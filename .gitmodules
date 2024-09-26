@@ -1,0 +1,6 @@
+[submodule "grammars/json"]
+	path = grammars/json
+	url = https://github.com/tree-sitter/tree-sitter-json.git
+[submodule "grammars/xml"]
+	path = grammars/xml
+	url = https://github.com/tree-sitter-grammars/tree-sitter-xml.git
