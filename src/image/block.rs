@@ -42,7 +42,7 @@ fn write_blocks(stdout: &mut impl WriteColor, img: &DynamicImage) -> io::Result<
     let use_truecolor = supports_truecolor();
 
     // Resize image to be the exact number of pixels as rows/columns.
-    let (cols, rows) = super::get_block_dims(img)?;
+    let (cols, rows) = super::image_block_output_dimensions(img)?;
     let img = img.thumbnail(cols, 2 * rows);
 
     let mut row_buf = vec![ColorSpec::new(); cols as usize];

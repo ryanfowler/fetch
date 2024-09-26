@@ -8,7 +8,7 @@ pub(crate) fn write_to_stdout(img: &DynamicImage) -> io::Result<()> {
     let mut cursor = io::Cursor::new(&mut buf);
     encode_image(&mut cursor, img)?;
 
-    let (cols, rows) = super::get_out_dims(img)?;
+    let (cols, rows) = super::image_output_dimensions(img)?;
     let mut stdout = io::stdout();
     writeln!(
         &mut stdout,

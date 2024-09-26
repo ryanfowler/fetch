@@ -18,7 +18,7 @@ pub(crate) fn write_to_stdout(img: &DynamicImage) -> std::io::Result<()> {
 
     {
         // Write the first chunk.
-        let (cols, rows) = super::get_out_dims(img)?;
+        let (cols, rows) = super::image_output_dimensions(img)?;
         let next = min(pos + 4096, encoded.len());
         let chunk = &encoded[pos..next];
         pos = next;

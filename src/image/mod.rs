@@ -224,13 +224,13 @@ impl Image {
     }
 }
 
-// Only 3/4ths of the height of the terminal should be used.
-static NUMERATOR: u32 = 3;
-static DENOMINATOR: u32 = 4;
+// Use only 4/5ths of the height of the terminal.
+static NUMERATOR: u32 = 4;
+static DENOMINATOR: u32 = 5;
 
-fn get_out_dims(img: &DynamicImage) -> io::Result<(u32, u32)> {
+fn image_output_dimensions(img: &DynamicImage) -> io::Result<(u32, u32)> {
     let (width, height) = img.dimensions();
-    let size = get_term_dims()?;
+    let size = get_term_dimensions()?;
     let cols = size.columns as u32;
     let rows = 2 * size.rows as u32 * NUMERATOR / DENOMINATOR;
 
@@ -253,19 +253,19 @@ fn get_out_dims(img: &DynamicImage) -> io::Result<(u32, u32)> {
         return Ok((icols, irows / 2));
     }
 
-    Ok(get_dims_for_sizes(cols, rows, width, height))
+    Ok(dimensions_for_sizes(cols, rows, width, height))
 }
 
-fn get_block_dims(img: &DynamicImage) -> io::Result<(u32, u32)> {
+fn image_block_output_dimensions(img: &DynamicImage) -> io::Result<(u32, u32)> {
     let size = crossterm::terminal::size()?;
     let cols = size.0 as u32;
     let rows = 2 * size.1 as u32 * NUMERATOR / DENOMINATOR;
 
     let (width, height) = img.dimensions();
-    Ok(get_dims_for_sizes(cols, rows, width, height))
+    Ok(dimensions_for_sizes(cols, rows, width, height))
 }
 
-fn get_dims_for_sizes(cols: u32, rows: u32, width: u32, height: u32) -> (u32, u32) {
+fn dimensions_for_sizes(cols: u32, rows: u32, width: u32, height: u32) -> (u32, u32) {
     // If image is smaller than bounds, return the scaled image dimensions.
     if width <= cols && height <= rows {
         return (width, height / 2 + height % 2);
@@ -279,7 +279,7 @@ fn get_dims_for_sizes(cols: u32, rows: u32, width: u32, height: u32) -> (u32, u3
     }
 }
 
-fn get_term_dims() -> io::Result<WindowSize> {
+fn get_term_dimensions() -> io::Result<WindowSize> {
     crossterm::terminal::window_size().or_else(|_| {
         crossterm::terminal::size().map(|size| WindowSize {
             columns: size.0,
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_get_dims_for_sizes() {
-        let size = get_dims_for_sizes(40, 30, 100, 100);
+        let size = dimensions_for_sizes(40, 30, 100, 100);
         assert_eq!(size, (30, 15));
     }
 }
