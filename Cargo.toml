@@ -32,7 +32,7 @@ libavif-image = { version = "0.14.0", default-features = false, features = ["cod
 mime = { version = "0.3.17" }
 quick-xml = { version = "0.36.2" }
 lazy_static = { version = "1.5.0" }
-reqwest = { version = "0.12.7", features = ["blocking", "brotli", "gzip", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12.7", features = ["blocking", "brotli", "gzip", "rustls-tls-native-roots", "zstd"] }
 serde_json = { version = "1.0.128", features = ["preserve_order"] }
 termcolor = { version = "1.4.1" }
 tree-sitter = { version = "0.23.0" }
