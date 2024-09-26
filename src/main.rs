@@ -1,6 +1,6 @@
 use std::{path::PathBuf, process::ExitCode};
 
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, ValueEnum};
 
 mod error;
 mod fetch;
@@ -21,6 +21,8 @@ struct Cli {
     dry_run: bool,
     #[arg(short = 'H', long)]
     header: Vec<String>,
+    #[arg(long)]
+    http: Option<Http>,
     #[arg(short, long)]
     method: Option<String>,
     #[arg(long)]
@@ -31,6 +33,16 @@ struct Cli {
     silent: bool,
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum Http {
+    #[value(name = "1")]
+    One,
+    #[value(name = "2")]
+    Two,
+    // #[value(name = "3")]
+    // Three,
 }
 
 fn main() -> ExitCode {

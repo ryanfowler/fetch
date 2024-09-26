@@ -12,7 +12,7 @@ use crate::{
     error::Error,
     fetch::{Verbosity, IS_STDERR_TTY},
     format::format_request,
-    Cli, APP_STRING,
+    Cli, Http, APP_STRING,
 };
 
 static SCHEME_HTTP: &str = "http";
@@ -26,11 +26,19 @@ pub(crate) fn make_request(opts: &Cli, verbosity: Verbosity) -> Result<Option<Re
     let method = parse_method(opts.method.as_deref())?;
     let headers = parse_headers(&opts.header)?;
 
-    let client = ClientBuilder::new()
+    let mut builder = ClientBuilder::new()
         .use_rustls_tls()
         .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))
-        .connect_timeout(Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS))
-        .build()?;
+        .connect_timeout(Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS));
+    if let Some(v) = opts.http {
+        builder = match v {
+            Http::One => builder.http1_only(),
+            Http::Two => builder.http2_prior_knowledge(),
+            // Http::Three => builder.http3_prior_knowledge(),
+        }
+    }
+
+    let client = builder.build()?;
     let req = build_request(&client, method.clone(), url.clone(), headers)?;
 
     if verbosity > Verbosity::Verbose || opts.dry_run {
