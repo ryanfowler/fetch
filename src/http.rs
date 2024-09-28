@@ -27,6 +27,9 @@ pub(crate) fn make_request(opts: &Cli, verbosity: Verbosity) -> Result<Option<Re
     let mut builder = ClientBuilder::new()
         .use_rustls_tls()
         .connect_timeout(Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS));
+    if let Some(duration) = opts.timeout {
+        builder = builder.timeout(Some(duration.into()));
+    }
     if let Some(v) = opts.http {
         builder = match v {
             Http::One => builder.http1_only(),

@@ -1,6 +1,7 @@
 use std::{ops::Deref, path::PathBuf, process::ExitCode};
 
 use clap::{ArgAction, Parser, ValueEnum};
+use duration_string::DurationString;
 
 mod aws_sigv4;
 mod error;
@@ -36,6 +37,8 @@ struct Cli {
     query: Vec<String>,
     #[arg(short, long)]
     silent: bool,
+    #[arg(short, long)]
+    timeout: Option<DurationString>,
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
 }

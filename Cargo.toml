@@ -25,6 +25,7 @@ anstyle = { version = "1.0.8" }
 base64 = { version = "0.22.1" }
 clap = { version = "4.5.18", features = ["derive"] }
 crossterm = { version = "0.28.1" }
+duration-string = { version = "0.4.0" }
 flate2 = { version = "1.0.33", features = ["zlib"] }
 hmac = { version = "0.12.1" }
 image = { version = "0.25.2", default-features = false, features = ["jpeg", "png", "tiff"] }
