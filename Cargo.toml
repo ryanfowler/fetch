@@ -26,14 +26,19 @@ base64 = { version = "0.22.1" }
 clap = { version = "4.5.18", features = ["derive"] }
 crossterm = { version = "0.28.1" }
 flate2 = { version = "1.0.33", features = ["zlib"] }
+hex = { version = "0.4.3" }
+hmac = { version = "0.12.1" }
 image = { version = "0.25.2", default-features = false, features = ["jpeg", "png", "tiff"] }
+jiff = { version = "0.1.13" }
 kamadak-exif = "0.5.5"
 libavif-image = { version = "0.14.0", default-features = false, features = ["codec-dav1d"] }
 mime = { version = "0.3.17" }
+percent-encoding = { version = "2.3.1" }
 quick-xml = { version = "0.36.2" }
 lazy_static = { version = "1.5.0" }
 reqwest = { version = "0.12.7", features = ["blocking", "brotli", "gzip", "rustls-tls-native-roots", "zstd"] }
 serde_json = { version = "1.0.128", features = ["preserve_order"] }
+sha2 = { version = "0.10.8" }
 termcolor = { version = "1.4.1" }
 tree-sitter = { version = "0.23.0" }
 tree-sitter-highlight = { version = "0.23.0" }

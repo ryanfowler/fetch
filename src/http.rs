@@ -1,5 +1,6 @@
-use std::{io::Write, str::FromStr, time::Duration};
+use std::{env, io::Write, str::FromStr, time::Duration};
 
+use jiff::{tz::TimeZone, Zoned};
 use reqwest::{
     blocking::{Client, ClientBuilder, Request, Response},
     header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, USER_AGENT},
@@ -9,6 +10,7 @@ use termcolor::{BufferedStandardStream, ColorChoice};
 use url::ParseError;
 
 use crate::{
+    aws_sigv4,
     error::Error,
     fetch::{Verbosity, IS_STDERR_TTY},
     format::format_request,
@@ -39,7 +41,13 @@ pub(crate) fn make_request(opts: &Cli, verbosity: Verbosity) -> Result<Option<Re
     }
 
     let client = builder.build()?;
-    let req = build_request(&client, method.clone(), url.clone(), headers)?;
+    let req = build_request(
+        &client,
+        method.clone(),
+        url.clone(),
+        headers,
+        opts.aws_sigv4.as_deref(),
+    )?;
 
     if verbosity > Verbosity::Verbose || opts.dry_run {
         let choice = if *IS_STDERR_TTY {
@@ -61,7 +69,7 @@ pub(crate) fn make_request(opts: &Cli, verbosity: Verbosity) -> Result<Option<Re
         Err(err) => {
             if no_scheme && url.set_scheme(SCHEME_HTTP).is_ok() {
                 let headers = parse_headers(&opts.header)?;
-                let req = build_request(&client, method, url, headers)?;
+                let req = build_request(&client, method, url, headers, opts.aws_sigv4.as_deref())?;
                 client.execute(req).map(Some).map_err(|e| e.into())
             } else {
                 Err(err.into())
@@ -110,12 +118,34 @@ fn build_request(
     method: Method,
     url: Url,
     headers: HeaderMap,
+    sigv4: Option<&str>,
 ) -> Result<Request, Error> {
-    client
-        .request(method, url)
+    let mut req = client
+        .request(method.clone(), url.clone())
         .header(ACCEPT, "*/*")
         .header(USER_AGENT, APP_STRING)
         .headers(headers)
-        .build()
-        .map_err(|e| e.into())
+        .build()?;
+
+    if let Some(sigv4) = sigv4 {
+        sign_aws_sigv4(sigv4, &mut req)?;
+    }
+
+    Ok(req)
+}
+
+fn sign_aws_sigv4(opts: &str, req: &mut Request) -> Result<(), Error> {
+    let (region, service) = match opts.split_once(':') {
+        None => return Err(Error::new("aws-sigv4: format must be 'REGION:SERVICE'")),
+        Some(v) => v,
+    };
+    let access_key = get_sigv4_var("AWS_ACCESS_KEY_ID")?;
+    let secret_key = get_sigv4_var("AWS_SECRET_ACCESS_KEY")?;
+
+    let now = Zoned::now().with_time_zone(TimeZone::UTC);
+    aws_sigv4::sign(req, &access_key, &secret_key, region, service, &now)
+}
+
+fn get_sigv4_var(key: &str) -> Result<String, Error> {
+    env::var(key).map_err(|_| Error::new(format!("aws-sigv4: {key} must be provided")))
 }

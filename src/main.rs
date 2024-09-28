@@ -2,6 +2,7 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::{ArgAction, Parser, ValueEnum};
 
+mod aws_sigv4;
 mod error;
 mod fetch;
 mod format;
@@ -17,6 +18,8 @@ struct Cli {
     #[command()]
     url: String,
 
+    #[arg(long)]
+    aws_sigv4: Option<String>,
     #[arg(long)]
     dry_run: bool,
     #[arg(short = 'H', long)]

@@ -6,7 +6,6 @@ use reqwest::{
     StatusCode, Version,
 };
 use termcolor::{Color, ColorSpec, WriteColor};
-use url::Url;
 
 use crate::fetch::Verbosity;
 
@@ -62,7 +61,6 @@ pub(crate) fn format_request(w: &mut impl WriteColor, req: &Request) -> io::Resu
     let version = req.version();
     let method = req.method();
     let url = req.url();
-    let host = get_host(url);
     let headers = req.headers();
 
     // Write request method, path, and HTTP version.
@@ -80,12 +78,11 @@ pub(crate) fn format_request(w: &mut impl WriteColor, req: &Request) -> io::Resu
     // Write HTTP headers.
     let mut key_color = ColorSpec::new();
     key_color.set_bold(true).set_fg(Some(Color::Blue));
-    if let Some(ref host) = host {
-        w.set_color(&key_color)?;
-        write!(w, "{HOST}")?;
-        w.reset()?;
-        writeln!(w, ": {host}")?;
-    }
+    let host = url.authority();
+    w.set_color(&key_color)?;
+    write!(w, "{HOST}")?;
+    w.reset()?;
+    writeln!(w, ": {host}")?;
     for (key, val) in headers {
         w.set_color(&key_color)?;
         write!(w, "{key}")?;
@@ -98,14 +95,4 @@ pub(crate) fn format_request(w: &mut impl WriteColor, req: &Request) -> io::Resu
     }
 
     w.reset()
-}
-
-fn get_host(url: &Url) -> Option<String> {
-    if let Some(host) = url.host_str() {
-        if let Some(port) = url.port() {
-            return Some(format!("{host}:{port}"));
-        }
-        return Some(host.to_string());
-    }
-    None
 }
