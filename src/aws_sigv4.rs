@@ -44,7 +44,7 @@ pub(crate) fn sign(
     let date = &datetime[..8];
     let signing_key = derive_signing_key(secret_key, date, region, service);
 
-    let signature = hex::encode(hmac_sha256(&signing_key, &string_to_sign));
+    let signature = hex_encode(hmac_sha256(&signing_key, &string_to_sign));
 
     let keys = signed_headers
         .into_iter()
@@ -200,6 +200,18 @@ fn write_hex(w: &mut impl Write, data: impl AsRef<[u8]>) -> io::Result<()> {
         w.write_all(&[HEX[(b >> 4) as usize], HEX[(b & 0x0F) as usize]])?;
     }
     Ok(())
+}
+
+fn hex_encode(input: impl AsRef<[u8]>) -> String {
+    let input = input.as_ref();
+    let mut out = vec![0; input.len() * 2];
+    static HEX: &[u8; 16] = b"0123456789abcdef";
+    for (i, b) in input.iter().enumerate() {
+        let i = 2 * i;
+        out[i] = HEX[(b >> 4) as usize];
+        out[i + 1] = HEX[(b & 0x0F) as usize];
+    }
+    unsafe { std::string::String::from_utf8_unchecked(out) }
 }
 
 #[cfg(test)]
