@@ -33,6 +33,8 @@ struct Cli {
     #[arg(short, long)]
     output: Option<PathBuf>,
     #[arg(short, long)]
+    query: Vec<String>,
+    #[arg(short, long)]
     silent: bool,
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,

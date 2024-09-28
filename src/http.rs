@@ -22,6 +22,7 @@ pub(crate) fn make_request(opts: &Cli, verbosity: Verbosity) -> Result<Option<Re
     let url = parse_url(&opts.url)?;
     let method = parse_method(opts.method.as_deref())?;
     let headers = parse_headers(&opts.header)?;
+    let query = parse_query(&opts.query);
 
     let mut builder = ClientBuilder::new()
         .use_rustls_tls()
@@ -40,6 +41,7 @@ pub(crate) fn make_request(opts: &Cli, verbosity: Verbosity) -> Result<Option<Re
         method.clone(),
         url.clone(),
         headers,
+        query,
         opts.aws_sigv4.as_deref(),
         opts.http.as_deref(),
     )?;
@@ -106,11 +108,25 @@ fn parse_headers(headers: &[String]) -> Result<HeaderMap, Error> {
     Ok(out)
 }
 
+fn parse_query(query: &[String]) -> Vec<(&str, &str)> {
+    query
+        .iter()
+        .map(|q| {
+            if let Some((key, val)) = q.split_once('=') {
+                (key, val)
+            } else {
+                (q.as_str(), "")
+            }
+        })
+        .collect()
+}
+
 fn build_request(
     client: &Client,
     method: Method,
     url: Url,
     headers: HeaderMap,
+    query: Vec<(&str, &str)>,
     sigv4: Option<&str>,
     http_version: Option<&Http>,
 ) -> Result<Request, Error> {
@@ -119,6 +135,7 @@ fn build_request(
         .header(ACCEPT, "*/*")
         .header(USER_AGENT, APP_STRING)
         .headers(headers)
+        .query(&query)
         .build()?;
 
     if let Some(sigv4) = sigv4 {
@@ -154,7 +171,12 @@ fn get_sigv4_var(key: &str) -> Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_url;
+    use reqwest::{blocking::Client, header::HeaderMap, Method};
+    use url::Url;
+
+    use crate::http::parse_query;
+
+    use super::{build_request, parse_url};
 
     #[test]
     fn test_parse_url() {
@@ -169,5 +191,27 @@ mod tests {
 
         let url = parse_url("example.com").expect("no error");
         assert_eq!(url.as_str(), "https://example.com/");
+    }
+
+    #[test]
+    fn test_build_request() {
+        let req = build_request(
+            &Client::new(),
+            Method::GET,
+            Url::parse("https://example.com/path?first=value").unwrap(),
+            HeaderMap::new(),
+            parse_query(&[
+                "key3=".to_string(),
+                "key1=val1".to_string(),
+                "key2".to_string(),
+            ]),
+            None,
+            None,
+        )
+        .expect("no error");
+        assert_eq!(
+            req.url().query().expect("not None"),
+            "first=value&key3=&key1=val1&key2="
+        )
     }
 }
