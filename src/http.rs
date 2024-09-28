@@ -4,7 +4,7 @@ use jiff::{tz::TimeZone, Zoned};
 use reqwest::{
     blocking::{Client, ClientBuilder, Request, Response},
     header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, USER_AGENT},
-    Method, Url,
+    Method, Url, Version,
 };
 use termcolor::{BufferedStandardStream, ColorChoice};
 use url::ParseError;
@@ -47,6 +47,7 @@ pub(crate) fn make_request(opts: &Cli, verbosity: Verbosity) -> Result<Option<Re
         url.clone(),
         headers,
         opts.aws_sigv4.as_deref(),
+        opts.http.as_deref(),
     )?;
 
     if verbosity > Verbosity::Verbose || opts.dry_run {
@@ -69,7 +70,14 @@ pub(crate) fn make_request(opts: &Cli, verbosity: Verbosity) -> Result<Option<Re
         Err(err) => {
             if no_scheme && url.set_scheme(SCHEME_HTTP).is_ok() {
                 let headers = parse_headers(&opts.header)?;
-                let req = build_request(&client, method, url, headers, opts.aws_sigv4.as_deref())?;
+                let req = build_request(
+                    &client,
+                    method,
+                    url,
+                    headers,
+                    opts.aws_sigv4.as_deref(),
+                    opts.http.as_deref(),
+                )?;
                 client.execute(req).map(Some).map_err(|e| e.into())
             } else {
                 Err(err.into())
@@ -119,6 +127,7 @@ fn build_request(
     url: Url,
     headers: HeaderMap,
     sigv4: Option<&str>,
+    http_version: Option<&Http>,
 ) -> Result<Request, Error> {
     let mut req = client
         .request(method.clone(), url.clone())
@@ -129,6 +138,14 @@ fn build_request(
 
     if let Some(sigv4) = sigv4 {
         sign_aws_sigv4(sigv4, &mut req)?;
+    }
+
+    if let Some(version) = http_version {
+        *req.version_mut() = match version {
+            Http::One => Version::HTTP_11,
+            Http::Two => Version::HTTP_2,
+            // Http::Three => Version::HTTP_3,
+        };
     }
 
     Ok(req)

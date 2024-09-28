@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::ExitCode};
+use std::{ops::Deref, path::PathBuf, process::ExitCode};
 
 use clap::{ArgAction, Parser, ValueEnum};
 
@@ -46,6 +46,14 @@ enum Http {
     Two,
     // #[value(name = "3")]
     // Three,
+}
+
+impl Deref for Http {
+    type Target = Self;
+
+    fn deref(&self) -> &Self::Target {
+        self
+    }
 }
 
 fn main() -> ExitCode {
