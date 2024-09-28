@@ -1,4 +1,8 @@
-use std::io::{self, Write};
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    io::{self, Write},
+};
 
 use hmac::{
     digest::generic_array::{typenum, GenericArray},
@@ -57,22 +61,29 @@ pub(crate) fn sign(
     Ok(())
 }
 
-fn get_signed_headers(req: &Request) -> Vec<(&str, &str)> {
-    let headers = req.headers();
-    let mut out = Vec::with_capacity(headers.len() + 1);
-    out.push(("host", req.url().authority()));
-    for (key, val) in headers {
-        if let Ok(val) = val.to_str() {
-            out.push((key.as_str(), val));
-        }
-    }
-    out.sort();
-    out
+fn get_signed_headers(req: &Request) -> Vec<(&str, String)> {
+    req.headers()
+        .iter()
+        .filter_map(|(key, val)| match key.as_str() {
+            "authorization" | "user-agent" => None,
+            _ => val.to_str().ok().map(|v| (key.as_str(), v)),
+        })
+        .chain(std::iter::once(("host", req.url().authority())))
+        .fold(BTreeMap::<&str, String>::new(), |mut map, (key, val)| {
+            map.entry(key)
+                .and_modify(|v| {
+                    *v = [v, val].join(",");
+                })
+                .or_insert_with(|| val.to_string());
+            map
+        })
+        .into_iter()
+        .collect()
 }
 
 fn build_canonical_request(
     req: &Request,
-    headers: &[(&str, &str)],
+    headers: &[(&str, String)],
     payload: &str,
 ) -> io::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(1024);
@@ -84,8 +95,7 @@ fn build_canonical_request(
     writeln!(&mut out)?;
 
     if let Some(raw) = url.query() {
-        let mut query = parse(raw.as_bytes()).collect::<Vec<_>>();
-        query.sort_by(|a, b| a.0.cmp(&b.0));
+        let query = get_query_params(raw.as_bytes());
         for (i, (key, val)) in query.into_iter().enumerate() {
             if i > 0 {
                 out.write_all(b"&")?;
@@ -113,6 +123,12 @@ fn build_canonical_request(
     out.write_all(payload.as_bytes())?;
 
     Ok(out)
+}
+
+fn get_query_params(raw: &[u8]) -> Vec<(Cow<str>, Cow<str>)> {
+    let mut query = parse(raw).collect::<Vec<_>>();
+    query.sort();
+    query
 }
 
 fn build_string_to_sign(
@@ -195,9 +211,8 @@ fn write_uri_escaped(w: &mut impl Write, v: &str, encode_slash: bool) -> io::Res
 }
 
 fn write_hex(w: &mut impl Write, data: impl AsRef<[u8]>) -> io::Result<()> {
-    static HEX: &[u8; 16] = b"0123456789abcdef";
-    for b in data.as_ref() {
-        w.write_all(&[HEX[(b >> 4) as usize], HEX[(b & 0x0F) as usize]])?;
+    for &b in data.as_ref() {
+        w.write_all(&hex_for_byte(b))?;
     }
     Ok(())
 }
@@ -205,13 +220,17 @@ fn write_hex(w: &mut impl Write, data: impl AsRef<[u8]>) -> io::Result<()> {
 fn hex_encode(input: impl AsRef<[u8]>) -> String {
     let input = input.as_ref();
     let mut out = vec![0; input.len() * 2];
-    static HEX: &[u8; 16] = b"0123456789abcdef";
-    for (i, b) in input.iter().enumerate() {
+    for (i, &b) in input.iter().enumerate() {
         let i = 2 * i;
-        out[i] = HEX[(b >> 4) as usize];
-        out[i + 1] = HEX[(b & 0x0F) as usize];
+        [out[i], out[i + 1]] = hex_for_byte(b);
     }
     unsafe { std::string::String::from_utf8_unchecked(out) }
+}
+
+#[inline(always)]
+fn hex_for_byte(b: u8) -> [u8; 2] {
+    static HEX: &[u8; 16] = b"0123456789abcdef";
+    [HEX[(b >> 4) as usize], HEX[(b & 0x0F) as usize]]
 }
 
 #[cfg(test)]
@@ -224,6 +243,40 @@ mod tests {
 
     static ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
     static SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
+    #[test]
+    fn test_get_signed_headers_dupes() {
+        let url = Url::parse("https://test.com/test.txt").expect("no url error");
+        let mut req = Request::new(Method::GET, url);
+        let headers = req.headers_mut();
+        headers.append("x-key", HeaderValue::from_static("value1"));
+        headers.append("x-key", HeaderValue::from_static("value2"));
+
+        let out = get_signed_headers(&req);
+        assert_eq!(
+            vec![
+                ("host", "test.com".to_string()),
+                ("x-key", "value1,value2".to_string())
+            ],
+            out
+        );
+    }
+
+    #[test]
+    fn test_get_query_params() {
+        let raw = "q=2&q=1&key2=val2&key1=val1&key1=val12";
+        let params = get_query_params(raw.as_bytes());
+        assert_eq!(
+            vec![
+                (Cow::Borrowed("key1"), Cow::Borrowed("val1")),
+                (Cow::Borrowed("key1"), Cow::Borrowed("val12")),
+                (Cow::Borrowed("key2"), Cow::Borrowed("val2")),
+                (Cow::Borrowed("q"), Cow::Borrowed("1")),
+                (Cow::Borrowed("q"), Cow::Borrowed("2"))
+            ],
+            params
+        );
+    }
 
     #[test]
     fn test_sign_get_object() {
