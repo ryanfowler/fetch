@@ -1,12 +1,14 @@
 use std::{
-    cmp, env,
+    cmp,
     io::{self, Cursor},
 };
 
-use crossterm::terminal::WindowSize;
 use image::{load_from_memory_with_format, DynamicImage, GenericImageView, ImageFormat};
 
+use emulator::Emulator;
+
 mod block;
+mod emulator;
 mod inline;
 mod kitty;
 
@@ -15,115 +17,6 @@ enum Protocol {
     Block,
     InlineImages,
     Kitty,
-}
-
-#[derive(Copy, Clone, Debug)]
-enum Emulator {
-    Alacritty,
-    Apple,
-    Ghostty,
-    Hyper,
-    Iterm2,
-    Kitty,
-    Konsole,
-    Mintty,
-    Unknown,
-    VSCode,
-    WezTerm,
-    Windows,
-}
-
-impl Emulator {
-    fn detect() -> Self {
-        if let Some(emulator) = Self::detect_term_program_var() {
-            return emulator;
-        }
-
-        if let Some(emulator) = Self::detect_term_var() {
-            return emulator;
-        }
-
-        if let Some(emulator) = Self::detect_custom_var() {
-            return emulator;
-        }
-
-        Self::Unknown
-    }
-
-    fn detect_term_program_var() -> Option<Emulator> {
-        let values = [
-            ("Apple_Terminal", Self::Apple),
-            ("ghostty", Self::Ghostty),
-            ("Hyper", Self::Hyper),
-            ("iTerm.app", Self::Iterm2),
-            ("mintty", Self::Mintty),
-            ("vscode", Self::VSCode),
-            ("WezTerm", Self::WezTerm),
-        ];
-
-        if let Ok(var) = env::var("TERM_PROGRAM") {
-            for (value, emulator) in values.into_iter() {
-                if var.as_str() == value {
-                    return Some(emulator);
-                }
-            }
-        }
-
-        None
-    }
-
-    fn detect_term_var() -> Option<Emulator> {
-        let values = [
-            ("alacritty", Self::Alacritty),
-            ("xterm-ghostty", Self::Ghostty),
-            ("xterm-kitty", Self::Kitty),
-        ];
-
-        if let Ok(var) = env::var("TERM") {
-            for (value, emulator) in values.into_iter() {
-                if var.as_str() == value {
-                    return Some(emulator);
-                }
-            }
-        }
-        None
-    }
-
-    fn detect_custom_var() -> Option<Emulator> {
-        let values = [
-            ("GHOSTTY_BIN_DIR", Self::Ghostty),
-            ("ITERM_SESSION_ID", Self::Iterm2),
-            ("KITTY_PID", Self::Kitty),
-            ("KONSOLE_VERSION", Self::Konsole),
-            ("VSCODE_INJECTION", Self::VSCode),
-            ("WEZTERM_EXECUTABLE", Self::WezTerm),
-            ("WT_SESSION", Self::Windows),
-        ];
-
-        for (var, emulator) in values.into_iter() {
-            if env::var_os(var).is_some() {
-                return Some(emulator);
-            }
-        }
-        None
-    }
-
-    fn supported_protocol(&self) -> Protocol {
-        match self {
-            Emulator::Alacritty => Protocol::Block,
-            Emulator::Apple => Protocol::Block,
-            Emulator::Ghostty => Protocol::Kitty,
-            Emulator::Hyper => Protocol::InlineImages,
-            Emulator::Iterm2 => Protocol::InlineImages,
-            Emulator::Kitty => Protocol::Kitty,
-            Emulator::Konsole => Protocol::Kitty,
-            Emulator::Mintty => Protocol::InlineImages,
-            Emulator::Unknown => Protocol::Block,
-            Emulator::VSCode => Protocol::InlineImages,
-            Emulator::WezTerm => Protocol::InlineImages,
-            Emulator::Windows => Protocol::Block,
-        }
-    }
 }
 
 pub(crate) struct Image {
@@ -135,12 +28,32 @@ impl Image {
         Self::new_inner(input).map(|img| Image { img })
     }
 
-    pub(crate) fn write_to_stdout(&self) -> std::io::Result<()> {
+    pub(crate) fn dynamic_image(&self) -> &DynamicImage {
+        &self.img
+    }
+
+    pub(crate) fn write_to_stdout(self) -> std::io::Result<()> {
+        // If any of the image's dimensions are zero, return immediately.
+        let (width, height) = self.img.dimensions();
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
         let emulator = Emulator::detect();
         match emulator.supported_protocol() {
-            Protocol::Block => block::write_to_stdout(&self.img),
-            Protocol::InlineImages => inline::write_to_stdout(&self.img),
-            Protocol::Kitty => kitty::write_to_stdout(&self.img),
+            Protocol::Block => block::write_to_stdout(self),
+            Protocol::InlineImages => inline::write_to_stdout(self),
+            Protocol::Kitty => kitty::write_to_stdout(self),
+        }
+    }
+
+    pub(crate) fn dimensions(&self) -> (u32, u32) {
+        self.img.dimensions()
+    }
+
+    pub(crate) fn resize_for_term(self) -> Self {
+        Self {
+            img: resize_for_term(self.img),
         }
     }
 
@@ -228,32 +141,32 @@ impl Image {
 static NUMERATOR: u32 = 4;
 static DENOMINATOR: u32 = 5;
 
-fn image_output_dimensions(img: &DynamicImage) -> io::Result<(u32, u32)> {
-    let (width, height) = img.dimensions();
-    let size = get_term_dimensions()?;
-    let cols = size.columns as u32;
-    let rows = 2 * size.rows as u32 * NUMERATOR / DENOMINATOR;
-
-    // Use pixel count to size image appropriately.
-    let t_width = size.width as u32;
-    let t_height = size.height as u32 * NUMERATOR / DENOMINATOR;
-    if t_width > 0 && t_height > 0 && (height < t_height || width < t_width) {
-        let (cell_width, cell_height) = (t_width / cols, t_height / rows);
-        let mut icols = width / cell_width;
-        let mut irows = height / cell_height;
-
-        if icols > cols {
-            icols = cols;
-            irows = (height as f32 / width as f32 * cols as f32) as u32;
-        }
-        if irows > rows {
-            irows = rows;
-            icols = (width as f32 / height as f32 * rows as f32) as u32;
-        }
-        return Ok((icols, irows / 2));
+fn resize_for_term(img: DynamicImage) -> DynamicImage {
+    let size = match crossterm::terminal::window_size() {
+        Err(_) => return img,
+        Ok(size) => size,
+    };
+    if size.width == 0 || size.height == 0 {
+        return img;
     }
 
-    Ok(dimensions_for_sizes(cols, rows, width, height))
+    let t_width = size.width as u32;
+    let t_height = (size.height as u32) * NUMERATOR / DENOMINATOR;
+    let (width, height) = img.dimensions();
+
+    if width <= t_width && height <= t_height {
+        return img;
+    }
+
+    let aspect_ratio = width as f32 / height as f32;
+    let t_aspect_ratio = t_width as f32 / t_height as f32;
+    let (w, h) = if aspect_ratio > t_aspect_ratio {
+        (t_width, (t_width as f32 / aspect_ratio) as u32)
+    } else {
+        ((t_height as f32 * aspect_ratio) as u32, t_height)
+    };
+
+    img.thumbnail(w, h)
 }
 
 fn image_block_output_dimensions(img: &DynamicImage) -> io::Result<(u32, u32)> {
@@ -277,17 +190,6 @@ fn dimensions_for_sizes(cols: u32, rows: u32, width: u32, height: u32) -> (u32, 
     } else {
         (width * rows / height, cmp::max(1, rows / 2))
     }
-}
-
-fn get_term_dimensions() -> io::Result<WindowSize> {
-    crossterm::terminal::window_size().or_else(|_| {
-        crossterm::terminal::size().map(|size| WindowSize {
-            columns: size.0,
-            rows: size.1,
-            width: 0,
-            height: 0,
-        })
-    })
 }
 
 #[cfg(test)]

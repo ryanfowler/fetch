@@ -3,19 +3,24 @@ use std::io::{self, Seek, Write};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use image::{codecs::jpeg::JpegEncoder, DynamicImage, GenericImageView, ImageFormat};
 
-pub(crate) fn write_to_stdout(img: &DynamicImage) -> io::Result<()> {
+use super::Image;
+
+pub(crate) fn write_to_stdout(img: Image) -> io::Result<()> {
+    let img = img.resize_for_term();
+    let img = img.dynamic_image();
+
     let mut buf = Vec::with_capacity(img.as_bytes().len());
     let mut cursor = io::Cursor::new(&mut buf);
     encode_image(&mut cursor, img)?;
 
-    let (cols, rows) = super::image_output_dimensions(img)?;
+    let (width, height) = img.dimensions();
     let mut stdout = io::stdout();
     writeln!(
         &mut stdout,
-        "\x1b]1337;File=inline=1;preserveAspectRatio=1;size={};width={};height={}:{}\x07",
+        "\x1b]1337;File=inline=1;preserveAspectRatio=1;size={};width={}px;height={}px:{}\x07",
         buf.len(),
-        cols,
-        rows,
+        width,
+        height,
         STANDARD.encode(&buf)
     )?;
     stdout.flush()

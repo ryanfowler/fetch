@@ -1,4 +1,4 @@
-// Much of the code in this file was inspired by the code from the viuer library
+// Much of the code in this file was inspired by the code from the viuer crate
 // with the following license:
 
 // MIT License
@@ -30,12 +30,14 @@ use crossterm::{cursor::MoveRight, execute};
 use image::{DynamicImage, Rgba};
 use termcolor::{BufferedStandardStream, Color, ColorSpec, WriteColor};
 
+use super::Image;
+
 static UPPER_HALF_BLOCK: &str = "\u{2580}";
 static LOWER_HALF_BLOCK: &str = "\u{2584}";
 
-pub(crate) fn write_to_stdout(img: &DynamicImage) -> io::Result<()> {
+pub(crate) fn write_to_stdout(img: Image) -> io::Result<()> {
     let mut stdout = BufferedStandardStream::stdout(termcolor::ColorChoice::Always);
-    write_blocks(&mut stdout, img)
+    write_blocks(&mut stdout, img.dynamic_image())
 }
 
 fn write_blocks(stdout: &mut impl WriteColor, img: &DynamicImage) -> io::Result<()> {
