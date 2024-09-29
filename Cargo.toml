@@ -23,6 +23,7 @@ cc = { version = "1.1.21" }
 ansi_colours = { version = "1.2.3" }
 anstyle = { version = "1.0.8" }
 base64 = { version = "0.22.1" }
+brotli = { version = "6.0.0" }
 clap = { version = "4.5.18", features = ["derive"] }
 crossterm = { version = "0.28.1" }
 duration-string = { version = "0.4.0" }
@@ -36,7 +37,7 @@ mime = { version = "0.3.17" }
 percent-encoding = { version = "2.3.1" }
 quick-xml = { version = "0.36.2" }
 lazy_static = { version = "1.5.0" }
-reqwest = { version = "0.12.7", features = ["blocking", "brotli", "gzip", "rustls-tls-native-roots", "zstd"] }
+reqwest = { version = "0.12.7", features = ["blocking", "rustls-tls-native-roots"] }
 serde_json = { version = "1.0.128", features = ["preserve_order"] }
 sha2 = { version = "0.10.8" }
 termcolor = { version = "1.4.1" }
@@ -44,3 +45,4 @@ tree-sitter = { version = "0.23.0" }
 tree-sitter-highlight = { version = "0.23.0" }
 url = { version = "2.5.2" }
 webp = { version = "0.3.0" }
+zstd = { version = "0.13.2" }
