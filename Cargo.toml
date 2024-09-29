@@ -17,7 +17,7 @@ opt-level = 1
 opt-level = 2
 
 [build-dependencies]
-cc = { version = "1.1.21" }
+cc = { version = "1.1.22" }
 
 [dependencies]
 ansi_colours = { version = "1.2.3" }
@@ -27,7 +27,7 @@ brotli = { version = "6.0.0" }
 clap = { version = "4.5.18", features = ["derive"] }
 crossterm = { version = "0.28.1" }
 duration-string = { version = "0.4.0" }
-flate2 = { version = "1.0.33", features = ["zlib"] }
+flate2 = { version = "1.0.34", features = ["zlib"] }
 hmac = { version = "0.12.1" }
 image = { version = "0.25.2", default-features = false, features = ["jpeg", "png", "tiff"] }
 jiff = { version = "0.1.13" }
