@@ -1,13 +1,12 @@
 use std::io;
 
 use reqwest::{
-    blocking::Request,
     header::{HeaderMap, HOST},
     StatusCode, Version,
 };
 use termcolor::{Color, ColorSpec, WriteColor};
 
-use crate::fetch::Verbosity;
+use crate::{fetch::Verbosity, http::Request};
 
 pub(crate) fn format_headers(
     w: &mut impl WriteColor,

@@ -11,7 +11,14 @@ use quick_xml::{events::Event, Reader, Writer};
 use reqwest::header::{HeaderMap, CONTENT_TYPE};
 use termcolor::{BufferedStandardStream, ColorChoice};
 
-use crate::{error::Error, format, highlight::highlight, http::make_request, image::Image, Cli};
+use crate::{
+    error::Error,
+    format::{self, format_request},
+    highlight::highlight,
+    http,
+    image::Image,
+    Cli,
+};
 
 lazy_static! {
     pub(crate) static ref IS_STDOUT_TTY: bool = std::io::stdout().is_terminal();
@@ -56,13 +63,26 @@ pub(crate) fn fetch(opts: Cli) -> ExitCode {
 }
 
 fn fetch_inner(opts: Cli) -> Result<bool, Error> {
-    let v = Verbosity::new(&opts);
+    let req = http::Request::new(&opts)?;
 
-    let mut res = match make_request(&opts, v)? {
-        // Dry-run request, return success.
-        None => return Ok(true),
-        Some(res) => res,
-    };
+    // Print request info if necessary.
+    let v = Verbosity::new(&opts);
+    if v > Verbosity::Verbose || opts.dry_run {
+        let choice = if *IS_STDERR_TTY {
+            ColorChoice::Always
+        } else {
+            ColorChoice::Never
+        };
+        let mut stderr = BufferedStandardStream::stderr(choice);
+        format_request(&mut stderr, &req)?;
+        if opts.dry_run {
+            return Ok(true);
+        } else {
+            writeln!(&mut stderr)?;
+        }
+    }
+
+    let res = req.send()?;
     let version = res.version();
     let status = res.status();
     let is_success = (200..400).contains(&status.as_u16());
@@ -81,7 +101,7 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
         if let Some(content_type) = get_content_type(res.headers()) {
             // TODO(ryanfowler): Limit body before reading it all.
             let mut buf = Vec::with_capacity(1024);
-            res.read_to_end(&mut buf)?;
+            res.into_reader()?.read_to_end(&mut buf)?;
             match content_type {
                 ContentType::Text(text_type) => {
                     let out = format_text(&buf, text_type)
@@ -105,7 +125,7 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
         }
     }
 
-    stream_to_stdout(&mut res, opts.no_pager)?;
+    stream_to_stdout(&mut res.into_reader()?, opts.no_pager)?;
     Ok(is_success)
 }
 

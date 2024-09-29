@@ -100,22 +100,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-compression"
-version = "0.4.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fec134f64e2bc57411226dfc4e52dec859ddfc7e711fc5e07b612584f000e4aa"
-dependencies = [
- "brotli",
- "flate2",
- "futures-core",
- "memchr",
- "pin-project-lite",
- "tokio",
- "zstd",
- "zstd-safe",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -425,6 +409,7 @@ dependencies = [
  "ansi_colours",
  "anstyle",
  "base64",
+ "brotli",
  "cc",
  "clap",
  "crossterm",
@@ -447,6 +432,7 @@ dependencies = [
  "tree-sitter-highlight",
  "url",
  "webp",
+ "zstd",
 ]
 
 [[package]]
@@ -1281,7 +1267,6 @@ version = "0.12.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8f4955649ef5c38cc7f9e8aa41761d48fb9677197daea9984dc54f56aad5e63"
 dependencies = [
- "async-compression",
  "base64",
  "bytes",
  "encoding_rs",
@@ -1317,7 +1302,6 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-rustls",
- "tokio-util",
  "tower-service",
  "url",
  "wasm-bindgen",
