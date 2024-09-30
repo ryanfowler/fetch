@@ -10,15 +10,17 @@ use hmac::{
 };
 use jiff::{fmt::strtime, Zoned};
 use percent_encoding::percent_encode_byte;
-use reqwest::{blocking::Request, header::HeaderValue};
+use reqwest::header::HeaderValue;
 use sha2::{Digest, Sha256};
 use url::form_urlencoded::parse;
 
-use crate::error::Error;
+use crate::{error::Error, http::Request};
 
 static HDR_CONTENT_SHA256: &str = "x-amz-content-sha256";
 static EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+// signs an HTTP request using the AWS signature v4 protocol:
+// https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html
 pub(crate) fn sign(
     req: &mut Request,
     access_key: &str,
@@ -174,20 +176,8 @@ fn write_hex_sha256(w: &mut impl Write, data: impl AsRef<[u8]>) -> io::Result<()
 
 fn write_uri_escaped(w: &mut impl Write, v: &str, encode_slash: bool) -> io::Result<()> {
     fn is_valid_byte(b: u8, encode_slash: bool) -> bool {
-        if b == b'/' {
-            !encode_slash
-        } else {
-            matches!(
-                b,
-                b'A'..=b'Z' |
-                b'a'..=b'z' |
-                b'0'..=b'9' |
-                b'-' |
-                b'.' |
-                b'_' |
-                b'~'
-            )
-        }
+        matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~')
+            || (b == b'/' && !encode_slash)
     }
 
     let buf = v.as_bytes();
@@ -247,7 +237,7 @@ mod tests {
     #[test]
     fn test_get_signed_headers_dupes() {
         let url = Url::parse("https://test.com/test.txt").expect("no url error");
-        let mut req = Request::new(Method::GET, url);
+        let mut req = Request::new_test(Method::GET, url);
         let headers = req.headers_mut();
         headers.append("x-key", HeaderValue::from_static("value1"));
         headers.append("x-key", HeaderValue::from_static("value2"));
@@ -282,7 +272,7 @@ mod tests {
     fn test_sign_get_object() {
         let url =
             Url::parse("https://examplebucket.s3.amazonaws.com/test.txt").expect("no url error");
-        let mut req = Request::new(Method::GET, url);
+        let mut req = Request::new_test(Method::GET, url);
         let headers = req.headers_mut();
         headers.insert("range", HeaderValue::from_static("bytes=0-9"));
 
@@ -302,7 +292,7 @@ mod tests {
     fn test_sign_put_object() {
         let url = Url::parse("https://examplebucket.s3.amazonaws.com/test$file.text")
             .expect("no url error");
-        let mut req = Request::new(Method::PUT, url);
+        let mut req = Request::new_test(Method::PUT, url);
         let headers = req.headers_mut();
         headers.insert(
             "date",
@@ -335,7 +325,7 @@ mod tests {
     fn test_sign_get_bucket_lifecycle() {
         let url =
             Url::parse("https://examplebucket.s3.amazonaws.com?lifecycle").expect("no url error");
-        let mut req = Request::new(Method::GET, url);
+        let mut req = Request::new_test(Method::GET, url);
 
         let now = rfc2822::parse("Fri, 24 May 2013 00:00:00 GMT").unwrap();
         sign(&mut req, ACCESS_KEY, SECRET_KEY, "us-east-1", "s3", &now).expect("no signing error");
@@ -353,7 +343,7 @@ mod tests {
     fn test_sign_list_objects() {
         let url = Url::parse("https://examplebucket.s3.amazonaws.com?max-keys=2&prefix=J")
             .expect("no url error");
-        let mut req = Request::new(Method::GET, url);
+        let mut req = Request::new_test(Method::GET, url);
 
         let now = rfc2822::parse("Fri, 24 May 2013 00:00:00 GMT").unwrap();
         sign(&mut req, ACCESS_KEY, SECRET_KEY, "us-east-1", "s3", &now).expect("no signing error");

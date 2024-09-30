@@ -2,7 +2,7 @@
 name = "fetch"
 version = "0.1.0"
 edition = "2021"
-description = "fetch is a user-friendly HTTP(S) client for the command line"
+description = "fetch is a modern HTTP(S) client for the command line"
 
 [profile.release]
 codegen-units = 1

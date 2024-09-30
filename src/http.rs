@@ -54,6 +54,17 @@ pub(crate) struct Request {
 }
 
 impl Request {
+    #[allow(dead_code)] // Used in aws-sigv4 testing.
+    pub(crate) fn new_test(method: Method, url: Url) -> Self {
+        let client = Client::new();
+        let req = blocking::Request::new(method, url);
+        Self {
+            client,
+            req,
+            encoding_requested: false,
+        }
+    }
+
     pub(crate) fn new(cli: &Cli) -> Result<Self, Error> {
         // Parse our request dependencies.
         let url = parse_url(&cli.url)?;
@@ -92,11 +103,6 @@ impl Request {
             HeaderValue::from_static("gzip, br, zstd")
         });
 
-        // Sign the request if necessary.
-        if let Some(sigv4) = &cli.aws_sigv4 {
-            sign_aws_sigv4(sigv4, &mut req)?;
-        }
-
         // Ensure the appropriate HTTP version is set on the request.
         if let Some(version) = &cli.http {
             *req.version_mut() = match version {
@@ -106,11 +112,18 @@ impl Request {
             };
         }
 
-        Ok(Self {
+        let mut out = Self {
             client,
             req,
             encoding_requested,
-        })
+        };
+
+        // Sign the request if necessary.
+        if let Some(sigv4) = &cli.aws_sigv4 {
+            sign_aws_sigv4(sigv4, &mut out)?;
+        }
+
+        Ok(out)
     }
 
     pub(crate) fn send(self) -> Result<Response, Error> {
@@ -142,6 +155,10 @@ impl Request {
 
     pub(crate) fn headers(&self) -> &HeaderMap {
         self.req.headers()
+    }
+
+    pub(crate) fn headers_mut(&mut self) -> &mut HeaderMap {
+        self.req.headers_mut()
     }
 }
 
@@ -225,7 +242,7 @@ fn parse_query(query: &[String]) -> Vec<(&str, &str)> {
         .collect()
 }
 
-fn sign_aws_sigv4(opts: &str, req: &mut blocking::Request) -> Result<(), Error> {
+fn sign_aws_sigv4(opts: &str, req: &mut Request) -> Result<(), Error> {
     let (region, service) = match opts.split_once(':') {
         None => return Err(Error::new("aws-sigv4: format must be 'REGION:SERVICE'")),
         Some(v) => v,
