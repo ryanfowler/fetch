@@ -8,7 +8,7 @@ use crate::fetch::TextType;
 
 pub(crate) fn highlight(input: &[u8], text_type: TextType) -> Option<Vec<u8>> {
     let name = text_type.as_str();
-    let language = get_language(text_type)?;
+    let language = get_language(text_type);
     let highlights = get_highlights(text_type);
     let mut config = HighlightConfiguration::new(language, name, highlights, "", "").ok()?;
     config.configure(&HIGHLIGHT_NAMES);
@@ -39,26 +39,28 @@ pub(crate) fn highlight(input: &[u8], text_type: TextType) -> Option<Vec<u8>> {
 }
 
 extern "C" {
+    fn tree_sitter_html() -> tree_sitter::Language;
     fn tree_sitter_json() -> tree_sitter::Language;
     fn tree_sitter_xml() -> tree_sitter::Language;
 }
 
-fn get_language(content_type: TextType) -> Option<Language> {
+fn get_language(content_type: TextType) -> Language {
     match content_type {
-        TextType::Json => unsafe { Some(tree_sitter_json()) },
-        TextType::Xml => unsafe { Some(tree_sitter_xml()) },
-        _ => None,
+        TextType::Html => unsafe { tree_sitter_html() },
+        TextType::Json => unsafe { tree_sitter_json() },
+        TextType::Xml => unsafe { tree_sitter_xml() },
     }
 }
 
+static HTML_HIGHLIGHTS: &str = include_str!("../highlights/html.scm");
 static JSON_HIGHLIGHTS: &str = include_str!("../highlights/json.scm");
 static XML_HIGHLIGHTS: &str = include_str!("../highlights/xml.scm");
 
 fn get_highlights(content_type: TextType) -> &'static str {
     match content_type {
+        TextType::Html => HTML_HIGHLIGHTS,
         TextType::Json => JSON_HIGHLIGHTS,
         TextType::Xml => XML_HIGHLIGHTS,
-        _ => unreachable!(),
     }
 }
 

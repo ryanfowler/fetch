@@ -8,6 +8,11 @@ struct Grammar {
 
 const GRAMMARS: &[Grammar] = &[
     Grammar {
+        name: "html",
+        prefix: None,
+        files: &["parser.c", "scanner.c"],
+    },
+    Grammar {
         name: "json",
         prefix: None,
         files: &["parser.c"],
