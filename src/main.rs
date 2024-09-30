@@ -11,34 +11,49 @@ mod highlight;
 mod http;
 mod image;
 
-static APP_STRING: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+fn main() -> ExitCode {
+    fetch::fetch(Cli::parse())
+}
 
 #[derive(Debug, Parser)]
-#[command(disable_help_subcommand = true, version)]
+#[command(name = "fetch")]
+#[command(disable_help_subcommand = true, about, version)]
 struct Cli {
+    /// The URL to make a request to
     #[command()]
     url: String,
 
-    #[arg(long)]
+    /// Sign the request using AWS signature V4
+    #[arg(long, value_name = "REGION:SERVICE")]
     aws_sigv4: Option<String>,
+    /// Print out the request info and exit
     #[arg(long)]
     dry_run: bool,
-    #[arg(short = 'H', long)]
+    /// Append headers to the request
+    #[arg(short = 'H', long, value_name = "NAME:VALUE")]
     header: Vec<String>,
-    #[arg(long)]
+    /// Force the use of HTTP version
+    #[arg(long, value_name = "VERSION")]
     http: Option<Http>,
+    /// HTTP method to use
     #[arg(short, long)]
     method: Option<String>,
+    /// Avoid using a pager for displaying the response body
     #[arg(long)]
     no_pager: bool,
-    #[arg(short, long)]
+    /// Write the response body to a file
+    #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
-    #[arg(short, long)]
+    /// Append query parameters to the url
+    #[arg(short, long, value_name = "KEY=VALUE")]
     query: Vec<String>,
+    /// Avoid printing anything to stderr
     #[arg(short, long)]
     silent: bool,
+    /// Timeout applied to the entire request
     #[arg(short, long)]
     timeout: Option<DurationString>,
+    /// Verbosity of of the command
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
 }
@@ -59,11 +74,4 @@ impl Deref for Http {
     fn deref(&self) -> &Self::Target {
         self
     }
-}
-
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    // println!("{cli:?}");
-
-    fetch::fetch(cli)
 }

@@ -15,9 +15,10 @@ use reqwest::{
     Method, StatusCode, Url, Version,
 };
 
-use crate::{aws_sigv4, error::Error, Cli, Http, APP_STRING};
+use crate::{aws_sigv4, error::Error, Cli, Http};
 
 static DEFAULT_CONNECT_TIMEOUT_MS: u64 = 60_000;
+static APP_STRING: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Copy, Clone, Debug)]
 enum ContentEncoding {
