@@ -76,6 +76,7 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
         let mut stderr = BufferedStandardStream::stderr(choice);
         format_request(&mut stderr, &req)?;
         if opts.dry_run {
+            // Dry-run, so we can return now.
             return Ok(true);
         } else {
             writeln!(&mut stderr)?;
@@ -87,7 +88,7 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
     let status = res.status();
     let is_success = (200..400).contains(&status.as_u16());
 
-    if !matches!(v, Verbosity::Silent) {
+    if v > Verbosity::Silent {
         let choice = if *IS_STDERR_TTY {
             ColorChoice::Always
         } else {
