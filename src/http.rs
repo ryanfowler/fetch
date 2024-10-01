@@ -255,7 +255,7 @@ fn sign_aws_sigv4(opts: &str, req: &mut Request) -> Result<(), Error> {
 }
 
 fn get_sigv4_var(key: &str) -> Result<String, Error> {
-    env::var(key).map_err(|_| Error::new(format!("aws-sigv4: {key} must be provided")))
+    env::var(key).map_err(|_| Error::new(format!("aws-sigv4: {key} env var must be set")))
 }
 
 enum Decoder<'a, R: Read> {
