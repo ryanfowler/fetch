@@ -18,14 +18,14 @@ opt-level = 1
 opt-level = 2
 
 [build-dependencies]
-cc = { version = "1.1.22" }
+cc = { version = "1.1.24" }
 
 [dependencies]
 ansi_colours = { version = "1.2.3" }
 anstyle = { version = "1.0.8" }
 base64 = { version = "0.22.1" }
 brotli = { version = "6.0.0" }
-clap = { version = "4.5.18", features = ["derive"] }
+clap = { version = "4.5.19", features = ["derive"] }
 crossterm = { version = "0.28.1" }
 duration-string = { version = "0.4.0" }
 flate2 = { version = "1.0.34", features = ["zlib"] }
@@ -42,8 +42,8 @@ reqwest = { version = "0.12.8", features = ["blocking", "rustls-tls-native-roots
 serde_json = { version = "1.0.128", features = ["preserve_order"] }
 sha2 = { version = "0.10.8" }
 termcolor = { version = "1.4.1" }
-tree-sitter = { version = "0.23.0" }
-tree-sitter-highlight = { version = "0.23.0" }
+tree-sitter = { version = "0.23.2" }
+tree-sitter-highlight = { version = "0.23.2" }
 url = { version = "2.5.2" }
 webp = { version = "0.3.0" }
 zstd = { version = "0.13.2" }
