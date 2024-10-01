@@ -104,13 +104,13 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
             res.into_reader()?.read_to_end(&mut buf)?;
             match content_type {
                 ContentType::Text(text_type) => {
-                    let out = format_text(&buf, text_type)
-                        .map_or_else(
-                            || highlight(&buf, text_type),
-                            |formatted| highlight(&formatted, text_type),
-                        )
-                        .unwrap_or(buf);
-                    stream_to_stdout(&mut &out[..], opts.no_pager)?;
+                    if let Some(formatted) = format_text(&buf, text_type) {
+                        buf = formatted;
+                    }
+                    if let Some(highlighted) = highlight(&buf, text_type) {
+                        buf = highlighted;
+                    }
+                    stream_to_stdout(&mut &buf[..], opts.no_pager)?;
                     return Ok(is_success);
                 }
                 ContentType::Image(_image) => {
