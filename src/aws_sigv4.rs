@@ -18,6 +18,7 @@ use crate::{error::Error, http::Request};
 
 static HDR_CONTENT_SHA256: &str = "x-amz-content-sha256";
 static EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+static UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 
 // signs an HTTP request using the AWS signature v4 protocol:
 // https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html
@@ -31,16 +32,14 @@ pub(crate) fn sign(
 ) -> Result<(), Error> {
     let datetime = strtime::format("%Y%m%dT%H%M%SZ", now)?;
 
-    let headers = req.headers_mut();
-    let payload = headers
-        .get(HDR_CONTENT_SHA256)
-        .map(|v| v.to_str().unwrap())
-        .unwrap_or(EMPTY_SHA256)
-        .to_string();
+    let payload = get_payload_hash(req, service)?;
 
+    let headers = req.headers_mut();
     headers.insert("x-amz-date", HeaderValue::from_str(&datetime).unwrap());
     if service == "s3" {
-        headers.insert(HDR_CONTENT_SHA256, HeaderValue::from_str(&payload).unwrap());
+        headers
+            .entry(HDR_CONTENT_SHA256)
+            .or_insert_with(|| HeaderValue::from_str(&payload).unwrap());
     }
 
     let signed_headers = get_signed_headers(req);
@@ -63,11 +62,36 @@ pub(crate) fn sign(
     Ok(())
 }
 
+fn get_payload_hash(req: &mut Request, service: &str) -> Result<String, Error> {
+    // Use the value from the x-amz-content-sha256 header, if provided.
+    if let Some(content_sha256) = req.headers().get(HDR_CONTENT_SHA256) {
+        return Ok(content_sha256.to_str().unwrap_or("").to_string());
+    }
+
+    if let Some(body) = req.body_mut() {
+        // If we have the body in memory, take the sha256.
+        if let Some(bytes) = body.as_bytes() {
+            Ok(hex_sha256(bytes))
+        } else if service == "s3" {
+            // The body is a reader, but the service is "s3". Use the unsigned
+            // payload indicator.
+            Ok(UNSIGNED_PAYLOAD.to_string())
+        } else {
+            // Read the body into memory to hash it.
+            let bytes = body.buffer()?;
+            Ok(hex_sha256(bytes))
+        }
+    } else {
+        // No body, use the empty hash.
+        Ok(EMPTY_SHA256.to_string())
+    }
+}
+
 fn get_signed_headers(req: &Request) -> Vec<(&str, String)> {
     req.headers()
         .iter()
         .filter_map(|(key, val)| match key.as_str() {
-            "authorization" | "user-agent" => None,
+            "authorization" | "content-length" | "user-agent" => None,
             _ => val.to_str().ok().map(|v| (key.as_str(), v)),
         })
         .chain(std::iter::once(("host", req.url().authority())))
@@ -172,6 +196,12 @@ fn write_hex_sha256(w: &mut impl Write, data: impl AsRef<[u8]>) -> io::Result<()
     let mut hasher = Sha256::new();
     hasher.update(data);
     write_hex(w, hasher.finalize())
+}
+
+fn hex_sha256(data: impl AsRef<[u8]>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex_encode(hasher.finalize())
 }
 
 fn write_uri_escaped(w: &mut impl Write, v: &str, encode_slash: bool) -> io::Result<()> {

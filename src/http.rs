@@ -10,12 +10,18 @@ use jiff::{tz::TimeZone, Zoned};
 use reqwest::{
     blocking::{self, Client, ClientBuilder},
     header::{
-        HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, USER_AGENT,
+        HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING,
+        CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT,
     },
     Method, StatusCode, Url, Version,
 };
 
-use crate::{aws_sigv4, error::Error, Cli, Http};
+use crate::{
+    aws_sigv4,
+    body::{Body, Data},
+    error::Error,
+    Http,
+};
 
 static DEFAULT_CONNECT_TIMEOUT_MS: u64 = 60_000;
 static APP_STRING: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -47,39 +53,79 @@ impl From<&str> for ContentEncoding {
     }
 }
 
-pub(crate) struct Request {
-    client: Client,
-    req: blocking::Request,
-    encoding_requested: bool,
+pub(crate) struct RequestBuilder<'a> {
+    url: &'a str,
+    aws_sigv4: Option<&'a str>,
+    body: Option<Body>,
+    method: Option<&'a str>,
+    headers: &'a [String],
+    query: &'a [String],
+    timeout: Option<Duration>,
+    version: Option<Http>,
 }
 
-impl Request {
-    #[allow(dead_code)] // Used in aws-sigv4 testing.
-    pub(crate) fn new_test(method: Method, url: Url) -> Self {
-        let client = Client::new();
-        let req = blocking::Request::new(method, url);
+impl<'a> RequestBuilder<'a> {
+    pub(crate) fn new(url: &'a str) -> Self {
         Self {
-            client,
-            req,
-            encoding_requested: false,
+            url,
+            aws_sigv4: None,
+            body: None,
+            method: None,
+            headers: &[],
+            query: &[],
+            timeout: None,
+            version: None,
         }
     }
 
-    pub(crate) fn new(cli: &Cli) -> Result<Self, Error> {
+    pub(crate) fn with_aws_sigv4(mut self, sigv4: Option<&'a str>) -> Self {
+        self.aws_sigv4 = sigv4;
+        self
+    }
+
+    pub(crate) fn with_method(mut self, method: Option<&'a str>) -> Self {
+        self.method = method;
+        self
+    }
+
+    pub(crate) fn with_headers(mut self, headers: &'a [String]) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    pub(crate) fn with_query(mut self, query: &'a [String]) -> Self {
+        self.query = query;
+        self
+    }
+
+    pub(crate) fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub(crate) fn with_version(mut self, version: Option<Http>) -> Self {
+        self.version = version;
+        self
+    }
+
+    pub(crate) fn with_body(mut self, body: Option<Body>) -> Self {
+        self.body = body;
+        self
+    }
+
+    pub(crate) fn build(self) -> Result<Request, Error> {
         // Parse our request dependencies.
-        let url = parse_url(&cli.url)?;
-        let method = parse_method(cli.method.as_deref())?;
-        let headers = parse_headers(&cli.header)?;
-        let query = parse_query(&cli.query);
+        let url = parse_url(self.url)?;
+        let method = parse_method(self.method)?;
+        let headers = parse_headers(self.headers)?;
+        let query = parse_query(self.query);
 
         // Build the blocking HTTP client.
         let mut builder = ClientBuilder::new()
             .use_rustls_tls()
+            .timeout(self.timeout)
             .connect_timeout(Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS));
-        if let Some(duration) = cli.timeout {
-            builder = builder.timeout(Some(duration.into()));
-        }
-        if let Some(v) = cli.http {
+        if let Some(v) = self.version {
             builder = match v {
                 Http::One => builder.http1_only(),
                 Http::Two => builder.http2_prior_knowledge(),
@@ -103,8 +149,26 @@ impl Request {
             HeaderValue::from_static("gzip, br, zstd")
         });
 
+        if let Some(body) = self.body {
+            if let Some(ct) = body.content_type {
+                req.headers_mut()
+                    .entry(CONTENT_TYPE)
+                    .or_insert_with(|| HeaderValue::from_static(ct));
+            }
+
+            // If we have the data in memory, set the content-length header.
+            if let Data::Buffer(bytes) = &body.data {
+                let n = bytes.len().to_string();
+                req.headers_mut()
+                    .insert(CONTENT_LENGTH, HeaderValue::from_str(&n).unwrap());
+            }
+
+            let req_body = req.body_mut();
+            *req_body = Some(body.data.into());
+        }
+
         // Ensure the appropriate HTTP version is set on the request.
-        if let Some(version) = &cli.http {
+        if let Some(version) = self.version {
             *req.version_mut() = match version {
                 Http::One => Version::HTTP_11,
                 Http::Two => Version::HTTP_2,
@@ -112,18 +176,37 @@ impl Request {
             };
         }
 
-        let mut out = Self {
+        let mut out = Request {
             client,
             req,
             encoding_requested,
         };
 
         // Sign the request if necessary.
-        if let Some(sigv4) = &cli.aws_sigv4 {
+        if let Some(sigv4) = self.aws_sigv4 {
             sign_aws_sigv4(sigv4, &mut out)?;
         }
 
         Ok(out)
+    }
+}
+
+pub(crate) struct Request {
+    client: Client,
+    req: blocking::Request,
+    encoding_requested: bool,
+}
+
+impl Request {
+    #[allow(dead_code)] // Used in aws-sigv4 testing.
+    pub(crate) fn new_test(method: Method, url: Url) -> Self {
+        let client = Client::new();
+        let req = blocking::Request::new(method, url);
+        Self {
+            client,
+            req,
+            encoding_requested: false,
+        }
     }
 
     pub(crate) fn send(self) -> Result<Response, Error> {
@@ -159,6 +242,10 @@ impl Request {
 
     pub(crate) fn headers_mut(&mut self) -> &mut HeaderMap {
         self.req.headers_mut()
+    }
+
+    pub(crate) fn body_mut(&mut self) -> &mut Option<blocking::Body> {
+        self.req.body_mut()
     }
 }
 

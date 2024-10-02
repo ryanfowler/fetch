@@ -12,6 +12,7 @@ use reqwest::header::{HeaderMap, CONTENT_TYPE};
 use termcolor::{BufferedStandardStream, ColorChoice};
 
 use crate::{
+    body::Body,
     error::Error,
     format::{self, format_request},
     highlight::highlight,
@@ -63,7 +64,7 @@ pub(crate) fn fetch(opts: Cli) -> ExitCode {
 }
 
 fn fetch_inner(opts: Cli) -> Result<bool, Error> {
-    let req = http::Request::new(&opts)?;
+    let req = create_request(&opts)?;
 
     // Print request info if necessary.
     let v = Verbosity::new(&opts);
@@ -128,6 +129,33 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
 
     stream_to_stdout(&mut res.into_reader()?, opts.no_pager)?;
     Ok(is_success)
+}
+
+fn create_request(cli: &Cli) -> Result<http::Request, Error> {
+    let mut builder = http::RequestBuilder::new(&cli.url)
+        .with_aws_sigv4(cli.aws_sigv4.as_deref())
+        .with_method(cli.method.as_deref())
+        .with_headers(&cli.header)
+        .with_query(&cli.query)
+        .with_timeout(cli.timeout.map(Into::into))
+        .with_version(cli.http);
+
+    if !cli.form.is_empty() {
+        let data = cli
+            .form
+            .iter()
+            .map(|v| {
+                if let Some((key, val)) = v.split_once('=') {
+                    (key, val)
+                } else {
+                    (v.as_str(), "")
+                }
+            })
+            .collect::<Vec<_>>();
+        builder = builder.with_body(Some(Body::new_form(&data)?));
+    }
+
+    builder.build()
 }
 
 #[derive(Copy, Clone, Debug)]
