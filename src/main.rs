@@ -4,6 +4,7 @@ use clap::{ArgAction, Parser, ValueEnum};
 use duration_string::DurationString;
 
 mod aws_sigv4;
+mod body;
 mod error;
 mod fetch;
 mod format;
@@ -29,10 +30,13 @@ struct Cli {
     /// Print out the request info and exit
     #[arg(long)]
     dry_run: bool,
+    /// Send a form body
+    #[arg(short, long, value_name = "KEY=VALUE")]
+    form: Vec<String>,
     /// Append headers to the request
     #[arg(short = 'H', long, value_name = "NAME:VALUE")]
     header: Vec<String>,
-    /// Force the use of HTTP version
+    /// Force the use of an HTTP version
     #[arg(long, value_name = "VERSION")]
     http: Option<Http>,
     /// HTTP method to use
@@ -53,7 +57,7 @@ struct Cli {
     /// Timeout applied to the entire request
     #[arg(short, long)]
     timeout: Option<DurationString>,
-    /// Verbosity of of the command
+    /// Verbosity of the command
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
 }

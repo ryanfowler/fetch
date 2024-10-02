@@ -426,6 +426,7 @@ dependencies = [
  "quick-xml",
  "reqwest",
  "serde_json",
+ "serde_urlencoded",
  "sha2",
  "termcolor",
  "tree-sitter",
