@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use flate2::bufread::GzDecoder;
+use flate2::bufread::{DeflateDecoder, GzDecoder};
 use jiff::{tz::TimeZone, Zoned};
 use reqwest::{
     blocking::{self, Client, ClientBuilder},
@@ -30,6 +30,7 @@ static APP_STRING: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_V
 enum ContentEncoding {
     None,
     Gzip,
+    Deflate,
     Brotli,
     Zstd,
 }
@@ -38,6 +39,7 @@ impl From<&str> for ContentEncoding {
     fn from(value: &str) -> Self {
         [
             ("gzip", Self::Gzip),
+            ("deflate", Self::Deflate),
             ("br", Self::Brotli),
             ("zstd", Self::Zstd),
         ]
@@ -146,7 +148,7 @@ impl<'a> RequestBuilder<'a> {
         let mut encoding_requested = false;
         req.headers_mut().entry(ACCEPT_ENCODING).or_insert_with(|| {
             encoding_requested = true;
-            HeaderValue::from_static("gzip, br, zstd")
+            HeaderValue::from_static("gzip, deflate, br, zstd")
         });
 
         if let Some(body) = self.body {
@@ -348,6 +350,7 @@ fn get_sigv4_var(key: &str) -> Result<String, Error> {
 enum Decoder<'a, R: Read> {
     Passthrough(R),
     Brotli(Box<brotli::Decompressor<R>>),
+    Deflate(Box<DeflateDecoder<BufReader<R>>>),
     Gzip(Box<GzDecoder<BufReader<R>>>),
     Zstd(Box<zstd::Decoder<'a, BufReader<R>>>),
 }
@@ -357,6 +360,9 @@ impl<'a, R: Read> Decoder<'a, R> {
         Ok(match ct {
             ContentEncoding::None => Self::Passthrough(r),
             ContentEncoding::Gzip => Self::Gzip(Box::new(GzDecoder::new(
+                BufReader::with_capacity(1 << 14, r),
+            ))),
+            ContentEncoding::Deflate => Self::Deflate(Box::new(DeflateDecoder::new(
                 BufReader::with_capacity(1 << 14, r),
             ))),
             ContentEncoding::Brotli => {
@@ -374,6 +380,7 @@ impl<'a, R: Read> Read for Decoder<'a, R> {
         match self {
             Decoder::Passthrough(r) => r.read(buf),
             Decoder::Brotli(r) => r.read(buf),
+            Decoder::Deflate(r) => r.read(buf),
             Decoder::Gzip(r) => r.read(buf),
             Decoder::Zstd(r) => r.read(buf),
         }
