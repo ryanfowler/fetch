@@ -48,6 +48,7 @@ fn get_language(content_type: TextType) -> Language {
     match content_type {
         TextType::Html => unsafe { tree_sitter_html() },
         TextType::Json => unsafe { tree_sitter_json() },
+        TextType::JsonLines => unsafe { tree_sitter_json() },
         TextType::Xml => unsafe { tree_sitter_xml() },
     }
 }
@@ -60,6 +61,7 @@ fn get_highlights(content_type: TextType) -> &'static str {
     match content_type {
         TextType::Html => HTML_HIGHLIGHTS,
         TextType::Json => JSON_HIGHLIGHTS,
+        TextType::JsonLines => JSON_HIGHLIGHTS,
         TextType::Xml => XML_HIGHLIGHTS,
     }
 }

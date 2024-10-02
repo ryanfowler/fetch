@@ -177,6 +177,7 @@ pub(crate) enum ImageType {
 pub(crate) enum TextType {
     Html,
     Json,
+    JsonLines,
     Xml,
 }
 
@@ -185,6 +186,7 @@ impl TextType {
         match self {
             TextType::Html => "html",
             TextType::Json => "json",
+            TextType::JsonLines => "jsonlines",
             TextType::Xml => "xml",
         }
     }
@@ -200,6 +202,7 @@ fn get_content_type(headers: &HeaderMap) -> Option<ContentType> {
         (mime::IMAGE, "webp") => Some(ContentType::Image(ImageType::Webp)),
         (_, "html") => Some(ContentType::Text(TextType::Html)),
         (_, "json") => Some(ContentType::Text(TextType::Json)),
+        (_, "jsonlines") => Some(ContentType::Text(TextType::JsonLines)),
         (_, "xml") => Some(ContentType::Text(TextType::Xml)),
         _ => None,
     }
