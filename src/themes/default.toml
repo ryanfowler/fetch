@@ -1,10 +1,13 @@
 # Default theme
 
 "attribute" = {}
+"boolean" = {}
 "comment" = { dimmed = true }
 "conceal" = {}
 "markup" = "green"
+"number" = {}
 "property" = { fg = "blue", bold = true }
 "string" = "green"
 "tag" = { fg = "blue", bold = true }
 "tag.property" = {}
+"type" = { fg = "cyan", bold = true }

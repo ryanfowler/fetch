@@ -42,6 +42,7 @@ pub(crate) fn highlight(input: &[u8], text_type: TextType) -> Option<Vec<u8>> {
 extern "C" {
     fn tree_sitter_html() -> tree_sitter::Language;
     fn tree_sitter_json() -> tree_sitter::Language;
+    fn tree_sitter_toml() -> tree_sitter::Language;
     fn tree_sitter_xml() -> tree_sitter::Language;
 }
 
@@ -50,12 +51,14 @@ fn get_language(content_type: TextType) -> Language {
         TextType::Html => unsafe { tree_sitter_html() },
         TextType::Json => unsafe { tree_sitter_json() },
         TextType::JsonLines => unsafe { tree_sitter_json() },
+        TextType::Toml => unsafe { tree_sitter_toml() },
         TextType::Xml => unsafe { tree_sitter_xml() },
     }
 }
 
 static HTML_HIGHLIGHTS: &str = include_str!("../highlights/html.scm");
 static JSON_HIGHLIGHTS: &str = include_str!("../highlights/json.scm");
+static TOML_HIGHLIGHTS: &str = include_str!("../highlights/toml.scm");
 static XML_HIGHLIGHTS: &str = include_str!("../highlights/xml.scm");
 
 fn get_highlights(content_type: TextType) -> &'static str {
@@ -63,6 +66,7 @@ fn get_highlights(content_type: TextType) -> &'static str {
         TextType::Html => HTML_HIGHLIGHTS,
         TextType::Json => JSON_HIGHLIGHTS,
         TextType::JsonLines => JSON_HIGHLIGHTS,
+        TextType::Toml => TOML_HIGHLIGHTS,
         TextType::Xml => XML_HIGHLIGHTS,
     }
 }

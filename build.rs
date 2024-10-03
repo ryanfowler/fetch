@@ -18,6 +18,11 @@ const GRAMMARS: &[Grammar] = &[
         files: &["parser.c"],
     },
     Grammar {
+        name: "toml",
+        prefix: None,
+        files: &["parser.c", "scanner.c"],
+    },
+    Grammar {
         name: "xml",
         prefix: Some("xml"),
         files: &["parser.c", "scanner.c"],
