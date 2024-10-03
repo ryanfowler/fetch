@@ -3,6 +3,7 @@ use std::{
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::{self, ExitCode, Stdio},
+    time::Duration,
 };
 
 use lazy_static::lazy_static;
@@ -137,7 +138,7 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
         .with_method(cli.method.as_deref())
         .with_headers(&cli.header)
         .with_query(&cli.query)
-        .with_timeout(cli.timeout.map(Into::into))
+        .with_timeout(duration_from_f64(cli.timeout))
         .with_version(cli.http);
 
     if !cli.form.is_empty() {
@@ -296,5 +297,15 @@ fn which(name: &str) -> Option<PathBuf> {
                 None
             }
         })
+    })
+}
+
+fn duration_from_f64(v: Option<f64>) -> Option<Duration> {
+    v.and_then(|v| {
+        if v <= 0.0 || v.is_infinite() {
+            None
+        } else {
+            Some(Duration::from_secs_f64(v))
+        }
     })
 }

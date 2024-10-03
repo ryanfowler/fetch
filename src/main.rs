@@ -1,7 +1,6 @@
 use std::{ops::Deref, path::PathBuf, process::ExitCode};
 
 use clap::{ArgAction, Parser, ValueEnum};
-use duration_string::DurationString;
 
 mod aws_sigv4;
 mod body;
@@ -55,9 +54,9 @@ struct Cli {
     /// Avoid printing anything to stderr
     #[arg(short, long)]
     silent: bool,
-    /// Timeout applied to the entire request
+    /// Timeout in seconds applied to the entire request
     #[arg(short, long)]
-    timeout: Option<DurationString>,
+    timeout: Option<f64>,
     /// Verbosity of the command
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
