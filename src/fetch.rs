@@ -1,6 +1,8 @@
 use std::{
     env,
+    fs::File,
     io::{self, IsTerminal, Read, Write},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{self, ExitCode, Stdio},
     time::Duration,
@@ -141,6 +143,8 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
         .with_timeout(duration_from_f64(cli.timeout))
         .with_version(cli.http);
 
+    // Parse any request body. Only one of these can be defined, as per the
+    // clap group they belong to.
     if !cli.form.is_empty() {
         let data = cli
             .form
@@ -155,8 +159,34 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
             .collect::<Vec<_>>();
         builder = builder.with_body(Some(Body::new_form(&data)?));
     }
+    if let Some(data) = &cli.data {
+        // TODO(ryanfowler): Try to parse the content type from file name or
+        // from the raw content directly.
+        let content_type = get_cli_content_type(cli);
+
+        if let Some(path) = data.strip_prefix('@') {
+            // Request body is a file path.
+            let file = File::open(path)?;
+            let size = file.metadata().ok().map(|v| v.size());
+            builder = builder.with_body(Some(Body::new_reader(file, content_type, size)));
+        } else {
+            // data is the raw request body.
+            let data = data.to_owned().into_bytes();
+            builder = builder.with_body(Some(Body::new_buf(data, content_type)));
+        }
+    }
 
     builder.build()
+}
+
+fn get_cli_content_type(cli: &Cli) -> Option<&'static str> {
+    if cli.json {
+        Some("application/json")
+    } else if cli.xml {
+        Some("application/xml")
+    } else {
+        None
+    }
 }
 
 #[derive(Copy, Clone, Debug)]

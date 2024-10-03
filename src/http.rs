@@ -152,6 +152,16 @@ impl<'a> RequestBuilder<'a> {
         });
 
         if let Some(body) = self.body {
+            // Disallow sending a body with certain methods, as reqwest will
+            // silently not send a body with these if the body is a type that
+            // implements Read.
+            if matches!(req.method(), &Method::GET | &Method::HEAD | &Method::TRACE) {
+                return Err(Error::new(format!(
+                    "cannot include a body with a {} request",
+                    req.method(),
+                )));
+            }
+
             if let Some(ct) = body.content_type {
                 req.headers_mut()
                     .entry(CONTENT_TYPE)

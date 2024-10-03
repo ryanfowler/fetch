@@ -27,11 +27,15 @@ struct Cli {
     /// Sign the request using AWS signature V4
     #[arg(long, value_name = "REGION:SERVICE")]
     aws_sigv4: Option<String>,
+    /// Send a request body
+    #[arg(short, long, group = "body", value_name = "[@]VALUE")]
+    data: Option<String>,
     /// Print out the request info and exit
     #[arg(long)]
     dry_run: bool,
     /// Send a form body
     #[arg(short, long, value_name = "KEY=VALUE")]
+    #[arg(group = "body", group = "content-type")]
     form: Vec<String>,
     /// Append headers to the request
     #[arg(short = 'H', long, value_name = "NAME:VALUE")]
@@ -39,6 +43,9 @@ struct Cli {
     /// Force the use of an HTTP version
     #[arg(long, value_name = "VERSION")]
     http: Option<Http>,
+    /// Set the content-type to application/json
+    #[arg(short, long, group = "content-type")]
+    json: bool,
     /// HTTP method to use
     #[arg(short, long)]
     method: Option<String>,
@@ -60,6 +67,9 @@ struct Cli {
     /// Verbosity of the command
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
+    /// Set the content-type to application/xml
+    #[arg(short, long, group = "content-type")]
+    xml: bool,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]

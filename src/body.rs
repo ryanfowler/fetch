@@ -17,18 +17,34 @@ impl Body {
             content_type: Some("application/x-www-form-urlencoded"),
         })
     }
+
+    pub(crate) fn new_buf(buf: Vec<u8>, content_type: Option<&'static str>) -> Self {
+        Self {
+            data: buf.into(),
+            content_type,
+        }
+    }
+
+    pub(crate) fn new_reader(
+        r: impl Read + Send + 'static,
+        content_type: Option<&'static str>,
+        content_length: Option<u64>,
+    ) -> Self {
+        Self {
+            data: Data::from_reader(r, content_length),
+            content_type,
+        }
+    }
 }
 
-#[allow(dead_code)]
 pub(crate) enum Data {
     Buffer(Vec<u8>),
-    Reader(Box<dyn Read + Send + 'static>),
+    Reader((Box<dyn Read + Send + 'static>, Option<u64>)),
 }
 
-#[allow(dead_code)]
 impl Data {
-    fn from_reader(r: impl Read + Send + 'static) -> Self {
-        Self::Reader(Box::new(r))
+    fn from_reader(r: impl Read + Send + 'static, content_length: Option<u64>) -> Self {
+        Self::Reader((Box::new(r), content_length))
     }
 }
 
@@ -48,7 +64,13 @@ impl From<Data> for blocking::Body {
     fn from(value: Data) -> Self {
         match value {
             Data::Buffer(buf) => buf.into(),
-            Data::Reader(r) => blocking::Body::new(r),
+            Data::Reader(r) => {
+                if let Some(size) = r.1 {
+                    blocking::Body::sized(r.0, size)
+                } else {
+                    blocking::Body::new(r.0)
+                }
+            }
         }
     }
 }
