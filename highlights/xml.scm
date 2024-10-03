@@ -5,7 +5,7 @@
 
 (XMLDecl "xml" @keyword)
 
-(XMLDecl [ "version" "encoding" "standalone" ] @property)
+(XMLDecl [ "version" "encoding" "standalone" ] @property.attribute)
 
 (XMLDecl (EncName) @string.special)
 
@@ -136,7 +136,7 @@
 
 ;; Attributes
 
-(Attribute (Name) @tag.property)
+(Attribute (Name) @property.tag)
 
 (Attribute (AttValue) @string)
 
