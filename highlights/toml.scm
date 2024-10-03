@@ -1,57 +1,38 @@
-; Taken from github.com/nvim-treesitter/nvim-treesitter
-; which uses the Apache-2.0 license
+; Originally taken from github.com/tree-sitter/tree-sitter-toml
+; which uses the MIT license
 
 ; Properties
 ;-----------
+
 (bare_key) @type
-
 (quoted_key) @string
-
-(pair
-  (bare_key)) @property
-
-(pair
-  (dotted_key
-    (bare_key) @property))
+(pair (bare_key)) @property
+(pair (dotted_key (bare_key))) @property
 
 ; Literals
 ;---------
-(boolean) @boolean
 
-(comment) @comment @spell
-
+(boolean) @constant.builtin
+(comment) @comment
 (string) @string
-
-(escape_sequence) @string.escape
-
 (integer) @number
-
-(float) @number.float
-
+(float) @number
 (offset_date_time) @string.special
-
 (local_date_time) @string.special
-
 (local_date) @string.special
-
 (local_time) @string.special
 
 ; Punctuation
 ;------------
-"." @punctuation.delimiter
 
+"." @punctuation.delimiter
 "," @punctuation.delimiter
 
 "=" @operator
 
 "[" @punctuation.bracket
-
 "]" @punctuation.bracket
-
 "[[" @punctuation.bracket
-
 "]]" @punctuation.bracket
-
 "{" @punctuation.bracket
-
 "}" @punctuation.bracket
