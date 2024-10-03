@@ -1,0 +1,10 @@
+# Default theme
+
+"attribute" = {}
+"comment" = { dimmed = true }
+"conceal" = {}
+"markup" = "green"
+"property" = { fg = "blue", bold = true }
+"string" = "green"
+"tag" = { fg = "blue", bold = true }
+"tag.property" = {}

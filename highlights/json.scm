@@ -1,4 +1,4 @@
-; Taken from github.com/nvim-treesitter/nvim-treesitter
+; Originally taken from github.com/nvim-treesitter/nvim-treesitter
 ; which uses the Apache-2.0 license
 
 [
@@ -35,7 +35,3 @@
   (#set! conceal ""))
 
 (escape_sequence) @string.escape
-
-;; ((escape_sequence) @conceal
-;;   (#eq? @conceal "\\\"")
-;;   (#set! conceal "\""))

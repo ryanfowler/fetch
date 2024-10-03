@@ -1,69 +1,176 @@
-; Taken from github.com/nvim-treesitter/nvim-treesitter
-; which uses the Apache-2.0 license
+; Taken from github.com/tree-sitter-grammars/tree-sitter-xml
+; which uses the MIT license
 
-; inherits: dtd
+;; XML declaration
 
-; XML declaration
-(XMLDecl
-  "standalone" @tag.attribute)
+(XMLDecl "xml" @keyword)
 
-(XMLDecl
-  [
-    "yes"
-    "no"
-  ] @boolean)
+(XMLDecl [ "version" "encoding" "standalone" ] @property)
 
-; Processing instructions
-(XmlModelPI
-  "xml-model" @keyword.directive)
+(XMLDecl (EncName) @string.special)
 
-(StyleSheetPI
-  "xml-stylesheet" @keyword.directive)
+(XMLDecl (VersionNum) @number)
 
-(PseudoAtt
-  (Name) @tag.attribute)
+(XMLDecl [ "yes" "no" ] @boolean)
 
-(PseudoAtt
-  (PseudoAttValue) @string)
+;; Processing instructions
 
-; Doctype declaration
-(doctypedecl
-  "DOCTYPE" @keyword.directive.define)
+(PI) @embedded
 
-(doctypedecl
-  (Name) @type.definition)
+(PI (PITarget) @keyword)
 
-; Tags
-(STag
+;; Element declaration
+
+(elementdecl
+  "ELEMENT" @keyword
   (Name) @tag)
 
-(ETag
+(contentspec
+  (_ (Name) @property))
+
+"#PCDATA" @type.builtin
+
+[ "EMPTY" "ANY" ] @string.special.symbol
+
+[ "*" "?" "+" ] @operator
+
+;; Entity declaration
+
+(GEDecl
+  "ENTITY" @keyword
+  (Name) @constant)
+
+(GEDecl (EntityValue) @string)
+
+(NDataDecl
+  "NDATA" @keyword
+  (Name) @label)
+
+;; Parsed entity declaration
+
+(PEDecl
+  "ENTITY" @keyword
+  "%" @operator
+  (Name) @constant)
+
+(PEDecl (EntityValue) @string)
+
+;; Notation declaration
+
+(NotationDecl
+  "NOTATION" @keyword
+  (Name) @constant)
+
+(NotationDecl
+  (ExternalID
+    (SystemLiteral (URI) @string.special)))
+
+;; Attlist declaration
+
+(AttlistDecl
+  "ATTLIST" @keyword
   (Name) @tag)
 
-(EmptyElemTag
-  (Name) @tag)
+(AttDef (Name) @property)
 
-; Attributes
-(Attribute
-  (Name) @tag.attribute)
+(AttDef (Enumeration (Nmtoken) @string))
 
-(Attribute
-  (AttValue) @string)
+(DefaultDecl (AttValue) @string)
 
-; Text
-(CharData) @none @spell
-
-((CDSect
-  (CDStart) @module
-  (CData) @markup.raw
-  "]]>" @module)
-  (#set! priority 105))
-
-; Delimiters & punctuation
 [
-  "<"
-  "</"
-  "/>"
-] @tag.delimiter
+  (StringType)
+  (TokenizedType)
+] @type.builtin
 
-"]" @punctuation.bracket
+(NotationType "NOTATION" @type.builtin)
+
+[
+  "#REQUIRED"
+  "#IMPLIED"
+  "#FIXED"
+] @attribute
+
+;; Entities
+
+(EntityRef) @constant
+
+((EntityRef) @constant.builtin
+ (#any-of? @constant.builtin
+   "&amp;" "&lt;" "&gt;" "&quot;" "&apos;"))
+
+(CharRef) @constant
+
+(PEReference) @constant
+
+;; External references
+
+[ "PUBLIC" "SYSTEM" ] @keyword
+
+(PubidLiteral) @string.special
+
+(SystemLiteral (URI) @markup.link)
+
+;; Processing instructions
+
+(XmlModelPI "xml-model" @keyword)
+
+(StyleSheetPI "xml-stylesheet" @keyword)
+
+(PseudoAtt (Name) @property)
+
+(PseudoAtt (PseudoAttValue) @string)
+
+;; Doctype declaration
+
+(doctypedecl "DOCTYPE" @keyword)
+
+(doctypedecl (Name) @type)
+
+;; Tags
+
+(STag (Name) @tag)
+
+(ETag (Name) @tag)
+
+(EmptyElemTag (Name) @tag)
+
+;; Attributes
+
+(Attribute (Name) @tag.property)
+
+(Attribute (AttValue) @string)
+
+;; Text
+
+(CharData) @markup
+
+(CDSect
+  (CDStart) @markup.heading
+  (CData) @markup.raw
+  "]]>" @markup.heading)
+
+;; Delimiters & punctuation
+
+[
+ "<?" "?>"
+ "<!" "]]>"
+ "<" ">"
+ "</" "/>"
+] @punctuation.delimiter
+
+[
+  "(" ")"
+  "[" "]"
+] @punctuation.bracket
+
+[ "\"" "'" ] @punctuation.delimiter
+
+[ "," "|" "=" ] @operator
+
+;; Misc
+
+[ "INCLUDE" "IGNORE" ] @keyword
+
+(Comment) @comment
+
+(ERROR) @error

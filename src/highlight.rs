@@ -1,17 +1,18 @@
 use std::io::Write;
 
-use anstyle::{AnsiColor, Color::Ansi, Style};
 use tree_sitter::Language;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-use crate::fetch::TextType;
+use crate::{fetch::TextType, theme::Theme};
 
 pub(crate) fn highlight(input: &[u8], text_type: TextType) -> Option<Vec<u8>> {
+    let theme = Theme::default();
+
     let name = text_type.as_str();
     let language = get_language(text_type);
     let highlights = get_highlights(text_type);
     let mut config = HighlightConfiguration::new(language, name, highlights, "", "").ok()?;
-    config.configure(&HIGHLIGHT_NAMES);
+    config.configure(theme.names());
 
     let mut highligher = Highlighter::new();
     let highlights = highligher.highlight(&config, input, None, |_| None).ok()?;
@@ -27,7 +28,7 @@ pub(crate) fn highlight(input: &[u8], text_type: TextType) -> Option<Vec<u8>> {
                 write!(&mut out, "{style:#}").unwrap();
             }
             HighlightEvent::HighlightStart(style) => {
-                stack.push(STYLES[style.0]);
+                stack.push(theme.get_style(style.0));
             }
             HighlightEvent::HighlightEnd => {
                 stack.pop();
@@ -65,37 +66,3 @@ fn get_highlights(content_type: TextType) -> &'static str {
         TextType::Xml => XML_HIGHLIGHTS,
     }
 }
-
-static HIGHLIGHT_NAMES: [&str; 14] = [
-    "boolean",
-    "constant.builtin",
-    "number",
-    "property",
-    "string",
-    "punctuation.delimiter",
-    "punctuation.bracket",
-    "conceal",
-    "string.escape",
-    "tag",
-    "tag.attribute",
-    "tag.delimiter",
-    "markup",
-    "spell",
-];
-
-static STYLES: [anstyle::Style; 14] = [
-    Style::new(),
-    Style::new(),
-    Style::new(),
-    Style::new().bold().fg_color(Some(Ansi(AnsiColor::Blue))),
-    Style::new().fg_color(Some(Ansi(AnsiColor::Green))),
-    Style::new().bold(),
-    Style::new().bold(),
-    Style::new(),
-    Style::new().fg_color(Some(Ansi(AnsiColor::Green))),
-    Style::new().bold().fg_color(Some(Ansi(AnsiColor::Blue))),
-    Style::new(),
-    Style::new(),
-    Style::new().fg_color(Some(Ansi(AnsiColor::Green))),
-    Style::new().fg_color(Some(Ansi(AnsiColor::Green))),
-];
