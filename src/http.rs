@@ -139,7 +139,7 @@ impl<'a> RequestBuilder<'a> {
 
         // Build the blocking HTTP request.
         let mut req = client
-            .request(method.clone(), url.clone())
+            .request(method, url)
             .header(ACCEPT, "*/*")
             .header(USER_AGENT, APP_STRING)
             .headers(headers)
