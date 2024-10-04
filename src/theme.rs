@@ -73,7 +73,7 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        const DEFAULT_THEME_RAW: &str = include_str!("themes/default.toml");
+        const DEFAULT_THEME_RAW: &str = include_str!("../themes/default.toml");
         Self::parse("default", DEFAULT_THEME_RAW).unwrap()
     }
 }
