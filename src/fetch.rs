@@ -149,6 +149,7 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
         .with_aws_sigv4(cli.aws_sigv4.as_deref())
         .with_method(cli.method.as_deref())
         .with_headers(&cli.header)
+        .with_proxy(cli.proxy.as_deref())
         .with_query(&cli.query)
         .with_timeout(duration_from_f64(cli.timeout))
         .with_version(cli.http);

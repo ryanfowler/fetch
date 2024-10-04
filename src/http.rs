@@ -13,7 +13,7 @@ use reqwest::{
         HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING,
         CONTENT_LENGTH, USER_AGENT,
     },
-    Method, StatusCode, Url, Version,
+    Method, Proxy, StatusCode, Url, Version,
 };
 
 use crate::{aws_sigv4, body::Body, error::Error, Http};
@@ -57,6 +57,7 @@ pub(crate) struct RequestBuilder<'a> {
     content_type: Option<&'static str>,
     method: Option<&'a str>,
     headers: &'a [String],
+    proxy: Option<&'a str>,
     query: &'a [String],
     timeout: Option<Duration>,
     version: Option<Http>,
@@ -71,6 +72,7 @@ impl<'a> RequestBuilder<'a> {
             content_type: None,
             method: None,
             headers: &[],
+            proxy: None,
             query: &[],
             timeout: None,
             version: None,
@@ -117,6 +119,11 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
+    pub(crate) fn with_proxy(mut self, proxy: Option<&'a str>) -> Self {
+        self.proxy = proxy;
+        self
+    }
+
     pub(crate) fn build(self) -> Result<Request, Error> {
         // Parse our request dependencies.
         let url = parse_url(self.url)?;
@@ -135,6 +142,9 @@ impl<'a> RequestBuilder<'a> {
                 Http::Two => builder.http2_prior_knowledge(),
                 // Http::Three => builder.http3_prior_knowledge(),
             }
+        }
+        if let Some(proxy) = self.proxy {
+            builder = builder.proxy(Proxy::all(proxy)?);
         }
         let client = builder.build()?;
 

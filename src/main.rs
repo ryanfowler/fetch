@@ -58,6 +58,9 @@ struct Cli {
     /// Write the response body to a file
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
+    /// Configure a proxy
+    #[arg(long)]
+    proxy: Option<String>,
     /// Append query parameters to the url
     #[arg(short, long, value_name = "KEY=VALUE")]
     query: Vec<String>,
