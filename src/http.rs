@@ -10,18 +10,12 @@ use jiff::{tz::TimeZone, Zoned};
 use reqwest::{
     blocking::{self, Client, ClientBuilder},
     header::{
-        HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING,
-        CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT,
+        HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, USER_AGENT,
     },
     Method, StatusCode, Url, Version,
 };
 
-use crate::{
-    aws_sigv4,
-    body::{Body, Data},
-    error::Error,
-    Http,
-};
+use crate::{aws_sigv4, body::Body, error::Error, Http};
 
 static DEFAULT_CONNECT_TIMEOUT_MS: u64 = 60_000;
 static APP_STRING: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
@@ -59,6 +53,7 @@ pub(crate) struct RequestBuilder<'a> {
     url: &'a str,
     aws_sigv4: Option<&'a str>,
     body: Option<Body>,
+    content_type: Option<&'static str>,
     method: Option<&'a str>,
     headers: &'a [String],
     query: &'a [String],
@@ -72,6 +67,7 @@ impl<'a> RequestBuilder<'a> {
             url,
             aws_sigv4: None,
             body: None,
+            content_type: None,
             method: None,
             headers: &[],
             query: &[],
@@ -107,6 +103,11 @@ impl<'a> RequestBuilder<'a> {
 
     pub(crate) fn with_version(mut self, version: Option<Http>) -> Self {
         self.version = version;
+        self
+    }
+
+    pub(crate) fn with_content_type(mut self, content_type: Option<&'static str>) -> Self {
+        self.content_type = content_type;
         self
     }
 
@@ -151,32 +152,9 @@ impl<'a> RequestBuilder<'a> {
             HeaderValue::from_static("gzip, deflate, br, zstd")
         });
 
-        if let Some(body) = self.body {
-            // Disallow sending a body with certain methods, as reqwest will
-            // silently not send a body with these if the body is a type that
-            // implements Read.
-            if matches!(req.method(), &Method::GET | &Method::HEAD | &Method::TRACE) {
-                return Err(Error::new(format!(
-                    "cannot include a body with a {} request",
-                    req.method(),
-                )));
-            }
-
-            if let Some(ct) = body.content_type {
-                req.headers_mut()
-                    .entry(CONTENT_TYPE)
-                    .or_insert_with(|| HeaderValue::from_static(ct));
-            }
-
-            // If we have the data in memory, set the content-length header.
-            if let Data::Buffer(bytes) = &body.data {
-                let n = bytes.len().to_string();
-                req.headers_mut()
-                    .insert(CONTENT_LENGTH, HeaderValue::from_str(&n).unwrap());
-            }
-
-            let req_body = req.body_mut();
-            *req_body = Some(body.data.into());
+        if let Some(content_type) = self.content_type {
+            let value = HeaderValue::from_static(content_type);
+            req.headers_mut().insert("content-type", value);
         }
 
         // Ensure the appropriate HTTP version is set on the request.
@@ -188,18 +166,15 @@ impl<'a> RequestBuilder<'a> {
             };
         }
 
-        let mut out = Request {
+        if let Some(body) = self.body {
+            *req.body_mut() = Some(body.into());
+        }
+
+        Ok(Request {
             client,
             req,
             encoding_requested,
-        };
-
-        // Sign the request if necessary.
-        if let Some(sigv4) = self.aws_sigv4 {
-            sign_aws_sigv4(sigv4, &mut out)?;
-        }
-
-        Ok(out)
+        })
     }
 }
 
@@ -258,6 +233,18 @@ impl Request {
 
     pub(crate) fn body_mut(&mut self) -> &mut Option<blocking::Body> {
         self.req.body_mut()
+    }
+
+    pub(crate) fn sign(&mut self, sigv4: SigV4) -> Result<(), Error> {
+        let now = Zoned::now().with_time_zone(TimeZone::UTC);
+        aws_sigv4::sign(
+            self,
+            &sigv4.access_key,
+            &sigv4.secret_key,
+            &sigv4.region,
+            &sigv4.service,
+            &now,
+        )
     }
 }
 
@@ -341,16 +328,29 @@ fn parse_query(query: &[String]) -> Vec<(&str, &str)> {
         .collect()
 }
 
-fn sign_aws_sigv4(opts: &str, req: &mut Request) -> Result<(), Error> {
-    let (region, service) = match opts.split_once(':') {
-        None => return Err(Error::new("aws-sigv4: format must be 'REGION:SERVICE'")),
-        Some(v) => v,
-    };
-    let access_key = get_sigv4_var("AWS_ACCESS_KEY_ID")?;
-    let secret_key = get_sigv4_var("AWS_SECRET_ACCESS_KEY")?;
+pub(crate) struct SigV4 {
+    region: String,
+    service: String,
+    access_key: String,
+    secret_key: String,
+}
 
-    let now = Zoned::now().with_time_zone(TimeZone::UTC);
-    aws_sigv4::sign(req, &access_key, &secret_key, region, service, &now)
+impl SigV4 {
+    pub(crate) fn parse(s: &str) -> Result<Self, Error> {
+        let (region, service) = match s.split_once('/') {
+            None => return Err(Error::new("aws-sigv4: format must be 'REGION/SERVICE'")),
+            Some(v) => v,
+        };
+        let access_key = get_sigv4_var("AWS_ACCESS_KEY_ID")?;
+        let secret_key = get_sigv4_var("AWS_SECRET_ACCESS_KEY")?;
+
+        Ok(Self {
+            region: region.to_string(),
+            service: service.to_string(),
+            access_key,
+            secret_key,
+        })
+    }
 }
 
 fn get_sigv4_var(key: &str) -> Result<String, Error> {

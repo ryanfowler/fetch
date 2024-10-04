@@ -2,7 +2,6 @@ use std::{
     env,
     fs::File,
     io::{self, IsTerminal, Read, Write},
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{self, ExitCode, Stdio},
     time::Duration,
@@ -11,11 +10,15 @@ use std::{
 use lazy_static::lazy_static;
 use mime::Mime;
 use quick_xml::{events::Event, Reader, Writer};
-use reqwest::header::{HeaderMap, CONTENT_TYPE};
+use reqwest::{
+    header::{HeaderMap, CONTENT_TYPE},
+    Method,
+};
 use termcolor::{BufferedStandardStream, ColorChoice};
 
 use crate::{
     body::Body,
+    editor,
     error::Error,
     format::{self, format_request},
     highlight::highlight,
@@ -143,8 +146,15 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
         .with_timeout(duration_from_f64(cli.timeout))
         .with_version(cli.http);
 
+    // Parse out sigv4 parameters.
+    let mut sigv4: Option<http::SigV4> = None;
+    if let Some(raw) = &cli.aws_sigv4 {
+        sigv4 = Some(http::SigV4::parse(raw)?);
+    }
+
     // Parse any request body. Only one of these can be defined, as per the
     // clap group they belong to.
+    builder = builder.with_content_type(get_cli_content_type(cli));
     if !cli.form.is_empty() {
         let data = cli
             .form
@@ -160,30 +170,74 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
         builder = builder.with_body(Some(Body::new_form(&data)?));
     }
     if let Some(data) = &cli.data {
-        // TODO(ryanfowler): Try to parse the content type from file name or
-        // from the raw content directly.
-        let content_type = get_cli_content_type(cli);
-
         if let Some(path) = data.strip_prefix('@') {
             // Request body is a file path.
             let file = File::open(path)?;
-            let size = file.metadata().ok().map(|v| v.size());
-            builder = builder.with_body(Some(Body::new_reader(file, content_type, size)));
+            builder = builder.with_body(Some(Body::new_file(file)?));
         } else {
             // data is the raw request body.
             let data = data.to_owned().into_bytes();
-            builder = builder.with_body(Some(Body::new_buf(data, content_type)));
+            builder = builder.with_body(Some(data.into()));
         }
     }
 
-    builder.build()
+    let mut req = builder.build()?;
+
+    // Disallow sending a body with certain methods, as reqwest will
+    // silently not send a body with these if the body is a type that
+    // implements Read.
+    if (req.body_mut().is_some() || cli.edit)
+        && matches!(req.method(), &Method::GET | &Method::HEAD | &Method::TRACE)
+    {
+        return Err(Error::new(format!(
+            "cannot include a body with a {} request",
+            req.method(),
+        )));
+    }
+
+    // Pull up an editor for the user to define the request body.
+    if cli.edit {
+        // If a body is already set, use that as the "placeholder" text in the
+        // file to edit.
+        let mut placeholder: Option<&[u8]> = None;
+        if let Some(body) = req.body_mut() {
+            let raw = body.buffer()?;
+            placeholder = Some(raw);
+        }
+
+        let ext = get_cli_content_ext(cli);
+        let body = editor::edit(placeholder, ext)?;
+        *req.body_mut() = Some(body.into());
+    }
+
+    // Sign the request, if necessary.
+    if let Some(sigv4) = sigv4 {
+        req.sign(sigv4)?;
+    }
+
+    Ok(req)
 }
 
 fn get_cli_content_type(cli: &Cli) -> Option<&'static str> {
+    // TODO(ryanfowler): Try to parse the content type from file name or
+    // from the raw content directly.
+
     if cli.json {
         Some("application/json")
     } else if cli.xml {
         Some("application/xml")
+    } else if !cli.form.is_empty() {
+        Some("application/x-www-form-urlencoded")
+    } else {
+        None
+    }
+}
+
+fn get_cli_content_ext(cli: &Cli) -> Option<&'static str> {
+    if cli.json {
+        Some(".json")
+    } else if cli.xml {
+        Some(".xml")
     } else {
         None
     }

@@ -1,74 +1,51 @@
-use std::io::{self, Read};
+use std::{
+    fs,
+    io::{self, Read},
+    os::unix::fs::MetadataExt,
+};
 
 use reqwest::blocking;
 
 use crate::error::Error;
 
-pub(crate) struct Body {
-    pub(crate) data: Data,
-    pub(crate) content_type: Option<&'static str>,
+pub(crate) enum Body {
+    Buffer(Vec<u8>),
+    File((fs::File, Option<u64>)),
 }
 
 impl Body {
     pub(crate) fn new_form(form: &[(&str, &str)]) -> Result<Self, Error> {
         let body = serde_urlencoded::to_string(form).map_err(|e| Error::new(e.to_string()))?;
-        Ok(Self {
-            data: body.into(),
-            content_type: Some("application/x-www-form-urlencoded"),
-        })
+        Ok(body.into())
     }
 
-    pub(crate) fn new_buf(buf: Vec<u8>, content_type: Option<&'static str>) -> Self {
-        Self {
-            data: buf.into(),
-            content_type,
-        }
-    }
-
-    pub(crate) fn new_reader(
-        r: impl Read + Send + 'static,
-        content_type: Option<&'static str>,
-        content_length: Option<u64>,
-    ) -> Self {
-        Self {
-            data: Data::from_reader(r, content_length),
-            content_type,
-        }
+    pub(crate) fn new_file(f: fs::File) -> Result<Self, Error> {
+        let size = f.metadata()?.size();
+        Ok(Self::File((f, Some(size))))
     }
 }
 
-pub(crate) enum Data {
-    Buffer(Vec<u8>),
-    Reader((Box<dyn Read + Send + 'static>, Option<u64>)),
-}
-
-impl Data {
-    fn from_reader(r: impl Read + Send + 'static, content_length: Option<u64>) -> Self {
-        Self::Reader((Box::new(r), content_length))
-    }
-}
-
-impl From<Vec<u8>> for Data {
+impl From<Vec<u8>> for Body {
     fn from(value: Vec<u8>) -> Self {
         Self::Buffer(value)
     }
 }
 
-impl From<String> for Data {
+impl From<String> for Body {
     fn from(value: String) -> Self {
         Self::Buffer(value.into_bytes())
     }
 }
 
-impl From<Data> for blocking::Body {
-    fn from(value: Data) -> Self {
+impl From<Body> for blocking::Body {
+    fn from(value: Body) -> Self {
         match value {
-            Data::Buffer(buf) => buf.into(),
-            Data::Reader(r) => {
-                if let Some(size) = r.1 {
-                    blocking::Body::sized(r.0, size)
+            Body::Buffer(buf) => buf.into(),
+            Body::File((f, size)) => {
+                if let Some(size) = size {
+                    blocking::Body::sized(f, size)
                 } else {
-                    blocking::Body::new(r.0)
+                    blocking::Body::new(f)
                 }
             }
         }

@@ -4,6 +4,7 @@ use clap::{ArgAction, Parser, ValueEnum};
 
 mod aws_sigv4;
 mod body;
+mod editor;
 mod error;
 mod fetch;
 mod format;
@@ -25,7 +26,7 @@ struct Cli {
     url: String,
 
     /// Sign the request using AWS signature V4
-    #[arg(long, value_name = "REGION:SERVICE")]
+    #[arg(long, value_name = "REGION/SERVICE")]
     aws_sigv4: Option<String>,
     /// Send a request body
     #[arg(short, long, group = "body", value_name = "[@]VALUE")]
@@ -33,9 +34,12 @@ struct Cli {
     /// Print out the request info and exit
     #[arg(long)]
     dry_run: bool,
+    /// Use an editor to send a request body
+    #[arg(short, long)]
+    edit: bool,
     /// Send a form body
     #[arg(short, long, value_name = "KEY=VALUE")]
-    #[arg(group = "body", group = "content-type")]
+    #[arg(group = "body")]
     form: Vec<String>,
     /// Append headers to the request
     #[arg(short = 'H', long, value_name = "NAME:VALUE")]
@@ -44,7 +48,7 @@ struct Cli {
     #[arg(long, value_name = "VERSION")]
     http: Option<Http>,
     /// Set the content-type to application/json
-    #[arg(short, long, group = "content-type")]
+    #[arg(short, long, conflicts_with = "form", conflicts_with = "xml")]
     json: bool,
     /// HTTP method to use
     #[arg(short, long)]
@@ -68,7 +72,7 @@ struct Cli {
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
     /// Set the content-type to application/xml
-    #[arg(short, long, group = "content-type")]
+    #[arg(short, long, conflicts_with = "form", conflicts_with = "json")]
     xml: bool,
 }
 
