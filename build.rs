@@ -27,6 +27,11 @@ const GRAMMARS: &[Grammar] = &[
         prefix: Some("xml"),
         files: &["parser.c", "scanner.c"],
     },
+    Grammar {
+        name: "yaml",
+        prefix: None,
+        files: &["parser.c", "scanner.c"],
+    },
 ];
 
 fn main() {

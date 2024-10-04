@@ -44,6 +44,7 @@ extern "C" {
     fn tree_sitter_json() -> tree_sitter::Language;
     fn tree_sitter_toml() -> tree_sitter::Language;
     fn tree_sitter_xml() -> tree_sitter::Language;
+    fn tree_sitter_yaml() -> tree_sitter::Language;
 }
 
 fn get_language(content_type: TextType) -> Language {
@@ -53,6 +54,7 @@ fn get_language(content_type: TextType) -> Language {
         TextType::JsonLines => unsafe { tree_sitter_json() },
         TextType::Toml => unsafe { tree_sitter_toml() },
         TextType::Xml => unsafe { tree_sitter_xml() },
+        TextType::Yaml => unsafe { tree_sitter_yaml() },
     }
 }
 
@@ -60,6 +62,7 @@ static HTML_HIGHLIGHTS: &str = include_str!("../highlights/html.scm");
 static JSON_HIGHLIGHTS: &str = include_str!("../highlights/json.scm");
 static TOML_HIGHLIGHTS: &str = include_str!("../highlights/toml.scm");
 static XML_HIGHLIGHTS: &str = include_str!("../highlights/xml.scm");
+static YAML_HIGHLIGHTS: &str = include_str!("../highlights/yaml.scm");
 
 fn get_highlights(content_type: TextType) -> &'static str {
     match content_type {
@@ -68,5 +71,6 @@ fn get_highlights(content_type: TextType) -> &'static str {
         TextType::JsonLines => JSON_HIGHLIGHTS,
         TextType::Toml => TOML_HIGHLIGHTS,
         TextType::Xml => XML_HIGHLIGHTS,
+        TextType::Yaml => YAML_HIGHLIGHTS,
     }
 }

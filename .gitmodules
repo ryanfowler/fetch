@@ -10,3 +10,6 @@
 [submodule "grammars/toml"]
 	path = grammars/toml
 	url = https://github.com/tree-sitter/tree-sitter-toml.git
+[submodule "grammars/yaml"]
+	path = grammars/yaml
+	url = https://github.com/tree-sitter-grammars/tree-sitter-yaml.git

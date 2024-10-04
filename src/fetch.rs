@@ -211,6 +211,7 @@ pub(crate) enum TextType {
     JsonLines,
     Toml,
     Xml,
+    Yaml,
 }
 
 impl TextType {
@@ -221,6 +222,7 @@ impl TextType {
             TextType::JsonLines => "jsonlines",
             TextType::Toml => "toml",
             TextType::Xml => "xml",
+            TextType::Yaml => "yaml",
         }
     }
 }
@@ -238,6 +240,7 @@ fn get_content_type(headers: &HeaderMap) -> Option<ContentType> {
         (_, "jsonlines") => Some(ContentType::Text(TextType::JsonLines)),
         (_, "toml") => Some(ContentType::Text(TextType::Toml)),
         (_, "xml") => Some(ContentType::Text(TextType::Xml)),
+        (_, "x-yaml" | "yaml") => Some(ContentType::Text(TextType::Yaml)),
         _ => None,
     }
 }
@@ -250,12 +253,6 @@ fn format_text(input: &[u8], content_type: TextType) -> Option<Vec<u8>> {
             serde_json::to_writer_pretty(&mut out, &v).ok()?;
             writeln!(&mut out).ok()?;
             Some(out)
-        }
-        TextType::Toml => {
-            let raw = std::str::from_utf8(input).ok()?;
-            let v: toml::Value = toml::from_str(raw).ok()?;
-            let out = toml::to_string_pretty(&v).ok()?;
-            Some(out.into_bytes())
         }
         TextType::Xml => {
             let mut reader = Reader::from_reader(input);
