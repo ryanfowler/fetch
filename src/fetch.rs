@@ -70,7 +70,7 @@ pub(crate) fn fetch(opts: Cli) -> ExitCode {
 }
 
 fn fetch_inner(opts: Cli) -> Result<bool, Error> {
-    let req = create_request(&opts)?;
+    let mut req = create_request(&opts)?;
 
     // Print request info if necessary.
     let v = Verbosity::new(&opts);
@@ -83,6 +83,13 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
         let mut stderr = BufferedStandardStream::stderr(choice);
         format_request(&mut stderr, &req)?;
         if opts.dry_run {
+            if let Some(body) = req.body_mut() {
+                // TODO(ryanfowler): This can be optimized to not have to read
+                // the whole request body into memory.
+                let raw = body.buffer()?;
+                writeln!(&mut stderr)?;
+                stderr.write_all(raw)?;
+            }
             // Dry-run, so we can return now.
             return Ok(true);
         } else {

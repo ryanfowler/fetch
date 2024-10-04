@@ -38,8 +38,7 @@ struct Cli {
     #[arg(short, long)]
     edit: bool,
     /// Send a form body
-    #[arg(short, long, value_name = "KEY=VALUE")]
-    #[arg(group = "body")]
+    #[arg(short, long, group = "body", value_name = "KEY=VALUE")]
     form: Vec<String>,
     /// Append headers to the request
     #[arg(short = 'H', long, value_name = "NAME:VALUE")]
