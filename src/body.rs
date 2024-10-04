@@ -23,6 +23,13 @@ impl Body {
         let size = f.metadata()?.size();
         Ok(Self::File((f, Some(size))))
     }
+
+    pub(crate) fn content_length(&self) -> Option<u64> {
+        match self {
+            Body::Buffer(vec) => Some(vec.len() as u64),
+            Body::File((_, size)) => *size,
+        }
+    }
 }
 
 impl From<Vec<u8>> for Body {

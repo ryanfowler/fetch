@@ -10,7 +10,8 @@ use jiff::{tz::TimeZone, Zoned};
 use reqwest::{
     blocking::{self, Client, ClientBuilder},
     header::{
-        HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, USER_AGENT,
+        HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING,
+        CONTENT_LENGTH, USER_AGENT,
     },
     Method, StatusCode, Url, Version,
 };
@@ -167,6 +168,12 @@ impl<'a> RequestBuilder<'a> {
         }
 
         if let Some(body) = self.body {
+            if let Some(content_length) = body.content_length() {
+                req.headers_mut().insert(
+                    CONTENT_LENGTH,
+                    HeaderValue::from_str(&content_length.to_string()).unwrap(),
+                );
+            }
             *req.body_mut() = Some(body.into());
         }
 
