@@ -49,7 +49,7 @@ pub(crate) fn write_to_stdout(img: Image) -> std::io::Result<()> {
             chunk
         )?;
     }
-    writeln!(&mut stdout)?;
+    stdout.write_all("\n\n".as_bytes())?;
     stdout.flush()
 }
 
