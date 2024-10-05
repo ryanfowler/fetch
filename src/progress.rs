@@ -23,7 +23,7 @@ impl<R> ProgressReader<R> {
         } else if let Some(size) = size {
             ProgressBar::new(size).with_style(
                 ProgressStyle::with_template(
-                    " {bar:40.cyan/blue} {bytes}/{total_bytes:.bold} [{elapsed}]",
+                    "{bar:40.cyan/blue} {bytes}/{total_bytes:.bold} [{elapsed}]",
                 )
                 .unwrap(),
             )
@@ -36,6 +36,9 @@ impl<R> ProgressReader<R> {
             progress.enable_steady_tick(Duration::from_millis(100));
             progress
         };
+
+        // Call tick to print the progress bar to stderr.
+        progress.tick();
 
         Self {
             inner: r,
