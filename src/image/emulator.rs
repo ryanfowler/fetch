@@ -12,14 +12,20 @@ pub(crate) enum Emulator {
     Kitty,
     Konsole,
     Mintty,
+    Tmux,
     Unknown,
     VSCode,
     WezTerm,
     Windows,
+    Zellij,
 }
 
 impl Emulator {
     pub(crate) fn detect() -> Self {
+        if env::var_os("ZELLIJ").is_some() {
+            return Self::Zellij;
+        }
+
         if let Some(emulator) = Self::detect_term_program_var() {
             return emulator;
         }
@@ -42,6 +48,7 @@ impl Emulator {
             ("Hyper", Self::Hyper),
             ("iTerm.app", Self::Iterm2),
             ("mintty", Self::Mintty),
+            ("tmux", Self::Tmux),
             ("vscode", Self::VSCode),
             ("WezTerm", Self::WezTerm),
         ];
@@ -103,10 +110,12 @@ impl Emulator {
             Emulator::Kitty => Protocol::Kitty,
             Emulator::Konsole => Protocol::Kitty,
             Emulator::Mintty => Protocol::InlineImages,
+            Emulator::Tmux => Protocol::Block,
             Emulator::Unknown => Protocol::Block,
-            Emulator::VSCode => Protocol::InlineImages,
+            Emulator::VSCode => Protocol::Block,
             Emulator::WezTerm => Protocol::InlineImages,
             Emulator::Windows => Protocol::Block,
+            Emulator::Zellij => Protocol::Block,
         }
     }
 }

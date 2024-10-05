@@ -137,7 +137,6 @@ High quality images will be rendered in the following terminals:
 - kitty
 - wezterm
 - iterm2
-- vscode
 - mintty
 - konsole
 
