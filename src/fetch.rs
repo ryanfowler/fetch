@@ -1,6 +1,6 @@
 use std::{
     env,
-    fs::File,
+    fs::{self, File},
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::{self, ExitCode, Stdio},
@@ -112,6 +112,16 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
         format::format_headers(&mut stderr, version, status, res.headers(), v)?;
     }
 
+    // Write to a file if, specified.
+    if let Some(output) = opts.output {
+        let mut file = fs::File::create(output)?;
+        let mut reader = res.into_reader()?;
+        io::copy(&mut reader, &mut file)?;
+        file.sync_all()?;
+        return Ok(is_success);
+    }
+
+    // Otherwise, write to stdout.
     if *IS_STDOUT_TTY {
         if let Some(content_type) = get_content_type(res.headers()) {
             // TODO(ryanfowler): Limit body before reading it all.
