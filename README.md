@@ -2,11 +2,12 @@
 
 `fetch` is a modern HTTP(S) client for the command line.
 
-It's features include:
+Its features include:
 - auto formatted and colored output for supported types (e.g. json, xml, etc.)
 - render images directly in your terminal
 - easily sign requests with [AWS Signature V4](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html)
 - optionally use an editor to define the request body
+- progress bar for file downloads
 - automatic response body decompression for gzip, deflate, brotli, and zstd
 - and more!
 
@@ -14,12 +15,9 @@ It's features include:
 
 #### Download binary
 
-TBD
+Download the binary for your os and architecture [here](https://github.com/ryanfowler/fetch/releases).
 
-#### Install through `cargo`
-
-Requires having the following dependencies installed:
-- TODO
+#### Install with `cargo`
 
 ```sh
 cargo install --force --locked fetch-cli
@@ -31,7 +29,7 @@ cargo install --force --locked fetch-cli
 
 ```sh
 # Make a simple GET request
-# fetch will default to using HTTPS if no scheme is specified.
+# fetch will default to using HTTPS if no scheme is specified
 fetch example.com
 
 # Make a PUT request with inline body
@@ -41,8 +39,9 @@ fetch -m PUT --data 'request body' example.com
 # The --json flag will set the content-type header to 'application/json'
 fetch -m PUT --json --data '{"key":"val"}' example.com
 
-# Send a JSON request body from a local file
-fetch -m PUT --json --data '@local/file.json' example.com
+# Send a request body from a local file
+# The content-type will automatically be inferred from the file extension
+fetch -m PUT --data '@local/image.jpeg' example.com
 
 # Use an editor to define the JSON request body
 fetch -m PUT --json --edit example.com
@@ -112,6 +111,16 @@ fetch -q key1=value1 -q key2=value2 "example.com?existing=param"
 # Send a POST request with a form body.
 # Sets the content-type to 'application/x-www-form-urlencoded'
 fetch -m POST -f key1=value1 -f key2=value2 example.com
+```
+
+#### Write the response body to a file
+
+```sh
+# Write the response body to a local file
+fetch example.com -o 'local/file.txt'
+
+# Write the response body to a file, disabling the progress bar
+fetch example.com -o 'local/file.txt' -s
 ```
 
 #### AWS signature v4
