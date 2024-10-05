@@ -1,5 +1,5 @@
 [package]
-name = "fetch"
+name = "fetch-cli"
 version = "0.1.0"
 edition = "2021"
 description = "fetch is a modern HTTP(S) client for the command line"
