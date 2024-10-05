@@ -53,14 +53,12 @@ fetch -m PUT --json --edit example.com
 ```sh
 # By default, fetch will write the HTTP version and status to stderr.
 fetch example.com
-
 # HTTP/1.1 200 OK
 #
 # [response data]
 
 # Providing the verbose flag a single time will also output the response headers
 fetch -v example.com
-
 # HTTP/1.1 200 OK
 # date: Sat, 05 Oct 2024 04:42:51 GMT
 # content-type: application/json; charset=utf-8
@@ -70,7 +68,6 @@ fetch -v example.com
 
 # Providing the verbose flag twice will also output the request headers
 fetch -vv example.com
-
 # GET / HTTP/1.1
 # host: example.com
 # accept: */*
@@ -86,7 +83,6 @@ fetch -vv example.com
 
 # If you don't want any metadata written to stderr, use the silent flag
 fetch -s example.com
-
 # [response data]
 ```
 
@@ -122,7 +118,7 @@ fetch -m POST -f key1=value1 -f key2=value2 example.com
 
 ```sh
 # Sign a request with aws signature v4.
-# This will set the x-amx-date, authorization, and optionally the x-amx-content-sha256 headers
+# This will set the authorization, x-amz-date, and optionally the x-amz-content-sha256 headers
 export AWS_ACCESS_KEY_ID=AWSACCESSKEYID
 export AWS_SECRET_ACCESS_KEY=SEcrETAccESSkEY
 fetch mybucket.example.com --aws-sigv4 us-east-1/s3
