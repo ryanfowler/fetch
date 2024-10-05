@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "fetch is a modern HTTP(S) client for the command line"
 
+[[bin]]
+path = "src/main.rs"
+name = "fetch"
+
 [profile.release]
 codegen-units = 1
 debug = false
