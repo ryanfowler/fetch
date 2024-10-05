@@ -29,7 +29,7 @@ impl<R> ProgressReader<R> {
             )
         } else {
             let progress = ProgressBar::new_spinner().with_style(
-                ProgressStyle::with_template("{spinner:.blue} {bytes} [{elapsed}]")
+                ProgressStyle::with_template("{spinner:.blue} {bytes:.bold} [{elapsed}]")
                     .unwrap()
                     .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷", "⣿"]),
             );

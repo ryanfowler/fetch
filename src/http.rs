@@ -53,7 +53,7 @@ impl From<&str> for ContentEncoding {
 pub(crate) struct RequestBuilder<'a> {
     url: &'a str,
     body: Option<Body>,
-    content_type: Option<&'static str>,
+    content_type: Option<&'a str>,
     method: Option<&'a str>,
     headers: &'a [String],
     proxy: Option<&'a str>,
@@ -102,7 +102,7 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
-    pub(crate) fn with_content_type(mut self, content_type: Option<&'static str>) -> Self {
+    pub(crate) fn with_content_type(mut self, content_type: Option<&'a str>) -> Self {
         self.content_type = content_type;
         self
     }
@@ -168,7 +168,7 @@ impl<'a> RequestBuilder<'a> {
         }
 
         if let Some(content_type) = self.content_type {
-            let value = HeaderValue::from_static(content_type);
+            let value = HeaderValue::from_str(content_type).unwrap();
             req_headers.insert("content-type", value);
         }
 

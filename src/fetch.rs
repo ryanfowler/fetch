@@ -80,12 +80,7 @@ fn fetch_inner(cli: Cli) -> Result<bool, Error> {
     // Print request info if necessary.
     let v = Verbosity::new(&cli);
     if v > Verbosity::Verbose || cli.dry_run {
-        let choice = if *IS_STDERR_TTY {
-            ColorChoice::Always
-        } else {
-            ColorChoice::Never
-        };
-        let mut stderr = BufferedStandardStream::stderr(choice);
+        let mut stderr = BufferedStandardStream::stderr(ColorChoice::Auto);
         format_request(&mut stderr, &req)?;
         if cli.dry_run {
             if let Some(body) = req.body_mut() {
@@ -108,12 +103,7 @@ fn fetch_inner(cli: Cli) -> Result<bool, Error> {
     let is_success = (200..400).contains(&status.as_u16());
 
     if v > Verbosity::Silent {
-        let choice = if *IS_STDERR_TTY {
-            ColorChoice::Always
-        } else {
-            ColorChoice::Never
-        };
-        let mut stderr = BufferedStandardStream::stderr(choice);
+        let mut stderr = BufferedStandardStream::stderr(ColorChoice::Auto);
         format::format_headers(&mut stderr, version, status, res.headers(), v)?;
     }
 
@@ -185,7 +175,8 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
 
     // Parse any request body. Only one of these can be defined, as per the
     // clap group they belong to.
-    builder = builder.with_content_type(get_cli_content_type(cli));
+    let content_type = get_cli_content_type(cli);
+    builder = builder.with_content_type(content_type.as_deref());
     if !cli.form.is_empty() {
         let data = cli
             .form
@@ -249,18 +240,19 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
     Ok(req)
 }
 
-fn get_cli_content_type(cli: &Cli) -> Option<&'static str> {
-    // TODO(ryanfowler): Try to parse the content type from file name or
-    // from the raw content directly.
-
+fn get_cli_content_type(cli: &Cli) -> Option<String> {
     if cli.json {
-        Some("application/json")
+        Some("application/json".to_string())
     } else if cli.xml {
-        Some("application/xml")
+        Some("application/xml".to_string())
     } else if !cli.form.is_empty() {
-        Some("application/x-www-form-urlencoded")
+        Some("application/x-www-form-urlencoded".to_string())
     } else {
-        None
+        cli.data
+            .as_ref()
+            .and_then(|v| v.strip_prefix('@'))
+            .and_then(|v| mime_guess::from_path(v).first())
+            .map(|mimetype| mimetype.to_string())
     }
 }
 
