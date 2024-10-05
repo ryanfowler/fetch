@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  pull_request:
+    branches: ["main"]
+
+env:
+  RUST_VERSION: "1.81.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy, rustfmt
+
+      - name: Update git submodules
+        run: git submodule update --init
+
+      - name: Install build dependencies
+        run: sudo apt-get install meson nasm ninja-build
+
+      - name: Rust cargo format
+        run: cargo fmt --all -- --check
+
+      - name: Rust cargo clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Rust cargo test
+        run: cargo test
+
+      - name: Rust cargo build
+        run: cargo build --locked

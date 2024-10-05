@@ -50,6 +50,7 @@ fn main() {
         build
             .include(&dir)
             .flag_if_supported("-Wno-implicit-fallthrough")
+            .flag_if_supported("-Wno-sign-compare")
             .flag_if_supported("-Wno-trigraphs")
             .flag_if_supported("-Wno-unused-but-set-variable")
             .flag_if_supported("-Wno-unused-parameter")
