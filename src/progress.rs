@@ -23,13 +23,13 @@ impl<R> ProgressReader<R> {
         } else if let Some(size) = size {
             ProgressBar::new(size).with_style(
                 ProgressStyle::with_template(
-                    "{bar:40.cyan/blue} {bytes}/{total_bytes:.bold} [{elapsed}]",
+                    " {bar:40.cyan/blue} {bytes}/{total_bytes:.bold} [{elapsed}]",
                 )
                 .unwrap(),
             )
         } else {
             let progress = ProgressBar::new_spinner().with_style(
-                ProgressStyle::with_template("{spinner:.blue} {bytes:.bold} [{elapsed}]")
+                ProgressStyle::with_template(" {spinner:.blue} {bytes:.bold} [{elapsed}]")
                     .unwrap()
                     .tick_strings(&["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷", "⣿"]),
             );
