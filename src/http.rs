@@ -151,7 +151,10 @@ impl<'a> RequestBuilder<'a> {
         // Build the blocking HTTP request.
         let mut req = client
             .request(method, url)
-            .header(ACCEPT, "*/*")
+            .header(
+                ACCEPT,
+                "application/json,application/xml,application/html,image/avif,image/webp,*/*;q=0.8",
+            )
             .header(USER_AGENT, APP_STRING)
             .headers(headers)
             .query(&query)
