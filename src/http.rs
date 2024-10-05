@@ -52,7 +52,6 @@ impl From<&str> for ContentEncoding {
 
 pub(crate) struct RequestBuilder<'a> {
     url: &'a str,
-    aws_sigv4: Option<&'a str>,
     body: Option<Body>,
     content_type: Option<&'static str>,
     method: Option<&'a str>,
@@ -67,7 +66,6 @@ impl<'a> RequestBuilder<'a> {
     pub(crate) fn new(url: &'a str) -> Self {
         Self {
             url,
-            aws_sigv4: None,
             body: None,
             content_type: None,
             method: None,
@@ -77,11 +75,6 @@ impl<'a> RequestBuilder<'a> {
             timeout: None,
             version: None,
         }
-    }
-
-    pub(crate) fn with_aws_sigv4(mut self, sigv4: Option<&'a str>) -> Self {
-        self.aws_sigv4 = sigv4;
-        self
     }
 
     pub(crate) fn with_method(mut self, method: Option<&'a str>) -> Self {

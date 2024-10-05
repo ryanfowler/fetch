@@ -156,7 +156,6 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
 
 fn create_request(cli: &Cli) -> Result<http::Request, Error> {
     let mut builder = http::RequestBuilder::new(&cli.url)
-        .with_aws_sigv4(cli.aws_sigv4.as_deref())
         .with_method(cli.method.as_deref())
         .with_headers(&cli.header)
         .with_proxy(cli.proxy.as_deref())
