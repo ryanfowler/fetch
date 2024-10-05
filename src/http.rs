@@ -151,24 +151,32 @@ impl<'a> RequestBuilder<'a> {
         // Build the blocking HTTP request.
         let mut req = client
             .request(method, url)
-            .header(
-                ACCEPT,
-                "application/json,application/xml,application/html,image/avif,image/webp,*/*;q=0.8",
-            )
             .header(USER_AGENT, APP_STRING)
-            .headers(headers)
             .query(&query)
             .build()?;
 
+        // Set all the relevant headers.
+        let req_headers = req.headers_mut();
+        req_headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("image/avif,image/webp,*/*"),
+        );
+
         let mut encoding_requested = false;
-        req.headers_mut().entry(ACCEPT_ENCODING).or_insert_with(|| {
+        req_headers.entry(ACCEPT_ENCODING).or_insert_with(|| {
             encoding_requested = true;
             HeaderValue::from_static("gzip, deflate, br, zstd")
         });
 
+        req_headers.insert(USER_AGENT, HeaderValue::from_static(APP_STRING));
+
+        for header in headers.iter() {
+            req_headers.insert(header.0, header.1.clone());
+        }
+
         if let Some(content_type) = self.content_type {
             let value = HeaderValue::from_static(content_type);
-            req.headers_mut().insert("content-type", value);
+            req_headers.insert("content-type", value);
         }
 
         // Ensure the appropriate HTTP version is set on the request.
