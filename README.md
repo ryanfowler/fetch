@@ -136,7 +136,7 @@ High quality images will be rendered in the following terminals:
 - mintty
 - konsole
 
-A low quality block-based image will be rendered in all other terminal emulators.
+Low quality block-based images will be rendered in all other terminal emulators.
 
 Supported image types are:
 - jpeg
