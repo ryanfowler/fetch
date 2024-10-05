@@ -22,7 +22,7 @@ opt-level = 1
 opt-level = 2
 
 [build-dependencies]
-cc = { version = "1.1.24" }
+cc = { version = "1.1.25" }
 
 [dependencies]
 ansi_colours = { version = "1.2.3" }
@@ -34,6 +34,7 @@ crossterm = { version = "0.28.1" }
 flate2 = { version = "1.0.34", features = ["zlib"] }
 hmac = { version = "0.12.1" }
 image = { version = "0.25.2", default-features = false, features = ["jpeg", "png", "tiff"] }
+indicatif = { version = "0.17.8" }
 jiff = { version = "0.1.13" }
 kamadak-exif = "0.5.5"
 libavif-image = { version = "0.14.0", default-features = false, features = ["codec-dav1d"] }

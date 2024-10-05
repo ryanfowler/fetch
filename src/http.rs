@@ -287,6 +287,10 @@ impl Response {
         self.res.headers()
     }
 
+    pub(crate) fn content_length(&self) -> Option<u64> {
+        self.res.content_length()
+    }
+
     pub(crate) fn into_reader(self) -> io::Result<impl Read> {
         Decoder::new(self.res, self.enc)
     }

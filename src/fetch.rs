@@ -14,7 +14,7 @@ use reqwest::{
     header::{HeaderMap, CONTENT_TYPE},
     Method,
 };
-use termcolor::{BufferedStandardStream, ColorChoice};
+use termcolor::{BufferedStandardStream, Color, ColorChoice, ColorSpec, WriteColor};
 
 use crate::{
     body::Body,
@@ -24,6 +24,7 @@ use crate::{
     highlight::highlight,
     http,
     image::Image,
+    progress::ProgressReader,
     Cli,
 };
 
@@ -56,7 +57,11 @@ impl Verbosity {
 pub(crate) fn fetch(opts: Cli) -> ExitCode {
     match fetch_inner(opts) {
         Err(err) => {
-            println!("Error: {}", err);
+            let mut w = BufferedStandardStream::stderr(ColorChoice::Auto);
+            _ = w.set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Red)));
+            _ = w.write_all("Error".as_bytes());
+            _ = w.reset();
+            _ = writeln!(&mut w, ": {err}");
             ExitCode::FAILURE
         }
         Ok(ok) => {
@@ -69,12 +74,12 @@ pub(crate) fn fetch(opts: Cli) -> ExitCode {
     }
 }
 
-fn fetch_inner(opts: Cli) -> Result<bool, Error> {
-    let mut req = create_request(&opts)?;
+fn fetch_inner(cli: Cli) -> Result<bool, Error> {
+    let mut req = create_request(&cli)?;
 
     // Print request info if necessary.
-    let v = Verbosity::new(&opts);
-    if v > Verbosity::Verbose || opts.dry_run {
+    let v = Verbosity::new(&cli);
+    if v > Verbosity::Verbose || cli.dry_run {
         let choice = if *IS_STDERR_TTY {
             ColorChoice::Always
         } else {
@@ -82,7 +87,7 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
         };
         let mut stderr = BufferedStandardStream::stderr(choice);
         format_request(&mut stderr, &req)?;
-        if opts.dry_run {
+        if cli.dry_run {
             if let Some(body) = req.body_mut() {
                 // TODO(ryanfowler): This can be optimized to not have to read
                 // the whole request body into memory.
@@ -113,16 +118,18 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
     }
 
     // Write to a file if, specified.
-    if let Some(output) = opts.output {
+    if let Some(output) = cli.output {
         let mut file = fs::File::create(output)?;
-        let mut reader = res.into_reader()?;
+        let size = res.content_length();
+        let reader = res.into_reader()?;
+        let mut reader = ProgressReader::new(reader, size, matches!(v, Verbosity::Silent));
         io::copy(&mut reader, &mut file)?;
         file.sync_all()?;
         return Ok(is_success);
     }
 
-    // Otherwise, write to stdout.
     if *IS_STDOUT_TTY {
+        // Stream response body to stdout.
         if let Some(content_type) = get_content_type(res.headers()) {
             // TODO(ryanfowler): Limit body before reading it all.
             let mut buf = Vec::with_capacity(1024);
@@ -135,23 +142,30 @@ fn fetch_inner(opts: Cli) -> Result<bool, Error> {
                     if let Some(highlighted) = highlight(&buf, text_type) {
                         buf = highlighted;
                     }
-                    stream_to_stdout(&mut &buf[..], opts.no_pager)?;
-                    return Ok(is_success);
+                    stream_to_stdout(&mut &buf[..], cli.no_pager)?;
+                    Ok(is_success)
                 }
                 ContentType::Image(_image) => {
                     if let Some(img) = Image::new(&buf) {
                         img.write_to_stdout()?;
-                        return Ok(is_success);
+                        Ok(is_success)
                     } else {
-                        return Err(Error::new("unable to parse image"));
+                        Err(Error::new("unable to parse image"))
                     }
                 }
             }
+        } else {
+            stream_to_stdout(&mut res.into_reader()?, cli.no_pager)?;
+            Ok(is_success)
         }
+    } else {
+        // stdout is not a tty, use a ProgressReader.
+        let size = res.content_length();
+        let reader = res.into_reader()?;
+        let mut reader = ProgressReader::new(reader, size, matches!(v, Verbosity::Silent));
+        stream_to_stdout(&mut reader, cli.no_pager)?;
+        Ok(is_success)
     }
-
-    stream_to_stdout(&mut res.into_reader()?, opts.no_pager)?;
-    Ok(is_success)
 }
 
 fn create_request(cli: &Cli) -> Result<http::Request, Error> {

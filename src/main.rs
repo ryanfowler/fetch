@@ -11,6 +11,7 @@ mod format;
 mod highlight;
 mod http;
 mod image;
+mod progress;
 mod theme;
 
 fn main() -> ExitCode {
