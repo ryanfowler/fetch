@@ -5,6 +5,8 @@ use std::{
 
 use indicatif::{ProgressBar, ProgressStyle};
 
+use crate::fetch::IS_STDERR_TTY;
+
 pub(crate) struct ProgressReader<R> {
     inner: R,
     progress: ProgressBar,
@@ -13,6 +15,9 @@ pub(crate) struct ProgressReader<R> {
 
 impl<R> ProgressReader<R> {
     pub(crate) fn new(r: R, size: Option<u64>, hidden: bool) -> Self {
+        if *IS_STDERR_TTY {
+            console::set_colors_enabled(true);
+        }
         let progress = if hidden {
             ProgressBar::hidden()
         } else if let Some(size) = size {

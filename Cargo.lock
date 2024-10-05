@@ -425,6 +425,7 @@ dependencies = [
  "brotli",
  "cc",
  "clap",
+ "console",
  "crossterm",
  "flate2",
  "hmac",

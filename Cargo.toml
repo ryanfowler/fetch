@@ -30,6 +30,7 @@ anstyle = { version = "1.0.8" }
 base64 = { version = "0.22.1" }
 brotli = { version = "7.0.0" }
 clap = { version = "4.5.19", features = ["derive"] }
+console = { version = "0.15", default-features = false, features = ["ansi-parsing"] }
 crossterm = { version = "0.28.1" }
 flate2 = { version = "1.0.34", features = ["zlib"] }
 hmac = { version = "0.12.1" }
