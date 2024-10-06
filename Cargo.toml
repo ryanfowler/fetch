@@ -3,6 +3,12 @@ name = "fetch-cli"
 version = "0.1.0"
 edition = "2021"
 description = "fetch is a modern HTTP(S) client for the command line"
+authors = ["Ryan Fowler <ryan.fowler19@gmail.com>"]
+repository = "https://github.com/ryanfowler/fetch"
+categories = ["command-line-utilities"]
+keywords = ["http", "https", "client"]
+license = "MIT"
+include = ["build.rs", "/grammars/**/*.c", "/grammars/**/*.h", "/highlights", "/src", "/themes"]
 
 [[bin]]
 path = "src/main.rs"
@@ -14,12 +20,6 @@ debug = false
 lto = true
 opt-level = 3
 strip = true
-
-[profile.dev]
-opt-level = 1
-
-[profile.dev.package."*"]
-opt-level = 2
 
 [build-dependencies]
 cc = { version = "1.1.25" }
