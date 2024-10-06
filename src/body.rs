@@ -1,8 +1,13 @@
 use std::{
     fs,
     io::{self, Read},
-    os::unix::fs::MetadataExt,
 };
+
+#[cfg(not(target_os = "windows"))]
+use std::os::unix::fs::MetadataExt;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::fs::MetadataExt;
 
 use reqwest::blocking;
 
@@ -20,6 +25,9 @@ impl Body {
     }
 
     pub(crate) fn new_file(f: fs::File) -> Result<Self, Error> {
+        #[cfg(target_os = "windows")]
+        let size = f.metadata()?.file_size();
+        #[cfg(not(target_os = "windows"))]
         let size = f.metadata()?.size();
         Ok(Self::File((f, Some(size))))
     }
