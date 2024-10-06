@@ -48,9 +48,9 @@ jobs:
           - build: macos-arm64
             os: macos-14
             target: aarch64-apple-darwin
-          # - build: windows-x86_64-msvc
-          #   os: windows-2022
-          #   target: x86_64-pc-windows-msvc
+          - build: windows-x86_64-msvc
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v3
 
@@ -90,6 +90,17 @@ jobs:
           7z a "$staging.zip" fetch.exe
           echo "ASSET=$staging.zip" >> $GITHUB_ENV
 
+      - name: Upload release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload ${{ github.ref_name }} ${{ env.ASSET }}
+
+  latest:
+    runs-on: "ubuntu-latest"
+    needs: release
+    permissions:
+      contents: write
+    steps:
       - name: Upload release archive
         env:
           GH_TOKEN: ${{ github.token }}
