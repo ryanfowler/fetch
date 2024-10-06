@@ -152,7 +152,7 @@ impl<'a> RequestBuilder<'a> {
         let req_headers = req.headers_mut();
         req_headers.insert(
             ACCEPT,
-            HeaderValue::from_static("image/avif,image/webp,*/*"),
+            HeaderValue::from_static("application/json,image/webp,*/*"),
         );
 
         let mut encoding_requested = false;
