@@ -274,7 +274,6 @@ pub(crate) enum ContentType {
 
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum ImageType {
-    Avif,
     Jpeg,
     Png,
     Tiff,
@@ -307,7 +306,6 @@ impl TextType {
 fn get_content_type(headers: &HeaderMap) -> Option<ContentType> {
     let mt: Mime = headers.get(CONTENT_TYPE)?.to_str().ok()?.parse().ok()?;
     match (mt.type_(), mt.subtype().as_str()) {
-        (mime::IMAGE, "avif") => Some(ContentType::Image(ImageType::Avif)),
         (mime::IMAGE, "jpeg") => Some(ContentType::Image(ImageType::Jpeg)),
         (mime::IMAGE, "png") => Some(ContentType::Image(ImageType::Png)),
         (mime::IMAGE, "tiff") => Some(ContentType::Image(ImageType::Tiff)),

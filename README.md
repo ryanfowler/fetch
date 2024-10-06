@@ -151,5 +151,4 @@ Supported image types are:
 - jpeg
 - png
 - webp
-- avif
 - tiff

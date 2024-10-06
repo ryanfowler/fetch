@@ -110,12 +110,3 @@ impl From<ImageError> for Error {
         }
     }
 }
-
-impl From<libavif_image::Error> for Error {
-    fn from(value: libavif_image::Error) -> Self {
-        Self {
-            msg: value.to_string(),
-            src: Some(Box::new(value)),
-        }
-    }
-}

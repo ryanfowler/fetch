@@ -60,7 +60,6 @@ impl Image {
     fn new_inner(input: &[u8]) -> Option<DynamicImage> {
         Self::get_format(input)
             .and_then(|format| match format {
-                ImageFormat::Avif => Some(libavif_image::read(input).ok()?),
                 ImageFormat::Jpeg => Some(load_from_memory_with_format(input, format).ok()?),
                 ImageFormat::Png => Some(load_from_memory_with_format(input, format).ok()?),
                 ImageFormat::Tiff => Some(load_from_memory_with_format(input, format).ok()?),
@@ -99,11 +98,6 @@ impl Image {
         const WEBP: &[u8; 4] = b"\x57\x45\x42\x50";
         if input[8..].starts_with(WEBP) {
             return Some(ImageFormat::WebP);
-        }
-
-        const AVIF: &[u8; 8] = b"ftypavif";
-        if input[4..].starts_with(AVIF) {
-            return Some(ImageFormat::Avif);
         }
 
         None

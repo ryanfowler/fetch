@@ -262,15 +262,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1462739cb27611015575c0c11df5df7601141071f07518d56fcc1be504cbec97"
 
 [[package]]
-name = "cmake"
-version = "0.1.51"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb1e43aa7fd152b1f968787f7dbcdeb306d1867ff373c69955211876c053f91a"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -425,7 +416,6 @@ dependencies = [
  "jiff",
  "kamadak-exif",
  "lazy_static",
- "libavif-image",
  "mime",
  "mime_guess",
  "percent-encoding",
@@ -837,49 +827,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
-name = "libavif"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b710faf0de92da0e32a9a9c89bbf849e37277fd447b4f17b0f0f798796ae1f2"
-dependencies = [
- "libavif-sys",
-]
-
-[[package]]
-name = "libavif-image"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0a6b5ea7c9d9260fa57daa8f238992de5d9c7a3c82a78e8dbc4d1367e7c28be"
-dependencies = [
- "image",
- "libavif",
-]
-
-[[package]]
-name = "libavif-sys"
-version = "0.17.0+libavif.1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490ca74b61e773140bebb086c81facb23273a99364a9ab0c92ab1532b90ade35"
-dependencies = [
- "cmake",
- "libc",
- "libdav1d-sys",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.159"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "561d97a539a36e26a9a5fad1ea11a3039a67714694aaa379433e580854bc3dc5"
-
-[[package]]
-name = "libdav1d-sys"
-version = "0.7.1+libdav1d.1.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d875e9669d116a603412a126de599b7bf47789a365b79fcf461fbf9c18d141f"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "libwebp-sys"
