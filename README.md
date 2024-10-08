@@ -23,6 +23,27 @@ Download the binary for your os and architecture [here](https://github.com/ryanf
 cargo install --force --locked fetch-cli
 ```
 
+## Building from source
+
+Clone this repository:
+
+```sh
+git clone https://github.com/ryanfowler/fetch.git
+```
+
+Initialize and update the Git submodules for tree-sitter grammars:
+
+```sh
+git submodule init
+git submodule update
+```
+
+Then build with Cargo:
+
+```sh
+cargo build --release
+```
+
 ## Usage
 
 #### Basic usage
