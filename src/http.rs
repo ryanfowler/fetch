@@ -52,6 +52,7 @@ impl From<&str> for ContentEncoding {
 
 pub(crate) struct RequestBuilder<'a> {
     url: &'a str,
+    basic: Option<&'a str>,
     bearer: Option<&'a str>,
     body: Option<Body>,
     content_type: Option<&'a str>,
@@ -67,6 +68,7 @@ impl<'a> RequestBuilder<'a> {
     pub(crate) fn new(url: &'a str) -> Self {
         Self {
             url,
+            basic: None,
             bearer: None,
             body: None,
             content_type: None,
@@ -124,6 +126,11 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
+    pub(crate) fn with_basic(mut self, basic: Option<&'a str>) -> Self {
+        self.basic = basic;
+        self
+    }
+
     pub(crate) fn build(self) -> Result<Request, Error> {
         // Parse our request dependencies.
         let url = parse_url(self.url)?;
@@ -154,7 +161,15 @@ impl<'a> RequestBuilder<'a> {
             .header(USER_AGENT, APP_STRING)
             .query(&query);
 
-        // Optionally add bearer authentication.
+        // Optionally add basic/bearer authentication.
+        if let Some(basic) = self.basic {
+            let (user, pass) = if let Some((user, pass)) = basic.split_once(':') {
+                (user, Some(pass))
+            } else {
+                (basic, None)
+            };
+            builder = builder.basic_auth(user, pass);
+        }
         if let Some(token) = self.bearer {
             builder = builder.bearer_auth(token);
         }
