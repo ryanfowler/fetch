@@ -29,6 +29,9 @@ struct Cli {
     /// Sign the request using AWS signature V4
     #[arg(long, value_name = "REGION/SERVICE")]
     aws_sigv4: Option<String>,
+    /// Enable HTTP bearer authentication
+    #[arg(long, conflicts_with = "aws_sigv4", value_name = "TOKEN")]
+    bearer: Option<String>,
     /// Send a request body
     #[arg(short, long, group = "body", value_name = "[@]VALUE")]
     data: Option<String>,

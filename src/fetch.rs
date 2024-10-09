@@ -162,6 +162,7 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
     let mut builder = http::RequestBuilder::new(&cli.url)
         .with_method(cli.method.as_deref())
         .with_headers(&cli.header)
+        .with_bearer(cli.bearer.as_deref())
         .with_proxy(cli.proxy.as_deref())
         .with_query(&cli.query)
         .with_timeout(duration_from_f64(cli.timeout))

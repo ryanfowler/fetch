@@ -52,6 +52,7 @@ impl From<&str> for ContentEncoding {
 
 pub(crate) struct RequestBuilder<'a> {
     url: &'a str,
+    bearer: Option<&'a str>,
     body: Option<Body>,
     content_type: Option<&'a str>,
     method: Option<&'a str>,
@@ -66,6 +67,7 @@ impl<'a> RequestBuilder<'a> {
     pub(crate) fn new(url: &'a str) -> Self {
         Self {
             url,
+            bearer: None,
             body: None,
             content_type: None,
             method: None,
@@ -117,6 +119,11 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
+    pub(crate) fn with_bearer(mut self, bearer: Option<&'a str>) -> Self {
+        self.bearer = bearer;
+        self
+    }
+
     pub(crate) fn build(self) -> Result<Request, Error> {
         // Parse our request dependencies.
         let url = parse_url(self.url)?;
@@ -142,11 +149,17 @@ impl<'a> RequestBuilder<'a> {
         let client = builder.build()?;
 
         // Build the blocking HTTP request.
-        let mut req = client
+        let mut builder = client
             .request(method, url)
             .header(USER_AGENT, APP_STRING)
-            .query(&query)
-            .build()?;
+            .query(&query);
+
+        // Optionally add bearer authentication.
+        if let Some(token) = self.bearer {
+            builder = builder.bearer_auth(token);
+        }
+
+        let mut req = builder.build()?;
 
         // Set all the relevant headers.
         let req_headers = req.headers_mut();
