@@ -60,7 +60,7 @@ pub(crate) fn fetch(opts: Cli) -> ExitCode {
         Err(err) => {
             let mut w = BufferedStandardStream::stderr(ColorChoice::Auto);
             _ = w.set_color(ColorSpec::new().set_bold(true).set_fg(Some(Color::Red)));
-            _ = w.write_all("Error".as_bytes());
+            _ = w.write_all("error".as_bytes());
             _ = w.reset();
             _ = writeln!(&mut w, ": {err}");
             ExitCode::FAILURE
