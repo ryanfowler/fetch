@@ -46,8 +46,9 @@ struct Cli {
     /// Use an editor to send a request body
     #[arg(short, long)]
     edit: bool,
-    /// Send a form body
+    /// Send a urlencoded form body
     #[arg(short, long, group = "body", value_name = "KEY=VALUE")]
+    #[arg(conflicts_with = "data", conflicts_with = "multipart")]
     form: Vec<String>,
     /// Append headers to the request
     #[arg(short = 'H', long, value_name = "NAME:VALUE")]
@@ -56,11 +57,16 @@ struct Cli {
     #[arg(long, value_name = "VERSION")]
     http: Option<Http>,
     /// Set the content-type to application/json
-    #[arg(short, long, conflicts_with = "form", conflicts_with = "xml")]
+    #[arg(short, long, conflicts_with = "xml")]
+    #[arg(conflicts_with = "form", conflicts_with = "multipart")]
     json: bool,
     /// HTTP method to use
     #[arg(short, long)]
     method: Option<String>,
+    /// Send a multipart form body
+    #[arg(short = 'F', long, value_name = "NAME=[@]VALUE")]
+    #[arg(conflicts_with = "data", conflicts_with = "form")]
+    multipart: Vec<String>,
     /// Avoid using a pager for displaying the response body
     #[arg(long)]
     no_pager: bool,
@@ -83,7 +89,8 @@ struct Cli {
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
     /// Set the content-type to application/xml
-    #[arg(short, long, conflicts_with = "form", conflicts_with = "json")]
+    #[arg(short, long, conflicts_with = "json")]
+    #[arg(conflicts_with = "form", conflicts_with = "multipart")]
     xml: bool,
 }
 
