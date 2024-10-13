@@ -11,7 +11,8 @@ use lazy_static::lazy_static;
 use mime::Mime;
 use quick_xml::{events::Event, Reader, Writer};
 use reqwest::{
-    header::{HeaderMap, CONTENT_TYPE},
+    blocking,
+    header::{HeaderMap, HeaderValue, CONTENT_LENGTH, CONTENT_TYPE},
     Method,
 };
 use termcolor::{BufferedStandardStream, Color, ColorChoice, ColorSpec, WriteColor};
@@ -193,6 +194,22 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
             .collect::<Vec<_>>();
         builder = builder.with_body(Some(Body::new_form(&data)?));
     }
+    if !cli.multipart.is_empty() {
+        let mut form = blocking::multipart::Form::new();
+        for v in &cli.multipart {
+            let (key, val) = if let Some((key, val)) = v.split_once('=') {
+                (key, val)
+            } else {
+                (v.as_str(), "")
+            };
+            if let Some(file) = val.strip_prefix('@') {
+                form = form.file(key.to_owned(), file)?;
+            } else {
+                form = form.text(key.to_owned(), val.to_owned());
+            }
+        }
+        builder = builder.with_multipart(Some(form));
+    }
     if let Some(data) = &cli.data {
         if let Some(path) = data.strip_prefix('@') {
             // Request body is a file path.
@@ -231,7 +248,10 @@ fn create_request(cli: &Cli) -> Result<http::Request, Error> {
 
         let ext = get_cli_content_ext(cli);
         let body = editor::edit(placeholder, ext)?;
+        let length_str = body.len().to_string();
         *req.body_mut() = Some(body.into());
+        req.headers_mut()
+            .insert(CONTENT_LENGTH, HeaderValue::from_str(&length_str).unwrap());
     }
 
     // Sign the request, if necessary.

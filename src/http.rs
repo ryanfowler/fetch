@@ -57,6 +57,7 @@ pub(crate) struct RequestBuilder<'a> {
     body: Option<Body>,
     content_type: Option<&'a str>,
     method: Option<&'a str>,
+    multipart: Option<blocking::multipart::Form>,
     headers: &'a [String],
     proxy: Option<&'a str>,
     query: &'a [String],
@@ -73,6 +74,7 @@ impl<'a> RequestBuilder<'a> {
             body: None,
             content_type: None,
             method: None,
+            multipart: None,
             headers: &[],
             proxy: None,
             query: &[],
@@ -131,6 +133,11 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
+    pub(crate) fn with_multipart(mut self, multipart: Option<blocking::multipart::Form>) -> Self {
+        self.multipart = multipart;
+        self
+    }
+
     pub(crate) fn build(self) -> Result<Request, Error> {
         // Parse our request dependencies.
         let url = parse_url(self.url)?;
@@ -172,6 +179,11 @@ impl<'a> RequestBuilder<'a> {
         }
         if let Some(token) = self.bearer {
             builder = builder.bearer_auth(token);
+        }
+
+        // Add multipart form, if provided.
+        if let Some(form) = self.multipart {
+            builder = builder.multipart(form);
         }
 
         let mut req = builder.build()?;
