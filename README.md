@@ -13,17 +13,17 @@ Its features include:
 
 ## Install
 
-#### Download binary
+### Download binary
 
 Download the binary for your os and architecture [here](https://github.com/ryanfowler/fetch/releases).
 
-#### Install with `cargo`
+### Install with `cargo`
 
 ```sh
 cargo install --force --locked fetch-cli
 ```
 
-## Building from source
+### Building from source
 
 Clone this repository:
 
@@ -31,17 +31,10 @@ Clone this repository:
 git clone https://github.com/ryanfowler/fetch.git
 ```
 
-Initialize and update the Git submodules for tree-sitter grammars:
-
-```sh
-git submodule init
-git submodule update
-```
-
 Then build with Cargo:
 
 ```sh
-cargo build --release
+cargo install --force --locked --path .
 ```
 
 ## Usage
