@@ -18,7 +18,7 @@ fn main() {
     }
 }
 
-static RAW_GRAMMARS: &str = include_str!("../../grammars/grammars.toml");
+static RAW_GRAMMARS: &str = include_str!("../../grammars.toml");
 
 #[derive(Deserialize)]
 struct Grammars {
