@@ -1,0 +1,36 @@
+# treesitter grammars
+
+[[language]]
+name = "html"
+files = ["src/parser.c", "src/scanner.c"]
+headers = ["src/tag.h", "src/tree_sitter/alloc.h", "src/tree_sitter/array.h", "src/tree_sitter/parser.h"]
+revision = "14bdaf0da9e26e2de9b30178c2242539d2b0b285"
+repository = "https://github.com/tree-sitter/tree-sitter-html"
+
+[[language]]
+name = "json"
+files = ["src/parser.c"]
+headers = ["src/tree_sitter/alloc.h", "src/tree_sitter/array.h", "src/tree_sitter/parser.h"]
+revision = "8bfdb43f47ad805bb1ce093203cfcbaa8ed2c571"
+repository = "https://github.com/tree-sitter/tree-sitter-json"
+
+[[language]]
+name = "toml"
+files = ["src/parser.c", "src/scanner.c"]
+headers = ["src/tree_sitter/parser.h"]
+revision = "342d9be207c2dba869b9967124c679b5e6fd0ebe"
+repository = "https://github.com/tree-sitter/tree-sitter-toml"
+
+[[language]]
+name = "xml"
+files = ["xml/src/parser.c", "xml/src/scanner.c"]
+headers = ["common/scanner.h", "xml/src/tree_sitter/alloc.h", "xml/src/tree_sitter/array.h", "xml/src/tree_sitter/parser.h"]
+revision = "809266ed1694d64dedc168a18893cc254e3edf7e"
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-xml"
+
+[[language]]
+name = "yaml"
+files = ["src/parser.c", "src/scanner.c", "src/schema.core.c", "src/schema.json.c"]
+headers = ["src/tree_sitter/alloc.h", "src/tree_sitter/array.h", "src/tree_sitter/parser.h"]
+revision = "7b03feefd36b5f155465ca736c6304aca983b267"
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"
