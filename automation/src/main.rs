@@ -11,6 +11,7 @@ fn main() {
 
     match args[1].as_str() {
         "install" => install(),
+        "view-updates" => view_updates(),
         arg => {
             println!("error: invalid command: {}", arg);
             std::process::exit(1);
@@ -55,6 +56,22 @@ fn install() {
     println!("info: all done!");
 }
 
+fn view_updates() {
+    let grammars: Grammars = toml::from_str(RAW_GRAMMARS).unwrap();
+
+    for lang in &grammars.language {
+        let commit = get_latest_commit(&lang.repository);
+        if lang.revision == commit {
+            println!("{}: latest ({})", &lang.name, &lang.revision);
+        } else {
+            println!(
+                "{}: update available ({} -> {})",
+                &lang.name, &lang.revision, &commit
+            );
+        }
+    }
+}
+
 fn format_url(repo: &str, revision: &str, file: &str) -> String {
     let url = repo.strip_prefix("https://github.com/").unwrap();
     format!(
@@ -70,4 +87,25 @@ fn download(path: &str) -> String {
         std::process::exit(1);
     }
     res.into_string().unwrap()
+}
+
+fn get_latest_commit(repo: &str) -> String {
+    let output = std::process::Command::new("git")
+        .arg("ls-remote")
+        .arg("--heads")
+        .arg(repo)
+        .arg("refs/heads/master")
+        .output()
+        .unwrap();
+
+    if !output.status.success() {
+        println!(
+            "error: getting latest git commit for {}: {}",
+            repo, output.status
+        );
+        std::process::exit(1);
+    }
+
+    let output = String::from_utf8(output.stdout).unwrap();
+    output.split('\t').next().unwrap().to_string()
 }
