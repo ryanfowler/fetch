@@ -4,6 +4,7 @@
 "boolean" = {}
 "comment" = { dimmed = true }
 "conceal" = {}
+"keyword" = { fg = "magenta" }
 "markup" = "green"
 "number" = {}
 "property" = { fg = "blue", bold = true }
