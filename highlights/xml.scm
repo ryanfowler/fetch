@@ -3,15 +3,15 @@
 
 ;; XML declaration
 
-(XMLDecl "xml" @keyword)
+"xml" @keyword
 
-(XMLDecl [ "version" "encoding" "standalone" ] @property.attribute)
+[ "version" "encoding" "standalone" ] @property.attribute
 
-(XMLDecl (EncName) @string.special)
+(EncName) @string.special
 
-(XMLDecl (VersionNum) @number)
+(VersionNum) @number
 
-(XMLDecl [ "yes" "no" ] @boolean)
+[ "yes" "no" ] @boolean
 
 ;; Processing instructions
 
@@ -136,18 +136,9 @@
 
 ;; Attributes
 
-(Attribute (Name) @property.tag)
+(Attribute (Name) @property.attribute)
 
 (Attribute (AttValue) @string)
-
-;; Text
-
-(CharData) @markup
-
-(CDSect
-  (CDStart) @markup.heading
-  (CData) @markup.raw
-  "]]>" @markup.heading)
 
 ;; Delimiters & punctuation
 
@@ -158,18 +149,22 @@
  "</" "/>"
 ] @punctuation.delimiter
 
-[
-  "(" ")"
-  "[" "]"
-] @punctuation.bracket
+[ "(" ")" "[" "]" ] @punctuation.bracket
 
 [ "\"" "'" ] @punctuation.delimiter
 
 [ "," "|" "=" ] @operator
 
-;; Misc
+;; Text
 
-[ "INCLUDE" "IGNORE" ] @keyword
+(CharData) @markup
+
+(CDSect
+  (CDStart) @markup.heading
+  (CData) @markup.raw
+  "]]>" @markup.heading)
+
+;; Misc
 
 (Comment) @comment
 
