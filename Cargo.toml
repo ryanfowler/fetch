@@ -28,7 +28,7 @@ toml = { version = "0.8.19" }
 
 [dependencies]
 ansi_colours = { version = "1.2.3" }
-anstyle = { version = "1.0.8" }
+anstyle = { version = "1.0.9" }
 base64 = { version = "0.22.1" }
 brotli = { version = "7.0.0" }
 clap = { version = "4.5.20", features = ["derive"] }
