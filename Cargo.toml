@@ -1,6 +1,6 @@
 [package]
 name = "fetch-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "fetch is a modern HTTP(S) client for the command line"
 authors = ["Ryan Fowler <ryan.fowler19@gmail.com>"]
@@ -8,7 +8,7 @@ repository = "https://github.com/ryanfowler/fetch"
 categories = ["command-line-utilities"]
 keywords = ["http", "https", "client"]
 license = "MIT"
-include = ["build.rs", "/grammars/**/*.c", "/grammars/**/*.h", "/highlights", "/src", "/themes"]
+include = ["build.rs", "grammars.toml", "/grammars", "/highlights", "/src", "/themes"]
 
 [[bin]]
 path = "src/main.rs"
