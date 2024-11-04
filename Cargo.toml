@@ -39,7 +39,7 @@ hmac = { version = "0.12.1" }
 image = { version = "0.25.4", default-features = false, features = ["jpeg", "png", "tiff"] }
 indicatif = { version = "0.17.8" }
 jiff = { version = "0.1.14" }
-kamadak-exif = "0.5.5"
+kamadak-exif = "0.6.0"
 mime = { version = "0.3.17" }
 mime_guess = { version = "2.0.5" }
 percent-encoding = { version = "2.3.1" }
