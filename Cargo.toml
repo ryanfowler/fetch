@@ -54,7 +54,7 @@ tempfile = { version = "3.14.0" }
 termcolor = { version = "1.4.1" }
 toml = { version = "0.8.19" }
 tree-sitter = { version = "0.24.4" }
-tree-sitter-highlight = { version = "0.24.3" }
+tree-sitter-highlight = { version = "0.24.4" }
 url = { version = "2.5.3" }
 webp = { version = "0.3.0" }
 zstd = { version = "0.13.2" }
