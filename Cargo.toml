@@ -1,6 +1,6 @@
 [package]
 name = "fetch-cli"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "fetch is a modern HTTP(S) client for the command line"
 authors = ["Ryan Fowler <ryan.fowler19@gmail.com>"]
