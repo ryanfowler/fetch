@@ -430,7 +430,7 @@ enum Decoder<'a, R: Read> {
     Zstd(Box<zstd::Decoder<'a, BufReader<R>>>),
 }
 
-impl<'a, R: Read> Decoder<'a, R> {
+impl<R: Read> Decoder<'_, R> {
     fn new(r: R, ct: ContentEncoding) -> io::Result<Self> {
         Ok(match ct {
             ContentEncoding::None => Self::Passthrough(r),
@@ -450,7 +450,7 @@ impl<'a, R: Read> Decoder<'a, R> {
     }
 }
 
-impl<'a, R: Read> Read for Decoder<'a, R> {
+impl<R: Read> Read for Decoder<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Decoder::Passthrough(r) => r.read(buf),
