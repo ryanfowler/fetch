@@ -60,9 +60,6 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           target: ${{ matrix.target }}
 
-      - name: Update git submodules
-        run: git submodule update --init
-
       - name: Install cross
         if: ${{ matrix.os == 'ubuntu-22.04' }}
         run: |
