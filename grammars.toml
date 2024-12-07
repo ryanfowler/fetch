@@ -4,14 +4,14 @@
 name = "html"
 files = ["src/parser.c", "src/scanner.c"]
 headers = ["src/tag.h", "src/tree_sitter/alloc.h", "src/tree_sitter/array.h", "src/tree_sitter/parser.h"]
-revision = "c30792dee70aaa1910e66a39557a841b6e4386d5"
+revision = "d9219ada6e1a2c8f0ab0304a8bd9ca4285ae0468"
 repository = "https://github.com/tree-sitter/tree-sitter-html"
 
 [[language]]
 name = "json"
 files = ["src/parser.c"]
 headers = ["src/tree_sitter/alloc.h", "src/tree_sitter/array.h", "src/tree_sitter/parser.h"]
-revision = "f2503f1c437fe24560876557868ac94c9cfd3216"
+revision = "4d770d31f732d50d3ec373865822fbe659e47c75"
 repository = "https://github.com/tree-sitter/tree-sitter-json"
 
 [[language]]
@@ -25,12 +25,12 @@ repository = "https://github.com/tree-sitter/tree-sitter-toml"
 name = "xml"
 files = ["xml/src/parser.c", "xml/src/scanner.c"]
 headers = ["common/scanner.h", "xml/src/tree_sitter/alloc.h", "xml/src/tree_sitter/array.h", "xml/src/tree_sitter/parser.h"]
-revision = "cd1316e476ec40da6ce1fb5749c9d7e6b4f1090c"
+revision = "ce150c5be7f617e18ffa2064213e5d9c4cb5d69e"
 repository = "https://github.com/tree-sitter-grammars/tree-sitter-xml"
 
 [[language]]
 name = "yaml"
 files = ["src/parser.c", "src/scanner.c", "src/schema.core.c", "src/schema.json.c"]
 headers = ["src/tree_sitter/alloc.h", "src/tree_sitter/array.h", "src/tree_sitter/parser.h"]
-revision = "7b03feefd36b5f155465ca736c6304aca983b267"
+revision = "b733d3f5f5005890f324333dd57e1f0badec5c87"
 repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"
