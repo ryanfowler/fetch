@@ -43,7 +43,7 @@ kamadak-exif = "0.6.1"
 mime = { version = "0.3.17" }
 mime_guess = { version = "2.0.5" }
 percent-encoding = { version = "2.3.1" }
-quick-xml = { version = "0.37.1" }
+quick-xml = { version = "0.37.2" }
 lazy_static = { version = "1.5.0" }
 reqwest = { version = "0.12.11", default-features = false, features = ["blocking", "http2", "macos-system-configuration", "multipart", "rustls-tls-native-roots"] }
 serde = { version = "1.0.217", features = ["derive"] }
