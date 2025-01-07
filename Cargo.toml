@@ -47,7 +47,7 @@ quick-xml = { version = "0.37.2" }
 lazy_static = { version = "1.5.0" }
 reqwest = { version = "0.12.12", default-features = false, features = ["blocking", "http2", "macos-system-configuration", "multipart", "rustls-tls-native-roots"] }
 serde = { version = "1.0.217", features = ["derive"] }
-serde_json = { version = "1.0.134", features = ["preserve_order"] }
+serde_json = { version = "1.0.135", features = ["preserve_order"] }
 serde_urlencoded = { version = "0.7.1" }
 sha2 = { version = "0.10.8" }
 tempfile = { version = "3.15.0" }
