@@ -37,7 +37,7 @@ crossterm = { version = "0.28.1" }
 flate2 = { version = "1.0.35", features = ["zlib"] }
 hmac = { version = "0.12.1" }
 image = { version = "0.25.5", default-features = false, features = ["jpeg", "png", "tiff"] }
-indicatif = { version = "0.17.9" }
+indicatif = { version = "0.17.10" }
 jiff = { version = "0.1.27" }
 kamadak-exif = "0.6.1"
 mime = { version = "0.3.17" }
