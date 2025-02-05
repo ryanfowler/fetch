@@ -160,7 +160,7 @@ fn fetch_inner(cli: Cli) -> Result<bool, Error> {
 }
 
 fn create_request(cli: &Cli) -> Result<http::Request, Error> {
-    let mut builder = http::RequestBuilder::new(&cli.url)
+    let mut builder = http::RequestBuilder::new(cli.url.as_ref().unwrap())
         .with_method(cli.method.as_deref())
         .with_headers(&cli.header)
         .with_basic(cli.basic.as_deref())

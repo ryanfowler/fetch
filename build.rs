@@ -49,4 +49,7 @@ fn main() {
             .flag_if_supported("-Wno-unused-value")
             .compile(&format!("tree-sitter-{}", language.name));
     }
+
+    let target = std::env::var("TARGET").unwrap();
+    println!("cargo:rustc-env=TARGET={target}");
 }

@@ -45,11 +45,12 @@ mime_guess = { version = "2.0.5" }
 percent-encoding = { version = "2.3.1" }
 quick-xml = { version = "0.37.2" }
 lazy_static = { version = "1.5.0" }
-reqwest = { version = "0.12.12", default-features = false, features = ["blocking", "http2", "macos-system-configuration", "multipart", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12.12", default-features = false, features = ["blocking", "http2", "json", "macos-system-configuration", "multipart", "rustls-tls-native-roots"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = { version = "1.0.138", features = ["preserve_order"] }
 serde_urlencoded = { version = "0.7.1" }
 sha2 = { version = "0.10.8" }
+tar = { version = "0.4.43" }
 tempfile = { version = "3.16.0" }
 termcolor = { version = "1.4.1" }
 toml = { version = "0.8.19" }

@@ -13,9 +13,15 @@ mod http;
 mod image;
 mod progress;
 mod theme;
+mod update;
 
 fn main() -> ExitCode {
-    fetch::fetch(Cli::parse())
+    let cli = Cli::parse();
+    if cli.update {
+        update::update(cli.timeout)
+    } else {
+        fetch::fetch(cli)
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -23,8 +29,8 @@ fn main() -> ExitCode {
 #[command(disable_help_subcommand = true, about, version)]
 struct Cli {
     /// The URL to make a request to
-    #[command()]
-    url: String,
+    #[clap(required_unless_present = "update")]
+    url: Option<String>,
 
     /// Sign the request using AWS signature V4
     #[arg(long, value_name = "REGION/SERVICE")]
@@ -85,6 +91,9 @@ struct Cli {
     /// Timeout in seconds applied to the entire request
     #[arg(short, long)]
     timeout: Option<f64>,
+    /// Update the fetch binary in place
+    #[arg(long)]
+    update: bool,
     /// Verbosity of the command
     #[arg(short, long, action = ArgAction::Count)]
     verbose: u8,
