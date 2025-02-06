@@ -32,5 +32,5 @@ repository = "https://github.com/tree-sitter-grammars/tree-sitter-xml"
 name = "yaml"
 files = ["src/parser.c", "src/scanner.c", "src/schema.core.c", "src/schema.json.c"]
 headers = ["src/tree_sitter/alloc.h", "src/tree_sitter/array.h", "src/tree_sitter/parser.h"]
-revision = "b733d3f5f5005890f324333dd57e1f0badec5c87"
+revision = "1805917414a9a8ba2473717fd69447277a175fae"
 repository = "https://github.com/tree-sitter-grammars/tree-sitter-yaml"

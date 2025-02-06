@@ -5,7 +5,7 @@ use serde::Deserialize;
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
     if args.len() <= 1 {
-        println!("Available commands are: ['install']");
+        println!("Available commands are: ['install', 'view-updates']");
         std::process::exit(0);
     }
 
