@@ -105,4 +105,6 @@ jobs:
       - name: Mark release as latest
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit ${{ github.ref_name }} --latest
+        run: |
+          gh release edit ${{ github.ref_name }} --prerelease=false
+          gh release edit ${{ github.ref_name }} --latest
