@@ -5,13 +5,13 @@ on:
     branches: ["main"]
 
 env:
-  RUST_VERSION: "1.83.0"
+  RUST_VERSION: "1.84.1"
 
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
@@ -35,3 +35,55 @@ jobs:
 
       - name: Rust cargo build
         run: cargo build --locked
+
+  build:
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO: cargo
+    strategy:
+      matrix:
+        build:
+          - linux-arm64-gnu
+          - linux-arm64-musl
+          - linux-x86_64-gnu
+          - linux-x86_64-musl
+          - macos-arm64
+          - macos-x86_64
+        include:
+          - build: linux-arm64-gnu
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+          - build: linux-arm64-musl
+            os: ubuntu-22.04
+            target: aarch64-unknown-linux-musl
+          - build: linux-x86_64-gnu
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - build: linux-x86_64-musl
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - build: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - build: macos-x86_64
+            os: macos-14
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          target: ${{ matrix.target }}
+
+      - name: Install cross
+        if: ${{ matrix.os == 'ubuntu-22.04' }}
+        run: |
+          cargo install cross@0.2.5 --locked
+          echo "CARGO=cross" >> $GITHUB_ENV
+
+      - name: Rust cargo build
+        run: ${{ env.CARGO }} build --locked --target ${{ matrix.target }}
