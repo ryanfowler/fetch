@@ -21,9 +21,6 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy, rustfmt
 
-      - name: Update git submodules
-        run: git submodule update --init
-
       - name: Rust cargo format
         run: cargo fmt --all -- --check
 
