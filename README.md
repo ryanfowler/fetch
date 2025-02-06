@@ -1,168 +1,280 @@
 # fetch
 
-`fetch` is a modern HTTP(S) client for the command line.
+`fetch` is a modern command-line HTTP(S) client written in Rust.
+It supports a wide variety of HTTP features — from basic GET requests to options such as custom headers,
+authentication (including AWS signature V4), multipart or urlencoded forms, and automatic response body decompression.
+It also features built‑in request formatting, syntax highlighting, progress indicators, and even in-terminal image rendering.
 
-Its features include:
-- auto formatted and colored output for supported types (e.g. json, xml, etc.)
-- render images directly in your terminal
-- easily sign requests with [AWS Signature V4](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html)
-- optionally use an editor to define the request body
-- progress bar for file downloads
-- automatic response body decompression for gzip, deflate, brotli, and zstd
-- and more!
+---
 
-## Install
+## Installation
 
-### Download binary
+You can install `fetch` from the pre-built binaries or compile it from source.
 
-Download the binary for your os and architecture [here](https://github.com/ryanfowler/fetch/releases).
+### Using Pre-built Binaries
 
-### Install with `cargo`
+Visit the [GitHub releases page](https://github.com/ryanfowler/fetch/releases)
+to download the binary for your operating system.
 
-```sh
+### Building from Source
+
+Make sure you have Rust installed (using [rustup](https://rustup.rs/)) then run:
+
+```bash
 cargo install --force --locked fetch-cli
 ```
 
-### Building from source
+Alternatively, you can build from source locally from the `main` branch:
 
-Clone this repository:
-
-```sh
+```bash
 git clone https://github.com/ryanfowler/fetch.git
-```
-
-Then build with Cargo:
-
-```sh
+cd fetch
 cargo install --force --locked --path .
 ```
 
-## Usage
+### Updating
 
-#### Basic usage
+Once installed, you can update the fetch binary in-place by running:
 
-```sh
-# Make a simple GET request
-# fetch will default to using HTTPS if no scheme is specified
-fetch example.com
-
-# Make a PUT request with inline body
-fetch -m PUT --data 'request body' example.com
-
-# Make a PUT request with inline JSON body
-# The --json flag will set the content-type header to 'application/json'
-fetch -m PUT --json --data '{"key":"val"}' example.com
-
-# Send a request body from a local file
-# The content-type will automatically be inferred from the file extension
-fetch -m PUT --data '@local/image.jpeg' example.com
-
-# Use an editor to define the JSON request body
-fetch -m PUT --json --edit example.com
+```bash
+fetch --update
 ```
 
-#### Verbosity
+---
 
-```sh
-# By default, fetch will write the HTTP version and status to stderr.
-fetch example.com
-# HTTP/1.1 200 OK
-#
-# [response data]
+## Basic Usage
 
-# Providing the verbose flag a single time will also output the response headers
-fetch -v example.com
-# HTTP/1.1 200 OK
-# date: Sat, 05 Oct 2024 04:42:51 GMT
-# content-type: application/json; charset=utf-8
-# content-length: 456
-#
-# [response data]
+To make a GET request to a URL and print the response body to stdout:
 
-# Providing the verbose flag twice will also output the request headers
-fetch -vv example.com
-# GET / HTTP/1.1
-# host: example.com
-# accept: */*
-# accept-encoding: gzip, deflate, br, zstd
-# user-agent: fetch/0.1.0
-#
-# HTTP/1.1 200 OK
-# date: Sat, 05 Oct 2024 04:42:51 GMT
-# content-type: application/json; charset=utf-8
-# content-length: 456
-#
-# [response data]
-
-# If you don't want any metadata written to stderr, use the silent flag
-fetch -s example.com
-# [response data]
+```bash
+fetch https://api.example.com/data
 ```
 
-#### Headers
+By default, `fetch` uses the GET method. To use a different HTTP method (e.g. POST), use the `--method` (or `-m`) option:
 
-```sh
-# Set a custom request header for the request in the 'key:value' format
-fetch -H x-custom-header:value1 example.com
-
-# Set multiple request headers
-fetch -H x-custom-header:value1 -H x-another-header:value2 example.com
+```bash
+fetch -m POST https://api.example.com/submit
 ```
 
-#### Query parameters
+---
 
-```sh
-# Append a query parameter to the request in the 'key=value' format
-fetch -q key=value example.com
+## Custom Headers and Query Parameters
 
-# Parameters will be appended to any exist query parameters on the request
-fetch -q key1=value1 -q key2=value2 "example.com?existing=param"
+### Custom Headers
+
+Use the `--header` (or `-H`) flag to append custom headers. For example:
+
+```bash
+fetch -H "Accept: application/json" -H "X-Custom-Header: hello" https://api.example.com/data
 ```
 
-#### Send a request with a form body
+### Query Parameters
 
-```sh
-# Send a POST request with a form body.
-# Sets the content-type to 'application/x-www-form-urlencoded'
-fetch -m POST -f key1=value1 -f key2=value2 example.com
+Append query parameters using the `--query` (or `-q`) flag:
+
+```bash
+fetch -q "key1=value1" -q "key2=value2" https://api.example.com/search
 ```
 
-#### Write the response body to a file
+These parameters will be URL‑encoded and appended to the request URL.
 
-```sh
-# Write the response body to a local file
-fetch example.com -o 'local/file.txt'
+---
 
-# Write the response body to a file, disabling the progress bar
-fetch example.com -o 'local/file.txt' -s
+## Sending Request Bodies
+
+### Raw Data and Files
+
+Use the `--data` (or `-d`) flag to send a raw request body. To send data directly:
+
+```bash
+fetch -m POST --json -d '{"name": "Alice", "age": 30}' https://api.example.com/users
 ```
 
-#### AWS signature v4
+The `--json` flag sets the request's `Content-Type` header to `application/json`.
 
-```sh
-# Sign a request with aws signature v4.
-# This will set the authorization, x-amz-date, and optionally the x-amz-content-sha256 headers
-export AWS_ACCESS_KEY_ID=AWSACCESSKEYID
-export AWS_SECRET_ACCESS_KEY=SEcrETAccESSkEY
-fetch mybucket.example.com --aws-sigv4 us-east-1/s3
+If you want to load the request body from a file, prefix the file path with an `@`:
+
+```bash
+fetch -m POST -d @payload.json https://api.example.com/users
 ```
 
-## Images
+### Form and Multipart Data
 
-Images will be automatically rendered in your terminal.
+For URL‑encoded form submissions, use the `--form` (or `-f`) option. This option accepts key=value pairs:
 
-High quality images will be rendered in the following terminals:
-- ghostty
-- kitty
-- wezterm
-- iterm2
-- mintty
-- konsole
+```bash
+fetch -m POST -f "username=alice" -f "password=secret" https://api.example.com/login
+```
 
-Low quality block-based images will be rendered in all other terminal emulators.
+For multipart form submissions, use the `--multipart` (or `-F`) option:
 
-Supported image types are:
-- jpeg
-- png
-- webp
-- tiff
+```bash
+fetch -m POST -F "file=@/path/to/image.png" https://api.example.com/upload
+```
+
+### Using an Editor
+
+If you want to interactively create or edit the request body before sending, use the `--edit` (or `-e`) option:
+
+```bash
+fetch --edit -m PUT https://api.example.com/update
+```
+
+Your preferred editor (from the `VISUAL` or `EDITOR` environment variables) will be opened so you can enter the body content.
+
+---
+
+## Authentication
+
+### Basic Authentication
+
+Use the `--basic` option followed by `USER:PASS`:
+
+```bash
+fetch --basic "alice:secret" https://api.example.com/protected
+```
+
+### Bearer Authentication
+
+Use the `--bearer` option followed by your token:
+
+```bash
+fetch --bearer "your_access_token" https://api.example.com/secure-data
+```
+
+### AWS Signature V4
+
+For services that require AWS Signature Version 4 signing, use the `--aws-sigv4` option with the format `REGION/SERVICE`.
+Ensure that the environment variables `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are set.
+
+```bash
+fetch --aws-sigv4 "us-east-1/s3" https://s3.amazonaws.com/your-bucket/your-object
+```
+
+---
+
+## Other Options
+
+### HTTP Versions
+
+Force the use of a specific HTTP version with the `--http` flag. Supported values are `1` and `2`:
+
+```bash
+fetch --http 2 https://api.example.com/data
+```
+
+### Proxy Support
+
+To route your request through a proxy server, use the `--proxy` option:
+
+```bash
+fetch --proxy http://proxy.example.com:8080 https://api.example.com/data
+```
+
+### Dry-Run Mode
+
+Want to see what the request will look like without actually sending it? Use `--dry-run` to print the full request details:
+
+```bash
+fetch --dry-run https://api.example.com/data
+```
+
+### Verbosity Levels
+
+Control the amount of information printed to stderr with the `-v` or `--verbose` flag.
+One `-v` will print the response headers, two `-vv` will also print the request headers.
+
+```bash
+fetch -v https://api.example.com/data
+fetch -vv https://api.example.com/data
+```
+
+Alternatively, use the `--silent`(or `-s`) flag to suppress any output to stderr:
+
+```bash
+fetch -s https://api.example.com/data
+```
+
+---
+
+## Output and Display
+
+### Saving to a File
+
+To write the response body to a file instead of stdout, use the `--output` (or `-o`) option:
+
+```bash
+fetch -o response.json https://api.example.com/data
+```
+
+### Pager and In-Terminal Rendering
+
+If stdout is a TTY, `fetch` automatically uses a pager (like `less`) for long text responses unless you disable it with the `--no-pager` flag.
+
+### Image Rendering
+
+If the response is an image (e.g. JPEG, PNG, TIFF, WebP), `fetch` can render it directly in the terminal using one of several protocols.
+Depending on your terminal emulator (e.g. iTerm2, Kitty, Ghostty, or others), the image will be rendered inline or using block graphics.
+
+---
+
+## Examples
+
+### 1. Simple GET Request
+
+```bash
+fetch https://api.github.com/repos/ryanfowler/fetch
+```
+
+### 2. POST JSON Data with Bearer Token
+
+```bash
+fetch -m POST --json -d '{"title": "New Issue", "body": "Issue description"}' \
+  --bearer "your_token_here" \
+  https://api.github.com/repos/ryanfowler/fetch/issues
+```
+
+### 3. Send a Form Submission
+
+```bash
+fetch -m POST -f "username=alice" -f "password=secret" https://example.com/login
+```
+
+### 4. Upload a File via Multipart Form
+
+```bash
+fetch -m POST -F "file=@/path/to/upload.png" https://example.com/upload
+```
+
+### 5. AWS S3 Request with Signature V4
+
+Ensure your AWS credentials are set:
+
+```bash
+export AWS_ACCESS_KEY_ID="your_access_key"
+export AWS_SECRET_ACCESS_KEY="your_secret_key"
+fetch --aws-sigv4 "us-west-2/s3" https://s3.amazonaws.com/your-bucket/your-object
+```
+
+### 6. Editing the Request Body with an Editor
+
+```bash
+fetch --edit -m PUT https://api.example.com/update
+```
+
+An editor window will open so you can write or modify the request body before it is sent.
+
+### 7. Verbose Dry-Run
+
+See the full details of the request without actually sending it:
+
+```bash
+fetch --dry-run -vv https://api.example.com/data
+```
+
+---
+
+## License
+
+`fetch` is released under the [MIT License](LICENSE).
+
