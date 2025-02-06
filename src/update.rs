@@ -6,10 +6,8 @@ use std::{
     time::Duration,
 };
 
-use flate2::read::GzDecoder;
 use reqwest::blocking::{Client, ClientBuilder};
 use serde::Deserialize;
-use tar::Archive;
 use termcolor::{BufferWriter, Color, ColorChoice, ColorSpec, WriteColor};
 
 static TARGET: &str = env!("TARGET");
@@ -33,6 +31,12 @@ pub(crate) fn update(timeout: Option<f64>) -> ExitCode {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn update_in_place(_writer: &BufferWriter, _timeout: Option<f64>) -> Result<(), Error> {
+    Err("update functionality not supported for windows at this time".into())
+}
+
+#[cfg(not(target_os = "windows"))]
 fn update_in_place(writer: &BufferWriter, timeout: Option<f64>) -> Result<(), Error> {
     let client = ClientBuilder::new()
         .use_rustls_tls()
@@ -93,10 +97,16 @@ fn get_artifact_reader(client: &Client, tag: &str) -> Result<impl Read, Error> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn unpack_artifact(temp_dir: &Path, r: impl Read) -> Result<(), io::Error> {
-    let gz = GzDecoder::new(r);
-    let mut archive = Archive::new(gz);
+    let gz = flate2::read::GzDecoder::new(r);
+    let mut archive = tar::Archive::new(gz);
     archive.unpack(temp_dir)
+}
+
+#[cfg(target_os = "windows")]
+fn unpack_artifact(temp_dir: &Path, r: impl Read) -> Result<(), io::Error> {
+    unimplemented!();
 }
 
 fn duration_from_f64(v: Option<f64>) -> Option<Duration> {
