@@ -47,7 +47,7 @@ fn update_in_place(writer: &BufferWriter, timeout: Option<f64>) -> Result<(), Er
     let _ = write_info(writer, "fetching latest release version");
     let latest = get_latest_tag(&client)?;
     if latest.trim_start_matches('v') == VERSION {
-        let msg = format!("\n  already using the latest version (v{VERSION})");
+        let msg = format!("\n  currently using the latest version (v{VERSION})");
         return write_raw(writer, &msg);
     }
 
