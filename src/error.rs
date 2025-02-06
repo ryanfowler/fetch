@@ -64,10 +64,21 @@ impl From<ParseError> for Error {
 impl From<reqwest::Error> for Error {
     fn from(value: reqwest::Error) -> Self {
         let mut msg = value.to_string();
-        if let Some(inner) = value.source() {
-            _ = msg.write_str(": ");
-            _ = msg.write_str(&inner.to_string());
+
+        // Walk the entire error chain.
+        let mut count = 0;
+        let mut current = value.source();
+        while let Some(source) = current {
+            // Append the current source's message.
+            if count > 0 {
+                let _ = write!(msg, "\n       {}", source);
+            } else {
+                let _ = write!(msg, ": {}", source);
+            }
+            current = source.source();
+            count += 1;
         }
+
         Self {
             msg,
             src: Some(Box::new(value)),
