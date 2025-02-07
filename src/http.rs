@@ -56,6 +56,7 @@ pub(crate) struct RequestBuilder<'a> {
     bearer: Option<&'a str>,
     body: Option<Body>,
     content_type: Option<&'a str>,
+    insecure: bool,
     method: Option<&'a str>,
     multipart: Option<blocking::multipart::Form>,
     headers: &'a [String],
@@ -73,6 +74,7 @@ impl<'a> RequestBuilder<'a> {
             bearer: None,
             body: None,
             content_type: None,
+            insecure: false,
             method: None,
             multipart: None,
             headers: &[],
@@ -90,6 +92,11 @@ impl<'a> RequestBuilder<'a> {
 
     pub(crate) fn with_headers(mut self, headers: &'a [String]) -> Self {
         self.headers = headers;
+        self
+    }
+
+    pub(crate) fn with_insecure(mut self, insecure: bool) -> Self {
+        self.insecure = insecure;
         self
     }
 
@@ -149,6 +156,7 @@ impl<'a> RequestBuilder<'a> {
         let mut builder = ClientBuilder::new()
             .use_rustls_tls()
             .timeout(self.timeout)
+            .danger_accept_invalid_certs(self.insecure)
             .connect_timeout(Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS));
         if let Some(v) = self.version {
             builder = match v {

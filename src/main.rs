@@ -62,6 +62,9 @@ struct Cli {
     /// Force the use of an HTTP version
     #[arg(long, value_name = "VERSION")]
     http: Option<Http>,
+    /// Accept invalid TLS certificates (DANGEROUS!)
+    #[arg(long)]
+    insecure: bool,
     /// Set the content-type to application/json
     #[arg(short, long, conflicts_with = "xml")]
     #[arg(conflicts_with = "form", conflicts_with = "multipart")]
