@@ -19,7 +19,7 @@ use reqwest::{
 use crate::{aws_sigv4, body::Body, error::Error, Http};
 
 static DEFAULT_CONNECT_TIMEOUT_MS: u64 = 60_000;
-static APP_STRING: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+static APP_STRING: &str = concat!("fetch/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Copy, Clone, Debug)]
 enum ContentEncoding {
@@ -208,8 +208,6 @@ impl<'a> RequestBuilder<'a> {
             encoding_requested = true;
             HeaderValue::from_static("gzip, deflate, br, zstd")
         });
-
-        req_headers.insert(USER_AGENT, HeaderValue::from_static(APP_STRING));
 
         for header in headers.iter() {
             req_headers.insert(header.0, header.1.clone());
