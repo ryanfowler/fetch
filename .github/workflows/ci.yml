@@ -88,4 +88,4 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-        run: go install -trimpath -ldflags="-s -w" ./cmd/fetch/main.go
+        run: go install -trimpath -ldflags="-s -w" ./cmd/fetch
