@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/aws"
+	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/vars"
 )
 
@@ -69,7 +70,7 @@ type RequestConfig struct {
 	Method      string
 	URL         *url.URL
 	Form        []vars.KeyVal
-	Multipart   io.Reader
+	Multipart   *multipart.Multipart
 	Headers     []vars.KeyVal
 	QueryParams []vars.KeyVal
 	Body        io.Reader
@@ -128,6 +129,8 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	switch {
 	case len(cfg.Form) > 0:
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	case cfg.Multipart != nil:
+		req.Header.Set("Content-Type", cfg.Multipart.ContentType())
 	}
 
 	if !cfg.NoEncode && req.Header.Get("Accept-Encoding") == "" {
