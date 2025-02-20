@@ -31,7 +31,7 @@ func main() {
 
 	if app.Help {
 		p := printerHandle.Stdout()
-		cli.Help(app.CLI(), p)
+		app.PrintHelp(p)
 		p.Flush(os.Stdout)
 		os.Exit(0)
 	}

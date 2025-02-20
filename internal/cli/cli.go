@@ -172,7 +172,7 @@ func Parse() (*App, error) {
 	return app, nil
 }
 
-func Help(cli *CLI, p *printer.Printer) {
+func printHelp(cli *CLI, p *printer.Printer) {
 	p.WriteString(cli.Description)
 	p.WriteString("\n\n")
 
