@@ -39,7 +39,7 @@ func Render(b []byte) error {
 		return err
 	}
 	if termWidthPx == 0 || termHeightPx == 0 {
-		// If we're unable to get the terminal dimensinos in pixels,
+		// If we're unable to get the terminal dimensions in pixels,
 		// render the image using blocks.
 		return writeBlocks(img, termWidth, termHeight)
 	}
