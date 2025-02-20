@@ -79,6 +79,11 @@ func (a *App) CLI() *CLI {
 			a.URL = s
 			return nil
 		},
+		ExclusiveFlags: [][]string{
+			{"aws-sigv4", "basic", "bearer"},
+			{"data", "form", "multipart"},
+			{"form", "json", "multipart", "xml"},
+		},
 		Flags: []Flag{
 			{
 				Short:       "",
@@ -86,6 +91,9 @@ func (a *App) CLI() *CLI {
 				Args:        "REGION/SERVICE",
 				Description: "Sign the request using AWS signature V4",
 				Default:     "",
+				IsSet: func() bool {
+					return a.AWSSigv4 != nil
+				},
 				Fn: func(value string) error {
 					region, service, ok := strings.Cut(value, "/")
 					if !ok {
@@ -116,6 +124,9 @@ func (a *App) CLI() *CLI {
 				Args:        "USER:PASS",
 				Description: "Enable HTTP basic authentication",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Basic != nil
+				},
 				Fn: func(value string) error {
 					user, pass, ok := strings.Cut(value, ":")
 					if !ok {
@@ -131,6 +142,9 @@ func (a *App) CLI() *CLI {
 				Args:        "TOKEN",
 				Description: "Enable HTTP bearer authentication",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Bearer != ""
+				},
 				Fn: func(value string) error {
 					a.Bearer = value
 					return nil
@@ -143,6 +157,9 @@ func (a *App) CLI() *CLI {
 				Description: "Set color config",
 				Default:     "auto",
 				Values:      []string{"auto", "never", "always"},
+				IsSet: func() bool {
+					return a.Color != printer.ColorAuto
+				},
 				Fn: func(value string) error {
 					switch value {
 					case "auto":
@@ -163,6 +180,9 @@ func (a *App) CLI() *CLI {
 				Args:        "[@]VALUE",
 				Description: "Send a request body",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Data != nil
+				},
 				Fn: func(value string) error {
 					switch {
 					case value == "":
@@ -194,6 +214,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Print out the request info and exit",
 				Default:     "",
+				IsSet: func() bool {
+					return a.DryRun
+				},
 				Fn: func(value string) error {
 					a.DryRun = true
 					return nil
@@ -205,6 +228,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Use an editor to modify the request body",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Edit
+				},
 				Fn: func(value string) error {
 					a.Edit = true
 					return nil
@@ -216,6 +242,9 @@ func (a *App) CLI() *CLI {
 				Args:        "KEY=VALUE",
 				Description: "Send a urlencoded form body",
 				Default:     "",
+				IsSet: func() bool {
+					return len(a.Form) > 0
+				},
 				Fn: func(value string) error {
 					key, val, _ := strings.Cut(value, "=")
 					a.Form = append(a.Form, vars.KeyVal{Key: key, Val: val})
@@ -228,6 +257,9 @@ func (a *App) CLI() *CLI {
 				Args:        "NAME:VALUE",
 				Description: "Set headers for the request",
 				Default:     "",
+				IsSet: func() bool {
+					return len(a.Headers) > 0
+				},
 				Fn: func(value string) error {
 					key, val, _ := strings.Cut(value, ":")
 					a.Headers = append(a.Headers, vars.KeyVal{Key: key, Val: val})
@@ -240,6 +272,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Print help",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Help
+				},
 				Fn: func(value string) error {
 					a.Help = true
 					return nil
@@ -252,6 +287,9 @@ func (a *App) CLI() *CLI {
 				Description: "Force the use of an HTTP version",
 				Default:     "",
 				Values:      []string{"1", "2"},
+				IsSet: func() bool {
+					return a.HTTP != client.HTTPDefault
+				},
 				Fn: func(value string) error {
 					switch value {
 					case "1", "1.1":
@@ -270,6 +308,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Accept invalid TLS certificates - DANGER!",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Insecure
+				},
 				Fn: func(value string) error {
 					a.Insecure = true
 					return nil
@@ -281,6 +322,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Set the request content-type to application/json",
 				Default:     "",
+				IsSet: func() bool {
+					return a.JSON
+				},
 				Fn: func(value string) error {
 					a.JSON = true
 					return nil
@@ -292,6 +336,9 @@ func (a *App) CLI() *CLI {
 				Args:        "METHOD",
 				Description: "HTTP method to use",
 				Default:     "GET",
+				IsSet: func() bool {
+					return a.Method != "GET"
+				},
 				Fn: func(value string) error {
 					a.Method = value
 					return nil
@@ -303,6 +350,9 @@ func (a *App) CLI() *CLI {
 				Args:        "NAME=[@]VALUE",
 				Description: "Send a multipart form body",
 				Default:     "",
+				IsSet: func() bool {
+					return len(a.Multipart) > 0
+				},
 				Fn: func(value string) error {
 					key, val, _ := strings.Cut(value, "=")
 					if strings.HasPrefix(val, "@") {
@@ -324,6 +374,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Avoid requesting gzip encoding",
 				Default:     "",
+				IsSet: func() bool {
+					return a.NoEncode
+				},
 				Fn: func(value string) error {
 					a.NoEncode = true
 					return nil
@@ -335,6 +388,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Avoid formatting the output",
 				Default:     "",
+				IsSet: func() bool {
+					return a.NoFormat
+				},
 				Fn: func(value string) error {
 					a.NoFormat = true
 					return nil
@@ -346,6 +402,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Avoid using a pager for the response body",
 				Default:     "",
+				IsSet: func() bool {
+					return a.NoPager
+				},
 				Fn: func(value string) error {
 					a.NoPager = true
 					return nil
@@ -357,6 +416,9 @@ func (a *App) CLI() *CLI {
 				Args:        "FILE",
 				Description: "Write the response body to a file",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Output != ""
+				},
 				Fn: func(value string) error {
 					a.Output = value
 					return nil
@@ -368,6 +430,9 @@ func (a *App) CLI() *CLI {
 				Args:        "PROXY",
 				Description: "Configure a proxy",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Proxy != nil
+				},
 				Fn: func(value string) error {
 					proxy, err := url.Parse(value)
 					if err != nil {
@@ -383,6 +448,9 @@ func (a *App) CLI() *CLI {
 				Args:        "KEY=VALUE",
 				Description: "Append query parameters to the url",
 				Default:     "",
+				IsSet: func() bool {
+					return len(a.QueryParams) > 0
+				},
 				Fn: func(value string) error {
 					key, val, _ := strings.Cut(value, "=")
 					a.QueryParams = append(a.QueryParams, vars.KeyVal{Key: key, Val: val})
@@ -395,6 +463,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Avoid printing anything to stderr",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Silent
+				},
 				Fn: func(value string) error {
 					a.Silent = true
 					return nil
@@ -406,6 +477,9 @@ func (a *App) CLI() *CLI {
 				Args:        "SECONDS",
 				Description: "Timeout in seconds applied to the entire request",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Timeout != 0
+				},
 				Fn: func(value string) error {
 					secs, err := strconv.ParseFloat(value, 64)
 					if err != nil {
@@ -422,6 +496,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Update the fetch binary in place",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Update
+				},
 				Fn: func(value string) error {
 					a.Update = true
 					return nil
@@ -433,6 +510,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Verbosity of the output",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Verbose > 0
+				},
 				Fn: func(value string) error {
 					a.Verbose += 1
 					return nil
@@ -444,6 +524,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Print version",
 				Default:     "",
+				IsSet: func() bool {
+					return a.Version
+				},
 				Fn: func(value string) error {
 					a.Version = true
 					return nil
@@ -455,6 +538,9 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Set the request content-type to application/xml",
 				Default:     "",
+				IsSet: func() bool {
+					return a.XML
+				},
 				Fn: func(value string) error {
 					a.XML = true
 					return nil
