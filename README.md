@@ -1,6 +1,6 @@
 # fetch
 
-`fetch` is a modern command-line HTTP(S) client.
+`fetch` is a modern HTTP(S) client for the command-line.
 It supports a wide variety of HTTP features — from basic GET requests to options such as custom headers,
 authentication (including AWS signature V4), multipart or urlencoded forms, and automatic response body decompression.
 It also features built‑in request formatting, syntax highlighting, progress indicators, and even in-terminal image rendering.
