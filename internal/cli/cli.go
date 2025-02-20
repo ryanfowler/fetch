@@ -9,10 +9,11 @@ import (
 )
 
 type CLI struct {
-	Description string
-	ArgFn       func(s string) error
-	Args        []Arguments
-	Flags       []Flag
+	Description    string
+	ArgFn          func(s string) error
+	Args           []Arguments
+	Flags          []Flag
+	ExclusiveFlags [][]string
 }
 
 type Arguments struct {
@@ -27,6 +28,7 @@ type Flag struct {
 	Description string
 	Default     string
 	Values      []string
+	IsSet       func() bool
 	Fn          func(value string) error
 }
 
@@ -39,6 +41,13 @@ func parse(cli *CLI, args []string) error {
 		}
 		if flag.Long != "" {
 			long[flag.Long] = flag
+		}
+	}
+
+	exclusives := make(map[string][][]string)
+	for _, fs := range cli.ExclusiveFlags {
+		for _, f := range fs {
+			exclusives[f] = append(exclusives[f], fs)
 		}
 	}
 
@@ -82,6 +91,14 @@ func parse(cli *CLI, args []string) error {
 			}
 		}
 		break
+	}
+
+	// Check exclusive flags.
+	for _, exc := range cli.ExclusiveFlags {
+		err = validateExclusives(exc, long)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -154,6 +171,24 @@ func parseLongFlag(arg string, args []string, long map[string]Flag) ([]string, e
 	}
 
 	return args, nil
+}
+
+func validateExclusives(exc []string, long map[string]Flag) error {
+	var lastSet string
+	for _, name := range exc {
+		flag := long[name]
+		if !flag.IsSet() {
+			continue
+		}
+
+		if lastSet == "" {
+			lastSet = name
+			continue
+		}
+
+		return fmt.Errorf("flags '--%s' and '--%s' cannot be used together", lastSet, name)
+	}
+	return nil
 }
 
 func unknownFlagError(name string) error {
