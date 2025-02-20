@@ -157,7 +157,7 @@ func parseLongFlag(arg string, args []string, long map[string]Flag) ([]string, e
 }
 
 func unknownFlagError(name string) error {
-	return fmt.Errorf("unknown flag %q", name)
+	return fmt.Errorf("unknown flag: %q", name)
 }
 
 func Parse() (*App, error) {
