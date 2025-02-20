@@ -17,6 +17,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/image"
+	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/printer"
 	"github.com/ryanfowler/fetch/internal/vars"
 )
@@ -46,7 +47,7 @@ type Request struct {
 	URL         string
 	Body        io.Reader
 	Form        []vars.KeyVal
-	Multipart   io.Reader
+	Multipart   *multipart.Multipart
 	Headers     []vars.KeyVal
 	QueryParams []vars.KeyVal
 	AWSSigv4    *aws.Config

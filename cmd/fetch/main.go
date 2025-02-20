@@ -4,13 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"mime/multipart"
 	"os"
-	"strings"
 
 	"github.com/ryanfowler/fetch/internal/cli"
 	"github.com/ryanfowler/fetch/internal/fetch"
+	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/printer"
 	"github.com/ryanfowler/fetch/internal/update"
 	"github.com/ryanfowler/fetch/internal/vars"
@@ -69,7 +67,7 @@ func main() {
 		URL:         app.URL,
 		Body:        app.Data,
 		Form:        app.Form,
-		Multipart:   getMultipartReader(app.Multipart),
+		Multipart:   multipart.NewMultipart(app.Multipart),
 		Headers:     app.Headers,
 		QueryParams: app.QueryParams,
 		AWSSigv4:    app.AWSSigv4,
@@ -96,53 +94,6 @@ func getVerbosity(app *cli.App) fetch.Verbosity {
 	default:
 		return fetch.VExtraVerbose
 	}
-}
-
-func getMultipartReader(kvs []vars.KeyVal) io.Reader {
-	if len(kvs) == 0 {
-		return nil
-	}
-
-	reader, writer := io.Pipe()
-	go func() {
-		defer writer.Close()
-
-		mpw := multipart.NewWriter(writer)
-		defer mpw.Close()
-
-		for _, kv := range kvs {
-			if !strings.HasPrefix(kv.Val, "@") {
-				err := mpw.WriteField(kv.Key, kv.Val)
-				if err != nil {
-					writer.CloseWithError(err)
-					return
-				}
-				continue
-			}
-
-			// Form part is a file.
-			w, err := mpw.CreateFormFile(kv.Key, kv.Val[1:])
-			if err != nil {
-				writer.CloseWithError(err)
-				return
-			}
-
-			f, err := os.Open(kv.Val[1:])
-			if err != nil {
-				writer.CloseWithError(err)
-				return
-			}
-
-			_, err = io.Copy(w, f)
-			f.Close()
-			if err != nil {
-				writer.CloseWithError(err)
-				return
-			}
-		}
-	}()
-
-	return reader
 }
 
 func writeCLIErr(p *printer.Printer, err error) {
