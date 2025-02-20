@@ -14,11 +14,10 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/printer"
-	"github.com/ryanfowler/fetch/internal/vars"
 )
 
-func Update(ctx context.Context, p *printer.Printer, timeout time.Duration) bool {
-	err := update(ctx, p, timeout)
+func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, version string) bool {
+	err := update(ctx, p, timeout, version)
 	if err == nil {
 		return true
 	}
@@ -33,8 +32,8 @@ func Update(ctx context.Context, p *printer.Printer, timeout time.Duration) bool
 	return false
 }
 
-func update(ctx context.Context, p *printer.Printer, timeout time.Duration) error {
-	cfg := client.ClientConfig{Timeout: timeout}
+func update(ctx context.Context, p *printer.Printer, timeout time.Duration, version string) error {
+	cfg := client.ClientConfig{Timeout: timeout, UserAgent: "fetch/" + version}
 	c := client.NewClient(cfg)
 
 	writeInfo(p, "fetching latest release tag")
@@ -43,9 +42,9 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration) erro
 		return err
 	}
 
-	if strings.TrimPrefix(latest, "v") == vars.Version {
+	if strings.TrimPrefix(latest, "v") == version {
 		p.WriteString("\n  currently using the latest version (v")
-		p.WriteString(vars.Version)
+		p.WriteString(version)
 		p.WriteString(")\n")
 		p.Flush(os.Stderr)
 		return nil
@@ -78,7 +77,7 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration) erro
 	}
 
 	p.WriteString("\n  fetch successfully updated (v")
-	p.WriteString(vars.Version)
+	p.WriteString(version)
 	p.WriteString(" -> ")
 	p.WriteString(latest)
 	p.WriteString(")\n")

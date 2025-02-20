@@ -21,7 +21,7 @@ to download the binary for your operating system.
 Make sure you have Go installed, then run:
 
 ```bash
-go install -trimpath -ldflags="-s -w" github.com/ryanfowler/fetch/cmd/fetch@latest
+go install github.com/ryanfowler/fetch@latest
 ```
 
 ### Updating

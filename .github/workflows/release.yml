@@ -63,7 +63,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-s -w" -o ${{ env.BIN_NAME }} ./cmd/fetch/main.go
+        run: go build -trimpath -ldflags="-s -w" -o ${{ env.BIN_NAME }} ./main.go
 
       - name: Build archive (unix)
         if: ${{ matrix.goos != 'windows' }}

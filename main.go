@@ -2,17 +2,25 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ryanfowler/fetch/internal/cli"
 	"github.com/ryanfowler/fetch/internal/fetch"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/printer"
 	"github.com/ryanfowler/fetch/internal/update"
-	"github.com/ryanfowler/fetch/internal/vars"
 )
+
+//go:embed VERSION
+var version string
+
+func init() {
+	version = strings.TrimSpace(version)
+}
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -34,12 +42,12 @@ func main() {
 		os.Exit(0)
 	}
 	if app.Version {
-		fmt.Fprintln(os.Stdout, "fetch", vars.Version)
+		fmt.Fprintln(os.Stdout, "fetch", version)
 		os.Exit(0)
 	}
 	if app.Update {
 		p := printerHandle.Stderr()
-		if ok := update.Update(ctx, p, app.Timeout); ok {
+		if ok := update.Update(ctx, p, app.Timeout, version); ok {
 			os.Exit(0)
 		}
 		os.Exit(1)
@@ -61,6 +69,7 @@ func main() {
 		NoPager:       app.NoPager,
 		Output:        app.Output,
 		PrinterHandle: printerHandle,
+		UserAgent:     "fetch/" + version,
 		Verbosity:     getVerbosity(app),
 
 		Method:      app.Method,
