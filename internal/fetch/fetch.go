@@ -32,6 +32,7 @@ const (
 
 type Request struct {
 	DryRun        bool
+	Edit          bool
 	HTTP          client.HTTPVersion
 	Insecure      bool
 	NoEncode      bool
@@ -116,7 +117,25 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 		return false, err
 	}
 
-	// TODO: open editor if necessary.
+	// Open an editor if necessary.
+	if r.Edit {
+		var extension string
+		switch {
+		case r.JSON:
+			extension = ".json"
+		case r.XML:
+			extension = ".xml"
+		}
+
+		buf, err := edit(req.Body, extension)
+		if err != nil {
+			return false, err
+		}
+
+		req.Body = io.NopCloser(bytes.NewReader(buf))
+		req.ContentLength = int64(len(buf))
+		req.GetBody = nil
+	}
 
 	if r.Verbosity >= VExtraVerbose || r.DryRun {
 		printRequestMetadata(errPrinter, req)
