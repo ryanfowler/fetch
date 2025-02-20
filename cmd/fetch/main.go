@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -21,7 +22,8 @@ func main() {
 
 	app, err := cli.Parse()
 	if err != nil {
-		fmt.Println(err)
+		p := printer.NewHandle(printer.ColorAuto).Stderr()
+		writeCLIErr(p, err)
 		os.Exit(1)
 	}
 
@@ -42,6 +44,12 @@ func main() {
 		if ok := update.Update(ctx, p, app.Timeout); ok {
 			os.Exit(0)
 		}
+		os.Exit(1)
+	}
+
+	if app.URL == "" {
+		p := printerHandle.Stderr()
+		writeCLIErr(p, errors.New("<URL> must be provided"))
 		os.Exit(1)
 	}
 
@@ -133,4 +141,22 @@ func getMultipartReader(kvs []vars.KeyVal) io.Reader {
 	}()
 
 	return reader
+}
+
+func writeCLIErr(p *printer.Printer, err error) {
+	p.Set(printer.Bold)
+	p.Set(printer.Red)
+	p.WriteString("error")
+	p.Reset()
+
+	p.WriteString(": ")
+	p.WriteString(err.Error())
+	p.WriteString("\n\nFor more information, try '")
+
+	p.Set(printer.Bold)
+	p.Set("\\--help")
+	p.Reset()
+
+	p.WriteString("'.\n")
+	p.Flush(os.Stderr)
 }

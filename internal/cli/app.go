@@ -68,7 +68,7 @@ func (a *App) CLI() *CLI {
 		},
 		ArgFn: func(s string) error {
 			if a.URL != "" {
-				return fmt.Errorf("unexpected argument %q", s)
+				return fmt.Errorf("unexpected argument: %q", s)
 			}
 			a.URL = s
 			return nil
@@ -381,7 +381,7 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					secs, err := strconv.ParseFloat(value, 64)
 					if err != nil {
-						return fmt.Errorf("invalid value for timeout %q", value)
+						return fmt.Errorf("invalid value for timeout: %q", value)
 					}
 
 					a.Timeout = time.Duration(float64(time.Second) * secs)
