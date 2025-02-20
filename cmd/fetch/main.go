@@ -55,6 +55,7 @@ func main() {
 
 	req := fetch.Request{
 		DryRun:        app.DryRun,
+		Edit:          app.Edit,
 		HTTP:          app.HTTP,
 		Insecure:      app.Insecure,
 		NoEncode:      app.NoEncode,

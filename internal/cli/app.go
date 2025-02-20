@@ -25,6 +25,7 @@ type App struct {
 	Color       printer.Color
 	Data        io.Reader
 	DryRun      bool
+	Edit        bool
 	Form        []vars.KeyVal
 	Headers     []vars.KeyVal
 	Help        bool
@@ -191,6 +192,17 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Fn: func(value string) error {
 					a.DryRun = true
+					return nil
+				},
+			},
+			{
+				Short:       "e",
+				Long:        "edit",
+				Args:        "",
+				Description: "Use an editor to modify the request body",
+				Default:     "",
+				Fn: func(value string) error {
+					a.Edit = true
 					return nil
 				},
 			},
