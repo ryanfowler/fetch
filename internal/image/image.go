@@ -7,6 +7,7 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"os"
+	"strings"
 
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
@@ -87,13 +88,16 @@ func resizeImage(img image.Image, width, height int) image.Image {
 func encodeToBase64PNG(img image.Image) (string, error) {
 	img = convertToRGBA(img)
 
-	var buf bytes.Buffer
-	err := png.Encode(&buf, img)
+	var sb strings.Builder
+	wc := base64.NewEncoder(base64.StdEncoding, &sb)
+
+	err := png.Encode(wc, img)
 	if err != nil {
 		return "", err
 	}
 
-	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
+	wc.Close()
+	return sb.String(), nil
 }
 
 func convertToRGBA(img image.Image) *image.RGBA {
