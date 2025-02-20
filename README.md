@@ -1,6 +1,6 @@
 # fetch
 
-`fetch` is a modern command-line HTTP(S) client written in Rust.
+`fetch` is a modern command-line HTTP(S) client.
 It supports a wide variety of HTTP features — from basic GET requests to options such as custom headers,
 authentication (including AWS signature V4), multipart or urlencoded forms, and automatic response body decompression.
 It also features built‑in request formatting, syntax highlighting, progress indicators, and even in-terminal image rendering.
@@ -18,18 +18,10 @@ to download the binary for your operating system.
 
 ### Building from Source
 
-Make sure you have Rust installed (using [rustup](https://rustup.rs/)) then run:
+Make sure you have Go installed, then run:
 
 ```bash
-cargo install --force --locked fetch-cli
-```
-
-Alternatively, you can build from source locally from the `main` branch:
-
-```bash
-git clone https://github.com/ryanfowler/fetch.git
-cd fetch
-cargo install --force --locked --path .
+go install -trimpath -ldflags="-s -w" github.com/ryanfowler/fetch/cmd/fetch@latest
 ```
 
 ### Updating
