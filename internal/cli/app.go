@@ -62,6 +62,10 @@ func NewApp() *App {
 	return &app
 }
 
+func (a *App) PrintHelp(p *printer.Printer) {
+	printHelp(a.CLI(), p)
+}
+
 func (a *App) CLI() *CLI {
 	return &CLI{
 		Description: "fetch is a modern HTTP(S) client for the command line",
