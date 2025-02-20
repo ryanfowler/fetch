@@ -41,6 +41,7 @@ type Request struct {
 	NoPager       bool
 	Output        string
 	PrinterHandle *printer.Handle
+	UserAgent     string
 	Verbosity     Verbosity
 
 	Method      string
@@ -93,10 +94,11 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 	}
 
 	c := client.NewClient(client.ClientConfig{
-		HTTP:     r.HTTP,
-		Insecure: r.Insecure,
-		Proxy:    r.Proxy,
-		Timeout:  r.Timeout,
+		HTTP:      r.HTTP,
+		Insecure:  r.Insecure,
+		Proxy:     r.Proxy,
+		Timeout:   r.Timeout,
+		UserAgent: r.UserAgent,
 	})
 	req, err := c.NewRequest(ctx, client.RequestConfig{
 		Method:      r.Method,
