@@ -59,6 +59,7 @@ func main() {
 		Insecure:      app.Insecure,
 		NoEncode:      app.NoEncode,
 		NoFormat:      app.NoFormat,
+		NoPager:       app.NoPager,
 		Output:        app.Output,
 		PrinterHandle: printerHandle,
 		Verbosity:     getVerbosity(app),

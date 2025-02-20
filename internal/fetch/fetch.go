@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ type Request struct {
 	Insecure      bool
 	NoEncode      bool
 	NoFormat      bool
+	NoPager       bool
 	Output        string
 	PrinterHandle *printer.Handle
 	Verbosity     Verbosity
@@ -193,7 +195,7 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 		}
 	}
 
-	_, err = io.Copy(os.Stdout, body)
+	err = streamToStdout(body, r.NoPager)
 	if err != nil {
 		return false, err
 	}
@@ -350,4 +352,24 @@ func getContentType(headers http.Header) ContentType {
 	default:
 		return TypeUnknown
 	}
+}
+
+func streamToStdout(r io.Reader, noPager bool) error {
+	if !noPager && vars.IsStdoutTerm {
+		path, err := exec.LookPath("less")
+		if err == nil {
+			return streamToPager(r, path)
+		}
+	}
+
+	_, err := io.Copy(os.Stdout, r)
+	return err
+}
+
+func streamToPager(r io.Reader, path string) error {
+	cmd := exec.Command(path, "-FIRX")
+	cmd.Stdin = r
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	return cmd.Run()
 }

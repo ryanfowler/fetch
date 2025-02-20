@@ -35,6 +35,7 @@ type App struct {
 	Multipart   []vars.KeyVal
 	NoEncode    bool
 	NoFormat    bool
+	NoPager     bool
 	Output      string
 	Proxy       *url.URL
 	QueryParams []vars.KeyVal
@@ -320,6 +321,17 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Fn: func(value string) error {
 					a.NoFormat = true
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "no-pager",
+				Args:        "",
+				Description: "Avoid using a pager for the response body",
+				Default:     "",
+				Fn: func(value string) error {
+					a.NoPager = true
 					return nil
 				},
 			},
