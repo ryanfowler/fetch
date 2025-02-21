@@ -106,7 +106,7 @@ func (a *App) CLI() *CLI {
 					return a.AWSSigv4 != nil
 				},
 				Fn: func(value string) error {
-					region, service, ok := strings.Cut(value, "/")
+					region, service, ok := cut(value, "/")
 					if !ok {
 						return errors.New("aws-sigv4 must be provided as REGION/SERVICE")
 					}
@@ -139,7 +139,7 @@ func (a *App) CLI() *CLI {
 					return a.Basic != nil
 				},
 				Fn: func(value string) error {
-					user, pass, ok := strings.Cut(value, ":")
+					user, pass, ok := cut(value, ":")
 					if !ok {
 						return fmt.Errorf("invalid format for basic auth: %q", value)
 					}
@@ -257,7 +257,7 @@ func (a *App) CLI() *CLI {
 					return len(a.Form) > 0
 				},
 				Fn: func(value string) error {
-					key, val, _ := strings.Cut(value, "=")
+					key, val, _ := cut(value, "=")
 					a.Form = append(a.Form, vars.KeyVal{Key: key, Val: val})
 					return nil
 				},
@@ -272,7 +272,7 @@ func (a *App) CLI() *CLI {
 					return len(a.Headers) > 0
 				},
 				Fn: func(value string) error {
-					key, val, _ := strings.Cut(value, ":")
+					key, val, _ := cut(value, ":")
 					a.Headers = append(a.Headers, vars.KeyVal{Key: key, Val: val})
 					return nil
 				},
@@ -365,7 +365,7 @@ func (a *App) CLI() *CLI {
 					return len(a.Multipart) > 0
 				},
 				Fn: func(value string) error {
-					key, val, _ := strings.Cut(value, "=")
+					key, val, _ := cut(value, "=")
 					if strings.HasPrefix(val, "@") {
 						stats, err := os.Stat(val[1:])
 						if err != nil {
@@ -463,7 +463,7 @@ func (a *App) CLI() *CLI {
 					return len(a.QueryParams) > 0
 				},
 				Fn: func(value string) error {
-					key, val, _ := strings.Cut(value, "=")
+					key, val, _ := cut(value, "=")
 					a.QueryParams = append(a.QueryParams, vars.KeyVal{Key: key, Val: val})
 					return nil
 				},
@@ -559,4 +559,11 @@ func (a *App) CLI() *CLI {
 			},
 		},
 	}
+}
+
+func cut(s, sep string) (string, string, bool) {
+	key, val, ok := strings.Cut(s, sep)
+	key = strings.TrimSpace(key)
+	val = strings.TrimSpace(val)
+	return key, val, ok
 }
