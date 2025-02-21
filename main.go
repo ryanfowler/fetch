@@ -38,7 +38,7 @@ func main() {
 	if app.Help {
 		p := printerHandle.Stdout()
 		app.PrintHelp(p)
-		p.Flush(os.Stdout)
+		p.Flush()
 		os.Exit(0)
 	}
 	if app.Version {
@@ -120,5 +120,5 @@ func writeCLIErr(p *printer.Printer, err error) {
 	p.Reset()
 
 	p.WriteString("'.\n")
-	p.Flush(os.Stderr)
+	p.Flush()
 }

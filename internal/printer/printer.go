@@ -3,6 +3,7 @@ package printer
 import (
 	"bytes"
 	"io"
+	"os"
 
 	"github.com/ryanfowler/fetch/internal/vars"
 )
@@ -43,8 +44,8 @@ type Handle struct {
 
 func NewHandle(c Color) *Handle {
 	return &Handle{
-		stderr: newPrinter(vars.IsStderrTerm, c),
-		stdout: newPrinter(vars.IsStdoutTerm, c),
+		stderr: newPrinter(os.Stderr, vars.IsStderrTerm, c),
+		stdout: newPrinter(os.Stdout, vars.IsStdoutTerm, c),
 	}
 }
 
@@ -57,11 +58,12 @@ func (h *Handle) Stdout() *Printer {
 }
 
 type Printer struct {
+	file     *os.File
 	buf      bytes.Buffer
 	useColor bool
 }
 
-func newPrinter(isTerm bool, c Color) *Printer {
+func newPrinter(file *os.File, isTerm bool, c Color) *Printer {
 	var useColor bool
 	switch c {
 	case ColorAuto:
@@ -71,7 +73,7 @@ func newPrinter(isTerm bool, c Color) *Printer {
 	case ColorNever:
 		useColor = false
 	}
-	return &Printer{useColor: useColor}
+	return &Printer{file: file, useColor: useColor}
 }
 
 func (p *Printer) Set(s Sequence) {
@@ -89,9 +91,10 @@ func (p *Printer) Reset() {
 	}
 }
 
-func (p *Printer) Flush(w io.Writer) {
-	w.Write(p.buf.Bytes())
+func (p *Printer) Flush() error {
+	_, err := p.file.Write(p.buf.Bytes())
 	p.buf.Reset()
+	return err
 }
 
 func (p *Printer) Bytes() []byte {

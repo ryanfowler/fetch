@@ -73,7 +73,7 @@ func Fetch(ctx context.Context, r *Request) int {
 		p.WriteString(": ")
 		p.WriteString(err.Error())
 		p.WriteString("\n")
-		p.Flush(os.Stderr)
+		p.Flush()
 		return 1
 	}
 	if ok {
@@ -143,19 +143,19 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 
 		if r.DryRun {
 			if req.Body == nil || req.Body == http.NoBody {
-				errPrinter.Flush(os.Stderr)
+				errPrinter.Flush()
 				return true, nil
 			}
 
 			errPrinter.WriteString("\n")
-			errPrinter.Flush(os.Stderr)
+			errPrinter.Flush()
 
 			_, err = io.Copy(os.Stderr, req.Body)
 			return err == nil, err
 		}
 
 		errPrinter.WriteString("\n")
-		errPrinter.Flush(os.Stderr)
+		errPrinter.Flush()
 	}
 
 	resp, err := c.Do(req)
@@ -168,7 +168,7 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 
 	if r.Verbosity >= VNormal {
 		printResponseMetadata(errPrinter, r.Verbosity, resp)
-		errPrinter.Flush(os.Stderr)
+		errPrinter.Flush()
 	}
 
 	if r.Output != "" && r.Output != "-" {
@@ -454,5 +454,5 @@ func printBinaryWarning(p *printer.Printer) {
 	p.Reset()
 	p.WriteString(": the response body appears to be binary\n\n")
 	p.WriteString("To output to the terminal anyway, use '--output -'\n")
-	p.Flush(os.Stderr)
+	p.Flush()
 }
