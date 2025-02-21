@@ -53,7 +53,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if app.URL == "" {
+	if app.URL == nil {
 		p := printerHandle.Stderr()
 		writeCLIErr(p, errors.New("<URL> must be provided"))
 		os.Exit(1)
