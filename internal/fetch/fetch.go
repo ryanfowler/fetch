@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/client"
@@ -169,7 +171,7 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 		errPrinter.Flush(os.Stderr)
 	}
 
-	if r.Output != "" {
+	if r.Output != "" && r.Output != "-" {
 		f, err := os.Create(r.Output)
 		if err != nil {
 			return false, err
@@ -213,7 +215,7 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 		}
 	}
 
-	err = streamToStdout(body, r.NoPager)
+	err = streamToStdout(body, errPrinter, r.Output == "-", r.NoPager)
 	if err != nil {
 		return false, err
 	}
@@ -372,7 +374,22 @@ func getContentType(headers http.Header) ContentType {
 	}
 }
 
-func streamToStdout(r io.Reader, noPager bool) error {
+func streamToStdout(r io.Reader, p *printer.Printer, forceOutput, noPager bool) error {
+	// Check output to see if it's likely safe to print to stdout.
+	if vars.IsStdoutTerm && !forceOutput {
+		var ok bool
+		var err error
+		ok, r, err = isPrintable(r)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			printBinaryWarning(p)
+			return nil
+		}
+	}
+
+	// Optionally stream output to a pager.
 	if !noPager && vars.IsStdoutTerm {
 		path, err := exec.LookPath("less")
 		if err == nil {
@@ -390,4 +407,52 @@ func streamToPager(r io.Reader, path string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 	return cmd.Run()
+}
+
+// isPrintable returns true if the data in the provided io.Reader is likely
+// okay to print to a terminal.
+func isPrintable(r io.Reader) (bool, io.Reader, error) {
+	buf := make([]byte, 1024)
+	n, err := io.ReadFull(r, buf)
+	switch {
+	case err == io.ErrUnexpectedEOF:
+		buf = buf[:n]
+		r = bytes.NewReader(buf)
+	case err != nil:
+		return false, nil, err
+	default:
+		r = io.MultiReader(bytes.NewReader(buf), r)
+	}
+
+	if bytes.ContainsRune(buf, '\x00') {
+		return false, r, nil
+	}
+
+	var safe, total int
+	for len(buf) > 0 {
+		c, size := utf8.DecodeRune(buf)
+		buf = buf[size:]
+		if c == utf8.RuneError && len(buf) < 4 {
+			break
+		}
+		total++
+		if unicode.IsPrint(c) || unicode.IsSpace(c) || c == '\x1b' {
+			safe++
+		}
+	}
+
+	if total == 0 {
+		return true, r, nil
+	}
+	return float64(safe)/float64(total) >= 0.9, r, nil
+}
+
+func printBinaryWarning(p *printer.Printer) {
+	p.Set(printer.Bold)
+	p.Set(printer.Yellow)
+	p.WriteString("warning")
+	p.Reset()
+	p.WriteString(": the response body appears to be binary\n\n")
+	p.WriteString("To output to the terminal anyway, use '--output -'\n")
+	p.Flush(os.Stderr)
 }
