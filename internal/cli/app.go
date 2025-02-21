@@ -17,7 +17,7 @@ import (
 )
 
 type App struct {
-	URL string
+	URL *url.URL
 
 	AWSSigv4    *aws.Config
 	Basic       *vars.KeyVal
@@ -73,10 +73,21 @@ func (a *App) CLI() *CLI {
 			{Name: "URL", Description: "The URL to make a request to"},
 		},
 		ArgFn: func(s string) error {
-			if a.URL != "" {
+			if a.URL != nil {
 				return fmt.Errorf("unexpected argument: %q", s)
 			}
-			a.URL = s
+
+			u, err := url.Parse(s)
+			if err != nil {
+				return fmt.Errorf("invalid url: %w", err)
+			}
+			switch u.Scheme {
+			case "", "http", "https":
+			default:
+				return fmt.Errorf("unsupported url scheme: %s", u.Scheme)
+			}
+
+			a.URL = u
 			return nil
 		},
 		ExclusiveFlags: [][]string{

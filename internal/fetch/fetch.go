@@ -45,7 +45,7 @@ type Request struct {
 	Verbosity     Verbosity
 
 	Method      string
-	URL         string
+	URL         *url.URL
 	Body        io.Reader
 	Form        []vars.KeyVal
 	Multipart   *multipart.Multipart
@@ -84,13 +84,9 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 	errPrinter := r.PrinterHandle.Stderr()
 	outPrinter := r.PrinterHandle.Stdout()
 
-	u, err := url.Parse(r.URL)
-	if err != nil {
-		return false, err
-	}
-	if u.Scheme == "" {
+	if r.URL.Scheme == "" {
 		// Use HTTPS if no scheme is defined.
-		u.Scheme = "https"
+		r.URL.Scheme = "https"
 	}
 
 	c := client.NewClient(client.ClientConfig{
@@ -102,7 +98,7 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 	})
 	req, err := c.NewRequest(ctx, client.RequestConfig{
 		Method:      r.Method,
-		URL:         u,
+		URL:         r.URL,
 		Form:        r.Form,
 		Multipart:   r.Multipart,
 		Headers:     r.Headers,
