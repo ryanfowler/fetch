@@ -2,6 +2,14 @@ package image
 
 import "os"
 
+type protocol int
+
+const (
+	protoBlock protocol = iota
+	protoInline
+	protoKitty
+)
+
 type emulator int
 
 const (
@@ -21,16 +29,16 @@ const (
 	eZellij
 )
 
-func (e emulator) Protocol() Protocol {
+func (e emulator) Protocol() protocol {
 	switch e {
 	case eAlacritty, eApple, eTmux, eUnknown, eVSCode, eWindows, eZellij:
-		return ProtoBlock
+		return protoBlock
 	case eHyper, eIterm2, eMintty, eWezTerm:
-		return ProtoInline
+		return protoInline
 	case eGhostty, eKitty, eKonsole:
-		return ProtoKitty
+		return protoKitty
 	default:
-		return ProtoBlock
+		return protoBlock
 	}
 }
 

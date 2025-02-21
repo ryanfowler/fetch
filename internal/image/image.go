@@ -15,19 +15,12 @@ import (
 	"golang.org/x/term"
 )
 
-type Protocol int
-
-const (
-	ProtoBlock Protocol = iota
-	ProtoInline
-	ProtoKitty
-)
-
 func Render(b []byte) error {
 	img, _, err := image.Decode(bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
+	img = orient(b, img)
 
 	termWidth, termHeight, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil {
@@ -45,9 +38,9 @@ func Render(b []byte) error {
 	}
 
 	switch detectEmulator().Protocol() {
-	case ProtoInline:
+	case protoInline:
 		return writeInline(img, termWidthPx, termHeightPx)
-	case ProtoKitty:
+	case protoKitty:
 		return writeKitty(img, termWidthPx, termHeightPx)
 	default:
 		return writeBlocks(img, termWidth, termHeight)
