@@ -28,7 +28,7 @@ func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 	p.Reset()
 	p.WriteString(err.Error())
 	p.WriteString("\n")
-	p.Flush(os.Stderr)
+	p.Flush()
 	return false
 }
 
@@ -46,7 +46,7 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 		p.WriteString("\n  currently using the latest version (v")
 		p.WriteString(version)
 		p.WriteString(")\n")
-		p.Flush(os.Stderr)
+		p.Flush()
 		return nil
 	}
 
@@ -81,7 +81,7 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 	p.WriteString(" -> ")
 	p.WriteString(latest)
 	p.WriteString(")\n")
-	p.Flush(os.Stderr)
+	p.Flush()
 	return nil
 }
 
@@ -177,5 +177,5 @@ func writeInfo(p *printer.Printer, s string) {
 
 	p.WriteString(s)
 	p.WriteString("\n")
-	p.Flush(os.Stderr)
+	p.Flush()
 }
