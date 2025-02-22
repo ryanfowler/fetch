@@ -164,23 +164,23 @@ func (a *App) CLI() *CLI {
 			{
 				Short:       "",
 				Long:        "color",
-				Args:        "CONFIG",
-				Description: "Set color config",
-				Default:     "auto",
-				Values:      []string{"auto", "never", "always"},
+				Args:        "OPTION",
+				Description: "Enable/disable color",
+				Default:     "",
+				Values:      []string{"auto", "off", "on"},
 				IsSet: func() bool {
 					return a.Color != printer.ColorAuto
 				},
 				Fn: func(value string) error {
 					switch value {
-					case "auto":
+					case "", "auto":
 						a.Color = printer.ColorAuto
-					case "never":
-						a.Color = printer.ColorNever
-					case "always":
-						a.Color = printer.ColorAlways
+					case "off":
+						a.Color = printer.ColorOff
+					case "on":
+						a.Color = printer.ColorOn
 					default:
-						return fmt.Errorf("invalid vlaue for color: %q", value)
+						return fmt.Errorf("invalid value for color: %q", value)
 					}
 					return nil
 				},

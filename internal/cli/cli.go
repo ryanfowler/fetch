@@ -28,6 +28,7 @@ type Flag struct {
 	Description string
 	Default     string
 	Values      []string
+	IsSecret    bool
 	IsSet       func() bool
 	Fn          func(value string) error
 }
@@ -261,6 +262,10 @@ func printHelp(cli *CLI, p *printer.Printer) {
 
 		maxLen := maxFlagLength(cli.Flags)
 		for _, flag := range cli.Flags {
+			if flag.IsSecret {
+				continue
+			}
+
 			p.Set(printer.Bold)
 			p.WriteString("  ")
 
@@ -290,9 +295,9 @@ func printHelp(cli *CLI, p *printer.Printer) {
 			p.WriteString(flag.Description)
 
 			if len(flag.Values) > 0 {
-				p.WriteString(" (")
+				p.WriteString(" [")
 				p.WriteString(strings.Join(flag.Values, ", "))
-				p.WriteString(")")
+				p.WriteString("]")
 			}
 
 			if flag.Default != "" {

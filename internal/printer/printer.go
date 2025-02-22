@@ -33,8 +33,8 @@ type Color int
 
 const (
 	ColorAuto Color = iota
-	ColorAlways
-	ColorNever
+	ColorOn
+	ColorOff
 )
 
 type Handle struct {
@@ -68,9 +68,9 @@ func newPrinter(file *os.File, isTerm bool, c Color) *Printer {
 	switch c {
 	case ColorAuto:
 		useColor = isTerm
-	case ColorAlways:
+	case ColorOn:
 		useColor = true
-	case ColorNever:
+	case ColorOff:
 		useColor = false
 	}
 	return &Printer{file: file, useColor: useColor}
