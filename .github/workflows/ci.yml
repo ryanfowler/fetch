@@ -39,8 +39,24 @@ jobs:
           version: "2025.1"
           install-go: false
 
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
       - name: Test
-        run: go test -cover -race ./...
+        run: go test -cover -race -v ./...
 
   build:
     runs-on: ubuntu-latest
