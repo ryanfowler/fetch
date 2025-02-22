@@ -5,6 +5,7 @@ package update
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -37,11 +38,7 @@ func handleZipFile(dir string, f *zip.File) error {
 	target := filepath.Join(dir, f.Name)
 
 	if f.FileInfo().IsDir() {
-		err := os.MkdirAll(target, f.Mode())
-		if err != nil {
-			return err
-		}
-		return err
+		return os.MkdirAll(target, f.Mode())
 	}
 
 	err := os.MkdirAll(filepath.Dir(target), 0755)
@@ -63,4 +60,8 @@ func handleZipFile(dir string, f *zip.File) error {
 
 	_, err = io.Copy(out, rc)
 	return err
+}
+
+func selfReplace(_, _ string) error {
+	return errors.New("not yet implemented for windows")
 }
