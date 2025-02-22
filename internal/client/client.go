@@ -151,7 +151,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	case cfg.Basic != nil:
 		req.SetBasicAuth(cfg.Basic.Key, cfg.Basic.Val)
 	case cfg.Bearer != "":
-		req.Header.Set("Authentication", "Bearer "+cfg.Bearer)
+		req.Header.Set("Authorization", "Bearer "+cfg.Bearer)
 	}
 
 	return req, nil
