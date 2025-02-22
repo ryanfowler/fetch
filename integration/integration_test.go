@@ -1,9 +1,13 @@
 package integration_test
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -21,7 +26,7 @@ func TestMain(t *testing.T) {
 	defer os.RemoveAll(tempDir)
 
 	fetchPath := goBuild(t, tempDir)
-	_ = getFetchVersion(t, fetchPath)
+	version := getFetchVersion(t, fetchPath)
 
 	t.Run("help", func(t *testing.T) {
 		res := runFetch(t, fetchPath, "--help")
@@ -171,6 +176,79 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, server.URL, "--bearer", "token")
 		assertExitCode(t, 0, res.state)
 	})
+
+	t.Run("update", func(t *testing.T) {
+		// Not yet working on windows.
+		if runtime.GOOS == "windows" {
+			return
+		}
+
+		var empty string
+		var urlStr atomic.Pointer[string]
+		urlStr.Store(&empty)
+		var newVersion atomic.Pointer[string]
+		newVersion.Store(&version)
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/artifact" {
+				buf := new(bytes.Buffer)
+				gw := gzip.NewWriter(buf)
+				tw := tar.NewWriter(gw)
+				data := []byte("fetch binary")
+				tw.WriteHeader(&tar.Header{
+					Name:     "fetch",
+					Typeflag: tar.TypeReg,
+					Mode:     0600,
+					Size:     int64(len(data)),
+				})
+				tw.Write(data)
+				tw.Close()
+				gw.Close()
+				w.WriteHeader(200)
+				w.Write(buf.Bytes())
+				return
+			}
+
+			type Asset struct {
+				Name string `json:"name"`
+				URL  string `json:"browser_download_url"`
+			}
+			type Release struct {
+				TagName string  `json:"tag_name"`
+				Assets  []Asset `json:"assets"`
+			}
+			w.WriteHeader(200)
+			rel := Release{TagName: "v" + *newVersion.Load()}
+			rel.Assets = append(rel.Assets, Asset{
+				Name: fmt.Sprintf("fetch-v%s-%s-%s.tar.gz",
+					*newVersion.Load(), runtime.GOOS, runtime.GOARCH),
+				URL: *urlStr.Load() + "/artifact",
+			})
+			json.NewEncoder(w).Encode(rel)
+		})
+		defer server.Close()
+		urlStr.Store(&server.URL)
+
+		os.Setenv("FETCH_INTERNAL_UPDATE_URL", server.URL)
+		defer os.Unsetenv("FETCH_INTERNAL_UPDATE_URL")
+
+		// Test update using latest version.
+		res := runFetch(t, fetchPath, server.URL, "--update")
+		assertExitCode(t, 0, res.state)
+		assertBufContains(t, res.stderr, "currently using the latest version")
+		if s := listFiles(t, filepath.Dir(fetchPath)); len(s) > 1 {
+			t.Fatalf("unexpected files after updating: %v", s)
+		}
+
+		// Test full update.
+		newStr := "new"
+		newVersion.Store(&newStr)
+		res = runFetch(t, fetchPath, server.URL, "--update")
+		assertExitCode(t, 0, res.state)
+		assertBufContains(t, res.stderr, "fetch successfully updated")
+		if s := listFiles(t, filepath.Dir(fetchPath)); len(s) > 1 {
+			t.Fatalf("unexpected files after updating: %v", s)
+		}
+	})
 }
 
 type runResult struct {
@@ -267,6 +345,21 @@ func getFetchVersion(t *testing.T, path string) string {
 
 func startServer(h http.HandlerFunc) *httptest.Server {
 	return httptest.NewServer(h)
+}
+
+func listFiles(t *testing.T, dir string) []string {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("unexpected error reading directory: %s", err.Error())
+	}
+
+	out := make([]string, len(entries))
+	for i, entry := range entries {
+		out[i] = entry.Name()
+	}
+	return out
 }
 
 func assertExitCode(t *testing.T, exp int, state *os.ProcessState) {
