@@ -30,6 +30,7 @@ const (
 	TypeUnknown ContentType = iota
 	TypeImage
 	TypeJSON
+	TypeNDJSON
 	TypeXML
 )
 
@@ -171,56 +172,68 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 		errPrinter.Flush()
 	}
 
-	if r.Output != "" && r.Output != "-" {
-		f, err := os.Create(r.Output)
-		if err != nil {
-			return false, err
-		}
-		defer f.Close()
-
-		// TODO: show a progress bar on stderr?
-
-		if _, err = io.Copy(f, resp.Body); err != nil {
-			return false, err
-		}
-		return ok, nil
-	}
-
-	var body io.Reader = resp.Body
-	if !r.NoFormat && vars.IsStdoutTerm {
-		contentType := getContentType(resp.Header)
-		if contentType != TypeUnknown {
-			// TODO: limit bytes read
-			buf, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return false, err
-			}
-
-			switch contentType {
-			case TypeImage:
-				err = image.Render(buf)
-				return err == nil, err
-			case TypeJSON:
-				r := bytes.NewReader(buf)
-				if format.FormatJSON(r, outPrinter) == nil {
-					buf = outPrinter.Bytes()
-				}
-			case TypeXML:
-				r := bytes.NewReader(buf)
-				if format.FormatXML(r, outPrinter) == nil {
-					buf = outPrinter.Bytes()
-				}
-			}
-			body = bytes.NewReader(buf)
-		}
-	}
-
-	err = streamToStdout(body, errPrinter, r.Output == "-", r.NoPager)
+	body, err := formatResponse(r, resp, outPrinter)
 	if err != nil {
 		return false, err
 	}
 
+	if body != nil {
+		err = streamToStdout(body, errPrinter, r.Output == "-", r.NoPager)
+		if err != nil {
+			return false, err
+		}
+	}
+
 	return ok, nil
+}
+
+func formatResponse(r *Request, resp *http.Response, p *printer.Printer) (io.Reader, error) {
+	if r.Output != "" && r.Output != "-" {
+		f, err := os.Create(r.Output)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		// TODO: show a progress bar on stderr?
+		_, err = io.Copy(f, resp.Body)
+		return nil, err
+	}
+
+	if r.NoFormat || !vars.IsStdoutTerm {
+		return resp.Body, nil
+	}
+
+	contentType := getContentType(resp.Header)
+	switch contentType {
+	case TypeUnknown:
+		return resp.Body, nil
+	case TypeNDJSON:
+		return nil, format.FormatNDJSON(resp.Body, p)
+	}
+
+	// TODO: Should probably limit the bytes read here.
+	buf, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	switch contentType {
+	case TypeImage:
+		return nil, image.Render(buf)
+	case TypeJSON:
+		r := bytes.NewReader(buf)
+		if format.FormatJSON(r, p) == nil {
+			buf = p.Bytes()
+		}
+	case TypeXML:
+		r := bytes.NewReader(buf)
+		if format.FormatXML(r, p) == nil {
+			buf = p.Bytes()
+		}
+	}
+
+	return bytes.NewReader(buf), nil
 }
 
 func printRequestMetadata(p *printer.Printer, req *http.Request) {
@@ -357,6 +370,8 @@ func getContentType(headers http.Header) ContentType {
 		switch subtype {
 		case "json":
 			return TypeJSON
+		case "ndjson", "x-ndjson", "jsonl", "x-jsonl", "x-jsonlines":
+			return TypeNDJSON
 		case "xml":
 			return TypeXML
 		}
@@ -365,6 +380,8 @@ func getContentType(headers http.Header) ContentType {
 	switch mediaType {
 	case "application/json":
 		return TypeJSON
+	case "application/x-ndjson":
+		return TypeNDJSON
 	case "application/xml", "text/xml":
 		return TypeXML
 	case "image/jpeg", "image/png", "image/tiff", "image/webp":
