@@ -209,6 +209,7 @@ func formatResponse(r *Request, resp *http.Response, p *printer.Printer) (io.Rea
 	case TypeUnknown:
 		return resp.Body, nil
 	case TypeNDJSON:
+		// NOTE: This bypasses the isPrintable check for binary data.
 		return nil, format.FormatNDJSON(resp.Body, p)
 	}
 
@@ -432,7 +433,7 @@ func isPrintable(r io.Reader) (bool, io.Reader, error) {
 	buf := make([]byte, 1024)
 	n, err := io.ReadFull(r, buf)
 	switch {
-	case err == io.ErrUnexpectedEOF:
+	case err == io.EOF || err == io.ErrUnexpectedEOF:
 		buf = buf[:n]
 		r = bytes.NewReader(buf)
 	case err != nil:
