@@ -58,6 +58,13 @@ func handleHeader(dir string, tr *tar.Reader, header *tar.Header) error {
 }
 
 func selfReplace(exePath, newExePath string) error {
+	// Fast path, attempt to rename from the temp directory.
+	if os.Rename(newExePath, exePath) == nil {
+		return nil
+	}
+
+	// Otherwise, copy the file into the same directory as the existing
+	// binary and attempt the rename again.
 	tempPath := createTempFilePath(filepath.Dir(exePath), ".__temp")
 	defer os.Remove(tempPath)
 
