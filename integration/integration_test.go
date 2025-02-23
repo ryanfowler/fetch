@@ -223,6 +223,7 @@ func TestMain(t *testing.T) {
 		}
 
 		tempFile := createTempFile(t, "temp file data")
+		defer os.Remove(tempFile)
 		res = runFetch(t, fetchPath, server.URL, "--data", "@"+tempFile)
 		assertExitCode(t, 0, res)
 		req = <-chReq
@@ -304,8 +305,42 @@ func TestMain(t *testing.T) {
 		defer server.Close()
 
 		tempFile := createTempFile(t, "file content")
+		defer os.Remove(tempFile)
 		res := runFetch(t, fetchPath, server.URL, "-F", "key1=val1", "-F", "file1=@"+tempFile)
 		assertExitCode(t, 0, res)
+	})
+
+	t.Run("output", func(t *testing.T) {
+		const data = "this is the data"
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		dir, err := os.MkdirTemp("", "")
+		if err != nil {
+			t.Fatalf("unable to create temp dir: %s", err.Error())
+		}
+		defer os.RemoveAll(dir)
+
+		// Test writing to an output file.
+		path := filepath.Join(dir, "output")
+		res := runFetch(t, fetchPath, server.URL, "-o", path)
+		assertExitCode(t, 0, res)
+
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("unable to read from output file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("unexpected data in output file: %s", raw)
+		}
+
+		// Test writing to stdout.
+		res = runFetch(t, fetchPath, server.URL, "-o", "-")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
 	})
 
 	t.Run("update", func(t *testing.T) {
