@@ -26,7 +26,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	app, err := cli.Parse()
+	app, err := cli.Parse(os.Args[1:])
 	if err != nil {
 		p := printer.NewHandle(printer.ColorAuto).Stderr()
 		writeCLIErr(p, err)

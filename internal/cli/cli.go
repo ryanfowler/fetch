@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/ryanfowler/fetch/internal/printer"
@@ -24,6 +23,7 @@ type Arguments struct {
 type Flag struct {
 	Short       string
 	Long        string
+	Aliases     []string
 	Args        string
 	Description string
 	Default     string
@@ -42,6 +42,13 @@ func parse(cli *CLI, args []string) error {
 		}
 		if flag.Long != "" {
 			long[flag.Long] = flag
+		}
+		for _, alias := range flag.Aliases {
+			if len(alias) == 1 {
+				short[alias] = flag
+			} else {
+				long[alias] = flag
+			}
 		}
 	}
 
@@ -196,11 +203,11 @@ func unknownFlagError(name string) error {
 	return fmt.Errorf("unknown flag: %q", name)
 }
 
-func Parse() (*App, error) {
+func Parse(args []string) (*App, error) {
 	app := NewApp()
 
 	cli := app.CLI()
-	err := parse(cli, os.Args[1:])
+	err := parse(cli, args)
 	if err != nil {
 		return app, err
 	}

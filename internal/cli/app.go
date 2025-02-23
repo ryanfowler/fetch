@@ -331,7 +331,7 @@ func (a *App) CLI() *CLI {
 				Short:       "j",
 				Long:        "json",
 				Args:        "",
-				Description: "Set the request content-type to application/json",
+				Description: "Set the content-type to application/json",
 				Default:     "",
 				IsSet: func() bool {
 					return a.JSON
@@ -344,6 +344,7 @@ func (a *App) CLI() *CLI {
 			{
 				Short:       "m",
 				Long:        "method",
+				Aliases:     []string{"X"},
 				Args:        "METHOD",
 				Description: "HTTP method to use",
 				Default:     "GET",
@@ -486,7 +487,7 @@ func (a *App) CLI() *CLI {
 				Short:       "t",
 				Long:        "timeout",
 				Args:        "SECONDS",
-				Description: "Timeout in seconds applied to the entire request",
+				Description: "Timeout in seconds applied to the request",
 				Default:     "",
 				IsSet: func() bool {
 					return a.Timeout != 0
@@ -547,7 +548,7 @@ func (a *App) CLI() *CLI {
 				Short:       "x",
 				Long:        "xml",
 				Args:        "",
-				Description: "Set the request content-type to application/xml",
+				Description: "Set the content-type to application/xml",
 				Default:     "",
 				IsSet: func() bool {
 					return a.XML
