@@ -34,6 +34,7 @@ func main() {
 	}
 
 	printerHandle := printer.NewHandle(app.Color)
+	verbosity := getVerbosity(app)
 
 	if app.Help {
 		p := printerHandle.Stdout()
@@ -47,7 +48,8 @@ func main() {
 	}
 	if app.Update {
 		p := printerHandle.Stderr()
-		if ok := update.Update(ctx, p, app.Timeout, version); ok {
+		ok := update.Update(ctx, p, app.Timeout, version, verbosity == fetch.VSilent)
+		if ok {
 			os.Exit(0)
 		}
 		os.Exit(1)
@@ -70,7 +72,7 @@ func main() {
 		Output:        app.Output,
 		PrinterHandle: printerHandle,
 		UserAgent:     "fetch/" + version,
-		Verbosity:     getVerbosity(app),
+		Verbosity:     verbosity,
 
 		Method:      app.Method,
 		URL:         app.URL,

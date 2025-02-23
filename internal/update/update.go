@@ -18,8 +18,8 @@ import (
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
-func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, version string) bool {
-	err := update(ctx, p, timeout, version)
+func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, version string, silent bool) bool {
+	err := update(ctx, p, timeout, version, silent)
 	if err == nil {
 		return true
 	}
@@ -35,21 +35,18 @@ func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 	return false
 }
 
-func update(ctx context.Context, p *printer.Printer, timeout time.Duration, version string) error {
+func update(ctx context.Context, p *printer.Printer, timeout time.Duration, version string, silent bool) error {
 	cfg := client.ClientConfig{Timeout: timeout, UserAgent: "fetch/" + version}
 	c := client.NewClient(cfg)
 
-	writeInfo(p, "fetching latest release tag")
+	writeInfo(p, silent, "fetching latest release tag")
 	latest, err := getLatestRelease(ctx, c)
 	if err != nil {
 		return fmt.Errorf("fetching latest release: %w", err)
 	}
 
 	if strings.TrimPrefix(latest.TagName, "v") == version {
-		p.WriteString("\n  currently using the latest version (v")
-		p.WriteString(version)
-		p.WriteString(")\n")
-		p.Flush()
+		writeInfo(p, silent, fmt.Sprintf("currently using the latest version (v%s)", version))
 		return nil
 	}
 
@@ -59,7 +56,7 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 			runtime.GOOS, runtime.GOARCH, latest.TagName)
 	}
 
-	writeInfo(p, fmt.Sprintf("downloading latest version (%s)", latest.TagName))
+	writeInfo(p, silent, fmt.Sprintf("downloading latest version (%s)", latest.TagName))
 	rc, err := getArtifactReader(ctx, c, artifactURL)
 	if err != nil {
 		return fmt.Errorf("fetching artifact: %w", err)
@@ -87,12 +84,8 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 		return err
 	}
 
-	p.WriteString("\n  fetch successfully updated (v")
-	p.WriteString(version)
-	p.WriteString(" -> ")
-	p.WriteString(latest.TagName)
-	p.WriteString(")\n")
-	p.Flush()
+	msg := fmt.Sprintf("fetch successfully updated (v%s -> %s)", version, latest.TagName)
+	writeInfo(p, silent, msg)
 	return nil
 }
 
@@ -204,7 +197,11 @@ func getFetchFilename() string {
 	return name
 }
 
-func writeInfo(p *printer.Printer, s string) {
+func writeInfo(p *printer.Printer, silent bool, s string) {
+	if silent {
+		return
+	}
+
 	p.Set(printer.Bold)
 	p.Set(printer.Green)
 	p.WriteString("info")

@@ -472,7 +472,7 @@ func (a *App) CLI() *CLI {
 				Short:       "s",
 				Long:        "silent",
 				Args:        "",
-				Description: "Avoid printing anything to stderr",
+				Description: "Print only errors to stderr",
 				Default:     "",
 				IsSet: func() bool {
 					return a.Silent
