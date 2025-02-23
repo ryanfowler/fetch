@@ -207,8 +207,9 @@ func getFetchFilename() string {
 func writeInfo(p *printer.Printer, s string) {
 	p.Set(printer.Bold)
 	p.Set(printer.Green)
-	p.WriteString("info: ")
+	p.WriteString("info")
 	p.Reset()
+	p.WriteString(": ")
 
 	p.WriteString(s)
 	p.WriteString("\n")

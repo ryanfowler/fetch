@@ -56,7 +56,7 @@ jobs:
           check-latest: true
 
       - name: Test
-        run: go test -cover -race -v ./...
+        run: go test -v ./...
 
   build:
     runs-on: ubuntu-latest

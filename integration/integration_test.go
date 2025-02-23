@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"encoding/base64"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestMain(t *testing.T) {
@@ -63,7 +65,7 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "cannot be used together")
 	})
 
-	t.Run("200 verbosity", func(t *testing.T) {
+	t.Run("verbosity", func(t *testing.T) {
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Custom-Header", "value")
 			w.WriteHeader(200)
@@ -190,19 +192,57 @@ func TestMain(t *testing.T) {
 		newVersion.Store(&version)
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/artifact" {
+				f, err := os.Open(fetchPath)
+				if err != nil {
+					w.WriteHeader(400)
+					return
+				}
+				defer f.Close()
+				stat, err := f.Stat()
+				if err != nil {
+					w.WriteHeader(400)
+					return
+				}
+
 				buf := new(bytes.Buffer)
-				gw := gzip.NewWriter(buf)
-				tw := tar.NewWriter(gw)
-				data := []byte("fetch binary")
-				tw.WriteHeader(&tar.Header{
-					Name:     "fetch",
-					Typeflag: tar.TypeReg,
-					Mode:     0600,
-					Size:     int64(len(data)),
-				})
-				tw.Write(data)
-				tw.Close()
-				gw.Close()
+				if runtime.GOOS == "windows" {
+					zw := zip.NewWriter(buf)
+					h, err := zip.FileInfoHeader(stat)
+					if err != nil {
+						w.WriteHeader(400)
+						return
+					}
+					hw, err := zw.CreateHeader(h)
+					if err != nil {
+						w.WriteHeader(400)
+						return
+					}
+					if _, err = io.Copy(hw, f); err != nil {
+						w.WriteHeader(400)
+						return
+					}
+					zw.Close()
+				} else {
+					gw := gzip.NewWriter(buf)
+					tw := tar.NewWriter(gw)
+					h, err := tar.FileInfoHeader(stat, "")
+					if err != nil {
+						w.WriteHeader(400)
+						return
+					}
+					err = tw.WriteHeader(h)
+					if err != nil {
+						w.WriteHeader(400)
+						return
+					}
+					if _, err = io.Copy(tw, f); err != nil {
+						w.WriteHeader(400)
+						return
+					}
+					tw.Close()
+					gw.Close()
+				}
+
 				w.WriteHeader(200)
 				w.Write(buf.Bytes())
 				return
@@ -216,6 +256,7 @@ func TestMain(t *testing.T) {
 				TagName string  `json:"tag_name"`
 				Assets  []Asset `json:"assets"`
 			}
+
 			w.WriteHeader(200)
 			rel := Release{TagName: "v" + *newVersion.Load()}
 			rel.Assets = append(rel.Assets, Asset{
@@ -231,12 +272,17 @@ func TestMain(t *testing.T) {
 		os.Setenv("FETCH_INTERNAL_UPDATE_URL", server.URL)
 		defer os.Unsetenv("FETCH_INTERNAL_UPDATE_URL")
 
+		origModTime := getModTime(t, fetchPath)
+
 		// Test update using latest version.
 		res := runFetch(t, fetchPath, server.URL, "--update")
 		assertExitCode(t, 0, res.state)
 		assertBufContains(t, res.stderr, "currently using the latest version")
 		if s := listFiles(t, filepath.Dir(fetchPath)); len(s) > 1 {
 			t.Fatalf("unexpected files after updating: %v", s)
+		}
+		if !getModTime(t, fetchPath).Equal(origModTime) {
+			t.Fatal("mod times after non-update are not equal")
 		}
 
 		// Test full update.
@@ -248,6 +294,15 @@ func TestMain(t *testing.T) {
 		if s := listFiles(t, filepath.Dir(fetchPath)); len(s) > 1 {
 			t.Fatalf("unexpected files after updating: %v", s)
 		}
+		// Verify that the mod time has changed on the file.
+		afterModTime := getModTime(t, fetchPath)
+		if origModTime.Equal(afterModTime) {
+			t.Fatal("mod times are equal")
+		}
+
+		// Ensure the new fetch binary still works.
+		res = runFetch(t, fetchPath, "--version")
+		assertExitCode(t, 0, res.state)
 	})
 }
 
@@ -291,11 +346,7 @@ func getTempDir(t *testing.T) string {
 func goBuild(t *testing.T, dir string) string {
 	t.Helper()
 
-	name := "fetch"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	path := filepath.Join(dir, name)
+	path := filepath.Join(dir, getExeName())
 	workingDir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("unable to get current working directory: %s", err.Error())
@@ -315,6 +366,13 @@ func goBuild(t *testing.T, dir string) string {
 	}
 
 	return path
+}
+
+func getExeName() string {
+	if runtime.GOOS == "windows" {
+		return "fetch.exe"
+	}
+	return "fetch"
 }
 
 func getFetchVersion(t *testing.T, path string) string {
@@ -360,6 +418,16 @@ func listFiles(t *testing.T, dir string) []string {
 		out[i] = entry.Name()
 	}
 	return out
+}
+
+func getModTime(t *testing.T, path string) time.Time {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("unable to get file info: %s", err.Error())
+	}
+	return info.ModTime()
 }
 
 func assertExitCode(t *testing.T, exp int, state *os.ProcessState) {
