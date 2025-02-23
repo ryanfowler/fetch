@@ -58,35 +58,20 @@ func handleHeader(dir string, tr *tar.Reader, header *tar.Header) error {
 }
 
 func selfReplace(exePath, newExePath string) error {
-	stat, err := os.Stat(exePath)
-	if err != nil {
-		return err
-	}
-
-	exeDir := filepath.Dir(exePath)
-	tempPath, err := createTemp(exeDir, stat.Mode())
-	if err != nil {
-		return err
-	}
+	tempPath := createTempFilePath(filepath.Dir(exePath), ".__temp")
 	defer os.Remove(tempPath)
 
-	if err = copyFile(tempPath, newExePath); err != nil {
+	err := copyFile(tempPath, newExePath)
+	if err != nil {
 		return err
 	}
 
 	return os.Rename(tempPath, exePath)
-
 }
 
-func createTemp(dir string, mode os.FileMode) (string, error) {
-	name := ".fetch.temp." + randomString(12)
-	f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDWR|os.O_CREATE|os.O_TRUNC, mode)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	return f.Name(), nil
+func createTempFilePath(dir, suffix string) string {
+	name := ".fetch." + randomString(16) + suffix
+	return filepath.Join(dir, name)
 }
 
 func copyFile(dst, src string) error {
@@ -96,7 +81,12 @@ func copyFile(dst, src string) error {
 	}
 	defer srcFile.Close()
 
-	dstFile, err := os.OpenFile(dst, os.O_RDWR|os.O_APPEND, 0)
+	info, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode())
 	if err != nil {
 		return err
 	}
