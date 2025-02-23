@@ -10,8 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,6 +182,132 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 	})
 
+	t.Run("data", func(t *testing.T) {
+		type requestData struct {
+			body    string
+			headers http.Header
+		}
+		chReq := make(chan requestData, 1)
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			var buf bytes.Buffer
+			buf.ReadFrom(r.Body)
+			chReq <- requestData{body: buf.String(), headers: r.Header}
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--data", "hello")
+		assertExitCode(t, 0, res)
+		req := <-chReq
+		if req.body != "hello" {
+			t.Fatalf("unexpected body: %s", req.body)
+		}
+
+		res = runFetch(t, fetchPath, server.URL, "--json", "--data", `{"key":"val"}`)
+		assertExitCode(t, 0, res)
+		req = <-chReq
+		if req.body != `{"key":"val"}` {
+			t.Fatalf("unexpected body: %s", req.body)
+		}
+		if h := req.headers.Get("Content-Type"); h != "application/json" {
+			t.Fatalf("unexpected content-type: %s", h)
+		}
+
+		res = runFetch(t, fetchPath, server.URL, "--xml", "--data", `<Tag></Tag>`)
+		assertExitCode(t, 0, res)
+		req = <-chReq
+		if req.body != `<Tag></Tag>` {
+			t.Fatalf("unexpected body: %s", req.body)
+		}
+		if h := req.headers.Get("Content-Type"); h != "application/xml" {
+			t.Fatalf("unexpected content-type: %s", h)
+		}
+
+		tempFile := createTempFile(t, "temp file data")
+		res = runFetch(t, fetchPath, server.URL, "--data", "@"+tempFile)
+		assertExitCode(t, 0, res)
+		req = <-chReq
+		if req.body != "temp file data" {
+			t.Fatalf("unexpected body: %s", req.body)
+		}
+	})
+
+	t.Run("form", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			var buf bytes.Buffer
+			buf.ReadFrom(r.Body)
+			q, _ := url.ParseQuery(buf.String())
+			if len(q) != 2 {
+				w.WriteHeader(400)
+				return
+			}
+			if q.Get("key1") != "val1" {
+				w.WriteHeader(400)
+				return
+			}
+			if q.Get("key2") != "val2" {
+				w.WriteHeader(400)
+				return
+			}
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "-f", "key1=val1", "-f", "key2=val2")
+		assertExitCode(t, 0, res)
+	})
+
+	t.Run("multipart", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if err != nil {
+				w.WriteHeader(400)
+				io.WriteString(w, "cannot parse media type: "+err.Error())
+				return
+			}
+			if mediaType != "multipart/form-data" {
+				w.WriteHeader(400)
+				io.WriteString(w, "invalid media type: "+mediaType)
+				return
+			}
+
+			form, err := multipart.NewReader(r.Body, params["boundary"]).ReadForm(1 << 24)
+			if err != nil {
+				w.WriteHeader(400)
+				io.WriteString(w, "cannot read form: "+err.Error())
+				return
+			}
+
+			if len(form.Value) != 1 || form.Value["key1"][0] != "val1" {
+				w.WriteHeader(400)
+				io.WriteString(w, fmt.Sprintf("invalid form values: %+v", form.Value))
+				return
+			}
+			if len(form.File) != 1 {
+				w.WriteHeader(400)
+				io.WriteString(w, fmt.Sprintf("invalid form files: %+v", form.File))
+				return
+			}
+			file, err := form.File["file1"][0].Open()
+			if err != nil {
+				w.WriteHeader(400)
+				io.WriteString(w, "cannot open form file: "+err.Error())
+				return
+			}
+
+			var buf bytes.Buffer
+			buf.ReadFrom(file)
+			if buf.String() != "file content" {
+				w.WriteHeader(400)
+				io.WriteString(w, "invalid file content: "+buf.String())
+				return
+			}
+		})
+		defer server.Close()
+
+		tempFile := createTempFile(t, "file content")
+		res := runFetch(t, fetchPath, server.URL, "-F", "key1=val1", "-F", "file1=@"+tempFile)
+		assertExitCode(t, 0, res)
+	})
+
 	t.Run("update", func(t *testing.T) {
 		var empty string
 		var urlStr atomic.Pointer[string]
@@ -342,6 +471,23 @@ func getTempDir(t *testing.T) string {
 	return dir
 }
 
+func createTempFile(t *testing.T, data string) string {
+	t.Helper()
+
+	f, err := os.CreateTemp("", "")
+	if err != nil {
+		t.Fatalf("unable to create temp file: %s", err.Error())
+	}
+	defer f.Close()
+
+	_, err = io.Copy(f, strings.NewReader(data))
+	if err != nil {
+		t.Fatalf("unable to write data to temp file: %s", err.Error())
+	}
+
+	return f.Name()
+}
+
 func goBuild(t *testing.T, dir string) string {
 	t.Helper()
 
@@ -435,6 +581,7 @@ func assertExitCode(t *testing.T, exp int, res runResult) {
 	exitCode := res.state.ExitCode()
 	if exp != exitCode {
 		fmt.Printf("STDERR: %s\n", res.stderr.String())
+		fmt.Printf("STDOUT: %s\n", res.stdout.String())
 		t.Fatalf("unexpected exit code: %d", exitCode)
 	}
 }
