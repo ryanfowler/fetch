@@ -75,30 +75,3 @@ func selfReplace(exePath, newExePath string) error {
 
 	return os.Rename(tempPath, exePath)
 }
-
-func createTempFilePath(dir, suffix string) string {
-	name := ".fetch." + randomString(16) + suffix
-	return filepath.Join(dir, name)
-}
-
-func copyFile(dst, src string) error {
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	info, err := srcFile.Stat()
-	if err != nil {
-		return err
-	}
-
-	dstFile, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode())
-	if err != nil {
-		return err
-	}
-	defer dstFile.Close()
-
-	_, err = io.Copy(dstFile, srcFile)
-	return err
-}

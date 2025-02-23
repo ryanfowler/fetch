@@ -32,35 +32,35 @@ func TestMain(t *testing.T) {
 
 	t.Run("help", func(t *testing.T) {
 		res := runFetch(t, fetchPath, "--help")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 		assertBufEmpty(t, res.stderr)
 		assertBufNotEmpty(t, res.stdout)
 	})
 
 	t.Run("no url", func(t *testing.T) {
 		res := runFetch(t, fetchPath)
-		assertExitCode(t, 1, res.state)
+		assertExitCode(t, 1, res)
 		assertBufEmpty(t, res.stdout)
 		assertBufContains(t, res.stderr, "<URL> must be provided")
 	})
 
 	t.Run("too many args", func(t *testing.T) {
 		res := runFetch(t, fetchPath, "url1", "url2")
-		assertExitCode(t, 1, res.state)
+		assertExitCode(t, 1, res)
 		assertBufEmpty(t, res.stdout)
 		assertBufContains(t, res.stderr, "unexpected argument")
 	})
 
 	t.Run("invalid flag", func(t *testing.T) {
 		res := runFetch(t, fetchPath, "--invalid")
-		assertExitCode(t, 1, res.state)
+		assertExitCode(t, 1, res)
 		assertBufEmpty(t, res.stdout)
 		assertBufContains(t, res.stderr, "unknown flag")
 	})
 
 	t.Run("conflicting flags", func(t *testing.T) {
 		res := runFetch(t, fetchPath, "--basic", "user:pass", "--bearer", "token")
-		assertExitCode(t, 1, res.state)
+		assertExitCode(t, 1, res)
 		assertBufEmpty(t, res.stdout)
 		assertBufContains(t, res.stderr, "cannot be used together")
 	})
@@ -74,25 +74,25 @@ func TestMain(t *testing.T) {
 		defer server.Close()
 
 		res := runFetch(t, fetchPath, server.URL)
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "HTTP/1.1 200 OK")
 		assertBufNotContains(t, res.stderr, "user-agent")
 		assertBufNotContains(t, res.stderr, "x-custom-header")
 		assertBufEquals(t, res.stdout, "hello")
 
 		res = runFetch(t, fetchPath, server.URL, "-s")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 		assertBufEmpty(t, res.stderr)
 		assertBufEquals(t, res.stdout, "hello")
 
 		res = runFetch(t, fetchPath, server.URL, "-v")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 		assertBufNotContains(t, res.stderr, "user-agent")
 		assertBufContains(t, res.stderr, "x-custom-header")
 		assertBufEquals(t, res.stdout, "hello")
 
 		res = runFetch(t, fetchPath, server.URL, "-vv")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "GET / HTTP/1.1")
 		assertBufContains(t, res.stderr, "user-agent")
 		assertBufContains(t, res.stderr, "x-custom-header")
@@ -124,7 +124,7 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, server.URL, "--aws-sigv4", "us-east-1/s3")
 		os.Unsetenv("AWS_ACCESS_KEY_ID")
 		os.Unsetenv("AWS_SECRET_ACCESS_KEY")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 	})
 
 	t.Run("basic auth", func(t *testing.T) {
@@ -153,7 +153,7 @@ func TestMain(t *testing.T) {
 		defer server.Close()
 
 		res := runFetch(t, fetchPath, server.URL, "--basic", "user:pass")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 	})
 
 	t.Run("bearer auth", func(t *testing.T) {
@@ -176,95 +176,94 @@ func TestMain(t *testing.T) {
 		defer server.Close()
 
 		res := runFetch(t, fetchPath, server.URL, "--bearer", "token")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 	})
 
 	t.Run("update", func(t *testing.T) {
-		// Not yet working on windows.
-		if runtime.GOOS == "windows" {
-			return
-		}
-
 		var empty string
 		var urlStr atomic.Pointer[string]
 		urlStr.Store(&empty)
 		var newVersion atomic.Pointer[string]
 		newVersion.Store(&version)
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/artifact" {
-				f, err := os.Open(fetchPath)
-				if err != nil {
-					w.WriteHeader(400)
-					return
+			if r.URL.Path != "/artifact" {
+				type Asset struct {
+					Name string `json:"name"`
+					URL  string `json:"browser_download_url"`
 				}
-				defer f.Close()
-				stat, err := f.Stat()
-				if err != nil {
-					w.WriteHeader(400)
-					return
-				}
-
-				buf := new(bytes.Buffer)
-				if runtime.GOOS == "windows" {
-					zw := zip.NewWriter(buf)
-					h, err := zip.FileInfoHeader(stat)
-					if err != nil {
-						w.WriteHeader(400)
-						return
-					}
-					hw, err := zw.CreateHeader(h)
-					if err != nil {
-						w.WriteHeader(400)
-						return
-					}
-					if _, err = io.Copy(hw, f); err != nil {
-						w.WriteHeader(400)
-						return
-					}
-					zw.Close()
-				} else {
-					gw := gzip.NewWriter(buf)
-					tw := tar.NewWriter(gw)
-					h, err := tar.FileInfoHeader(stat, "")
-					if err != nil {
-						w.WriteHeader(400)
-						return
-					}
-					err = tw.WriteHeader(h)
-					if err != nil {
-						w.WriteHeader(400)
-						return
-					}
-					if _, err = io.Copy(tw, f); err != nil {
-						w.WriteHeader(400)
-						return
-					}
-					tw.Close()
-					gw.Close()
+				type Release struct {
+					TagName string  `json:"tag_name"`
+					Assets  []Asset `json:"assets"`
 				}
 
 				w.WriteHeader(200)
-				w.Write(buf.Bytes())
+				rel := Release{TagName: "v" + *newVersion.Load()}
+				suffix := "tar.gz"
+				if runtime.GOOS == "windows" {
+					suffix = "zip"
+				}
+				rel.Assets = append(rel.Assets, Asset{
+					Name: fmt.Sprintf("fetch-v%s-%s-%s.%s",
+						*newVersion.Load(), runtime.GOOS, runtime.GOARCH, suffix),
+					URL: *urlStr.Load() + "/artifact",
+				})
+				json.NewEncoder(w).Encode(rel)
 				return
 			}
 
-			type Asset struct {
-				Name string `json:"name"`
-				URL  string `json:"browser_download_url"`
+			f, err := os.Open(fetchPath)
+			if err != nil {
+				w.WriteHeader(400)
+				return
 			}
-			type Release struct {
-				TagName string  `json:"tag_name"`
-				Assets  []Asset `json:"assets"`
+			defer f.Close()
+			stat, err := f.Stat()
+			if err != nil {
+				w.WriteHeader(400)
+				return
+			}
+
+			buf := new(bytes.Buffer)
+			if runtime.GOOS == "windows" {
+				zw := zip.NewWriter(buf)
+				h, err := zip.FileInfoHeader(stat)
+				if err != nil {
+					w.WriteHeader(400)
+					return
+				}
+				hw, err := zw.CreateHeader(h)
+				if err != nil {
+					w.WriteHeader(400)
+					return
+				}
+				if _, err = io.Copy(hw, f); err != nil {
+					w.WriteHeader(400)
+					return
+				}
+				zw.Close()
+			} else {
+				gw := gzip.NewWriter(buf)
+				tw := tar.NewWriter(gw)
+				h, err := tar.FileInfoHeader(stat, "")
+				if err != nil {
+					w.WriteHeader(400)
+					return
+				}
+				err = tw.WriteHeader(h)
+				if err != nil {
+					w.WriteHeader(400)
+					return
+				}
+				if _, err = io.Copy(tw, f); err != nil {
+					w.WriteHeader(400)
+					return
+				}
+				tw.Close()
+				gw.Close()
 			}
 
 			w.WriteHeader(200)
-			rel := Release{TagName: "v" + *newVersion.Load()}
-			rel.Assets = append(rel.Assets, Asset{
-				Name: fmt.Sprintf("fetch-v%s-%s-%s.tar.gz",
-					*newVersion.Load(), runtime.GOOS, runtime.GOARCH),
-				URL: *urlStr.Load() + "/artifact",
-			})
-			json.NewEncoder(w).Encode(rel)
+			w.Write(buf.Bytes())
 		})
 		defer server.Close()
 		urlStr.Store(&server.URL)
@@ -276,7 +275,7 @@ func TestMain(t *testing.T) {
 
 		// Test update using latest version.
 		res := runFetch(t, fetchPath, server.URL, "--update")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "currently using the latest version")
 		if s := listFiles(t, filepath.Dir(fetchPath)); len(s) > 1 {
 			t.Fatalf("unexpected files after updating: %v", s)
@@ -289,7 +288,7 @@ func TestMain(t *testing.T) {
 		newStr := "new"
 		newVersion.Store(&newStr)
 		res = runFetch(t, fetchPath, server.URL, "--update")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "fetch successfully updated")
 		if s := listFiles(t, filepath.Dir(fetchPath)); len(s) > 1 {
 			t.Fatalf("unexpected files after updating: %v", s)
@@ -302,7 +301,7 @@ func TestMain(t *testing.T) {
 
 		// Ensure the new fetch binary still works.
 		res = runFetch(t, fetchPath, "--version")
-		assertExitCode(t, 0, res.state)
+		assertExitCode(t, 0, res)
 	})
 }
 
@@ -379,7 +378,7 @@ func getFetchVersion(t *testing.T, path string) string {
 	t.Helper()
 
 	res := runFetch(t, path, "--version")
-	assertExitCode(t, 0, res.state)
+	assertExitCode(t, 0, res)
 
 	_, version, ok := strings.Cut(res.stdout.String(), " ")
 	if !ok {
@@ -430,11 +429,12 @@ func getModTime(t *testing.T, path string) time.Time {
 	return info.ModTime()
 }
 
-func assertExitCode(t *testing.T, exp int, state *os.ProcessState) {
+func assertExitCode(t *testing.T, exp int, res runResult) {
 	t.Helper()
 
-	exitCode := state.ExitCode()
+	exitCode := res.state.ExitCode()
 	if exp != exitCode {
+		fmt.Printf("STDERR: %s\n", res.stderr.String())
 		t.Fatalf("unexpected exit code: %d", exitCode)
 	}
 }
