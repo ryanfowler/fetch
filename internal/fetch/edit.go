@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -46,10 +47,22 @@ func edit(input io.Reader, extension string) ([]byte, error) {
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 	if err = cmd.Run(); err != nil {
-		return nil, errors.New("editing failed; abort")
+		if state := cmd.ProcessState; state != nil {
+			code := state.ExitCode()
+			return nil, fmt.Errorf("editor failed with exit code: %d", code)
+		}
+		return nil, fmt.Errorf("failed to start editor: %w", err)
 	}
 
-	return os.ReadFile(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, errors.New("aborting request due to empty body after editing")
+	}
+
+	return data, nil
 }
 
 func getEditor() (string, bool) {
