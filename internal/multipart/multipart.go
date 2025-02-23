@@ -23,8 +23,8 @@ func NewMultipart(kvs []vars.KeyVal) *Multipart {
 	mpw := multipart.NewWriter(writer)
 	go func() {
 		defer func() {
-			writer.Close()
 			mpw.Close()
+			writer.Close()
 		}()
 
 		for _, kv := range kvs {
