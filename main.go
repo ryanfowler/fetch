@@ -65,6 +65,7 @@ func main() {
 		DryRun:        app.DryRun,
 		Edit:          app.Edit,
 		HTTP:          app.HTTP,
+		IgnoreStatus:  app.IgnoreSatus,
 		Insecure:      app.Insecure,
 		NoEncode:      app.NoEncode,
 		NoFormat:      app.NoFormat,
