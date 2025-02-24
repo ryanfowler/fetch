@@ -12,15 +12,18 @@ import (
 
 func FormatNDJSON(r io.Reader, p *printer.Printer) error {
 	dec := json.NewDecoder(r)
-	for dec.More() {
+	for {
 		err := formatNDJSONValue(dec, p)
-		if err != nil && !errors.Is(err, io.EOF) {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
+
 		p.WriteString("\n")
 		p.Flush()
 	}
-	return nil
 }
 
 func formatNDJSONValue(dec *json.Decoder, p *printer.Printer) error {
