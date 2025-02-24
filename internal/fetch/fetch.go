@@ -65,26 +65,24 @@ type Request struct {
 }
 
 func Fetch(ctx context.Context, r *Request) int {
-	ok, err := fetch(ctx, r)
-	if err != nil {
-		p := r.PrinterHandle.Stderr()
-		p.Set(printer.Red)
-		p.Set(printer.Bold)
-		p.WriteString("error")
-		p.Reset()
-		p.WriteString(": ")
-		p.WriteString(err.Error())
-		p.WriteString("\n")
-		p.Flush()
-		return 1
+	code, err := fetch(ctx, r)
+	if err == nil {
+		return code
 	}
-	if ok {
-		return 0
-	}
+
+	p := r.PrinterHandle.Stderr()
+	p.Set(printer.Red)
+	p.Set(printer.Bold)
+	p.WriteString("error")
+	p.Reset()
+	p.WriteString(": ")
+	p.WriteString(err.Error())
+	p.WriteString("\n")
+	p.Flush()
 	return 1
 }
 
-func fetch(ctx context.Context, r *Request) (bool, error) {
+func fetch(ctx context.Context, r *Request) (int, error) {
 	errPrinter := r.PrinterHandle.Stderr()
 	outPrinter := r.PrinterHandle.Stdout()
 
@@ -117,7 +115,7 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 		HTTP:        r.HTTP,
 	})
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	if req.Body != nil {
 		defer req.Body.Close()
@@ -135,7 +133,7 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 
 		buf, err := edit(req.Body, extension)
 		if err != nil {
-			return false, err
+			return 0, err
 		}
 
 		req.Body = io.NopCloser(bytes.NewReader(buf))
@@ -149,14 +147,14 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 		if r.DryRun {
 			if req.Body == nil || req.Body == http.NoBody {
 				errPrinter.Flush()
-				return true, nil
+				return 0, nil
 			}
 
 			errPrinter.WriteString("\n")
 			errPrinter.Flush()
 
 			_, err = io.Copy(os.Stderr, req.Body)
-			return err == nil, err
+			return 0, err
 		}
 
 		errPrinter.WriteString("\n")
@@ -165,13 +163,13 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer resp.Body.Close()
 
-	ok := true
+	var exitCode int
 	if !r.IgnoreStatus {
-		ok = resp.StatusCode >= 200 && resp.StatusCode < 400
+		exitCode = getExitCodeForStatus(resp.StatusCode)
 	}
 
 	if r.Verbosity >= VNormal {
@@ -181,17 +179,17 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 
 	body, err := formatResponse(r, resp, outPrinter)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 
 	if body != nil {
 		err = streamToStdout(body, errPrinter, r.Output == "-", r.NoPager)
 		if err != nil {
-			return false, err
+			return 0, err
 		}
 	}
 
-	return ok, nil
+	return exitCode, nil
 }
 
 func formatResponse(r *Request, resp *http.Response, p *printer.Printer) (io.Reader, error) {
@@ -432,6 +430,19 @@ func streamToPager(r io.Reader, path string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 	return cmd.Run()
+}
+
+func getExitCodeForStatus(status int) int {
+	switch {
+	case status >= 200 && status < 400:
+		return 0
+	case status >= 400 && status < 500:
+		return 4
+	case status >= 500 && status < 600:
+		return 5
+	default:
+		return 6
+	}
 }
 
 // isPrintable returns true if the data in the provided io.Reader is likely

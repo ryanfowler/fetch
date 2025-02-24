@@ -343,6 +343,36 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, data)
 	})
 
+	t.Run("ignore status", func(t *testing.T) {
+		var statusCode atomic.Int64
+		statusCode.Store(200)
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(int(statusCode.Load()))
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL)
+		assertExitCode(t, 0, res)
+
+		statusCode.Store(400)
+		res = runFetch(t, fetchPath, server.URL)
+		assertExitCode(t, 4, res)
+		res = runFetch(t, fetchPath, server.URL, "--ignore-status")
+		assertExitCode(t, 0, res)
+
+		statusCode.Store(500)
+		res = runFetch(t, fetchPath, server.URL)
+		assertExitCode(t, 5, res)
+		res = runFetch(t, fetchPath, server.URL, "--ignore-status")
+		assertExitCode(t, 0, res)
+
+		statusCode.Store(999)
+		res = runFetch(t, fetchPath, server.URL)
+		assertExitCode(t, 6, res)
+		res = runFetch(t, fetchPath, server.URL, "--ignore-status")
+		assertExitCode(t, 0, res)
+	})
+
 	t.Run("update", func(t *testing.T) {
 		var empty string
 		var urlStr atomic.Pointer[string]
