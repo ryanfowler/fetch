@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,18 +11,23 @@ import (
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
-func FormatJSON(r io.Reader, p *printer.Printer) error {
+func FormatJSON(buf []byte, p *printer.Printer) error {
+	err := formatJSON(bytes.NewReader(buf), p)
+	if err != nil {
+		p.Reset()
+	}
+	return err
+}
+
+func formatJSON(r io.Reader, p *printer.Printer) error {
 	dec := json.NewDecoder(r)
 	err := formatJSONValue(dec, p, 0)
-	if errors.Is(err, io.EOF) {
-		p.WriteString("\n")
-		return nil
-	}
 	if err != nil {
 		return err
 	}
-	if dec.More() {
-		return io.ErrUnexpectedEOF
+	tok, err := dec.Token()
+	if !errors.Is(err, io.EOF) {
+		return fmt.Errorf("unexpected token: %v", tok)
 	}
 	p.WriteString("\n")
 	return nil

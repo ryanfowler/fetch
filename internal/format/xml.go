@@ -10,8 +10,8 @@ import (
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
-func FormatXML(r io.Reader, w *printer.Printer) error {
-	dec := xml.NewDecoder(r)
+func FormatXML(buf []byte, w *printer.Printer) error {
+	dec := xml.NewDecoder(bytes.NewReader(buf))
 
 	var stack []bool
 	for {

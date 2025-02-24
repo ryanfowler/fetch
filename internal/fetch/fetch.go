@@ -228,13 +228,11 @@ func formatResponse(r *Request, resp *http.Response, p *printer.Printer) (io.Rea
 	case TypeImage:
 		return nil, image.Render(buf)
 	case TypeJSON:
-		r := bytes.NewReader(buf)
-		if format.FormatJSON(r, p) == nil {
+		if format.FormatJSON(buf, p) == nil {
 			buf = p.Bytes()
 		}
 	case TypeXML:
-		r := bytes.NewReader(buf)
-		if format.FormatXML(r, p) == nil {
+		if format.FormatXML(buf, p) == nil {
 			buf = p.Bytes()
 		}
 	}
