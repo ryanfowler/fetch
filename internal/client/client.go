@@ -38,6 +38,7 @@ type ClientConfig struct {
 
 func NewClient(cfg ClientConfig) *Client {
 	transport := &http.Transport{
+		DisableCompression: true,
 		Proxy: func(r *http.Request) (*url.URL, error) {
 			return cfg.Proxy, nil
 		},

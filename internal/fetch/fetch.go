@@ -118,6 +118,9 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if req.Body != nil {
+		defer req.Body.Close()
+	}
 
 	// Open an editor if necessary.
 	if r.Edit {
