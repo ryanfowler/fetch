@@ -38,6 +38,7 @@ type Request struct {
 	DryRun        bool
 	Edit          bool
 	HTTP          client.HTTPVersion
+	IgnoreStatus  bool
 	Insecure      bool
 	NoEncode      bool
 	NoFormat      bool
@@ -168,7 +169,10 @@ func fetch(ctx context.Context, r *Request) (bool, error) {
 	}
 	defer resp.Body.Close()
 
-	ok := resp.StatusCode >= 200 && resp.StatusCode < 400
+	ok := true
+	if !r.IgnoreStatus {
+		ok = resp.StatusCode >= 200 && resp.StatusCode < 400
+	}
 
 	if r.Verbosity >= VNormal {
 		printResponseMetadata(errPrinter, r.Verbosity, resp)

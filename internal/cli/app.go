@@ -30,6 +30,7 @@ type App struct {
 	Headers     []vars.KeyVal
 	Help        bool
 	HTTP        client.HTTPVersion
+	IgnoreSatus bool
 	Insecure    bool
 	JSON        bool
 	Method      string
@@ -310,6 +311,20 @@ func (a *App) CLI() *CLI {
 					default:
 						return fmt.Errorf("invalid http version: %q", value)
 					}
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "ignore-status",
+				Args:        "",
+				Description: "Exit code unaffected by HTTP status",
+				Default:     "",
+				IsSet: func() bool {
+					return a.IgnoreSatus
+				},
+				Fn: func(value string) error {
+					a.IgnoreSatus = true
 					return nil
 				},
 			},
