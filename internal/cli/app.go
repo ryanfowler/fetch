@@ -19,34 +19,34 @@ import (
 type App struct {
 	URL *url.URL
 
-	AWSSigv4    *aws.Config
-	Basic       *vars.KeyVal
-	Bearer      string
-	Color       printer.Color
-	Data        io.Reader
-	DryRun      bool
-	Edit        bool
-	Form        []vars.KeyVal
-	Headers     []vars.KeyVal
-	Help        bool
-	HTTP        client.HTTPVersion
-	IgnoreSatus bool
-	Insecure    bool
-	JSON        bool
-	Method      string
-	Multipart   []vars.KeyVal
-	NoEncode    bool
-	NoFormat    bool
-	NoPager     bool
-	Output      string
-	Proxy       *url.URL
-	QueryParams []vars.KeyVal
-	Silent      bool
-	Timeout     time.Duration
-	Update      bool
-	Verbose     int
-	Version     bool
-	XML         bool
+	AWSSigv4     *aws.Config
+	Basic        *vars.KeyVal
+	Bearer       string
+	Color        printer.Color
+	Data         io.Reader
+	DryRun       bool
+	Edit         bool
+	Form         []vars.KeyVal
+	Headers      []vars.KeyVal
+	Help         bool
+	HTTP         client.HTTPVersion
+	IgnoreStatus bool
+	Insecure     bool
+	JSON         bool
+	Method       string
+	Multipart    []vars.KeyVal
+	NoEncode     bool
+	NoFormat     bool
+	NoPager      bool
+	Output       string
+	Proxy        *url.URL
+	QueryParams  []vars.KeyVal
+	Silent       bool
+	Timeout      time.Duration
+	Update       bool
+	Verbose      int
+	Version      bool
+	XML          bool
 }
 
 func NewApp() *App {
@@ -321,10 +321,10 @@ func (a *App) CLI() *CLI {
 				Description: "Exit code unaffected by HTTP status",
 				Default:     "",
 				IsSet: func() bool {
-					return a.IgnoreSatus
+					return a.IgnoreStatus
 				},
 				Fn: func(value string) error {
-					a.IgnoreSatus = true
+					a.IgnoreStatus = true
 					return nil
 				},
 			},
