@@ -296,7 +296,7 @@ func (a *App) CLI() *CLI {
 				Short:       "",
 				Long:        "http",
 				Args:        "VERSION",
-				Description: "Force the use of an HTTP version",
+				Description: "Highest allowed HTTP version",
 				Default:     "",
 				Values:      []string{"1", "2"},
 				IsSet: func() bool {
@@ -304,7 +304,7 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					switch value {
-					case "1", "1.1":
+					case "1":
 						a.HTTP = client.HTTP1
 					case "2":
 						a.HTTP = client.HTTP2
