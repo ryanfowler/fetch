@@ -28,7 +28,7 @@ func main() {
 
 	app, err := cli.Parse(os.Args[1:])
 	if err != nil {
-		p := printer.NewHandle(printer.ColorAuto).Stderr()
+		p := printer.NewHandle(printer.ColorUnknown).Stderr()
 		writeCLIErr(p, err)
 		os.Exit(1)
 	}
@@ -64,11 +64,11 @@ func main() {
 	req := fetch.Request{
 		DryRun:        app.DryRun,
 		Edit:          app.Edit,
+		Format:        app.Format,
 		HTTP:          app.HTTP,
 		IgnoreStatus:  app.IgnoreStatus,
 		Insecure:      app.Insecure,
 		NoEncode:      app.NoEncode,
-		NoFormat:      app.NoFormat,
 		NoPager:       app.NoPager,
 		Output:        app.Output,
 		PrinterHandle: printerHandle,

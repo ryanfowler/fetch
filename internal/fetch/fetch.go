@@ -34,14 +34,23 @@ const (
 	TypeXML
 )
 
+type Format int
+
+const (
+	FormatUnknown Format = iota
+	FormatAuto
+	FormatOff
+	FormatOn
+)
+
 type Request struct {
 	DryRun        bool
 	Edit          bool
+	Format        Format
 	HTTP          client.HTTPVersion
 	IgnoreStatus  bool
 	Insecure      bool
 	NoEncode      bool
-	NoFormat      bool
 	NoPager       bool
 	Output        string
 	PrinterHandle *printer.Handle
@@ -205,7 +214,7 @@ func formatResponse(r *Request, resp *http.Response, p *printer.Printer) (io.Rea
 		return nil, err
 	}
 
-	if r.NoFormat || !vars.IsStdoutTerm {
+	if r.Format == FormatOff || (!vars.IsStdoutTerm && r.Format != FormatOn) {
 		return resp.Body, nil
 	}
 
