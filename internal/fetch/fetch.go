@@ -31,6 +31,7 @@ const (
 	TypeImage
 	TypeJSON
 	TypeNDJSON
+	TypeSSE
 	TypeXML
 )
 
@@ -225,6 +226,9 @@ func formatResponse(r *Request, resp *http.Response, p *printer.Printer) (io.Rea
 	case TypeNDJSON:
 		// NOTE: This bypasses the isPrintable check for binary data.
 		return nil, format.FormatNDJSON(resp.Body, p)
+	case TypeSSE:
+		// NOTE: This bypasses the isPrintable check for binary data.
+		return nil, format.FormatEventStream(resp.Body, p)
 	}
 
 	// TODO: Should probably limit the bytes read here.
@@ -399,6 +403,8 @@ func getContentType(headers http.Header) ContentType {
 		return TypeXML
 	case "image/jpeg", "image/png", "image/tiff", "image/webp":
 		return TypeImage
+	case "text/event-stream":
+		return TypeSSE
 	default:
 		return TypeUnknown
 	}
