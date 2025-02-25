@@ -373,6 +373,20 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 	})
 
+	t.Run("server sent events", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			const data = ":comment\n\ndata:{\"key\":\"val\"}\n\nevent:ev1\ndata: this is my data\n\n"
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "[message]\n{ \"key\": \"val\" }\n\n[ev1]\nthis is my data\n")
+	})
+
 	t.Run("update", func(t *testing.T) {
 		var empty string
 		var urlStr atomic.Pointer[string]
