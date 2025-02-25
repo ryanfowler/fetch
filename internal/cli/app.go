@@ -12,6 +12,7 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/client"
+	"github.com/ryanfowler/fetch/internal/fetch"
 	"github.com/ryanfowler/fetch/internal/printer"
 	"github.com/ryanfowler/fetch/internal/vars"
 )
@@ -27,6 +28,7 @@ type App struct {
 	DryRun       bool
 	Edit         bool
 	Form         []vars.KeyVal
+	Format       fetch.Format
 	Headers      []vars.KeyVal
 	Help         bool
 	HTTP         client.HTTPVersion
@@ -36,7 +38,6 @@ type App struct {
 	Method       string
 	Multipart    []vars.KeyVal
 	NoEncode     bool
-	NoFormat     bool
 	NoPager      bool
 	Output       string
 	Proxy        *url.URL
@@ -170,11 +171,11 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Values:      []string{"auto", "off", "on"},
 				IsSet: func() bool {
-					return a.Color != printer.ColorAuto
+					return a.Color != printer.ColorUnknown
 				},
 				Fn: func(value string) error {
 					switch value {
-					case "", "auto":
+					case "auto":
 						a.Color = printer.ColorAuto
 					case "off":
 						a.Color = printer.ColorOff
@@ -260,6 +261,30 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					key, val, _ := cut(value, "=")
 					a.Form = append(a.Form, vars.KeyVal{Key: key, Val: val})
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "format",
+				Args:        "OPTION",
+				Description: "Enable/disable formatting",
+				Default:     "",
+				Values:      []string{"auto", "off", "on"},
+				IsSet: func() bool {
+					return a.Format != fetch.FormatUnknown
+				},
+				Fn: func(value string) error {
+					switch value {
+					case "auto":
+						a.Format = fetch.FormatAuto
+					case "off":
+						a.Format = fetch.FormatOff
+					case "on":
+						a.Format = fetch.FormatOn
+					default:
+						return fmt.Errorf("invalid value for format: %q", value)
+					}
 					return nil
 				},
 			},
@@ -406,20 +431,6 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					a.NoEncode = true
-					return nil
-				},
-			},
-			{
-				Short:       "",
-				Long:        "no-format",
-				Args:        "",
-				Description: "Avoid formatting the output",
-				Default:     "",
-				IsSet: func() bool {
-					return a.NoFormat
-				},
-				Fn: func(value string) error {
-					a.NoFormat = true
 					return nil
 				},
 			},

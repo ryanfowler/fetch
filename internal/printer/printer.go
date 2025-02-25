@@ -32,7 +32,8 @@ const (
 type Color int
 
 const (
-	ColorAuto Color = iota
+	ColorUnknown Color = iota
+	ColorAuto
 	ColorOn
 	ColorOff
 )
@@ -66,12 +67,12 @@ type Printer struct {
 func newPrinter(file *os.File, isTerm bool, c Color) *Printer {
 	var useColor bool
 	switch c {
-	case ColorAuto:
-		useColor = isTerm
 	case ColorOn:
 		useColor = true
 	case ColorOff:
 		useColor = false
+	default:
+		useColor = isTerm
 	}
 	return &Printer{file: file, useColor: useColor}
 }
