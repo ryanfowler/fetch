@@ -55,6 +55,7 @@ type Request struct {
 	NoPager       bool
 	Output        string
 	PrinterHandle *printer.Handle
+	TLS           uint16
 	UserAgent     string
 	Verbosity     Verbosity
 
@@ -106,6 +107,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		Insecure:  r.Insecure,
 		Proxy:     r.Proxy,
 		Timeout:   r.Timeout,
+		TLS:       r.TLS,
 		UserAgent: r.UserAgent,
 	})
 	req, err := c.NewRequest(ctx, client.RequestConfig{

@@ -33,15 +33,20 @@ type ClientConfig struct {
 	Insecure  bool
 	Proxy     *url.URL
 	Timeout   time.Duration
+	TLS       uint16
 	UserAgent string
 }
 
 func NewClient(cfg ClientConfig) *Client {
+	if cfg.TLS == 0 {
+		cfg.TLS = tls.VersionTLS12
+	}
 	transport := &http.Transport{
 		DisableCompression: true,
 		Proxy: func(r *http.Request) (*url.URL, error) {
 			return cfg.Proxy, nil
 		},
+		TLSClientConfig: &tls.Config{MinVersion: cfg.TLS},
 	}
 
 	if cfg.HTTP > HTTPDefault {
@@ -56,9 +61,7 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 
 	if cfg.Insecure {
-		transport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: true,
-		}
+		transport.TLSClientConfig.InsecureSkipVerify = true
 	}
 
 	return &Client{
