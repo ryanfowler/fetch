@@ -128,7 +128,7 @@ func parseShortFlag(arg string, args []string, short map[string]Flag) ([]string,
 		}
 
 		if flag.Args == "" && value != "" {
-			return nil, fmt.Errorf("flag %q cannot have any arguments", "-"+c)
+			return nil, fmt.Errorf("option '-%s' does not take any arguments", c)
 		}
 
 		if flag.Args != "" && value == "" {
@@ -136,7 +136,7 @@ func parseShortFlag(arg string, args []string, short map[string]Flag) ([]string,
 				value = arg[1:]
 				arg = arg[len(arg)-1:]
 			} else if len(args) == 0 {
-				return nil, fmt.Errorf("no argument provided for flag %q", "-"+c)
+				return nil, fmt.Errorf("argument required for flag '-%s'", c)
 			} else {
 				value = args[0]
 				args = args[1:]
@@ -162,12 +162,12 @@ func parseLongFlag(arg string, args []string, long map[string]Flag) ([]string, e
 	}
 
 	if (ok || value != "") && flag.Args == "" {
-		return nil, fmt.Errorf("flag %q does not have any arguments", "--"+name)
+		return nil, fmt.Errorf("flag '--%s' does not take any arguments", name)
 	}
 
 	if flag.Args != "" && value == "" {
 		if len(args) == 0 {
-			return nil, fmt.Errorf("no argument provided for flag %q", "--"+name)
+			return nil, fmt.Errorf("argument required for flag '--%s'", name)
 		}
 
 		value = args[0]
@@ -200,7 +200,7 @@ func validateExclusives(exc []string, long map[string]Flag) error {
 }
 
 func unknownFlagError(name string) error {
-	return fmt.Errorf("unknown flag: %q", name)
+	return fmt.Errorf("unknown flag: '%s'", name)
 }
 
 func Parse(args []string) (*App, error) {

@@ -28,7 +28,7 @@ func main() {
 
 	app, err := cli.Parse(os.Args[1:])
 	if err != nil {
-		p := printer.NewHandle(printer.ColorUnknown).Stderr()
+		p := printer.NewHandle(app.Color).Stderr()
 		writeCLIErr(p, err)
 		os.Exit(1)
 	}
@@ -116,11 +116,16 @@ func writeCLIErr(p *printer.Printer, err error) {
 	p.Reset()
 
 	p.WriteString(": ")
-	p.WriteString(err.Error())
+	if pt, ok := err.(printer.PrinterTo); ok {
+		pt.PrintTo(p)
+	} else {
+		p.WriteString(err.Error())
+	}
+
 	p.WriteString("\n\nFor more information, try '")
 
 	p.Set(printer.Bold)
-	p.Set("\\--help")
+	p.WriteString("--help")
 	p.Reset()
 
 	p.WriteString("'.\n")

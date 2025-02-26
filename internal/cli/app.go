@@ -2,7 +2,6 @@ package cli
 
 import (
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -112,16 +111,17 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					region, service, ok := cut(value, "/")
 					if !ok {
-						return errors.New("aws-sigv4 must be provided as REGION/SERVICE")
+						const usage = "format must be <REGION/SERVICE>"
+						return flagValueError("aws-sigv4", value, usage)
 					}
 
 					accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 					if accessKey == "" {
-						return errors.New("AWS_ACCESS_KEY_ID env var must be provided")
+						return missingEnvVarErr("AWS_ACCESS_KEY_ID", "aws-sigv4")
 					}
 					secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
 					if secretKey == "" {
-						return errors.New("AWS_SECRET_ACCESS_KEY env var must be provided")
+						return missingEnvVarErr("AWS_SECRET_ACCESS_KEY", "aws-sigv4")
 					}
 
 					a.AWSSigv4 = &aws.Config{
@@ -145,7 +145,8 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					user, pass, ok := cut(value, ":")
 					if !ok {
-						return fmt.Errorf("invalid format for basic auth: %q", value)
+						const usage = "format must be <USERNAME:PASSWORD>"
+						return flagValueError("basic", value, usage)
 					}
 					a.Basic = &vars.KeyVal{Key: user, Val: pass}
 					return nil
@@ -184,7 +185,8 @@ func (a *App) CLI() *CLI {
 					case "on":
 						a.Color = printer.ColorOn
 					default:
-						return fmt.Errorf("invalid value for color: %q", value)
+						const usage = "must be one of [auto, off, on]"
+						return flagValueError("color", value, usage)
 					}
 					return nil
 				},
@@ -200,15 +202,16 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					switch {
-					case value == "":
-						return errors.New("body value must be provided")
-					case value[0] != '@':
+					case len(value) == 0 || value[0] != '@':
 						a.Data = strings.NewReader(value)
 					case value == "@":
 						a.Data = os.Stdin
 					default:
 						f, err := os.Open(value[1:])
 						if err != nil {
+							if os.IsNotExist(err) {
+								return fmt.Errorf("file does not exist: '%s'", value[1:])
+							}
 							return err
 						}
 						info, err := f.Stat()
@@ -216,7 +219,7 @@ func (a *App) CLI() *CLI {
 							return err
 						}
 						if info.IsDir() {
-							return fmt.Errorf("file %q is a directory", value[1:])
+							return fmt.Errorf("file is a directory: '%s'", value[1:])
 						}
 						a.Data = f
 					}
@@ -285,7 +288,8 @@ func (a *App) CLI() *CLI {
 					case "on":
 						a.Format = fetch.FormatOn
 					default:
-						return fmt.Errorf("invalid value for format: %q", value)
+						const usage = "must be one of [auto, off, on]"
+						return flagValueError("format", value, usage)
 					}
 					return nil
 				},
@@ -336,7 +340,8 @@ func (a *App) CLI() *CLI {
 					case "2":
 						a.HTTP = client.HTTP2
 					default:
-						return fmt.Errorf("invalid http version: %q", value)
+						const usage = "must be one of [1, 2]"
+						return flagValueError("http", value, usage)
 					}
 					return nil
 				},
@@ -412,10 +417,13 @@ func (a *App) CLI() *CLI {
 					if strings.HasPrefix(val, "@") {
 						stats, err := os.Stat(val[1:])
 						if err != nil {
+							if os.IsNotExist(err) {
+								return fmt.Errorf("file does not exist: '%s'", val[1:])
+							}
 							return err
 						}
 						if stats.IsDir() {
-							return fmt.Errorf("multipart file is a directory: %q", val)
+							return fmt.Errorf("file is a directory: '%s'", val[1:])
 						}
 					}
 					a.Multipart = append(a.Multipart, vars.KeyVal{Key: key, Val: val})
@@ -476,7 +484,7 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					proxy, err := url.Parse(value)
 					if err != nil {
-						return fmt.Errorf("invalid proxy url: %q", value)
+						return flagValueError("proxy", value, err.Error())
 					}
 					a.Proxy = proxy
 					return nil
@@ -523,7 +531,7 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					secs, err := strconv.ParseFloat(value, 64)
 					if err != nil {
-						return fmt.Errorf("invalid value for timeout: %q", value)
+						return flagValueError("timeout", value, "must be a valid number")
 					}
 
 					a.Timeout = time.Duration(float64(time.Second) * secs)
@@ -551,7 +559,8 @@ func (a *App) CLI() *CLI {
 					case "1.3":
 						a.TLS = tls.VersionTLS13
 					default:
-						return fmt.Errorf("invalid value for tls: %q", value)
+						const usage = "must be one of [1.0, 1.1, 1.2, 1.3]"
+						return flagValueError("tls", value, usage)
 					}
 					return nil
 				},
@@ -621,4 +630,77 @@ func cut(s, sep string) (string, string, bool) {
 	key = strings.TrimSpace(key)
 	val = strings.TrimSpace(val)
 	return key, val, ok
+}
+
+type FlagValueError struct {
+	Flag  string
+	Value string
+	Usage string
+}
+
+func flagValueError(flag, value, usage string) *FlagValueError {
+	return &FlagValueError{
+		Flag:  flag,
+		Value: value,
+		Usage: usage,
+	}
+}
+
+func (err *FlagValueError) Error() string {
+	msg := fmt.Sprintf("invalid value '%s' for option '--%s'", err.Flag, err.Value)
+	if err.Usage == "" {
+		msg = fmt.Sprintf("%s: %s", msg, err.Usage)
+	}
+	return msg
+}
+
+func (err *FlagValueError) PrintTo(p *printer.Printer) {
+	p.WriteString("invalid value '")
+	p.Set(printer.Yellow)
+	p.WriteString(err.Value)
+	p.Reset()
+
+	p.WriteString("' for option '")
+	p.Set(printer.Bold)
+	p.WriteString("--")
+	p.WriteString(err.Flag)
+	p.Reset()
+
+	p.WriteString("'")
+
+	if err.Usage != "" {
+		p.WriteString(": ")
+		p.WriteString(err.Usage)
+	}
+}
+
+type MissingEnvVarError struct {
+	EnvVar string
+	Flag   string
+}
+
+func missingEnvVarErr(envVar, flag string) *MissingEnvVarError {
+	return &MissingEnvVarError{
+		EnvVar: envVar,
+		Flag:   flag,
+	}
+}
+
+func (err *MissingEnvVarError) Error() string {
+	return fmt.Sprintf("missing environment variable '%s' required for option '--%s'", err.EnvVar, err.Flag)
+}
+
+func (err *MissingEnvVarError) PrintTo(p *printer.Printer) {
+	p.WriteString("missing environment variable '")
+	p.Set(printer.Yellow)
+	p.WriteString(err.EnvVar)
+	p.Reset()
+
+	p.WriteString("' required for option '")
+	p.Set(printer.Bold)
+	p.WriteString("--")
+	p.WriteString(err.Flag)
+	p.Reset()
+
+	p.WriteString("'")
 }
