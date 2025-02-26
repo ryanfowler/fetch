@@ -356,16 +356,14 @@ func printResponseHeaders(p *printer.Printer, resp *http.Response) {
 }
 
 func colorForStatus(code int) printer.Sequence {
-	if code >= 200 && code < 300 {
+	switch {
+	case code >= 200 && code < 300:
 		return printer.Green
-	}
-	if code >= 300 && code < 400 {
+	case code >= 300 && code < 400:
 		return printer.Yellow
-	}
-	if code >= 400 {
+	default:
 		return printer.Red
 	}
-	return printer.Default
 }
 
 func getContentType(headers http.Header) ContentType {
@@ -379,37 +377,34 @@ func getContentType(headers http.Header) ContentType {
 	}
 
 	if typ, subtype, ok := strings.Cut(mediaType, "/"); ok {
-		if typ == "image" {
+		switch typ {
+		case "image":
 			switch subtype {
 			case "jpeg", "png", "tiff", "webp":
 				return TypeImage
+			default:
+				return TypeUnknown
+			}
+		case "application":
+			switch subtype {
+			case "json":
+				return TypeJSON
+			case "x-ndjson", "ndjson", "x-jsonl", "jsonl", "x-jsonlines":
+				return TypeNDJSON
+			case "xml":
+				return TypeXML
+			}
+		case "text":
+			switch subtype {
+			case "event-stream":
+				return TypeSSE
+			case "xml":
+				return TypeXML
 			}
 		}
-
-		switch subtype {
-		case "json":
-			return TypeJSON
-		case "ndjson", "x-ndjson", "jsonl", "x-jsonl", "x-jsonlines":
-			return TypeNDJSON
-		case "xml":
-			return TypeXML
-		}
 	}
 
-	switch mediaType {
-	case "application/json":
-		return TypeJSON
-	case "application/x-ndjson":
-		return TypeNDJSON
-	case "application/xml", "text/xml":
-		return TypeXML
-	case "image/jpeg", "image/png", "image/tiff", "image/webp":
-		return TypeImage
-	case "text/event-stream":
-		return TypeSSE
-	default:
-		return TypeUnknown
-	}
+	return TypeUnknown
 }
 
 func streamToStdout(r io.Reader, p *printer.Printer, forceOutput, noPager bool) error {
