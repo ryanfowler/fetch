@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +45,7 @@ type App struct {
 	QueryParams  []vars.KeyVal
 	Silent       bool
 	Timeout      time.Duration
+	TLS          uint16
 	Update       bool
 	Verbose      int
 	Version      bool
@@ -525,6 +527,32 @@ func (a *App) CLI() *CLI {
 					}
 
 					a.Timeout = time.Duration(float64(time.Second) * secs)
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "tls",
+				Args:        "VERSION",
+				Description: "Minimum TLS version",
+				Default:     "",
+				Values:      []string{"1.0", "1.1", "1.2", "1.3"},
+				IsSet: func() bool {
+					return a.TLS != 0
+				},
+				Fn: func(value string) error {
+					switch value {
+					case "1.0":
+						a.TLS = tls.VersionTLS10
+					case "1.1":
+						a.TLS = tls.VersionTLS11
+					case "1.2":
+						a.TLS = tls.VersionTLS12
+					case "1.3":
+						a.TLS = tls.VersionTLS13
+					default:
+						return fmt.Errorf("invalid value for tls: %q", value)
+					}
 					return nil
 				},
 			},

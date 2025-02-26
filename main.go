@@ -72,6 +72,7 @@ func main() {
 		NoPager:       app.NoPager,
 		Output:        app.Output,
 		PrinterHandle: printerHandle,
+		TLS:           app.TLS,
 		UserAgent:     "fetch/" + version,
 		Verbosity:     verbosity,
 
