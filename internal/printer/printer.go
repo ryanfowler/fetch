@@ -38,6 +38,10 @@ const (
 	ColorOff
 )
 
+type PrinterTo interface {
+	PrintTo(*Printer)
+}
+
 type Handle struct {
 	stderr *Printer
 	stdout *Printer
