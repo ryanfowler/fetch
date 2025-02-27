@@ -80,6 +80,9 @@ func Fetch(ctx context.Context, r *Request) int {
 	if err == nil {
 		return code
 	}
+	if e := context.Cause(ctx); e != nil {
+		err = e
+	}
 
 	p := r.PrinterHandle.Stderr()
 	p.Set(printer.Red)
@@ -150,7 +153,9 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 
 		req.Body = io.NopCloser(bytes.NewReader(buf))
 		req.ContentLength = int64(len(buf))
-		req.GetBody = nil
+		req.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(buf)), nil
+		}
 	}
 
 	if r.Verbosity >= VExtraVerbose || r.DryRun {

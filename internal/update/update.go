@@ -23,6 +23,9 @@ func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 	if err == nil {
 		return true
 	}
+	if e := context.Cause(ctx); e != nil {
+		err = e
+	}
 
 	p.Set(printer.Bold)
 	p.Set(printer.Red)
