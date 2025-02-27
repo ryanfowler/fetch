@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/ryanfowler/fetch/internal/cli"
 	"github.com/ryanfowler/fetch/internal/fetch"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/printer"
 	"github.com/ryanfowler/fetch/internal/update"
+	"github.com/ryanfowler/fetch/internal/vars"
 )
 
 //go:embed VERSION
@@ -23,8 +26,13 @@ func init() {
 }
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	chSig := make(chan os.Signal, 1)
+	signal.Notify(chSig, syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM)
+	go func() {
+		sig := <-chSig
+		cancel(vars.SignalError(sig.String()))
+	}()
 
 	app, err := cli.Parse(os.Args[1:])
 	if err != nil {
