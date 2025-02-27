@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -79,6 +80,14 @@ func (a *App) CLI() *CLI {
 			if a.URL != nil {
 				return fmt.Errorf("unexpected argument: %q", s)
 			}
+			if s == "" {
+				return fmt.Errorf("empty URL provided")
+			}
+
+			s = strings.ToLower(s)
+			if !strings.Contains(s, "://") && s[0] != '/' {
+				s = "//" + s
+			}
 
 			u, err := url.Parse(s)
 			if err != nil {
@@ -88,6 +97,15 @@ func (a *App) CLI() *CLI {
 			case "", "http", "https":
 			default:
 				return fmt.Errorf("unsupported url scheme: %s", u.Scheme)
+			}
+
+			if u.Scheme == "" {
+				host := u.Hostname()
+				if !strings.Contains(host, ".") || net.ParseIP(host) != nil {
+					u.Scheme = "http"
+				} else {
+					u.Scheme = "https"
+				}
 			}
 
 			a.URL = u
