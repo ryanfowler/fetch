@@ -7,4 +7,5 @@ const (
 	VNormal
 	VVerbose
 	VExtraVerbose
+	VSuperExtraVerbose
 )

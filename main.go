@@ -112,8 +112,10 @@ func getVerbosity(app *cli.App) fetch.Verbosity {
 		return fetch.VNormal
 	case 1:
 		return fetch.VVerbose
-	default:
+	case 2:
 		return fetch.VExtraVerbose
+	default:
+		return fetch.VSuperExtraVerbose
 	}
 }
 

@@ -3,6 +3,8 @@ package fetch
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -100,11 +102,6 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	errPrinter := r.PrinterHandle.Stderr()
 	outPrinter := r.PrinterHandle.Stdout()
 
-	if r.URL.Scheme == "" {
-		// Use HTTPS if no scheme is defined.
-		r.URL.Scheme = "https"
-	}
-
 	c := client.NewClient(client.ClientConfig{
 		HTTP:      r.HTTP,
 		Insecure:  r.Insecure,
@@ -183,6 +180,23 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
+
+	if resp.TLS != nil && r.Verbosity > VExtraVerbose {
+		printTLS(errPrinter, resp.TLS)
+		// fmt.Printf("TLS Version: %q\n", tls.VersionName(resp.TLS.Version))
+		// fmt.Printf("TLS Server name: %q\n", resp.TLS.ServerName)
+		// fmt.Printf("TLS cipher suite: %q\n", tls.CipherSuiteName(resp.TLS.CipherSuite))
+		// fmt.Printf("TLS negotiated protocol: %q\n", resp.TLS.NegotiatedProtocol)
+		// fmt.Printf("TLS number of peer certs: %d\n", len(resp.TLS.PeerCertificates))
+		// for _, cert := range resp.TLS.PeerCertificates {
+		// 	// cert := resp.TLS.PeerCertificates[0]
+		// 	fmt.Printf("TLS cert issuer: %q\n", cert.Issuer)
+		// 	fmt.Printf("TLS cert subject: %q\n", cert.Subject)
+		// 	fmt.Printf("TLS cert pub key algorithm: %q\n", cert.PublicKeyAlgorithm)
+		// 	fmt.Printf("TLS cert sig algorithm: %q\n", cert.SignatureAlgorithm)
+		// 	fmt.Printf("TLS cert DNS names: %v\n", cert.DNSNames)
+		// }
+	}
 
 	var exitCode int
 	if !r.IgnoreStatus {
@@ -357,6 +371,34 @@ func printResponseHeaders(p *printer.Printer, resp *http.Response) {
 		p.WriteString(": ")
 		p.WriteString(h.Val)
 		p.WriteString("\n")
+	}
+}
+
+func printTLS(p *printer.Printer, state *tls.ConnectionState) {
+	p.Set(printer.Bold)
+	p.Set(printer.Magenta)
+	p.WriteString(tlsVersionName(state.Version))
+	p.Reset()
+	p.WriteString(" ")
+
+	p.Set(printer.Bold)
+	p.WriteString(state.ServerName)
+	p.Reset()
+	p.WriteString("\n\n")
+}
+
+func tlsVersionName(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLSv1.0"
+	case tls.VersionTLS11:
+		return "TLSv1.1"
+	case tls.VersionTLS12:
+		return "TLSv1.2"
+	case tls.VersionTLS13:
+		return "TLSv1.3"
+	default:
+		return fmt.Sprintf("0x%04X", version)
 	}
 }
 
