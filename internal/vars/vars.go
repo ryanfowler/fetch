@@ -1,6 +1,7 @@
 package vars
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -15,6 +16,8 @@ var (
 
 	UserAgent string
 	Version   string
+
+	buildInfo *debug.BuildInfo
 )
 
 func init() {
@@ -26,11 +29,12 @@ func init() {
 }
 
 func getVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok || info.Main.Version == "" {
+	var ok bool
+	buildInfo, ok = debug.ReadBuildInfo()
+	if !ok || buildInfo.Main.Version == "" {
 		return "v(dev)"
 	}
-	return info.Main.Version
+	return buildInfo.Main.Version
 }
 
 type KeyVal struct {
@@ -49,4 +53,35 @@ type SignalError string
 
 func (err SignalError) Error() string {
 	return fmt.Sprintf("received signal: %s", string(err))
+}
+
+func GetVersions() []byte {
+	type Versions struct {
+		Fetch    string            `json:"fetch"`
+		Go       string            `json:"go,omitzero"`
+		Deps     map[string]string `json:"deps,omitzero"`
+		Settings map[string]string `json:"settings,omitzero"`
+	}
+
+	vs := Versions{Fetch: Version}
+	if buildInfo != nil {
+		vs.Go = buildInfo.GoVersion
+
+		if len(buildInfo.Deps) > 0 {
+			vs.Deps = make(map[string]string, len(buildInfo.Deps))
+			for _, dep := range buildInfo.Deps {
+				vs.Deps[dep.Path] = dep.Version
+			}
+		}
+
+		if len(buildInfo.Settings) > 0 {
+			vs.Settings = make(map[string]string, len(buildInfo.Settings))
+			for _, setting := range buildInfo.Settings {
+				vs.Settings[setting.Key] = setting.Value
+			}
+		}
+	}
+
+	out, _ := json.Marshal(vs)
+	return out
 }

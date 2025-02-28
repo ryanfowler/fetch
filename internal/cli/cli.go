@@ -325,6 +325,9 @@ func printHelp(cli *CLI, p *printer.Printer) {
 func maxFlagLength(fs []Flag) int {
 	var out int
 	for _, f := range fs {
+		if f.IsSecret {
+			continue
+		}
 		len := flagLength(f)
 		if len > out {
 			out = len
