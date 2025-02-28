@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -34,6 +35,14 @@ func getVersion() string {
 
 type KeyVal struct {
 	Key, Val string
+}
+
+type ErrRequestTimedOut struct {
+	Timeout time.Duration
+}
+
+func (err ErrRequestTimedOut) Error() string {
+	return fmt.Sprintf("request timed out after %s", err.Timeout)
 }
 
 type SignalError string

@@ -40,8 +40,14 @@ func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, sile
 }
 
 func update(ctx context.Context, p *printer.Printer, timeout time.Duration, silent bool) error {
-	cfg := client.ClientConfig{Timeout: timeout}
-	c := client.NewClient(cfg)
+	c := client.NewClient(client.ClientConfig{})
+
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		cause := vars.ErrRequestTimedOut{Timeout: timeout}
+		ctx, cancel = context.WithTimeoutCause(ctx, timeout, cause)
+		defer cancel()
+	}
 
 	writeInfo(p, silent, "fetching latest release tag")
 	latest, err := getLatestRelease(ctx, c)

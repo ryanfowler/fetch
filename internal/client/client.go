@@ -33,7 +33,6 @@ type ClientConfig struct {
 	HTTP      HTTPVersion
 	Insecure  bool
 	Proxy     *url.URL
-	Timeout   time.Duration
 	TLS       uint16
 }
 
@@ -84,7 +83,6 @@ func NewClient(cfg ClientConfig) *Client {
 
 	return &Client{
 		c: &http.Client{
-			Timeout:   cfg.Timeout,
 			Transport: transport,
 		},
 	}
