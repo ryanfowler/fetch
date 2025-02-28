@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/ryanfowler/fetch/internal/cli"
@@ -17,13 +16,6 @@ import (
 	"github.com/ryanfowler/fetch/internal/update"
 	"github.com/ryanfowler/fetch/internal/vars"
 )
-
-//go:embed VERSION
-var version string
-
-func init() {
-	version = strings.TrimSpace(version)
-}
 
 func main() {
 	ctx, cancel := context.WithCancelCause(context.Background())
@@ -51,12 +43,12 @@ func main() {
 		os.Exit(0)
 	}
 	if app.Version {
-		fmt.Fprintln(os.Stdout, "fetch", version)
+		fmt.Fprintln(os.Stdout, "fetch", vars.Version)
 		os.Exit(0)
 	}
 	if app.Update {
 		p := printerHandle.Stderr()
-		ok := update.Update(ctx, p, app.Timeout, version, verbosity == fetch.VSilent)
+		ok := update.Update(ctx, p, app.Timeout, verbosity == fetch.VSilent)
 		if ok {
 			os.Exit(0)
 		}
@@ -82,7 +74,6 @@ func main() {
 		Output:        app.Output,
 		PrinterHandle: printerHandle,
 		TLS:           app.TLS,
-		UserAgent:     "fetch/" + version,
 		Verbosity:     verbosity,
 
 		Method:      app.Method,

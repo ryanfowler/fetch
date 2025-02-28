@@ -16,10 +16,11 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/printer"
+	"github.com/ryanfowler/fetch/internal/vars"
 )
 
-func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, version string, silent bool) bool {
-	err := update(ctx, p, timeout, version, silent)
+func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, silent bool) bool {
+	err := update(ctx, p, timeout, silent)
 	if err == nil {
 		return true
 	}
@@ -38,8 +39,8 @@ func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 	return false
 }
 
-func update(ctx context.Context, p *printer.Printer, timeout time.Duration, version string, silent bool) error {
-	cfg := client.ClientConfig{Timeout: timeout, UserAgent: "fetch/" + version}
+func update(ctx context.Context, p *printer.Printer, timeout time.Duration, silent bool) error {
+	cfg := client.ClientConfig{Timeout: timeout}
 	c := client.NewClient(cfg)
 
 	writeInfo(p, silent, "fetching latest release tag")
@@ -48,8 +49,8 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 		return fmt.Errorf("fetching latest release: %w", err)
 	}
 
-	if strings.TrimPrefix(latest.TagName, "v") == version {
-		writeInfo(p, silent, fmt.Sprintf("currently using the latest version (v%s)", version))
+	if latest.TagName == vars.Version {
+		writeInfo(p, silent, fmt.Sprintf("currently using the latest version (%s)", vars.Version))
 		return nil
 	}
 
@@ -87,7 +88,7 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, vers
 		return err
 	}
 
-	msg := fmt.Sprintf("fetch successfully updated (v%s -> %s)", version, latest.TagName)
+	msg := fmt.Sprintf("fetch successfully updated (%s -> %s)", vars.Version, latest.TagName)
 	writeInfo(p, silent, msg)
 	return nil
 }
