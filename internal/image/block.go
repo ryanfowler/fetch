@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -21,9 +23,13 @@ type rgbColor struct {
 }
 
 // writeBlocks resizes the image and outputs it as terminal blocks.
-func writeBlocks(img image.Image, termWidth, termHeight int) error {
+func writeBlocks(img image.Image) error {
 	trueColor := supportsTrueColor()
 
+	termWidth, termHeight, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		return err
+	}
 	cols, rows := imageBlockOutputDimensions(img, termWidth, termHeight)
 
 	// Each terminal block represents 2 vertical pixels.
@@ -34,11 +40,11 @@ func writeBlocks(img image.Image, termWidth, termHeight int) error {
 
 	// Process the image in blocks (each block = two vertical pixels).
 	var out bytes.Buffer
-	for row := 0; row < rows; row++ {
+	for row := range rows {
 		topY := row * 2
 		bottomY := topY + 1
 
-		for x := 0; x < cols; x++ {
+		for x := range cols {
 			top := pixelToColor(dst.At(x, topY))
 			var bottom *rgbColor
 			if bottomY < targetHeight {
@@ -80,19 +86,10 @@ func imageBlockOutputDimensions(img image.Image, termWidth, termHeight int) (int
 
 	// Otherwise calculate appropriate size.
 	if cols*height <= width*rows {
-		h := (height * cols) / width / 2
-		if h < 1 {
-			h = 1
-		}
-		return cols, h
+		return cols, max((height*cols)/width/2, 1)
 	}
 
-	w := (width * rows) / height
-	h := rows / 2
-	if h < 1 {
-		h = 1
-	}
-	return w, h
+	return (width * rows) / height, max(rows/2, 1)
 }
 
 // pixelToColor converts a color.Color into a *rgbColor (or nil if fully transparent).
