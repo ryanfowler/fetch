@@ -11,6 +11,7 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/cli"
 	"github.com/ryanfowler/fetch/internal/fetch"
+	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/printer"
 	"github.com/ryanfowler/fetch/internal/update"
@@ -44,6 +45,12 @@ func main() {
 	}
 	if app.Version {
 		fmt.Fprintln(os.Stdout, "fetch", vars.Version)
+		os.Exit(0)
+	}
+	if app.Versions {
+		p := printerHandle.Stdout()
+		format.FormatJSON(vars.GetVersions(), p)
+		p.Flush()
 		os.Exit(0)
 	}
 	if app.Update {

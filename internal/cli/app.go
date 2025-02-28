@@ -50,6 +50,7 @@ type App struct {
 	Update       bool
 	Verbose      int
 	Version      bool
+	Versions     bool
 	XML          bool
 }
 
@@ -652,6 +653,21 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					a.Version = true
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "versions",
+				Args:        "",
+				Description: "Print all versions",
+				Default:     "",
+				IsSecret:    true,
+				IsSet: func() bool {
+					return a.Versions
+				},
+				Fn: func(value string) error {
+					a.Versions = true
 					return nil
 				},
 			},
