@@ -70,6 +70,7 @@ func main() {
 	}
 
 	req := fetch.Request{
+		DNSServer:     app.DNSServer,
 		DryRun:        app.DryRun,
 		Edit:          app.Edit,
 		Format:        app.Format,

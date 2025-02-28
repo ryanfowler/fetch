@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,6 +30,7 @@ type Client struct {
 }
 
 type ClientConfig struct {
+	DNSServer string
 	HTTP      HTTPVersion
 	Insecure  bool
 	Proxy     *url.URL
@@ -47,6 +49,19 @@ func NewClient(cfg ClientConfig) *Client {
 			return cfg.Proxy, nil
 		},
 		TLSClientConfig: &tls.Config{MinVersion: cfg.TLS},
+	}
+
+	if cfg.DNSServer != "" {
+		dialer := net.Dialer{
+			Resolver: &net.Resolver{
+				PreferGo: true,
+				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+					d := net.Dialer{Timeout: 10 * time.Second}
+					return d.DialContext(ctx, network, cfg.DNSServer)
+				},
+			},
+		}
+		transport.DialContext = dialer.DialContext
 	}
 
 	if cfg.HTTP > HTTPDefault {
