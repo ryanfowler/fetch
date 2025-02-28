@@ -6,13 +6,11 @@ import (
 	"image"
 	_ "image/jpeg"
 	"image/png"
-	"os"
 	"strings"
 
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
-	"golang.org/x/term"
 )
 
 func Render(b []byte) error {
@@ -22,11 +20,6 @@ func Render(b []byte) error {
 	}
 	img = orient(b, img)
 
-	termWidth, termHeight, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return err
-	}
-
 	termWidthPx, termHeightPx, err := getTermSizeInPixels()
 	if err != nil {
 		return err
@@ -34,7 +27,7 @@ func Render(b []byte) error {
 	if termWidthPx == 0 || termHeightPx == 0 {
 		// If we're unable to get the terminal dimensions in pixels,
 		// render the image using blocks.
-		return writeBlocks(img, termWidth, termHeight)
+		return writeBlocks(img)
 	}
 
 	switch detectEmulator().Protocol() {
@@ -43,7 +36,7 @@ func Render(b []byte) error {
 	case protoKitty:
 		return writeKitty(img, termWidthPx, termHeightPx)
 	default:
-		return writeBlocks(img, termWidth, termHeight)
+		return writeBlocks(img)
 	}
 }
 
