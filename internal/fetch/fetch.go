@@ -45,6 +45,7 @@ const (
 )
 
 type Request struct {
+	DNSServer     string
 	DryRun        bool
 	Edit          bool
 	Format        Format
@@ -106,6 +107,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	}
 
 	c := client.NewClient(client.ClientConfig{
+		DNSServer: r.DNSServer,
 		HTTP:      r.HTTP,
 		Insecure:  r.Insecure,
 		Proxy:     r.Proxy,

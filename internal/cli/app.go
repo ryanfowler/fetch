@@ -26,6 +26,7 @@ type App struct {
 	Bearer       string
 	Color        printer.Color
 	Data         io.Reader
+	DNSServer    string
 	DryRun       bool
 	Edit         bool
 	Form         []vars.KeyVal
@@ -241,6 +242,35 @@ func (a *App) CLI() *CLI {
 						}
 						a.Data = f
 					}
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "dns-server",
+				Args:        "IP[:PORT]",
+				Description: "DNS server IP",
+				Default:     "",
+				IsSet: func() bool {
+					return a.DNSServer != ""
+				},
+				Fn: func(value string) error {
+					const usage = "must be in the format <IP[:PORT]>"
+
+					port := "53"
+					host := value
+					if colons := strings.Count(value, ":"); colons == 1 || (colons > 1 && strings.HasPrefix(value, "[")) {
+						var err error
+						host, port, err = net.SplitHostPort(value)
+						if err != nil {
+							return flagValueError("dns-server", value, usage)
+						}
+					}
+					if net.ParseIP(host) == nil {
+						return flagValueError("dns-server", value, usage)
+					}
+
+					a.DNSServer = host + ":" + port
 					return nil
 				},
 			},
