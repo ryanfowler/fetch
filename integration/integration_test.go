@@ -342,6 +342,21 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, data)
 	})
 
+	t.Run("timeout", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(time.Second):
+			}
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "-t", "0.0000001")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "request timed out after 100ns")
+	})
+
 	t.Run("ignore status", func(t *testing.T) {
 		var statusCode atomic.Int64
 		statusCode.Store(200)

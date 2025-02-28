@@ -97,20 +97,11 @@ func Fetch(ctx context.Context, r *Request) int {
 }
 
 func fetch(ctx context.Context, r *Request) (int, error) {
-	errPrinter := r.PrinterHandle.Stderr()
-	outPrinter := r.PrinterHandle.Stdout()
-
-	if r.URL.Scheme == "" {
-		// Use HTTPS if no scheme is defined.
-		r.URL.Scheme = "https"
-	}
-
 	c := client.NewClient(client.ClientConfig{
 		DNSServer: r.DNSServer,
 		HTTP:      r.HTTP,
 		Insecure:  r.Insecure,
 		Proxy:     r.Proxy,
-		Timeout:   r.Timeout,
 		TLS:       r.TLS,
 	})
 	req, err := c.NewRequest(ctx, client.RequestConfig{
@@ -159,6 +150,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	}
 
 	if r.Verbosity >= VExtraVerbose || r.DryRun {
+		errPrinter := r.PrinterHandle.Stderr()
 		printRequestMetadata(errPrinter, req)
 
 		if r.DryRun {
@@ -178,6 +170,18 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		errPrinter.Flush()
 	}
 
+	if r.Timeout > 0 {
+		var cancel context.CancelFunc
+		cause := vars.ErrRequestTimedOut{Timeout: r.Timeout}
+		ctx, cancel = context.WithTimeoutCause(req.Context(), r.Timeout, cause)
+		defer cancel()
+		req = req.WithContext(ctx)
+	}
+
+	return makeRequest(r, c, req)
+}
+
+func makeRequest(r *Request, c *client.Client, req *http.Request) (int, error) {
 	resp, err := c.Do(req)
 	if err != nil {
 		return 0, err
@@ -190,17 +194,19 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	}
 
 	if r.Verbosity >= VNormal {
-		printResponseMetadata(errPrinter, r.Verbosity, resp)
-		errPrinter.Flush()
+		p := r.PrinterHandle.Stderr()
+		printResponseMetadata(p, r.Verbosity, resp)
+		p.Flush()
 	}
 
-	body, err := formatResponse(r, resp, outPrinter)
+	body, err := formatResponse(r, resp, r.PrinterHandle.Stdout())
 	if err != nil {
 		return 0, err
 	}
 
 	if body != nil {
-		err = streamToStdout(body, errPrinter, r.Output == "-", r.NoPager)
+		p := r.PrinterHandle.Stderr()
+		err = streamToStdout(body, p, r.Output == "-", r.NoPager)
 		if err != nil {
 			return 0, err
 		}
