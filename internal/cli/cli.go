@@ -92,6 +92,10 @@ func parse(cli *CLI, args []string) error {
 		}
 
 		// "--" means consider everything else arguments.
+		err = cli.ArgFn("--")
+		if err != nil {
+			return err
+		}
 		for _, arg := range args {
 			err = cli.ArgFn(arg)
 			if err != nil {
