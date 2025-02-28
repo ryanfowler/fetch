@@ -40,17 +40,22 @@ type ClientConfig struct {
 }
 
 func NewClient(cfg ClientConfig) *Client {
-	if cfg.TLS == 0 {
-		cfg.TLS = tls.VersionTLS12
-	}
 	transport := &http.Transport{
 		DisableCompression: true,
+		Protocols:          &http.Protocols{},
 		Proxy: func(r *http.Request) (*url.URL, error) {
 			return cfg.Proxy, nil
 		},
-		TLSClientConfig: &tls.Config{MinVersion: cfg.TLS},
+		TLSClientConfig: &tls.Config{},
 	}
 
+	// Set the minimum TLS version.
+	if cfg.TLS == 0 {
+		cfg.TLS = tls.VersionTLS12
+	}
+	transport.TLSClientConfig.MinVersion = cfg.TLS
+
+	// Set optional DNS server.
 	if cfg.DNSServer != "" {
 		dialer := net.Dialer{
 			Resolver: &net.Resolver{
@@ -64,17 +69,17 @@ func NewClient(cfg ClientConfig) *Client {
 		transport.DialContext = dialer.DialContext
 	}
 
-	if cfg.HTTP > HTTPDefault {
-		transport.Protocols = &http.Protocols{}
-		switch cfg.HTTP {
-		case HTTP1:
-			transport.Protocols.SetHTTP1(true)
-		case HTTP2:
-			transport.Protocols.SetHTTP2(true)
-			transport.Protocols.SetUnencryptedHTTP2(true)
-		}
+	// Set the supported protocols.
+	if cfg.HTTP == HTTPDefault {
+		cfg.HTTP = HTTP2
+	}
+	transport.Protocols.SetHTTP1(true)
+	if cfg.HTTP >= HTTP2 {
+		transport.Protocols.SetHTTP2(true)
+		transport.Protocols.SetUnencryptedHTTP2(true)
 	}
 
+	// Accept invalid certs if insecure.
 	if cfg.Insecure {
 		transport.TLSClientConfig.InsecureSkipVerify = true
 	}
@@ -126,12 +131,6 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	req, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL.String(), cfg.Body)
 	if err != nil {
 		return nil, err
-	}
-
-	if cfg.HTTP == HTTP2 {
-		req.Proto = "HTTP/2.0"
-		req.ProtoMajor = 2
-		req.ProtoMinor = 0
 	}
 
 	req.Header.Set("Accept", "application/json,application/xml,image/webp,*/*")
