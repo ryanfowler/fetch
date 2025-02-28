@@ -19,7 +19,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -405,13 +404,13 @@ func TestMain(t *testing.T) {
 				}
 
 				w.WriteHeader(200)
-				rel := Release{TagName: "v" + *newVersion.Load()}
+				rel := Release{TagName: *newVersion.Load()}
 				suffix := "tar.gz"
 				if runtime.GOOS == "windows" {
 					suffix = "zip"
 				}
 				rel.Assets = append(rel.Assets, Asset{
-					Name: fmt.Sprintf("fetch-v%s-%s-%s.%s",
+					Name: fmt.Sprintf("fetch-%s-%s-%s.%s",
 						*newVersion.Load(), runtime.GOOS, runtime.GOARCH, suffix),
 					URL: *urlStr.Load() + "/artifact",
 				})
@@ -493,7 +492,7 @@ func TestMain(t *testing.T) {
 		}
 
 		// Test full update.
-		newStr := "new"
+		newStr := "v(new)"
 		newVersion.Store(&newStr)
 		res = runFetch(t, fetchPath, server.URL, "--update")
 		assertExitCode(t, 0, res)
@@ -611,15 +610,11 @@ func getFetchVersion(t *testing.T, path string) string {
 	}
 	version = strings.TrimSpace(version)
 
-	split := strings.Split(version, ".")
-	if len(split) != 3 {
-		t.Fatalf("invalid version format: %s", version)
+	if !strings.HasPrefix(version, "v") {
+		t.Fatalf("version doesn't start with a 'v': %s", version)
 	}
-	for _, n := range split {
-		_, err := strconv.Atoi(n)
-		if err != nil {
-			t.Fatalf("invalid version format: %s", version)
-		}
+	if count := strings.Count(version, "."); count < 2 {
+		t.Fatalf("invalid version format: %s", version)
 	}
 
 	return version

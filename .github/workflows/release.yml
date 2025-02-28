@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -63,7 +63,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-s -w" -o ${{ env.BIN_NAME }} ./main.go
+        run: go build -trimpath -ldflags="-s -w" -o ${{ env.BIN_NAME }}
 
       - name: Build archive (unix)
         if: ${{ matrix.goos != 'windows' }}
@@ -93,8 +93,6 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Mark release as latest
         env:

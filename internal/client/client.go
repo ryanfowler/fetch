@@ -25,8 +25,7 @@ const (
 )
 
 type Client struct {
-	c         *http.Client
-	userAgent string
+	c *http.Client
 }
 
 type ClientConfig struct {
@@ -36,7 +35,6 @@ type ClientConfig struct {
 	Proxy     *url.URL
 	Timeout   time.Duration
 	TLS       uint16
-	UserAgent string
 }
 
 func NewClient(cfg ClientConfig) *Client {
@@ -89,7 +87,6 @@ func NewClient(cfg ClientConfig) *Client {
 			Timeout:   cfg.Timeout,
 			Transport: transport,
 		},
-		userAgent: cfg.UserAgent,
 	}
 }
 
@@ -134,7 +131,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	req.Header.Set("Accept", "application/json,application/xml,image/webp,*/*")
-	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("User-Agent", vars.UserAgent)
 
 	switch {
 	case cfg.JSON:
