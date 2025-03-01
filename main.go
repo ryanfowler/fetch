@@ -9,12 +9,12 @@ import (
 	"syscall"
 
 	"github.com/ryanfowler/fetch/internal/cli"
+	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/fetch"
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/printer"
 	"github.com/ryanfowler/fetch/internal/update"
-	"github.com/ryanfowler/fetch/internal/vars"
 )
 
 func main() {
@@ -23,7 +23,7 @@ func main() {
 	signal.Notify(chSig, syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM)
 	go func() {
 		sig := <-chSig
-		cancel(vars.SignalError(sig.String()))
+		cancel(core.SignalError(sig.String()))
 	}()
 
 	app, err := cli.Parse(os.Args[1:])
@@ -43,18 +43,18 @@ func main() {
 		os.Exit(0)
 	}
 	if app.Version {
-		fmt.Fprintln(os.Stdout, "fetch", vars.Version)
+		fmt.Fprintln(os.Stdout, "fetch", core.Version)
 		os.Exit(0)
 	}
 	if app.Versions {
 		p := printerHandle.Stdout()
-		format.FormatJSON(vars.GetVersions(), p)
+		format.FormatJSON(core.GetVersions(), p)
 		p.Flush()
 		os.Exit(0)
 	}
 	if app.Update {
 		p := printerHandle.Stderr()
-		ok := update.Update(ctx, p, app.Timeout, verbosity == fetch.VSilent)
+		ok := update.Update(ctx, p, app.Timeout, verbosity == core.VSilent)
 		if ok {
 			os.Exit(0)
 		}
@@ -101,17 +101,17 @@ func main() {
 	os.Exit(status)
 }
 
-func getVerbosity(app *cli.App) fetch.Verbosity {
+func getVerbosity(app *cli.App) core.Verbosity {
 	if app.Silent {
-		return fetch.VSilent
+		return core.VSilent
 	}
 	switch app.Verbose {
 	case 0:
-		return fetch.VNormal
+		return core.VNormal
 	case 1:
-		return fetch.VVerbose
+		return core.VVerbose
 	default:
-		return fetch.VExtraVerbose
+		return core.VExtraVerbose
 	}
 }
 
