@@ -96,20 +96,20 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		TLS:       r.TLS,
 	})
 	req, err := c.NewRequest(ctx, client.RequestConfig{
-		Method:      r.Method,
-		URL:         r.URL,
-		Form:        r.Form,
-		Multipart:   r.Multipart,
-		Headers:     r.Headers,
-		QueryParams: r.QueryParams,
-		Body:        r.Body,
-		NoEncode:    r.NoEncode,
 		AWSSigV4:    r.AWSSigv4,
 		Basic:       r.Basic,
 		Bearer:      r.Bearer,
-		JSON:        r.JSON,
-		XML:         r.XML,
+		Body:        r.Body,
+		Form:        r.Form,
+		Headers:     r.Headers,
 		HTTP:        r.HTTP,
+		JSON:        r.JSON,
+		Method:      r.Method,
+		Multipart:   r.Multipart,
+		NoEncode:    r.NoEncode,
+		QueryParams: r.QueryParams,
+		URL:         r.URL,
+		XML:         r.XML,
 	})
 	if err != nil {
 		return 0, err

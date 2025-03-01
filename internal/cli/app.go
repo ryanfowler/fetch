@@ -54,20 +54,6 @@ type App struct {
 	XML          bool
 }
 
-func NewApp() *App {
-	var app App
-	for _, flag := range app.CLI().Flags {
-		if flag.Default != "" {
-			err := flag.Fn(flag.Default)
-			if err != nil {
-				msg := fmt.Sprintf("invalid default for %q: %q", flag.Long, flag.Default)
-				panic(msg)
-			}
-		}
-	}
-	return &app
-}
-
 func (a *App) PrintHelp(p *printer.Printer) {
 	printHelp(a.CLI(), p)
 }
@@ -460,7 +446,7 @@ func (a *App) CLI() *CLI {
 				Description: "HTTP method to use",
 				Default:     "GET",
 				IsSet: func() bool {
-					return a.Method != "GET"
+					return a.Method != ""
 				},
 				Fn: func(value string) error {
 					a.Method = value
