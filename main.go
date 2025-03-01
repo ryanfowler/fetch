@@ -46,9 +46,9 @@ func main() {
 		fmt.Fprintln(os.Stdout, "fetch", core.Version)
 		os.Exit(0)
 	}
-	if app.Versions {
+	if app.BuildInfo {
 		p := printerHandle.Stdout()
-		format.FormatJSON(core.GetVersions(), p)
+		format.FormatJSON(core.GetBuildInfo(), p)
 		p.Flush()
 		os.Exit(0)
 	}

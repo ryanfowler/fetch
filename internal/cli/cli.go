@@ -28,7 +28,7 @@ type Flag struct {
 	Description string
 	Default     string
 	Values      []string
-	IsSecret    bool
+	IsHidden    bool
 	IsSet       func() bool
 	Fn          func(value string) error
 }
@@ -273,7 +273,7 @@ func printHelp(cli *CLI, p *printer.Printer) {
 
 		maxLen := maxFlagLength(cli.Flags)
 		for _, flag := range cli.Flags {
-			if flag.IsSecret {
+			if flag.IsHidden {
 				continue
 			}
 
@@ -325,7 +325,7 @@ func printHelp(cli *CLI, p *printer.Printer) {
 func maxFlagLength(fs []Flag) int {
 	var out int
 	for _, f := range fs {
-		if f.IsSecret {
+		if f.IsHidden {
 			continue
 		}
 		len := flagLength(f)

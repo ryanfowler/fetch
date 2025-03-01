@@ -35,7 +35,7 @@ func getVersion() string {
 	return buildInfo.Main.Version
 }
 
-func GetVersions() []byte {
+func GetBuildInfo() []byte {
 	type Versions struct {
 		Fetch    string            `json:"fetch"`
 		Go       string            `json:"go,omitzero"`
