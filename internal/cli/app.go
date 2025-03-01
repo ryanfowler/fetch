@@ -26,7 +26,7 @@ type App struct {
 	BuildInfo    bool
 	Color        core.Color
 	Data         io.Reader
-	DNSServer    string
+	DNSServer    *url.URL
 	DryRun       bool
 	Edit         bool
 	Form         []core.KeyVal
@@ -250,17 +250,25 @@ func (a *App) CLI() *CLI {
 			{
 				Short:       "",
 				Long:        "dns-server",
-				Args:        "IP[:PORT]",
-				Description: "DNS server IP",
+				Args:        "IP[:PORT]|URL",
+				Description: "DNS server IP or DoH URL",
 				Default:     "",
 				IsSet: func() bool {
-					return a.DNSServer != ""
+					return a.DNSServer != nil
 				},
 				Fn: func(value string) error {
-					const usage = "must be in the format <IP[:PORT]>"
+					if strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") {
+						u, err := url.Parse(value)
+						if err != nil {
+							return flagValueError("dns-server", value, "unable to parse DoH URL")
+						}
+						a.DNSServer = u
+						return nil
+					}
 
 					port := "53"
 					host := value
+					const usage = "must be in the format <IP[:PORT]>"
 					if colons := strings.Count(value, ":"); colons == 1 || (colons > 1 && strings.HasPrefix(value, "[")) {
 						var err error
 						host, port, err = net.SplitHostPort(value)
@@ -272,7 +280,8 @@ func (a *App) CLI() *CLI {
 						return flagValueError("dns-server", value, usage)
 					}
 
-					a.DNSServer = host + ":" + port
+					u := url.URL{Host: host + ":" + port}
+					a.DNSServer = &u
 					return nil
 				},
 			},

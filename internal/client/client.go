@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,7 +23,7 @@ type Client struct {
 
 // ClientConfig represents the optional configuration parameters for a Client.
 type ClientConfig struct {
-	DNSServer string
+	DNSServer *url.URL
 	HTTP      core.HTTPVersion
 	Insecure  bool
 	Proxy     *url.URL
@@ -41,17 +40,12 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 
 	// Set optional DNS server.
-	if cfg.DNSServer != "" {
-		dialer := net.Dialer{
-			Resolver: &net.Resolver{
-				PreferGo: true,
-				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-					d := net.Dialer{Timeout: 10 * time.Second}
-					return d.DialContext(ctx, network, cfg.DNSServer)
-				},
-			},
+	if cfg.DNSServer != nil {
+		if cfg.DNSServer.Scheme == "" {
+			transport.DialContext = dialContextUDP(cfg.DNSServer.Host)
+		} else {
+			transport.DialContext = dialContextDOH(cfg.DNSServer)
 		}
-		transport.DialContext = dialer.DialContext
 	}
 
 	// Set the supported protocols.
