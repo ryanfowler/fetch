@@ -208,15 +208,15 @@ func unknownFlagError(name string) error {
 }
 
 func Parse(args []string) (*App, error) {
-	app := NewApp()
+	var app App
 
 	cli := app.CLI()
 	err := parse(cli, args)
 	if err != nil {
-		return app, err
+		return &app, err
 	}
 
-	return app, nil
+	return &app, nil
 }
 
 func printHelp(cli *CLI, p *printer.Printer) {

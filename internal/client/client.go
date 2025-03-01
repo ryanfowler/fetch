@@ -142,6 +142,9 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	// Create the initial HTTP request.
+	if cfg.Method == "" {
+		cfg.Method = "GET"
+	}
 	req, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL.String(), cfg.Body)
 	if err != nil {
 		return nil, err
