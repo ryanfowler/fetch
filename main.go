@@ -55,7 +55,12 @@ func main() {
 	// Print build info to stdout.
 	if app.BuildInfo {
 		p := printerHandle.Stdout()
-		format.FormatJSON(core.GetBuildInfo(), p)
+		info := core.GetBuildInfo()
+		if app.Format != core.FormatOff {
+			format.FormatJSON(info, p)
+		} else {
+			p.Write(info)
+		}
 		p.Flush()
 		os.Exit(0)
 	}
