@@ -36,7 +36,7 @@ const (
 )
 
 type Request struct {
-	DNSServer     string
+	DNSServer     *url.URL
 	DryRun        bool
 	Edit          bool
 	Format        core.Format

@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -229,6 +230,35 @@ func TestMain(t *testing.T) {
 		if req.body != "temp file data" {
 			t.Fatalf("unexpected body: %s", req.body)
 		}
+	})
+
+	t.Run("dns over https", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/dns-query" {
+				io.WriteString(w, `{"Status":0,"Answer":[{"data":"127.0.0.1"}]}`)
+				return
+			}
+			if r.URL.Path == "/dns-query-nxdomain" {
+				io.WriteString(w, `{"Status":3}`)
+				return
+			}
+			w.WriteHeader(204)
+		})
+		defer server.Close()
+
+		_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+		if err != nil {
+			t.Fatalf("unable to split host and port from server url: %s", err.Error())
+		}
+		urlStr := "http://localhost:" + port
+
+		res := runFetch(t, fetchPath, urlStr, "--dns-server", server.URL+"/dns-query")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "204 No Content")
+
+		res = runFetch(t, fetchPath, urlStr, "--dns-server", server.URL+"/dns-query-nxdomain")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "no such host")
 	})
 
 	t.Run("form", func(t *testing.T) {
