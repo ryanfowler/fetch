@@ -13,12 +13,20 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+// Render renders the provided raw image to stdout based on what the terminal
+// emulator supports.
 func Render(b []byte) error {
 	img, _, err := image.Decode(bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
 	img = orient(b, img)
+
+	bounds := img.Bounds()
+	if bounds.Dx() == 0 || bounds.Dy() == 0 {
+		// Exit early if the image has a zero width or height.
+		return nil
+	}
 
 	termWidthPx, termHeightPx, err := getTermSizeInPixels()
 	if err != nil {
