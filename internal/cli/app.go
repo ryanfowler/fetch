@@ -44,6 +44,7 @@ type App struct {
 	Output       string
 	Proxy        *url.URL
 	QueryParams  []core.KeyVal
+	Redirects    *int
 	Silent       bool
 	Timeout      time.Duration
 	TLS          uint16
@@ -565,6 +566,25 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					key, val, _ := cut(value, "=")
 					a.QueryParams = append(a.QueryParams, core.KeyVal{Key: key, Val: val})
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "redirects",
+				Args:        "NUM",
+				Description: "Maximum number of redirects",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Redirects != nil
+				},
+				Fn: func(value string) error {
+					n, err := strconv.Atoi(value)
+					if err != nil || n < 0 {
+						const usage = "must be a positive integer"
+						return flagValueError("redirects", value, usage)
+					}
+					a.Redirects = &n
 					return nil
 				},
 			},

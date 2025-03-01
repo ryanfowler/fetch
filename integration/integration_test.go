@@ -387,6 +387,47 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 	})
 
+	t.Run("redirects", func(t *testing.T) {
+		var empty string
+		var urlStr atomic.Pointer[string]
+		urlStr.Store(&empty)
+
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if count.Add(-1) < 0 {
+				w.WriteHeader(200)
+				return
+			}
+
+			w.Header().Set("Location", *urlStr.Load())
+			w.WriteHeader(301)
+		})
+		defer server.Close()
+		urlStr.Store(&server.URL)
+
+		// Success with no redirects.
+		res := runFetch(t, fetchPath, server.URL, "--redirects", "0")
+		assertExitCode(t, 0, res)
+
+		// Returns 301 with no redirects.
+		count.Store(1)
+		res = runFetch(t, fetchPath, server.URL, "--redirects", "0")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "301 Moved Permanently")
+
+		// Returns 200 with redirects.
+		count.Store(5)
+		res = runFetch(t, fetchPath, server.URL)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "200 OK")
+
+		// Returns an error when max redirects exceeded.
+		count.Store(2)
+		res = runFetch(t, fetchPath, server.URL, "--redirects", "1")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "exceeded maximum number of redirects")
+	})
+
 	t.Run("server sent events", func(t *testing.T) {
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			const data = ":comment\n\ndata:{\"key\":\"val\"}\n\nevent:ev1\ndata: this is my data\n\n"
