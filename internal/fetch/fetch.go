@@ -3,6 +3,8 @@ package fetch
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
+	"errors"
 	"io"
 	"mime"
 	"net/http"
@@ -70,9 +72,6 @@ func Fetch(ctx context.Context, r *Request) int {
 	if err == nil {
 		return code
 	}
-	if e := context.Cause(ctx); e != nil {
-		err = e
-	}
 
 	p := r.PrinterHandle.Stderr()
 	p.Set(printer.Red)
@@ -82,6 +81,12 @@ func Fetch(ctx context.Context, r *Request) int {
 	p.WriteString(": ")
 	p.WriteString(err.Error())
 	p.WriteString("\n")
+
+	if isCertificateErr(err) {
+		p.WriteString("\n")
+		printInsecureMsg(p)
+	}
+
 	p.Flush()
 	return 1
 }
@@ -363,4 +368,34 @@ func addHeader(headers []core.KeyVal, h core.KeyVal) []core.KeyVal {
 		return strings.Compare(a.Key, b.Key)
 	})
 	return slices.Insert(headers, i, h)
+}
+
+// isCertificateErr returns true if the error has to do with TLS cert validation.
+func isCertificateErr(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		var certInvalidErr x509.CertificateInvalidError
+		if errors.As(urlErr.Err, &certInvalidErr) {
+			return true
+		}
+
+		var hostErr x509.HostnameError
+		if errors.As(urlErr.Err, &hostErr) {
+			return true
+		}
+
+		var unknownErr x509.UnknownAuthorityError
+		if errors.As(urlErr.Err, &unknownErr) {
+			return true
+		}
+	}
+	return false
+}
+
+func printInsecureMsg(p *printer.Printer) {
+	p.WriteString("If you absolutely trust the server, try '")
+	p.Set(printer.Bold)
+	p.WriteString("--insecure")
+	p.Reset()
+	p.WriteString("'.\n")
 }
