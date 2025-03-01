@@ -19,8 +19,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// unpackArtifact decodes the zip archive from the provided io.Reader into
+// "dir", returning any error encountered.
 func unpackArtifact(dir string, r io.Reader) error {
-	// Read the archive into memory.
+	// Read the archive into memory, as we need an io.ReaderAt.
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -42,6 +44,7 @@ func unpackArtifact(dir string, r io.Reader) error {
 	return nil
 }
 
+// handleZipFile writes the provided directory/file to dir.
 func handleZipFile(dir string, f *zip.File) error {
 	target := filepath.Join(dir, f.Name)
 
@@ -70,7 +73,7 @@ func handleZipFile(dir string, f *zip.File) error {
 	return err
 }
 
-// The following Windows self-replace functionality uses the same techniques as
+// The following Windows self-replace functionality uses similar techniques to
 // the 'self-replace' Rust crate: https://github.com/mitsuhiko/self-replace
 
 const (
@@ -126,6 +129,8 @@ func init() {
 	os.Exit(0)
 }
 
+// selfReplace replaces the current executable, exePath, with a new executable,
+// newExePath, returning any error encountered.
 func selfReplace(exePath, newExePath string) error {
 	dir := filepath.Dir(exePath)
 	oldExePath := createTempFilePath(dir, relocatedSuffix)

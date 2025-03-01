@@ -9,16 +9,19 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
+// Multipart implements io.Reader for multipart data.
 type Multipart struct {
 	io.Reader
 	contentType string
 }
 
+// NewMultipart returns a Multipart using the provided key/values.
 func NewMultipart(kvs []core.KeyVal) *Multipart {
 	if len(kvs) == 0 {
 		return nil
 	}
 
+	// Create a pipe and asynchronously write to it in a goroutine.
 	reader, writer := io.Pipe()
 	mpw := multipart.NewWriter(writer)
 	go func() {
@@ -65,6 +68,7 @@ func NewMultipart(kvs []core.KeyVal) *Multipart {
 	}
 }
 
+// ContentType returns the Content-Type header value to use for this request.
 func (m *Multipart) ContentType() string {
 	return m.contentType
 }

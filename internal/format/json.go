@@ -11,6 +11,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
+// FormatJSON formats the provided raw JSON data to the Printer.
 func FormatJSON(buf []byte, p *printer.Printer) error {
 	err := formatJSON(bytes.NewReader(buf), p)
 	if err != nil {
@@ -25,10 +26,13 @@ func formatJSON(r io.Reader, p *printer.Printer) error {
 	if err != nil {
 		return err
 	}
+
+	// Ensure that there are no more tokens left.
 	tok, err := dec.Token()
 	if !errors.Is(err, io.EOF) {
 		return fmt.Errorf("unexpected token: %v", tok)
 	}
+
 	p.WriteString("\n")
 	return nil
 }

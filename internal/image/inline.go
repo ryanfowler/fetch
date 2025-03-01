@@ -6,6 +6,8 @@ import (
 	"os"
 )
 
+// writeInline writes the provided image to the terminal using iTerm2's inline
+// image protocol.
 func writeInline(img image.Image, termWidthPx, termHeightPx int) error {
 	img = resizeForTerm(img, termWidthPx, termHeightPx)
 	bounds := img.Bounds()

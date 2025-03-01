@@ -18,6 +18,7 @@ import (
 )
 
 func main() {
+	// Cancel the context when one of the below signals are caught.
 	ctx, cancel := context.WithCancelCause(context.Background())
 	chSig := make(chan os.Signal, 1)
 	signal.Notify(chSig, syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM)
@@ -26,6 +27,7 @@ func main() {
 		cancel(core.SignalError(sig.String()))
 	}()
 
+	// Parse the CLI args.
 	app, err := cli.Parse(os.Args[1:])
 	if err != nil {
 		p := printer.NewHandle(app.Color).Stderr()
@@ -36,22 +38,29 @@ func main() {
 	printerHandle := printer.NewHandle(app.Color)
 	verbosity := getVerbosity(app)
 
+	// Print help to stdout.
 	if app.Help {
 		p := printerHandle.Stdout()
 		app.PrintHelp(p)
 		p.Flush()
 		os.Exit(0)
 	}
+
+	// Print version to stdout.
 	if app.Version {
 		fmt.Fprintln(os.Stdout, "fetch", core.Version)
 		os.Exit(0)
 	}
+
+	// Print build info to stdout.
 	if app.BuildInfo {
 		p := printerHandle.Stdout()
 		format.FormatJSON(core.GetBuildInfo(), p)
 		p.Flush()
 		os.Exit(0)
 	}
+
+	// Attempt to update the current executable.
 	if app.Update {
 		p := printerHandle.Stderr()
 		ok := update.Update(ctx, p, app.Timeout, verbosity == core.VSilent)
@@ -61,12 +70,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Otherwise, a URL must be provided.
 	if app.URL == nil {
 		p := printerHandle.Stderr()
 		writeCLIErr(p, errors.New("<URL> must be provided"))
 		os.Exit(1)
 	}
 
+	// Make the HTTP request using the parsed configuration.
 	req := fetch.Request{
 		DNSServer:     app.DNSServer,
 		DryRun:        app.DryRun,
@@ -101,6 +112,7 @@ func main() {
 	os.Exit(status)
 }
 
+// getVerbosity returns the Verbosity level based on the app configuration.
 func getVerbosity(app *cli.App) core.Verbosity {
 	if app.Silent {
 		return core.VSilent
@@ -115,6 +127,7 @@ func getVerbosity(app *cli.App) core.Verbosity {
 	}
 }
 
+// writeCLIErr writes the provided CLI error to the Printer.
 func writeCLIErr(p *printer.Printer, err error) {
 	p.Set(printer.Bold)
 	p.Set(printer.Red)

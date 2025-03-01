@@ -12,6 +12,8 @@ import (
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
+// FormatEventStream formats the provided stream of server sent events to the
+// Printer, flushing after each event.
 func FormatEventStream(r io.Reader, p *printer.Printer) error {
 	var written bool
 	for ev, err := range streamEvents(r) {
@@ -43,6 +45,7 @@ func writeEventStreamType(t string, p *printer.Printer) {
 func writeEventStreamData(d string, p *printer.Printer) {
 	dec := json.NewDecoder(strings.NewReader(d))
 	if formatNDJSONValue(dec, p) == nil {
+		// Ensure there are no more tokens in the event.
 		_, err := dec.Token()
 		if errors.Is(err, io.EOF) {
 			p.WriteString("\n")
@@ -73,6 +76,8 @@ type event struct {
 	Data   string
 }
 
+// streamEvents returns an iterator of server sent events from the provided
+// io.Reader.
 func streamEvents(r io.Reader) iter.Seq2[event, error] {
 	return func(yield func(event, error) bool) {
 		scanner := bufio.NewScanner(r)

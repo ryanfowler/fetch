@@ -8,6 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// getTermSizeInPixels returns the size of the terminal in pixels on unix.
 func getTermSizeInPixels() (int, int, error) {
 	ws, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
 	if err != nil {

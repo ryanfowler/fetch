@@ -7,7 +7,9 @@ import (
 	"io"
 )
 
-func orient(src []byte, img image.Image) image.Image {
+// orientImage reads the image's exif data to find any orientation value, and
+// returns an image that is rotated/mirrored appropriately.
+func orientImage(src []byte, img image.Image) image.Image {
 	switch parseOrientation(bytes.NewReader(src)) {
 	case 2:
 		return mirrorHorizontal(img)
@@ -28,6 +30,9 @@ func orient(src []byte, img image.Image) image.Image {
 	}
 }
 
+// parseOrientation returns the exif orientation value from the provided image.
+// If the image does not contain any exif data, or the data is invalid, it
+// returns "0".
 func parseOrientation(r io.Reader) int {
 	// Read and verify the JPEG SOI marker.
 	var marker uint16
@@ -130,7 +135,7 @@ func parseOrientation(r io.Reader) int {
 		return 0
 	}
 
-	for i := 0; i < int(numEntries); i++ {
+	for range int(numEntries) {
 		var tag uint16
 		err = binary.Read(r, order, &tag)
 		if err != nil {
@@ -182,8 +187,8 @@ func rotate90(img image.Image) image.Image {
 	w, h := bounds.Dx(), bounds.Dy()
 	out := image.NewRGBA(image.Rect(0, 0, h, w))
 
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			out.Set(h-y-1, x, img.At(x, y))
 		}
 	}
@@ -195,8 +200,8 @@ func rotate180(img image.Image) image.Image {
 	w, h := bounds.Dx(), bounds.Dy()
 	out := image.NewRGBA(bounds)
 
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			out.Set(w-x-1, h-y-1, img.At(x, y))
 		}
 	}
@@ -208,8 +213,8 @@ func rotate270(img image.Image) image.Image {
 	w, h := bounds.Dx(), bounds.Dy()
 	out := image.NewRGBA(image.Rect(0, 0, h, w))
 
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			out.Set(y, w-x-1, img.At(x, y))
 		}
 	}
@@ -221,8 +226,8 @@ func mirrorHorizontal(img image.Image) image.Image {
 	w, h := bounds.Dx(), bounds.Dy()
 	out := image.NewRGBA(bounds)
 
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			out.Set(w-x-1, y, img.At(x, y))
 		}
 	}
@@ -234,8 +239,8 @@ func mirrorVertical(img image.Image) image.Image {
 	w, h := bounds.Dx(), bounds.Dy()
 	out := image.NewRGBA(bounds)
 
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			out.Set(x, h-y-1, img.At(x, y))
 		}
 	}

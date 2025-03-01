@@ -29,6 +29,8 @@ type Config struct {
 	Service   string
 }
 
+// Sign signs the provided HTTP request with the information from Config,
+// returning any error encountered.
 func Sign(req *http.Request, cfg Config, now time.Time) error {
 	datetime := now.Format(datetimeFormat)
 	req.Header.Set("X-Amz-Date", datetime)
@@ -39,12 +41,14 @@ func Sign(req *http.Request, cfg Config, now time.Time) error {
 	}
 	req.Header.Set(headerContentSha256, payload)
 
+	// Build the signature.
 	signedHeaders := getSignedHeaders(req)
 	canonicalRequest := buildCanonicalRequest(req, signedHeaders, payload)
 	stringToSign := buildStringToSign(datetime, cfg.Region, cfg.Service, canonicalRequest)
 	signingKey := createSigningKey(datetime[:8], cfg.Region, cfg.Service, cfg.SecretKey)
 	signature := hex.EncodeToString(hmacSha256(signingKey, stringToSign))
 
+	// Format the Authorization header value.
 	var sb strings.Builder
 	sb.Grow(512)
 
@@ -70,15 +74,19 @@ func Sign(req *http.Request, cfg Config, now time.Time) error {
 	return nil
 }
 
+// getPayloadHash returns the appropriate payload has for HTTP request and service.
 func getPayloadHash(req *http.Request, service string) (string, error) {
+	// If a payload header already exists, use that.
 	if payload := req.Header.Get(headerContentSha256); payload != "" {
 		return payload, nil
 	}
 
+	// Use the empty sha256 if the request has no body.
 	if req.Body == nil || req.Body == http.NoBody {
 		return emptySha256, nil
 	}
 
+	// Attempt to utilize the GetBody function if it exists.
 	if req.GetBody != nil {
 		body, err := req.GetBody()
 		if err != nil {
@@ -88,6 +96,8 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 		return hexSha256Reader(body)
 	}
 
+	// If body implements io.ReadSeeker, calculate the hash and seek back
+	// to the start afterwards.
 	if rs, ok := req.Body.(io.ReadSeeker); ok {
 		payload, err := hexSha256Reader(rs)
 		if err != nil {
@@ -99,16 +109,23 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 		return payload, nil
 	}
 
+	// At this point, if the service is S3, use the "UNISIGNED-PAYLOAD" to
+	// avoid having to read the entire request body into memory.
 	if service == "s3" {
 		return "UNSIGNED-PAYLOAD", nil
 	}
 
-	defer req.Body.Close()
-	body, err := io.ReadAll(req.Body)
+	// Read the entire body into memory to calculate the payload hash.
+	oldBody := req.Body
+	defer oldBody.Close()
+	body, err := io.ReadAll(oldBody)
 	if err != nil {
 		return "", err
 	}
 	req.Body = io.NopCloser(bytes.NewReader(body))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
 
 	return hexSha256Reader(bytes.NewReader(body))
 }
@@ -116,6 +133,7 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 func getSignedHeaders(req *http.Request) []core.KeyVal {
 	out := make([]core.KeyVal, 0, len(req.Header)+1)
 
+	// Host header is required to be signed.
 	if _, ok := req.Header["Host"]; !ok {
 		out = append(out, core.KeyVal{Key: "host", Val: req.URL.Host})
 	}
@@ -123,12 +141,14 @@ func getSignedHeaders(req *http.Request) []core.KeyVal {
 	for key, vals := range req.Header {
 		switch key {
 		case "Authorization", "Content-Length", "User-Agent":
+			// Avoid signing these headers.
 			continue
 		}
 		key = strings.ToLower(strings.TrimSpace(key))
 		val := strings.TrimSpace(strings.Join(vals, ","))
 		out = append(out, core.KeyVal{Key: key, Val: val})
 	}
+	// Headers should be ordered by key.
 	slices.SortFunc(out, func(a, b core.KeyVal) int {
 		return strings.Compare(a.Key, b.Key)
 	})

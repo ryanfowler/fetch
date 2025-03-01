@@ -16,41 +16,27 @@ import (
 	"github.com/ryanfowler/fetch/internal/multipart"
 )
 
-type HTTPVersion int
-
-const (
-	HTTPDefault HTTPVersion = iota
-	HTTP1
-	HTTP2
-)
-
+// Client represents a wrapped HTTP client.
 type Client struct {
 	c *http.Client
 }
 
+// ClientConfig represents the optional configuration parameters for a Client.
 type ClientConfig struct {
 	DNSServer string
-	HTTP      HTTPVersion
+	HTTP      core.HTTPVersion
 	Insecure  bool
 	Proxy     *url.URL
 	TLS       uint16
 }
 
+// NewClient returns an initialized Client given the provided configuration.
 func NewClient(cfg ClientConfig) *Client {
 	transport := &http.Transport{
 		DisableCompression: true,
 		Protocols:          &http.Protocols{},
-		Proxy: func(r *http.Request) (*url.URL, error) {
-			return cfg.Proxy, nil
-		},
-		TLSClientConfig: &tls.Config{},
+		TLSClientConfig:    &tls.Config{},
 	}
-
-	// Set the minimum TLS version.
-	if cfg.TLS == 0 {
-		cfg.TLS = tls.VersionTLS12
-	}
-	transport.TLSClientConfig.MinVersion = cfg.TLS
 
 	// Set optional DNS server.
 	if cfg.DNSServer != "" {
@@ -67,11 +53,11 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 
 	// Set the supported protocols.
-	if cfg.HTTP == HTTPDefault {
-		cfg.HTTP = HTTP2
+	if cfg.HTTP == core.HTTPDefault {
+		cfg.HTTP = core.HTTP2
 	}
 	transport.Protocols.SetHTTP1(true)
-	if cfg.HTTP >= HTTP2 {
+	if cfg.HTTP >= core.HTTP2 {
 		transport.Protocols.SetHTTP2(true)
 		transport.Protocols.SetUnencryptedHTTP2(true)
 	}
@@ -81,6 +67,19 @@ func NewClient(cfg ClientConfig) *Client {
 		transport.TLSClientConfig.InsecureSkipVerify = true
 	}
 
+	// Set the optinal proxy URL.
+	if cfg.Proxy != nil {
+		transport.Proxy = func(r *http.Request) (*url.URL, error) {
+			return cfg.Proxy, nil
+		}
+	}
+
+	// Set the minimum TLS version.
+	if cfg.TLS == 0 {
+		cfg.TLS = tls.VersionTLS12
+	}
+	transport.TLSClientConfig.MinVersion = cfg.TLS
+
 	return &Client{
 		c: &http.Client{
 			Transport: transport,
@@ -88,30 +87,36 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 }
 
+// RequestConfig represents the configuration for creating an HTTP request.
 type RequestConfig struct {
-	Method      string
-	URL         *url.URL
-	Form        []core.KeyVal
-	Multipart   *multipart.Multipart
-	Headers     []core.KeyVal
-	QueryParams []core.KeyVal
-	Body        io.Reader
-	NoEncode    bool
 	AWSSigV4    *aws.Config
 	Basic       *core.KeyVal
 	Bearer      string
+	Body        io.Reader
+	Form        []core.KeyVal
+	Headers     []core.KeyVal
+	HTTP        core.HTTPVersion
 	JSON        bool
+	Method      string
+	Multipart   *multipart.Multipart
+	NoEncode    bool
+	QueryParams []core.KeyVal
+	URL         *url.URL
 	XML         bool
-	HTTP        HTTPVersion
 }
 
+// NewRequest returns an *http.Request given the provided configuration.
 func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Request, error) {
-	q := cfg.URL.Query()
-	for _, kv := range cfg.QueryParams {
-		q.Add(kv.Key, kv.Val)
+	// Add any query params to the URL.
+	if len(cfg.QueryParams) > 0 {
+		q := cfg.URL.Query()
+		for _, kv := range cfg.QueryParams {
+			q.Add(kv.Key, kv.Val)
+		}
+		cfg.URL.RawQuery = q.Encode()
 	}
-	cfg.URL.RawQuery = q.Encode()
 
+	// Set any form or multipart bodies.
 	switch {
 	case len(cfg.Form) > 0:
 		q := make(url.Values, len(cfg.Form))
@@ -123,38 +128,17 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		cfg.Body = cfg.Multipart
 	}
 
+	// Create the initial HTTP request.
 	req, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL.String(), cfg.Body)
 	if err != nil {
 		return nil, err
 	}
 
+	// Set the accept and user-agent headers.
 	req.Header.Set("Accept", "application/json,application/xml,image/webp,*/*")
 	req.Header.Set("User-Agent", core.UserAgent)
 
-	switch {
-	case cfg.JSON:
-		req.Header.Set("Content-Type", "application/json")
-	case cfg.XML:
-		req.Header.Set("Content-Type", "application/xml")
-	}
-
-	for _, kv := range cfg.Headers {
-		req.Header.Set(kv.Key, kv.Val)
-	}
-
-	switch {
-	case len(cfg.Form) > 0:
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	case cfg.Multipart != nil:
-		req.Header.Set("Content-Type", cfg.Multipart.ContentType())
-	}
-
-	if !cfg.NoEncode && req.Header.Get("Accept-Encoding") == "" {
-		req.Header.Set("Accept-Encoding", "gzip")
-		ctx = context.WithValue(ctx, ctxEncodingRequestedKey, true)
-		req = req.WithContext(ctx)
-	}
-
+	// Optionally set the authohrization header.
 	switch {
 	case cfg.AWSSigV4 != nil:
 		err = aws.Sign(req, *cfg.AWSSigV4, time.Now().UTC())
@@ -167,17 +151,43 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		req.Header.Set("Authorization", "Bearer "+cfg.Bearer)
 	}
 
+	// Optionally set the content-type header.
+	switch {
+	case len(cfg.Form) > 0:
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	case cfg.Multipart != nil:
+		req.Header.Set("Content-Type", cfg.Multipart.ContentType())
+	case cfg.JSON:
+		req.Header.Set("Content-Type", "application/json")
+	case cfg.XML:
+		req.Header.Set("Content-Type", "application/xml")
+	}
+
+	// Set any provided headers.
+	for _, kv := range cfg.Headers {
+		req.Header.Set(kv.Key, kv.Val)
+	}
+
+	// Optionally request gzip encoding.
+	if !cfg.NoEncode && req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "gzip")
+		ctx = context.WithValue(ctx, ctxEncodingRequestedKey, true)
+		req = req.WithContext(ctx)
+	}
+
 	return req, nil
 }
 
+// Do performs the provided http Request, returning the response.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	resp, err := c.c.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
+	// Automatically decode the gzipped response body if we requested it.
 	ce := resp.Header.Get("Content-Encoding")
-	if encodingRequested(req) && ce == "gzip" {
+	if ce == "gzip" && encodingRequested(req) {
 		gz, err := newGZIPReader(resp.Body)
 		if err != nil {
 			return nil, err
@@ -188,10 +198,14 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// ctxEncodingRequestedKeyType represents the type for storing whether gzip
+// encoding was requested.
 type ctxEncodingRequestedKeyType int
 
 const ctxEncodingRequestedKey ctxEncodingRequestedKeyType = 0
 
+// encodingRequested returns true if gzip encoding was requested for the
+// provided request.
 func encodingRequested(r *http.Request) bool {
 	v, ok := r.Context().Value(ctxEncodingRequestedKey).(bool)
 	return ok && v
@@ -202,6 +216,8 @@ type gzipReader struct {
 	c io.Closer
 }
 
+// newGZIPReader returns a new io.ReadCloser that automatically decodes the
+// gzipped data.
 func newGZIPReader(rc io.ReadCloser) (*gzipReader, error) {
 	gzr, err := gzip.NewReader(rc)
 	if err != nil {

@@ -19,13 +19,12 @@ import (
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
+// Update checks the API for the latest fetch version and upgrades the current
+// executable in-place, returning the exit code to use.
 func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, silent bool) bool {
 	err := update(ctx, p, timeout, silent)
 	if err == nil {
 		return true
-	}
-	if e := context.Cause(ctx); e != nil {
-		err = e
 	}
 
 	p.Set(printer.Bold)
@@ -43,6 +42,7 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, sile
 	c := client.NewClient(client.ClientConfig{})
 
 	if timeout > 0 {
+		// Ensure the context is cancelled after the provided timeout.
 		var cancel context.CancelFunc
 		cause := core.ErrRequestTimedOut{Timeout: timeout}
 		ctx, cancel = context.WithTimeoutCause(ctx, timeout, cause)
@@ -56,10 +56,12 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, sile
 	}
 
 	if latest.TagName == core.Version {
+		// Already using the latest version, exit successfully.
 		writeInfo(p, silent, fmt.Sprintf("currently using the latest version (%s)", core.Version))
 		return nil
 	}
 
+	// Look for the artifact URL for our OS and architecture.
 	artifactURL := getArtifactURL(latest)
 	if artifactURL == "" {
 		return fmt.Errorf("no %s/%s artifact found for %s",
@@ -73,17 +75,18 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, sile
 	}
 	defer rc.Close()
 
+	// Create a temporary directory, and unpack the artifact into it.
 	tempDir, err := os.MkdirTemp("", "fetch-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tempDir)
-
 	err = unpackArtifact(tempDir, rc)
 	if err != nil {
 		return err
 	}
 
+	// Replace the current executable in-place.
 	exePath, err := getExecutablePath()
 	if err != nil {
 		return err
@@ -109,6 +112,7 @@ type Release struct {
 	Assets  []Asset `json:"assets"`
 }
 
+// getLatestRelease returns the latest release, as reported by the API.
 func getLatestRelease(ctx context.Context, c *client.Client) (*Release, error) {
 	urlStr := getUpdateURL() + "/repos/ryanfowler/fetch/releases/latest"
 	u, err := url.Parse(urlStr)
@@ -147,6 +151,7 @@ func getLatestRelease(ctx context.Context, c *client.Client) (*Release, error) {
 	return &release, nil
 }
 
+// getArtifactReader returns an io.ReadCloser of the artifact data.
 func getArtifactReader(ctx context.Context, c *client.Client, urlStr string) (io.ReadCloser, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
@@ -175,6 +180,8 @@ func getArtifactReader(ctx context.Context, c *client.Client, urlStr string) (io
 	return resp.Body, nil
 }
 
+// getArtifactURL finds and returns the artifact URL for the current OS and
+// architecture. If no URL can be found, it returns an empty string.
 func getArtifactURL(release *Release) string {
 	ext := "tar.gz"
 	if runtime.GOOS == "windows" {
@@ -191,6 +198,7 @@ func getArtifactURL(release *Release) string {
 	return ""
 }
 
+// getExecutablePath returns the current executable path, following any symlinks.
 func getExecutablePath() (string, error) {
 	binPath, err := os.Executable()
 	if err != nil {
@@ -223,6 +231,7 @@ func writeInfo(p *printer.Printer, silent bool, s string) {
 	p.Flush()
 }
 
+// randomString returns a random string of lower-case letters of length "n".
 func randomString(n int) string {
 	var sb strings.Builder
 	sb.Grow(n)
@@ -236,6 +245,9 @@ func randomString(n int) string {
 	return sb.String()
 }
 
+// getUpdateURL returns the URL to use to obtain the latest fetch version info.
+// If the FETCH_INTERNAL_UPDATE_URL environment variable is set, it uses that
+// value.
 func getUpdateURL() string {
 	if env := os.Getenv("FETCH_INTERNAL_UPDATE_URL"); env != "" {
 		return env
@@ -243,11 +255,15 @@ func getUpdateURL() string {
 	return "https://api.github.com"
 }
 
+// createTempFilePath returns a path name in the format:
+// "{dir}/.fetch.{16_rand_letters}{suffix}"
 func createTempFilePath(dir, suffix string) string {
 	name := ".fetch." + randomString(16) + suffix
 	return filepath.Join(dir, name)
 }
 
+// copyFile copies the data from dst to src, creating the destination file with
+// the same file mode if necessary.
 func copyFile(dst, src string) error {
 	srcFile, err := os.Open(src)
 	if err != nil {

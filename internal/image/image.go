@@ -13,14 +13,14 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-// Render renders the provided raw image to stdout based on what the terminal
-// emulator supports.
+// Render renders the provided raw image to stdout based on what protocol the
+// current terminal emulator supports.
 func Render(b []byte) error {
 	img, _, err := image.Decode(bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
-	img = orient(b, img)
+	img = orientImage(b, img)
 
 	bounds := img.Bounds()
 	if bounds.Dx() == 0 || bounds.Dy() == 0 {
@@ -48,6 +48,8 @@ func Render(b []byte) error {
 	}
 }
 
+// resizeForTerm returns a new image that has been resized to fit in less than
+// 80% of the terminal height.
 func resizeForTerm(img image.Image, termWidthPx, termHeightPx int) image.Image {
 	if termWidthPx == 0 || termHeightPx == 0 {
 		return img
@@ -73,6 +75,8 @@ func resizeForTerm(img image.Image, termWidthPx, termHeightPx int) image.Image {
 	return resizeImage(img, w, termHeightPx)
 }
 
+// resizeImage returns a new image that has been scaled to the provided width
+// and height.
 func resizeImage(img image.Image, width, height int) image.Image {
 	dst := image.NewRGBA(image.Rect(0, 0, width, height))
 	draw.ApproxBiLinear.Scale(dst, dst.Rect, img, img.Bounds(), draw.Over, nil)
