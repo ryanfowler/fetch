@@ -10,6 +10,8 @@ import (
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
+// FormatNDJSON streams the provided newline-delimited JSON to the Printer,
+// flushing every line.
 func FormatNDJSON(r io.Reader, p *printer.Printer) error {
 	dec := json.NewDecoder(r)
 	for {

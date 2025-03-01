@@ -2,12 +2,8 @@ package format
 
 import "io"
 
-type Writer interface {
-	io.Writer
-	io.StringWriter
-}
-
-func writeIndent(w Writer, indent int) {
+// writeIndent writes the provided number of indents to the Printer.
+func writeIndent(w io.StringWriter, indent int) {
 	for range indent {
 		w.WriteString("  ")
 	}

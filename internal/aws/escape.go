@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 )
 
+// escapeURIPath writes the path-escaped version of uri to w.
 func escapeURIPath(w *bytes.Buffer, uri string) {
 	var n int
 	for i, c := range uri {
@@ -26,13 +27,14 @@ func escapeURIPath(w *bytes.Buffer, uri string) {
 
 func encodeHexUpper(w *bytes.Buffer, s []byte) {
 	const hexUpper = "0123456789ABCDEF"
-	for i := 0; i < len(s); i++ {
+	for i := range s {
 		b := s[i]
 		w.WriteByte(hexUpper[b>>4])
 		w.WriteByte(hexUpper[b&0x0F])
 	}
 }
 
+// mapping of valid uri path bytes.
 var validURIBytes = [256]bool{
 	// -
 	45: true,

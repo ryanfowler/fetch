@@ -20,6 +20,15 @@ const (
 	FormatOn
 )
 
+// HTTPVersion represents the options for the maximum allowed HTTP version.
+type HTTPVersion int
+
+const (
+	HTTPDefault HTTPVersion = iota
+	HTTP1
+	HTTP2
+)
+
 // Verbosity represents how verbose the output should be.
 type Verbosity int
 
@@ -30,6 +39,7 @@ const (
 	VExtraVerbose
 )
 
+// KeyVal represents a generic key & value struct.
 type KeyVal struct {
 	Key, Val string
 }

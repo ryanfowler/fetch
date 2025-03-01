@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 )
 
+// unpackArtifact decodes the gzipped tar archive from the provided io.Reader
+// into "dir", returning any error.
 func unpackArtifact(dir string, r io.Reader) error {
 	gr, err := gzip.NewReader(r)
 	if err != nil {
@@ -34,6 +36,7 @@ func unpackArtifact(dir string, r io.Reader) error {
 	}
 }
 
+// handleHeader writes the provided file/directory as appropriate.
 func handleHeader(dir string, tr *tar.Reader, header *tar.Header) error {
 	target := filepath.Join(dir, header.Name)
 	if header.Typeflag == tar.TypeDir {
@@ -57,6 +60,8 @@ func handleHeader(dir string, tr *tar.Reader, header *tar.Header) error {
 	return err
 }
 
+// selfReplace replaces the current executable, exePath, with a new executable,
+// newExePath, returning any error encountered.
 func selfReplace(exePath, newExePath string) error {
 	// Fast path, attempt to rename from the temp directory.
 	if os.Rename(newExePath, exePath) == nil {

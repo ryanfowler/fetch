@@ -10,6 +10,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
+// FormatXML formats the provided XML to the Printer.
 func FormatXML(buf []byte, w *printer.Printer) error {
 	dec := xml.NewDecoder(bytes.NewReader(buf))
 
@@ -123,7 +124,8 @@ var equalChar = []byte("=")
 var quoteChar = []byte("\"")
 
 func writeXMLProcInst(p *printer.Printer, inst []byte) {
-	// This isn't perfect, but should work in most cases.
+	// This isn't perfect, but should work in most cases. This will break
+	// when a field contains whitespace.
 	for pair := range bytes.FieldsSeq(inst) {
 		p.WriteString(" ")
 

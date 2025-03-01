@@ -19,13 +19,16 @@ var (
 )
 
 func init() {
+	// Determine if stderr and stdout are TTYs.
 	IsStderrTerm = term.IsTerminal(int(os.Stderr.Fd()))
 	IsStdoutTerm = term.IsTerminal(int(os.Stdout.Fd()))
 
+	// Set executable version and user-agent.
 	Version = getVersion()
 	UserAgent = "fetch/" + Version
 }
 
+// getVersion attempts to read the executable's BuildInfo, returning the version.
 func getVersion() string {
 	var ok bool
 	buildInfo, ok = debug.ReadBuildInfo()
@@ -35,33 +38,34 @@ func getVersion() string {
 	return buildInfo.Main.Version
 }
 
+// GetBuildInfo returns the JSON encoded build information for the executable.
 func GetBuildInfo() []byte {
-	type Versions struct {
+	type BuildInfo struct {
 		Fetch    string            `json:"fetch"`
 		Go       string            `json:"go,omitzero"`
 		Deps     map[string]string `json:"deps,omitzero"`
 		Settings map[string]string `json:"settings,omitzero"`
 	}
 
-	vs := Versions{Fetch: Version}
+	bi := BuildInfo{Fetch: Version}
 	if buildInfo != nil {
-		vs.Go = buildInfo.GoVersion
+		bi.Go = buildInfo.GoVersion
 
 		if len(buildInfo.Deps) > 0 {
-			vs.Deps = make(map[string]string, len(buildInfo.Deps))
+			bi.Deps = make(map[string]string, len(buildInfo.Deps))
 			for _, dep := range buildInfo.Deps {
-				vs.Deps[dep.Path] = dep.Version
+				bi.Deps[dep.Path] = dep.Version
 			}
 		}
 
 		if len(buildInfo.Settings) > 0 {
-			vs.Settings = make(map[string]string, len(buildInfo.Settings))
+			bi.Settings = make(map[string]string, len(buildInfo.Settings))
 			for _, setting := range buildInfo.Settings {
-				vs.Settings[setting.Key] = setting.Value
+				bi.Settings[setting.Key] = setting.Value
 			}
 		}
 	}
 
-	out, _ := json.Marshal(vs)
+	out, _ := json.Marshal(bi)
 	return out
 }

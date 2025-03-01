@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/aws"
-	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
+// App represents the full configuration for a fetch invocation.
 type App struct {
 	URL *url.URL
 
@@ -33,7 +33,7 @@ type App struct {
 	Format       core.Format
 	Headers      []core.KeyVal
 	Help         bool
-	HTTP         client.HTTPVersion
+	HTTP         core.HTTPVersion
 	IgnoreStatus bool
 	Insecure     bool
 	JSON         bool
@@ -394,14 +394,14 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Values:      []string{"1", "2"},
 				IsSet: func() bool {
-					return a.HTTP != client.HTTPDefault
+					return a.HTTP != core.HTTPDefault
 				},
 				Fn: func(value string) error {
 					switch value {
 					case "1":
-						a.HTTP = client.HTTP1
+						a.HTTP = core.HTTP1
 					case "2":
-						a.HTTP = client.HTTP2
+						a.HTTP = core.HTTP2
 					default:
 						const usage = "must be one of [1, 2]"
 						return flagValueError("http", value, usage)

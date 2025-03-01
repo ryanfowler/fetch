@@ -38,7 +38,7 @@ type Request struct {
 	DryRun        bool
 	Edit          bool
 	Format        core.Format
-	HTTP          client.HTTPVersion
+	HTTP          core.HTTPVersion
 	IgnoreStatus  bool
 	Insecure      bool
 	NoEncode      bool

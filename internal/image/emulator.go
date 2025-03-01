@@ -2,14 +2,21 @@ package image
 
 import "os"
 
+// protocol represents the image protocol to write the image with.
 type protocol int
 
 const (
+	// protoBlock writes the image in "blocks", supported by any emulator.
 	protoBlock protocol = iota
+	// protoInline writes the image using iTerm2's inline image protocol:
+	// https://iterm2.com/documentation-images.html
 	protoInline
+	// protoKitty writes the image using the kitty graphics protocol:
+	// https://sw.kovidgoyal.net/kitty/graphics-protocol/
 	protoKitty
 )
 
+// emulator represents popular terminal emulators.
 type emulator int
 
 const (
@@ -29,6 +36,7 @@ const (
 	eZellij
 )
 
+// Protocol returns the supported protocol for the terminal emulator.
 func (e emulator) Protocol() protocol {
 	switch e {
 	case eAlacritty, eApple, eTmux, eUnknown, eVSCode, eWindows, eZellij:
@@ -42,6 +50,8 @@ func (e emulator) Protocol() protocol {
 	}
 }
 
+// detectEmulator examines a number of environment variables to determine the
+// current terminal emulator.
 func detectEmulator() emulator {
 	if os.Getenv("ZELLIJ") != "" {
 		return eZellij
