@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/aws"
+	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/multipart"
-	"github.com/ryanfowler/fetch/internal/vars"
 )
 
 type HTTPVersion int
@@ -91,14 +91,14 @@ func NewClient(cfg ClientConfig) *Client {
 type RequestConfig struct {
 	Method      string
 	URL         *url.URL
-	Form        []vars.KeyVal
+	Form        []core.KeyVal
 	Multipart   *multipart.Multipart
-	Headers     []vars.KeyVal
-	QueryParams []vars.KeyVal
+	Headers     []core.KeyVal
+	QueryParams []core.KeyVal
 	Body        io.Reader
 	NoEncode    bool
 	AWSSigV4    *aws.Config
-	Basic       *vars.KeyVal
+	Basic       *core.KeyVal
 	Bearer      string
 	JSON        bool
 	XML         bool
@@ -129,7 +129,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	req.Header.Set("Accept", "application/json,application/xml,image/webp,*/*")
-	req.Header.Set("User-Agent", vars.UserAgent)
+	req.Header.Set("User-Agent", core.UserAgent)
 
 	switch {
 	case cfg.JSON:

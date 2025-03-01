@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ryanfowler/fetch/internal/vars"
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 type Multipart struct {
@@ -14,7 +14,7 @@ type Multipart struct {
 	contentType string
 }
 
-func NewMultipart(kvs []vars.KeyVal) *Multipart {
+func NewMultipart(kvs []core.KeyVal) *Multipart {
 	if len(kvs) == 0 {
 		return nil
 	}

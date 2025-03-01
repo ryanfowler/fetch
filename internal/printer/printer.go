@@ -5,37 +5,29 @@ import (
 	"io"
 	"os"
 
-	"github.com/ryanfowler/fetch/internal/vars"
+	"github.com/ryanfowler/fetch/internal/core"
 )
-
-const escape = "\x1b"
 
 type Sequence string
 
 const (
-	Bold      = "1m"
-	Dim       = "2m"
-	Italic    = "3m"
-	Underline = "4m"
+	escape = "\x1b"
+	reset  = "0"
 
-	Black   = "30m"
-	Red     = "31m"
-	Green   = "32m"
-	Yellow  = "33m"
-	Blue    = "34m"
-	Magenta = "35m"
-	Cyan    = "36m"
-	White   = "37m"
-	Default = "39m"
-)
+	Bold      Sequence = "1"
+	Dim       Sequence = "2"
+	Italic    Sequence = "3"
+	Underline Sequence = "4"
 
-type Color int
-
-const (
-	ColorUnknown Color = iota
-	ColorAuto
-	ColorOn
-	ColorOff
+	Black   Sequence = "30"
+	Red     Sequence = "31"
+	Green   Sequence = "32"
+	Yellow  Sequence = "33"
+	Blue    Sequence = "34"
+	Magenta Sequence = "35"
+	Cyan    Sequence = "36"
+	White   Sequence = "37"
+	Default Sequence = "39"
 )
 
 type PrinterTo interface {
@@ -47,10 +39,10 @@ type Handle struct {
 	stdout *Printer
 }
 
-func NewHandle(c Color) *Handle {
+func NewHandle(c core.Color) *Handle {
 	return &Handle{
-		stderr: newPrinter(os.Stderr, vars.IsStderrTerm, c),
-		stdout: newPrinter(os.Stdout, vars.IsStdoutTerm, c),
+		stderr: newPrinter(os.Stderr, core.IsStderrTerm, c),
+		stdout: newPrinter(os.Stdout, core.IsStdoutTerm, c),
 	}
 }
 
@@ -68,12 +60,12 @@ type Printer struct {
 	useColor bool
 }
 
-func newPrinter(file *os.File, isTerm bool, c Color) *Printer {
+func newPrinter(file *os.File, isTerm bool, c core.Color) *Printer {
 	var useColor bool
 	switch c {
-	case ColorOn:
+	case core.ColorOn:
 		useColor = true
-	case ColorOff:
+	case core.ColorOff:
 		useColor = false
 	default:
 		useColor = isTerm
@@ -86,14 +78,12 @@ func (p *Printer) Set(s Sequence) {
 		p.buf.WriteString(escape)
 		p.buf.WriteByte('[')
 		p.buf.WriteString(string(s))
+		p.buf.WriteByte('m')
 	}
 }
 
 func (p *Printer) Reset() {
-	if p.useColor {
-		p.buf.WriteString(escape)
-		p.buf.WriteString("[0m")
-	}
+	p.Set(reset)
 }
 
 func (p *Printer) Flush() error {

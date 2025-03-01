@@ -5,6 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/printer"
 )
 
@@ -13,7 +14,7 @@ func TestCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unable to parse cli: %s", err.Error())
 	}
-	p := printer.NewHandle(printer.ColorOff).Stdout()
+	p := printer.NewHandle(core.ColorOff).Stdout()
 
 	// Verify that no line of the help command is over 80 characters.
 	app.PrintHelp(p)

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ryanfowler/fetch/internal/vars"
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 const (
@@ -113,9 +113,13 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 	return hexSha256Reader(bytes.NewReader(body))
 }
 
-func getSignedHeaders(req *http.Request) []vars.KeyVal {
-	out := make([]vars.KeyVal, 0, len(req.Header)+1)
-	out = append(out, vars.KeyVal{Key: "host", Val: req.URL.Host})
+func getSignedHeaders(req *http.Request) []core.KeyVal {
+	out := make([]core.KeyVal, 0, len(req.Header)+1)
+
+	if _, ok := req.Header["Host"]; !ok {
+		out = append(out, core.KeyVal{Key: "host", Val: req.URL.Host})
+	}
+
 	for key, vals := range req.Header {
 		switch key {
 		case "Authorization", "Content-Length", "User-Agent":
@@ -123,15 +127,15 @@ func getSignedHeaders(req *http.Request) []vars.KeyVal {
 		}
 		key = strings.ToLower(strings.TrimSpace(key))
 		val := strings.TrimSpace(strings.Join(vals, ","))
-		out = append(out, vars.KeyVal{Key: key, Val: val})
+		out = append(out, core.KeyVal{Key: key, Val: val})
 	}
-	slices.SortFunc(out, func(a, b vars.KeyVal) int {
+	slices.SortFunc(out, func(a, b core.KeyVal) int {
 		return strings.Compare(a.Key, b.Key)
 	})
 	return out
 }
 
-func buildCanonicalRequest(req *http.Request, headers []vars.KeyVal, payload string) []byte {
+func buildCanonicalRequest(req *http.Request, headers []core.KeyVal, payload string) []byte {
 	var buf bytes.Buffer
 	buf.Grow(512)
 

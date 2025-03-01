@@ -1,11 +1,9 @@
-package vars
+package core
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"runtime/debug"
-	"time"
 
 	"golang.org/x/term"
 )
@@ -35,24 +33,6 @@ func getVersion() string {
 		return "v(dev)"
 	}
 	return buildInfo.Main.Version
-}
-
-type KeyVal struct {
-	Key, Val string
-}
-
-type ErrRequestTimedOut struct {
-	Timeout time.Duration
-}
-
-func (err ErrRequestTimedOut) Error() string {
-	return fmt.Sprintf("request timed out after %s", err.Timeout)
-}
-
-type SignalError string
-
-func (err SignalError) Error() string {
-	return fmt.Sprintf("received signal: %s", string(err))
 }
 
 func GetVersions() []byte {

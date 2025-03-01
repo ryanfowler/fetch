@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/client"
+	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/printer"
-	"github.com/ryanfowler/fetch/internal/vars"
 )
 
 func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, silent bool) bool {
@@ -44,7 +44,7 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, sile
 
 	if timeout > 0 {
 		var cancel context.CancelFunc
-		cause := vars.ErrRequestTimedOut{Timeout: timeout}
+		cause := core.ErrRequestTimedOut{Timeout: timeout}
 		ctx, cancel = context.WithTimeoutCause(ctx, timeout, cause)
 		defer cancel()
 	}
@@ -55,8 +55,8 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, sile
 		return fmt.Errorf("fetching latest release: %w", err)
 	}
 
-	if latest.TagName == vars.Version {
-		writeInfo(p, silent, fmt.Sprintf("currently using the latest version (%s)", vars.Version))
+	if latest.TagName == core.Version {
+		writeInfo(p, silent, fmt.Sprintf("currently using the latest version (%s)", core.Version))
 		return nil
 	}
 
@@ -94,7 +94,7 @@ func update(ctx context.Context, p *printer.Printer, timeout time.Duration, sile
 		return err
 	}
 
-	msg := fmt.Sprintf("fetch successfully updated (%s -> %s)", vars.Version, latest.TagName)
+	msg := fmt.Sprintf("fetch successfully updated (%s -> %s)", core.Version, latest.TagName)
 	writeInfo(p, silent, msg)
 	return nil
 }

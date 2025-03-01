@@ -13,37 +13,36 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/client"
-	"github.com/ryanfowler/fetch/internal/fetch"
+	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/printer"
-	"github.com/ryanfowler/fetch/internal/vars"
 )
 
 type App struct {
 	URL *url.URL
 
 	AWSSigv4     *aws.Config
-	Basic        *vars.KeyVal
+	Basic        *core.KeyVal
 	Bearer       string
-	Color        printer.Color
+	Color        core.Color
 	Data         io.Reader
 	DNSServer    string
 	DryRun       bool
 	Edit         bool
-	Form         []vars.KeyVal
-	Format       fetch.Format
-	Headers      []vars.KeyVal
+	Form         []core.KeyVal
+	Format       core.Format
+	Headers      []core.KeyVal
 	Help         bool
 	HTTP         client.HTTPVersion
 	IgnoreStatus bool
 	Insecure     bool
 	JSON         bool
 	Method       string
-	Multipart    []vars.KeyVal
+	Multipart    []core.KeyVal
 	NoEncode     bool
 	NoPager      bool
 	Output       string
 	Proxy        *url.URL
-	QueryParams  []vars.KeyVal
+	QueryParams  []core.KeyVal
 	Silent       bool
 	Timeout      time.Duration
 	TLS          uint16
@@ -168,7 +167,7 @@ func (a *App) CLI() *CLI {
 						const usage = "format must be <USERNAME:PASSWORD>"
 						return flagValueError("basic", value, usage)
 					}
-					a.Basic = &vars.KeyVal{Key: user, Val: pass}
+					a.Basic = &core.KeyVal{Key: user, Val: pass}
 					return nil
 				},
 			},
@@ -194,16 +193,16 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Values:      []string{"auto", "off", "on"},
 				IsSet: func() bool {
-					return a.Color != printer.ColorUnknown
+					return a.Color != core.ColorUnknown
 				},
 				Fn: func(value string) error {
 					switch value {
 					case "auto":
-						a.Color = printer.ColorAuto
+						a.Color = core.ColorAuto
 					case "off":
-						a.Color = printer.ColorOff
+						a.Color = core.ColorOff
 					case "on":
-						a.Color = printer.ColorOn
+						a.Color = core.ColorOn
 					default:
 						const usage = "must be one of [auto, off, on]"
 						return flagValueError("color", value, usage)
@@ -314,7 +313,7 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					key, val, _ := cut(value, "=")
-					a.Form = append(a.Form, vars.KeyVal{Key: key, Val: val})
+					a.Form = append(a.Form, core.KeyVal{Key: key, Val: val})
 					return nil
 				},
 			},
@@ -326,16 +325,16 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Values:      []string{"auto", "off", "on"},
 				IsSet: func() bool {
-					return a.Format != fetch.FormatUnknown
+					return a.Format != core.FormatUnknown
 				},
 				Fn: func(value string) error {
 					switch value {
 					case "auto":
-						a.Format = fetch.FormatAuto
+						a.Format = core.FormatAuto
 					case "off":
-						a.Format = fetch.FormatOff
+						a.Format = core.FormatOff
 					case "on":
-						a.Format = fetch.FormatOn
+						a.Format = core.FormatOn
 					default:
 						const usage = "must be one of [auto, off, on]"
 						return flagValueError("format", value, usage)
@@ -354,7 +353,7 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					key, val, _ := cut(value, ":")
-					a.Headers = append(a.Headers, vars.KeyVal{Key: key, Val: val})
+					a.Headers = append(a.Headers, core.KeyVal{Key: key, Val: val})
 					return nil
 				},
 			},
@@ -475,7 +474,7 @@ func (a *App) CLI() *CLI {
 							return fmt.Errorf("file is a directory: '%s'", val[1:])
 						}
 					}
-					a.Multipart = append(a.Multipart, vars.KeyVal{Key: key, Val: val})
+					a.Multipart = append(a.Multipart, core.KeyVal{Key: key, Val: val})
 					return nil
 				},
 			},
@@ -550,7 +549,7 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					key, val, _ := cut(value, "=")
-					a.QueryParams = append(a.QueryParams, vars.KeyVal{Key: key, Val: val})
+					a.QueryParams = append(a.QueryParams, core.KeyVal{Key: key, Val: val})
 					return nil
 				},
 			},
