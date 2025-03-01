@@ -90,6 +90,7 @@ func main() {
 		NoPager:       app.NoPager,
 		Output:        app.Output,
 		PrinterHandle: printerHandle,
+		Redirects:     app.Redirects,
 		TLS:           app.TLS,
 		Verbosity:     verbosity,
 

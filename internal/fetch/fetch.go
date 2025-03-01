@@ -45,6 +45,7 @@ type Request struct {
 	NoPager       bool
 	Output        string
 	PrinterHandle *printer.Handle
+	Redirects     *int
 	TLS           uint16
 	Verbosity     core.Verbosity
 
@@ -91,6 +92,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		HTTP:      r.HTTP,
 		Insecure:  r.Insecure,
 		Proxy:     r.Proxy,
+		Redirects: r.Redirects,
 		TLS:       r.TLS,
 	})
 	req, err := c.NewRequest(ctx, client.RequestConfig{

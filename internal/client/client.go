@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -27,6 +28,7 @@ type ClientConfig struct {
 	HTTP      core.HTTPVersion
 	Insecure  bool
 	Proxy     *url.URL
+	Redirects *int
 	TLS       uint16
 }
 
@@ -80,11 +82,22 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 	transport.TLSClientConfig.MinVersion = cfg.TLS
 
-	return &Client{
-		c: &http.Client{
-			Transport: transport,
-		},
+	// Optionally set the maximum number of redirects.
+	client := &http.Client{Transport: transport}
+	if cfg.Redirects != nil {
+		redirects := *cfg.Redirects
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if redirects == 0 {
+				return http.ErrUseLastResponse
+			}
+			if len(via) > redirects {
+				return fmt.Errorf("exceeded maximum number of redirects: %d", redirects)
+			}
+			return nil
+		}
 	}
+
+	return &Client{c: client}
 }
 
 // RequestConfig represents the configuration for creating an HTTP request.
