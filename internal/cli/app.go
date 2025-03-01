@@ -23,6 +23,7 @@ type App struct {
 	AWSSigv4     *aws.Config
 	Basic        *core.KeyVal
 	Bearer       string
+	BuildInfo    bool
 	Color        core.Color
 	Data         io.Reader
 	DNSServer    string
@@ -49,7 +50,6 @@ type App struct {
 	Update       bool
 	Verbose      int
 	Version      bool
-	Versions     bool
 	XML          bool
 }
 
@@ -182,6 +182,21 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					a.Bearer = value
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "buildinfo",
+				Args:        "",
+				Description: "Print the build information",
+				Default:     "",
+				IsHidden:    true,
+				IsSet: func() bool {
+					return a.BuildInfo
+				},
+				Fn: func(value string) error {
+					a.BuildInfo = true
 					return nil
 				},
 			},
@@ -652,21 +667,6 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					a.Version = true
-					return nil
-				},
-			},
-			{
-				Short:       "",
-				Long:        "versions",
-				Args:        "",
-				Description: "Print all versions",
-				Default:     "",
-				IsSecret:    true,
-				IsSet: func() bool {
-					return a.Versions
-				},
-				Fn: func(value string) error {
-					a.Versions = true
 					return nil
 				},
 			},
