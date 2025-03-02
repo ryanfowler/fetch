@@ -1,11 +1,9 @@
-package printer
+package core
 
 import (
 	"bytes"
 	"io"
 	"os"
-
-	"github.com/ryanfowler/fetch/internal/core"
 )
 
 // Sequence represents an ANSI escape sequence.
@@ -43,10 +41,10 @@ type Handle struct {
 }
 
 // NewHandle returns a new Handle given the provided color configuration.
-func NewHandle(c core.Color) *Handle {
+func NewHandle(c Color) *Handle {
 	return &Handle{
-		stderr: newPrinter(os.Stderr, core.IsStderrTerm, c),
-		stdout: newPrinter(os.Stdout, core.IsStdoutTerm, c),
+		stderr: newPrinter(os.Stderr, IsStderrTerm, c),
+		stdout: newPrinter(os.Stdout, IsStdoutTerm, c),
 	}
 }
 
@@ -68,12 +66,12 @@ type Printer struct {
 	useColor bool
 }
 
-func newPrinter(file *os.File, isTerm bool, c core.Color) *Printer {
+func newPrinter(file *os.File, isTerm bool, c Color) *Printer {
 	var useColor bool
 	switch c {
-	case core.ColorOn:
+	case ColorOn:
 		useColor = true
-	case core.ColorOff:
+	case ColorOff:
 		useColor = false
 	default:
 		// By default, set color settings based on whether the file is

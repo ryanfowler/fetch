@@ -8,11 +8,11 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/ryanfowler/fetch/internal/printer"
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 // FormatJSON formats the provided raw JSON data to the Printer.
-func FormatJSON(buf []byte, p *printer.Printer) error {
+func FormatJSON(buf []byte, p *core.Printer) error {
 	err := formatJSON(bytes.NewReader(buf), p)
 	if err != nil {
 		p.Reset()
@@ -20,7 +20,7 @@ func FormatJSON(buf []byte, p *printer.Printer) error {
 	return err
 }
 
-func formatJSON(r io.Reader, p *printer.Printer) error {
+func formatJSON(r io.Reader, p *core.Printer) error {
 	dec := json.NewDecoder(r)
 	err := formatJSONValue(dec, p, 0)
 	if err != nil {
@@ -37,7 +37,7 @@ func formatJSON(r io.Reader, p *printer.Printer) error {
 	return nil
 }
 
-func formatJSONValue(dec *json.Decoder, p *printer.Printer, indent int) error {
+func formatJSONValue(dec *json.Decoder, p *core.Printer, indent int) error {
 	token, err := dec.Token()
 	if err != nil {
 		return err
@@ -46,7 +46,7 @@ func formatJSONValue(dec *json.Decoder, p *printer.Printer, indent int) error {
 	return formatJSONValueToken(dec, p, indent, token)
 }
 
-func formatJSONValueToken(dec *json.Decoder, p *printer.Printer, indent int, token any) error {
+func formatJSONValueToken(dec *json.Decoder, p *core.Printer, indent int, token any) error {
 	switch t := token.(type) {
 	case json.Delim:
 		switch t {
@@ -73,7 +73,7 @@ func formatJSONValueToken(dec *json.Decoder, p *printer.Printer, indent int, tok
 	return nil
 }
 
-func formatJSONObject(dec *json.Decoder, p *printer.Printer, indent int) error {
+func formatJSONObject(dec *json.Decoder, p *core.Printer, indent int) error {
 	p.WriteString("{")
 
 	var hasFields bool
@@ -113,7 +113,7 @@ func formatJSONObject(dec *json.Decoder, p *printer.Printer, indent int) error {
 	}
 }
 
-func formatJSONArray(dec *json.Decoder, p *printer.Printer, indent int) error {
+func formatJSONArray(dec *json.Decoder, p *core.Printer, indent int) error {
 	p.WriteString("[")
 
 	var hasFields bool
@@ -146,24 +146,24 @@ func formatJSONArray(dec *json.Decoder, p *printer.Printer, indent int) error {
 	}
 }
 
-func writeJSONKey(p *printer.Printer, s string) {
+func writeJSONKey(p *core.Printer, s string) {
 	p.WriteString("\"")
-	p.Set(printer.Blue)
-	p.Set(printer.Bold)
+	p.Set(core.Blue)
+	p.Set(core.Bold)
 	escapeJSONString(p, s)
 	p.Reset()
 	p.WriteString("\": ")
 }
 
-func writeJSONString(p *printer.Printer, s string) {
+func writeJSONString(p *core.Printer, s string) {
 	p.WriteString("\"")
-	p.Set(printer.Green)
+	p.Set(core.Green)
 	escapeJSONString(p, s)
 	p.Reset()
 	p.WriteString("\"")
 }
 
-func escapeJSONString(p *printer.Printer, s string) {
+func escapeJSONString(p *core.Printer, s string) {
 	for _, c := range s {
 		switch c {
 		case '\b':

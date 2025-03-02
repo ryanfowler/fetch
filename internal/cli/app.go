@@ -1,60 +1,43 @@
 package cli
 
 import (
-	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ryanfowler/fetch/internal/aws"
+	"github.com/ryanfowler/fetch/internal/config"
 	"github.com/ryanfowler/fetch/internal/core"
-	"github.com/ryanfowler/fetch/internal/printer"
 )
 
 // App represents the full configuration for a fetch invocation.
 type App struct {
 	URL *url.URL
 
-	AWSSigv4     *aws.Config
-	Basic        *core.KeyVal
-	Bearer       string
-	BuildInfo    bool
-	Color        core.Color
-	Data         io.Reader
-	DNSServer    *url.URL
-	DryRun       bool
-	Edit         bool
-	Form         []core.KeyVal
-	Format       core.Format
-	Headers      []core.KeyVal
-	Help         bool
-	HTTP         core.HTTPVersion
-	IgnoreStatus bool
-	Insecure     bool
-	JSON         bool
-	Method       string
-	Multipart    []core.KeyVal
-	NoEncode     bool
-	NoPager      bool
-	Output       string
-	Proxy        *url.URL
-	QueryParams  []core.KeyVal
-	Redirects    *int
-	Silent       bool
-	Timeout      time.Duration
-	TLS          uint16
-	Update       bool
-	Verbose      int
-	Version      bool
-	XML          bool
+	Cfg config.Config
+
+	AWSSigv4   *aws.Config
+	Basic      *core.KeyVal
+	Bearer     string
+	BuildInfo  bool
+	ConfigPath string
+	Data       io.Reader
+	DryRun     bool
+	Edit       bool
+	Form       []core.KeyVal
+	Help       bool
+	JSON       bool
+	Method     string
+	Multipart  []core.KeyVal
+	Output     string
+	Update     bool
+	Version    bool
+	XML        bool
 }
 
-func (a *App) PrintHelp(p *printer.Printer) {
+func (a *App) PrintHelp(p *core.Printer) {
 	printHelp(a.CLI(), p)
 }
 
@@ -87,15 +70,6 @@ func (a *App) CLI() *CLI {
 				return fmt.Errorf("unsupported url scheme: %s", u.Scheme)
 			}
 
-			if u.Scheme == "" {
-				host := u.Hostname()
-				if !strings.Contains(host, ".") || net.ParseIP(host) != nil {
-					u.Scheme = "http"
-				} else {
-					u.Scheme = "https"
-				}
-			}
-
 			a.URL = u
 			return nil
 		},
@@ -118,7 +92,7 @@ func (a *App) CLI() *CLI {
 					region, service, ok := cut(value, "/")
 					if !ok {
 						const usage = "format must be <REGION/SERVICE>"
-						return flagValueError("aws-sigv4", value, usage)
+						return core.NewValueError("aws-sigv4", value, usage, false)
 					}
 
 					accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
@@ -152,7 +126,7 @@ func (a *App) CLI() *CLI {
 					user, pass, ok := cut(value, ":")
 					if !ok {
 						const usage = "format must be <USERNAME:PASSWORD>"
-						return flagValueError("basic", value, usage)
+						return core.NewValueError("basic", value, usage, false)
 					}
 					a.Basic = &core.KeyVal{Key: user, Val: pass}
 					return nil
@@ -195,20 +169,23 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Values:      []string{"auto", "off", "on"},
 				IsSet: func() bool {
-					return a.Color != core.ColorUnknown
+					return a.Cfg.Color != core.ColorUnknown
 				},
 				Fn: func(value string) error {
-					switch value {
-					case "auto":
-						a.Color = core.ColorAuto
-					case "off":
-						a.Color = core.ColorOff
-					case "on":
-						a.Color = core.ColorOn
-					default:
-						const usage = "must be one of [auto, off, on]"
-						return flagValueError("color", value, usage)
-					}
+					return a.Cfg.ParseColor(value)
+				},
+			},
+			{
+				Short:       "c",
+				Long:        "config",
+				Args:        "PATH",
+				Description: "Path to config file",
+				Default:     "",
+				IsSet: func() bool {
+					return a.ConfigPath != ""
+				},
+				Fn: func(value string) error {
+					a.ConfigPath = value
 					return nil
 				},
 			},
@@ -254,35 +231,10 @@ func (a *App) CLI() *CLI {
 				Description: "DNS server IP or DoH URL",
 				Default:     "",
 				IsSet: func() bool {
-					return a.DNSServer != nil
+					return a.Cfg.DNSServer != nil
 				},
 				Fn: func(value string) error {
-					if strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") {
-						u, err := url.Parse(value)
-						if err != nil {
-							return flagValueError("dns-server", value, "unable to parse DoH URL")
-						}
-						a.DNSServer = u
-						return nil
-					}
-
-					port := "53"
-					host := value
-					const usage = "must be in the format <IP[:PORT]>"
-					if colons := strings.Count(value, ":"); colons == 1 || (colons > 1 && strings.HasPrefix(value, "[")) {
-						var err error
-						host, port, err = net.SplitHostPort(value)
-						if err != nil {
-							return flagValueError("dns-server", value, usage)
-						}
-					}
-					if net.ParseIP(host) == nil {
-						return flagValueError("dns-server", value, usage)
-					}
-
-					u := url.URL{Host: host + ":" + port}
-					a.DNSServer = &u
-					return nil
+					return a.Cfg.ParseDNSServer(value)
 				},
 			},
 			{
@@ -336,21 +288,10 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Values:      []string{"auto", "off", "on"},
 				IsSet: func() bool {
-					return a.Format != core.FormatUnknown
+					return a.Cfg.Format != core.FormatUnknown
 				},
 				Fn: func(value string) error {
-					switch value {
-					case "auto":
-						a.Format = core.FormatAuto
-					case "off":
-						a.Format = core.FormatOff
-					case "on":
-						a.Format = core.FormatOn
-					default:
-						const usage = "must be one of [auto, off, on]"
-						return flagValueError("format", value, usage)
-					}
-					return nil
+					return a.Cfg.ParseFormat(value)
 				},
 			},
 			{
@@ -360,12 +301,10 @@ func (a *App) CLI() *CLI {
 				Description: "Set headers for the request",
 				Default:     "",
 				IsSet: func() bool {
-					return len(a.Headers) > 0
+					return len(a.Cfg.Headers) > 0
 				},
 				Fn: func(value string) error {
-					key, val, _ := cut(value, ":")
-					a.Headers = append(a.Headers, core.KeyVal{Key: key, Val: val})
-					return nil
+					return a.Cfg.ParseHeader(value)
 				},
 			},
 			{
@@ -390,19 +329,10 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Values:      []string{"1", "2"},
 				IsSet: func() bool {
-					return a.HTTP != core.HTTPDefault
+					return a.Cfg.HTTP != core.HTTPDefault
 				},
 				Fn: func(value string) error {
-					switch value {
-					case "1":
-						a.HTTP = core.HTTP1
-					case "2":
-						a.HTTP = core.HTTP2
-					default:
-						const usage = "must be one of [1, 2]"
-						return flagValueError("http", value, usage)
-					}
-					return nil
+					return a.Cfg.ParseHTTP(value)
 				},
 			},
 			{
@@ -412,10 +342,11 @@ func (a *App) CLI() *CLI {
 				Description: "Exit code unaffected by HTTP status",
 				Default:     "",
 				IsSet: func() bool {
-					return a.IgnoreStatus
+					return a.Cfg.IgnoreStatus != nil
 				},
 				Fn: func(value string) error {
-					a.IgnoreStatus = true
+					v := true
+					a.Cfg.IgnoreStatus = &v
 					return nil
 				},
 			},
@@ -426,10 +357,11 @@ func (a *App) CLI() *CLI {
 				Description: "Accept invalid TLS certificates - DANGER!",
 				Default:     "",
 				IsSet: func() bool {
-					return a.Insecure
+					return a.Cfg.Insecure != nil
 				},
 				Fn: func(value string) error {
-					a.Insecure = true
+					v := true
+					a.Cfg.Insecure = &v
 					return nil
 				},
 			},
@@ -496,10 +428,11 @@ func (a *App) CLI() *CLI {
 				Description: "Avoid requesting gzip encoding",
 				Default:     "",
 				IsSet: func() bool {
-					return a.NoEncode
+					return a.Cfg.NoEncode != nil
 				},
 				Fn: func(value string) error {
-					a.NoEncode = true
+					v := true
+					a.Cfg.NoEncode = &v
 					return nil
 				},
 			},
@@ -510,10 +443,11 @@ func (a *App) CLI() *CLI {
 				Description: "Avoid using a pager for the response body",
 				Default:     "",
 				IsSet: func() bool {
-					return a.NoPager
+					return a.Cfg.NoPager != nil
 				},
 				Fn: func(value string) error {
-					a.NoPager = true
+					v := true
+					a.Cfg.NoPager = &v
 					return nil
 				},
 			},
@@ -538,15 +472,10 @@ func (a *App) CLI() *CLI {
 				Description: "Configure a proxy",
 				Default:     "",
 				IsSet: func() bool {
-					return a.Proxy != nil
+					return a.Cfg.Proxy != nil
 				},
 				Fn: func(value string) error {
-					proxy, err := url.Parse(value)
-					if err != nil {
-						return flagValueError("proxy", value, err.Error())
-					}
-					a.Proxy = proxy
-					return nil
+					return a.Cfg.ParseProxy(value)
 				},
 			},
 			{
@@ -556,12 +485,10 @@ func (a *App) CLI() *CLI {
 				Description: "Append query parameters to the url",
 				Default:     "",
 				IsSet: func() bool {
-					return len(a.QueryParams) > 0
+					return len(a.Cfg.QueryParams) > 0
 				},
 				Fn: func(value string) error {
-					key, val, _ := cut(value, "=")
-					a.QueryParams = append(a.QueryParams, core.KeyVal{Key: key, Val: val})
-					return nil
+					return a.Cfg.ParseQuery(value)
 				},
 			},
 			{
@@ -571,16 +498,10 @@ func (a *App) CLI() *CLI {
 				Description: "Maximum number of redirects",
 				Default:     "",
 				IsSet: func() bool {
-					return a.Redirects != nil
+					return a.Cfg.Redirects != nil
 				},
 				Fn: func(value string) error {
-					n, err := strconv.Atoi(value)
-					if err != nil || n < 0 {
-						const usage = "must be a positive integer"
-						return flagValueError("redirects", value, usage)
-					}
-					a.Redirects = &n
-					return nil
+					return a.Cfg.ParseRedirects(value)
 				},
 			},
 			{
@@ -590,10 +511,11 @@ func (a *App) CLI() *CLI {
 				Description: "Print only errors to stderr",
 				Default:     "",
 				IsSet: func() bool {
-					return a.Silent
+					return a.Cfg.Silent != nil
 				},
 				Fn: func(value string) error {
-					a.Silent = true
+					v := true
+					a.Cfg.Silent = &v
 					return nil
 				},
 			},
@@ -604,16 +526,10 @@ func (a *App) CLI() *CLI {
 				Description: "Timeout in seconds applied to the request",
 				Default:     "",
 				IsSet: func() bool {
-					return a.Timeout != 0
+					return a.Cfg.Timeout != nil
 				},
 				Fn: func(value string) error {
-					secs, err := strconv.ParseFloat(value, 64)
-					if err != nil {
-						return flagValueError("timeout", value, "must be a valid number")
-					}
-
-					a.Timeout = time.Duration(float64(time.Second) * secs)
-					return nil
+					return a.Cfg.ParseTimeout(value)
 				},
 			},
 			{
@@ -624,23 +540,10 @@ func (a *App) CLI() *CLI {
 				Default:     "",
 				Values:      []string{"1.0", "1.1", "1.2", "1.3"},
 				IsSet: func() bool {
-					return a.TLS != 0
+					return a.Cfg.TLS != nil
 				},
 				Fn: func(value string) error {
-					switch value {
-					case "1.0":
-						a.TLS = tls.VersionTLS10
-					case "1.1":
-						a.TLS = tls.VersionTLS11
-					case "1.2":
-						a.TLS = tls.VersionTLS12
-					case "1.3":
-						a.TLS = tls.VersionTLS13
-					default:
-						const usage = "must be one of [1.0, 1.1, 1.2, 1.3]"
-						return flagValueError("tls", value, usage)
-					}
-					return nil
+					return a.Cfg.ParseTLS(value)
 				},
 			},
 			{
@@ -664,10 +567,14 @@ func (a *App) CLI() *CLI {
 				Description: "Verbosity of the output",
 				Default:     "",
 				IsSet: func() bool {
-					return a.Verbose > 0
+					return a.Cfg.Verbosity != nil
 				},
 				Fn: func(value string) error {
-					a.Verbose += 1
+					if a.Cfg.Verbosity == nil {
+						a.Cfg.Verbosity = core.PointerTo(1)
+					} else {
+						(*a.Cfg.Verbosity)++
+					}
 					return nil
 				},
 			},
@@ -710,48 +617,6 @@ func cut(s, sep string) (string, string, bool) {
 	return key, val, ok
 }
 
-type FlagValueError struct {
-	Flag  string
-	Value string
-	Usage string
-}
-
-func flagValueError(flag, value, usage string) *FlagValueError {
-	return &FlagValueError{
-		Flag:  flag,
-		Value: value,
-		Usage: usage,
-	}
-}
-
-func (err *FlagValueError) Error() string {
-	msg := fmt.Sprintf("invalid value '%s' for option '--%s'", err.Flag, err.Value)
-	if err.Usage == "" {
-		msg = fmt.Sprintf("%s: %s", msg, err.Usage)
-	}
-	return msg
-}
-
-func (err *FlagValueError) PrintTo(p *printer.Printer) {
-	p.WriteString("invalid value '")
-	p.Set(printer.Yellow)
-	p.WriteString(err.Value)
-	p.Reset()
-
-	p.WriteString("' for option '")
-	p.Set(printer.Bold)
-	p.WriteString("--")
-	p.WriteString(err.Flag)
-	p.Reset()
-
-	p.WriteString("'")
-
-	if err.Usage != "" {
-		p.WriteString(": ")
-		p.WriteString(err.Usage)
-	}
-}
-
 type MissingEnvVarError struct {
 	EnvVar string
 	Flag   string
@@ -768,14 +633,14 @@ func (err *MissingEnvVarError) Error() string {
 	return fmt.Sprintf("missing environment variable '%s' required for option '--%s'", err.EnvVar, err.Flag)
 }
 
-func (err *MissingEnvVarError) PrintTo(p *printer.Printer) {
+func (err *MissingEnvVarError) PrintTo(p *core.Printer) {
 	p.WriteString("missing environment variable '")
-	p.Set(printer.Yellow)
+	p.Set(core.Yellow)
 	p.WriteString(err.EnvVar)
 	p.Reset()
 
 	p.WriteString("' required for option '")
-	p.Set(printer.Bold)
+	p.Set(core.Bold)
 	p.WriteString("--")
 	p.WriteString(err.Flag)
 	p.Reset()

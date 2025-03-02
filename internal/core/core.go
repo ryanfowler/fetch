@@ -43,3 +43,8 @@ const (
 type KeyVal struct {
 	Key, Val string
 }
+
+// PointerTo returns a pointer to the value provided.
+func PointerTo[T any](t T) *T {
+	return &t
+}

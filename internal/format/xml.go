@@ -7,11 +7,11 @@ import (
 	"io"
 	"unicode/utf8"
 
-	"github.com/ryanfowler/fetch/internal/printer"
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 // FormatXML formats the provided XML to the Printer.
-func FormatXML(buf []byte, w *printer.Printer) error {
+func FormatXML(buf []byte, w *core.Printer) error {
 	dec := xml.NewDecoder(bytes.NewReader(buf))
 
 	var stack []bool
@@ -83,39 +83,39 @@ func FormatXML(buf []byte, w *printer.Printer) error {
 	}
 }
 
-func writeXMLTagName(p *printer.Printer, s string) {
-	p.Set(printer.Bold)
-	p.Set(printer.Blue)
+func writeXMLTagName(p *core.Printer, s string) {
+	p.Set(core.Bold)
+	p.Set(core.Blue)
 	escapeXMLString(p, s)
 	p.Reset()
 }
 
-func writeXMLAttrName(p *printer.Printer, s string) {
-	p.Set(printer.Cyan)
+func writeXMLAttrName(p *core.Printer, s string) {
+	p.Set(core.Cyan)
 	escapeXMLString(p, s)
 	p.Reset()
 }
 
-func writeXMLAttrVal(p *printer.Printer, s string) {
-	p.Set(printer.Green)
+func writeXMLAttrVal(p *core.Printer, s string) {
+	p.Set(core.Green)
 	escapeXMLString(p, s)
 	p.Reset()
 }
 
-func writeXMLText(p *printer.Printer, t []byte) {
-	p.Set(printer.Green)
+func writeXMLText(p *core.Printer, t []byte) {
+	p.Set(core.Green)
 	escapeXMLString(p, string(t))
 	p.Reset()
 }
 
-func writeXMLDirective(p *printer.Printer, b []byte) {
-	p.Set(printer.Cyan)
+func writeXMLDirective(p *core.Printer, b []byte) {
+	p.Set(core.Cyan)
 	p.Write(b)
 	p.Reset()
 }
 
-func writeXMLComment(p *printer.Printer, b []byte) {
-	p.Set(printer.Dim)
+func writeXMLComment(p *core.Printer, b []byte) {
+	p.Set(core.Dim)
 	p.Write(b)
 	p.Reset()
 }
@@ -123,14 +123,14 @@ func writeXMLComment(p *printer.Printer, b []byte) {
 var equalChar = []byte("=")
 var quoteChar = []byte("\"")
 
-func writeXMLProcInst(p *printer.Printer, inst []byte) {
+func writeXMLProcInst(p *core.Printer, inst []byte) {
 	// This isn't perfect, but should work in most cases. This will break
 	// when a field contains whitespace.
 	for pair := range bytes.FieldsSeq(inst) {
 		p.WriteString(" ")
 
 		key, val, ok := bytes.Cut(pair, equalChar)
-		p.Set(printer.Cyan)
+		p.Set(core.Cyan)
 		p.Write(key)
 		p.Reset()
 		if !ok {
@@ -143,14 +143,14 @@ func writeXMLProcInst(p *printer.Printer, inst []byte) {
 			p.Write(quoteChar)
 			val, ok = bytes.CutSuffix(val, quoteChar)
 			if ok {
-				p.Set(printer.Green)
+				p.Set(core.Green)
 				p.Write(val)
 				p.Reset()
 				p.Write(quoteChar)
 				continue
 			}
 		}
-		p.Set(printer.Cyan)
+		p.Set(core.Cyan)
 		p.Write(val)
 		p.Reset()
 	}
@@ -158,7 +158,7 @@ func writeXMLProcInst(p *printer.Printer, inst []byte) {
 
 // Mostly taken from the Go encoding/xml package in the standard library:
 // https://cs.opensource.google/go/go/+/refs/tags/go1.24.0:src/encoding/xml/xml.go;l=1964-1999
-func escapeXMLString(p *printer.Printer, s string) {
+func escapeXMLString(p *core.Printer, s string) {
 	var esc string
 	var last int
 	for i := 0; i < len(s); {

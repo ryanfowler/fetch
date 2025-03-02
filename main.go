@@ -9,11 +9,11 @@ import (
 	"syscall"
 
 	"github.com/ryanfowler/fetch/internal/cli"
+	"github.com/ryanfowler/fetch/internal/config"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/fetch"
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/multipart"
-	"github.com/ryanfowler/fetch/internal/printer"
 	"github.com/ryanfowler/fetch/internal/update"
 )
 
@@ -30,12 +30,29 @@ func main() {
 	// Parse the CLI args.
 	app, err := cli.Parse(os.Args[1:])
 	if err != nil {
-		p := printer.NewHandle(app.Color).Stderr()
+		p := core.NewHandle(app.Cfg.Color).Stderr()
 		writeCLIErr(p, err)
 		os.Exit(1)
 	}
 
-	printerHandle := printer.NewHandle(app.Color)
+	// Parse any config file, and merge with it.
+	file, err := config.GetFile(app.ConfigPath)
+	if err != nil {
+		p := core.NewHandle(app.Cfg.Color).Stderr()
+		writeCLIErr(p, err)
+		os.Exit(1)
+	}
+	if file != nil {
+		if app.URL != nil {
+			hostCfg, ok := file.Hosts[app.URL.Hostname()]
+			if ok {
+				app.Cfg.Merge(hostCfg)
+			}
+		}
+		app.Cfg.Merge(file.Global)
+	}
+
+	printerHandle := core.NewHandle(app.Cfg.Color)
 	verbosity := getVerbosity(app)
 
 	// Print help to stdout.
@@ -56,7 +73,7 @@ func main() {
 	if app.BuildInfo {
 		p := printerHandle.Stdout()
 		info := core.GetBuildInfo()
-		if app.Format != core.FormatOff {
+		if app.Cfg.Format != core.FormatOff {
 			format.FormatJSON(info, p)
 		} else {
 			p.Write(info)
@@ -68,7 +85,8 @@ func main() {
 	// Attempt to update the current executable.
 	if app.Update {
 		p := printerHandle.Stderr()
-		ok := update.Update(ctx, p, app.Timeout, verbosity == core.VSilent)
+		timeout := getValue(app.Cfg.Timeout)
+		ok := update.Update(ctx, p, timeout, verbosity == core.VSilent)
 		if ok {
 			os.Exit(0)
 		}
@@ -84,19 +102,19 @@ func main() {
 
 	// Make the HTTP request using the parsed configuration.
 	req := fetch.Request{
-		DNSServer:     app.DNSServer,
+		DNSServer:     app.Cfg.DNSServer,
 		DryRun:        app.DryRun,
 		Edit:          app.Edit,
-		Format:        app.Format,
-		HTTP:          app.HTTP,
-		IgnoreStatus:  app.IgnoreStatus,
-		Insecure:      app.Insecure,
-		NoEncode:      app.NoEncode,
-		NoPager:       app.NoPager,
+		Format:        app.Cfg.Format,
+		HTTP:          app.Cfg.HTTP,
+		IgnoreStatus:  getValue(app.Cfg.IgnoreStatus),
+		Insecure:      getValue(app.Cfg.Insecure),
+		NoEncode:      getValue(app.Cfg.NoEncode),
+		NoPager:       getValue(app.Cfg.NoPager),
 		Output:        app.Output,
 		PrinterHandle: printerHandle,
-		Redirects:     app.Redirects,
-		TLS:           app.TLS,
+		Redirects:     app.Cfg.Redirects,
+		TLS:           getValue(app.Cfg.TLS),
 		Verbosity:     verbosity,
 
 		Method:      app.Method,
@@ -104,26 +122,34 @@ func main() {
 		Body:        app.Data,
 		Form:        app.Form,
 		Multipart:   multipart.NewMultipart(app.Multipart),
-		Headers:     app.Headers,
-		QueryParams: app.QueryParams,
+		Headers:     app.Cfg.Headers,
+		QueryParams: app.Cfg.QueryParams,
 		AWSSigv4:    app.AWSSigv4,
 		Basic:       app.Basic,
 		Bearer:      app.Bearer,
 		JSON:        app.JSON,
 		XML:         app.XML,
-		Proxy:       app.Proxy,
-		Timeout:     app.Timeout,
+		Proxy:       app.Cfg.Proxy,
+		Timeout:     getValue(app.Cfg.Timeout),
 	}
 	status := fetch.Fetch(ctx, &req)
 	os.Exit(status)
 }
 
+func getValue[T any](v *T) T {
+	if v == nil {
+		var t T
+		return t
+	}
+	return *v
+}
+
 // getVerbosity returns the Verbosity level based on the app configuration.
 func getVerbosity(app *cli.App) core.Verbosity {
-	if app.Silent {
+	if getValue(app.Cfg.Silent) {
 		return core.VSilent
 	}
-	switch app.Verbose {
+	switch getValue(app.Cfg.Verbosity) {
 	case 0:
 		return core.VNormal
 	case 1:
@@ -134,14 +160,14 @@ func getVerbosity(app *cli.App) core.Verbosity {
 }
 
 // writeCLIErr writes the provided CLI error to the Printer.
-func writeCLIErr(p *printer.Printer, err error) {
-	p.Set(printer.Bold)
-	p.Set(printer.Red)
+func writeCLIErr(p *core.Printer, err error) {
+	p.Set(core.Bold)
+	p.Set(core.Red)
 	p.WriteString("error")
 	p.Reset()
 
 	p.WriteString(": ")
-	if pt, ok := err.(printer.PrinterTo); ok {
+	if pt, ok := err.(core.PrinterTo); ok {
 		pt.PrintTo(p)
 	} else {
 		p.WriteString(err.Error())
@@ -149,7 +175,7 @@ func writeCLIErr(p *printer.Printer, err error) {
 
 	p.WriteString("\n\nFor more information, try '")
 
-	p.Set(printer.Bold)
+	p.Set(core.Bold)
 	p.WriteString("--help")
 	p.Reset()
 

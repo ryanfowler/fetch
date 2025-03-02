@@ -16,19 +16,18 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
-	"github.com/ryanfowler/fetch/internal/printer"
 )
 
 // Update checks the API for the latest fetch version and upgrades the current
 // executable in-place, returning the exit code to use.
-func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, silent bool) bool {
+func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool) bool {
 	err := update(ctx, p, timeout, silent)
 	if err == nil {
 		return true
 	}
 
-	p.Set(printer.Bold)
-	p.Set(printer.Red)
+	p.Set(core.Bold)
+	p.Set(core.Red)
 	p.WriteString("error")
 	p.Reset()
 	p.WriteString(": ")
@@ -38,7 +37,7 @@ func Update(ctx context.Context, p *printer.Printer, timeout time.Duration, sile
 	return false
 }
 
-func update(ctx context.Context, p *printer.Printer, timeout time.Duration, silent bool) error {
+func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool) error {
 	c := client.NewClient(client.ClientConfig{})
 
 	if timeout > 0 {
@@ -215,13 +214,13 @@ func getFetchFilename() string {
 	return name
 }
 
-func writeInfo(p *printer.Printer, silent bool, s string) {
+func writeInfo(p *core.Printer, silent bool, s string) {
 	if silent {
 		return
 	}
 
-	p.Set(printer.Bold)
-	p.Set(printer.Green)
+	p.Set(core.Bold)
+	p.Set(core.Green)
 	p.WriteString("info")
 	p.Reset()
 	p.WriteString(": ")

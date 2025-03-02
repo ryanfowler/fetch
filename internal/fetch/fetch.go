@@ -21,7 +21,6 @@ import (
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/image"
 	"github.com/ryanfowler/fetch/internal/multipart"
-	"github.com/ryanfowler/fetch/internal/printer"
 )
 
 type ContentType int
@@ -46,7 +45,7 @@ type Request struct {
 	NoEncode      bool
 	NoPager       bool
 	Output        string
-	PrinterHandle *printer.Handle
+	PrinterHandle *core.Handle
 	Redirects     *int
 	TLS           uint16
 	Verbosity     core.Verbosity
@@ -74,8 +73,8 @@ func Fetch(ctx context.Context, r *Request) int {
 	}
 
 	p := r.PrinterHandle.Stderr()
-	p.Set(printer.Red)
-	p.Set(printer.Bold)
+	p.Set(core.Red)
+	p.Set(core.Bold)
 	p.WriteString("error")
 	p.Reset()
 	p.WriteString(": ")
@@ -211,7 +210,7 @@ func makeRequest(r *Request, c *client.Client, req *http.Request) (int, error) {
 	return exitCode, nil
 }
 
-func formatResponse(r *Request, resp *http.Response, p *printer.Printer) (io.Reader, error) {
+func formatResponse(r *Request, resp *http.Response, p *core.Printer) (io.Reader, error) {
 	if r.Output != "" && r.Output != "-" {
 		f, err := os.Create(r.Output)
 		if err != nil {
@@ -303,7 +302,7 @@ func getContentType(headers http.Header) ContentType {
 	return TypeUnknown
 }
 
-func streamToStdout(r io.Reader, p *printer.Printer, forceOutput, noPager bool) error {
+func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager bool) error {
 	// Check output to see if it's likely safe to print to stdout.
 	if core.IsStdoutTerm && !forceOutput {
 		var ok bool
@@ -392,9 +391,9 @@ func isCertificateErr(err error) bool {
 	return false
 }
 
-func printInsecureMsg(p *printer.Printer) {
+func printInsecureMsg(p *core.Printer) {
 	p.WriteString("If you absolutely trust the server, try '")
-	p.Set(printer.Bold)
+	p.Set(core.Bold)
 	p.WriteString("--insecure")
 	p.Reset()
 	p.WriteString("'.\n")
