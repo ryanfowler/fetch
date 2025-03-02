@@ -39,7 +39,14 @@ func main() {
 	file, err := config.GetFile(app.ConfigPath)
 	if err != nil {
 		p := core.NewHandle(app.Cfg.Color).Stderr()
-		writeCLIErr(p, err)
+		writeErrPrefix(p)
+		if pt, ok := err.(core.PrinterTo); ok {
+			pt.PrintTo(p)
+		} else {
+			p.WriteString(err.Error())
+		}
+		p.WriteString("\n")
+		p.Flush()
 		os.Exit(1)
 	}
 	if file != nil {
@@ -161,12 +168,8 @@ func getVerbosity(app *cli.App) core.Verbosity {
 
 // writeCLIErr writes the provided CLI error to the Printer.
 func writeCLIErr(p *core.Printer, err error) {
-	p.Set(core.Bold)
-	p.Set(core.Red)
-	p.WriteString("error")
-	p.Reset()
+	writeErrPrefix(p)
 
-	p.WriteString(": ")
 	if pt, ok := err.(core.PrinterTo); ok {
 		pt.PrintTo(p)
 	} else {
@@ -181,4 +184,12 @@ func writeCLIErr(p *core.Printer, err error) {
 
 	p.WriteString("'.\n")
 	p.Flush()
+}
+
+func writeErrPrefix(p *core.Printer) {
+	p.Set(core.Bold)
+	p.Set(core.Red)
+	p.WriteString("error")
+	p.Reset()
+	p.WriteString(": ")
 }
