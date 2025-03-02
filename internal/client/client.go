@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -135,10 +136,23 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		cfg.Body = cfg.Multipart
 	}
 
-	// Create the initial HTTP request.
+	// If no scheme was provided, use various heuristics to choose between
+	// http and https.
+	if cfg.URL.Scheme == "" {
+		host := cfg.URL.Hostname()
+		if !strings.Contains(host, ".") || net.ParseIP(host) != nil {
+			cfg.URL.Scheme = "http"
+		} else {
+			cfg.URL.Scheme = "https"
+		}
+	}
+
+	// If no method was provided, default to GET.
 	if cfg.Method == "" {
 		cfg.Method = "GET"
 	}
+
+	// Create the initial HTTP request.
 	req, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL.String(), cfg.Body)
 	if err != nil {
 		return nil, err

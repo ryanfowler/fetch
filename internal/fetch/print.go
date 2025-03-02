@@ -10,12 +10,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
-	"github.com/ryanfowler/fetch/internal/printer"
 )
 
-func printRequestMetadata(p *printer.Printer, req *http.Request) {
-	p.Set(printer.Bold)
-	p.Set(printer.Yellow)
+func printRequestMetadata(p *core.Printer, req *http.Request) {
+	p.Set(core.Bold)
+	p.Set(core.Yellow)
 	p.WriteString(req.Method)
 	p.Reset()
 
@@ -25,22 +24,22 @@ func printRequestMetadata(p *printer.Printer, req *http.Request) {
 	}
 
 	p.WriteString(" ")
-	p.Set(printer.Bold)
-	p.Set(printer.Cyan)
+	p.Set(core.Bold)
+	p.Set(core.Cyan)
 	p.WriteString(path)
 	p.Reset()
 
 	q := req.URL.RawQuery
 	if req.URL.ForceQuery || q != "" {
-		p.Set(printer.Italic)
-		p.Set(printer.Cyan)
+		p.Set(core.Italic)
+		p.Set(core.Cyan)
 		p.WriteString("?")
 		p.WriteString(q)
 		p.Reset()
 	}
 
 	p.WriteString(" ")
-	p.Set(printer.Dim)
+	p.Set(core.Dim)
 	p.WriteString(req.Proto)
 	p.Reset()
 
@@ -52,8 +51,8 @@ func printRequestMetadata(p *printer.Printer, req *http.Request) {
 	}
 
 	for _, h := range headers {
-		p.Set(printer.Bold)
-		p.Set(printer.Blue)
+		p.Set(core.Bold)
+		p.Set(core.Blue)
 		p.WriteString(h.Key)
 		p.Reset()
 		p.WriteString(": ")
@@ -62,15 +61,15 @@ func printRequestMetadata(p *printer.Printer, req *http.Request) {
 	}
 }
 
-func printResponseMetadata(p *printer.Printer, v core.Verbosity, resp *http.Response) {
-	p.Set(printer.Dim)
+func printResponseMetadata(p *core.Printer, v core.Verbosity, resp *http.Response) {
+	p.Set(core.Dim)
 	p.WriteString(resp.Proto)
 	p.Reset()
 	p.WriteString(" ")
 
 	statusColor := colorForStatus(resp.StatusCode)
 	p.Set(statusColor)
-	p.Set(printer.Bold)
+	p.Set(core.Bold)
 	p.WriteString(strconv.Itoa(resp.StatusCode))
 
 	text := http.StatusText(resp.StatusCode)
@@ -91,7 +90,7 @@ func printResponseMetadata(p *printer.Printer, v core.Verbosity, resp *http.Resp
 	p.WriteString("\n")
 }
 
-func printResponseHeaders(p *printer.Printer, resp *http.Response) {
+func printResponseHeaders(p *core.Printer, resp *http.Response) {
 	headers := getHeaders(resp.Header)
 	if resp.ContentLength >= 0 && resp.Header.Get("Content-Length") == "" {
 		val := strconv.FormatInt(resp.ContentLength, 10)
@@ -103,8 +102,8 @@ func printResponseHeaders(p *printer.Printer, resp *http.Response) {
 	}
 
 	for _, h := range headers {
-		p.Set(printer.Bold)
-		p.Set(printer.Cyan)
+		p.Set(core.Bold)
+		p.Set(core.Cyan)
 		p.WriteString(h.Key)
 		p.Reset()
 		p.WriteString(": ")
@@ -113,9 +112,9 @@ func printResponseHeaders(p *printer.Printer, resp *http.Response) {
 	}
 }
 
-func printBinaryWarning(p *printer.Printer) {
-	p.Set(printer.Bold)
-	p.Set(printer.Yellow)
+func printBinaryWarning(p *core.Printer) {
+	p.Set(core.Bold)
+	p.Set(core.Yellow)
 	p.WriteString("warning")
 	p.Reset()
 	p.WriteString(": the response body appears to be binary\n\n")
@@ -123,14 +122,14 @@ func printBinaryWarning(p *printer.Printer) {
 	p.Flush()
 }
 
-func colorForStatus(code int) printer.Sequence {
+func colorForStatus(code int) core.Sequence {
 	switch {
 	case code >= 200 && code < 300:
-		return printer.Green
+		return core.Green
 	case code >= 300 && code < 400:
-		return printer.Yellow
+		return core.Yellow
 	default:
-		return printer.Red
+		return core.Red
 	}
 }
 

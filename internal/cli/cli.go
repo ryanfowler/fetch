@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ryanfowler/fetch/internal/printer"
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 type CLI struct {
@@ -219,17 +219,17 @@ func Parse(args []string) (*App, error) {
 	return &app, nil
 }
 
-func printHelp(cli *CLI, p *printer.Printer) {
+func printHelp(cli *CLI, p *core.Printer) {
 	p.WriteString(cli.Description)
 	p.WriteString("\n\n")
 
-	p.Set(printer.Bold)
-	p.Set(printer.Underline)
+	p.Set(core.Bold)
+	p.Set(core.Underline)
 	p.WriteString("Usage")
 	p.Reset()
 	p.WriteString(": ")
 
-	p.Set(printer.Bold)
+	p.Set(core.Bold)
 	p.WriteString("fetch")
 	p.Reset()
 
@@ -247,8 +247,8 @@ func printHelp(cli *CLI, p *printer.Printer) {
 	if len(cli.Args) > 0 {
 		p.WriteString("\n")
 
-		p.Set(printer.Bold)
-		p.Set(printer.Underline)
+		p.Set(core.Bold)
+		p.Set(core.Underline)
 		p.WriteString("Arguments")
 		p.Reset()
 		p.WriteString(":\n")
@@ -265,8 +265,8 @@ func printHelp(cli *CLI, p *printer.Printer) {
 	if len(cli.Flags) > 0 {
 		p.WriteString("\n")
 
-		p.Set(printer.Bold)
-		p.Set(printer.Underline)
+		p.Set(core.Bold)
+		p.Set(core.Underline)
 		p.WriteString("Options")
 		p.Reset()
 		p.WriteString(":\n")
@@ -277,7 +277,7 @@ func printHelp(cli *CLI, p *printer.Printer) {
 				continue
 			}
 
-			p.Set(printer.Bold)
+			p.Set(core.Bold)
 			p.WriteString("  ")
 
 			if flag.Short == "" {

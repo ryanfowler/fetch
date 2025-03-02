@@ -9,12 +9,12 @@ import (
 	"iter"
 	"strings"
 
-	"github.com/ryanfowler/fetch/internal/printer"
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 // FormatEventStream formats the provided stream of server sent events to the
 // Printer, flushing after each event.
-func FormatEventStream(r io.Reader, p *printer.Printer) error {
+func FormatEventStream(r io.Reader, p *core.Printer) error {
 	var written bool
 	for ev, err := range streamEvents(r) {
 		if err != nil {
@@ -33,16 +33,16 @@ func FormatEventStream(r io.Reader, p *printer.Printer) error {
 	return nil
 }
 
-func writeEventStreamType(t string, p *printer.Printer) {
+func writeEventStreamType(t string, p *core.Printer) {
 	p.WriteString("[")
-	p.Set(printer.Bold)
+	p.Set(core.Bold)
 	p.WriteString(t)
 	p.Reset()
 	p.WriteString("]\n")
 	p.Flush()
 }
 
-func writeEventStreamData(d string, p *printer.Printer) {
+func writeEventStreamData(d string, p *core.Printer) {
 	dec := json.NewDecoder(strings.NewReader(d))
 	if formatNDJSONValue(dec, p) == nil {
 		// Ensure there are no more tokens in the event.

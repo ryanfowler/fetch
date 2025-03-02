@@ -7,12 +7,12 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/ryanfowler/fetch/internal/printer"
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 // FormatNDJSON streams the provided newline-delimited JSON to the Printer,
 // flushing every line.
-func FormatNDJSON(r io.Reader, p *printer.Printer) error {
+func FormatNDJSON(r io.Reader, p *core.Printer) error {
 	dec := json.NewDecoder(r)
 	for {
 		err := formatNDJSONValue(dec, p)
@@ -28,7 +28,7 @@ func FormatNDJSON(r io.Reader, p *printer.Printer) error {
 	}
 }
 
-func formatNDJSONValue(dec *json.Decoder, p *printer.Printer) error {
+func formatNDJSONValue(dec *json.Decoder, p *core.Printer) error {
 	token, err := dec.Token()
 	if err != nil {
 		return err
@@ -37,7 +37,7 @@ func formatNDJSONValue(dec *json.Decoder, p *printer.Printer) error {
 	return formatNDJSONValueToken(dec, p, token)
 }
 
-func formatNDJSONValueToken(dec *json.Decoder, p *printer.Printer, token any) error {
+func formatNDJSONValueToken(dec *json.Decoder, p *core.Printer, token any) error {
 	switch t := token.(type) {
 	case json.Delim:
 		switch t {
@@ -64,7 +64,7 @@ func formatNDJSONValueToken(dec *json.Decoder, p *printer.Printer, token any) er
 	return nil
 }
 
-func formatNDJSONObject(dec *json.Decoder, p *printer.Printer) error {
+func formatNDJSONObject(dec *json.Decoder, p *core.Printer) error {
 	p.WriteString("{")
 
 	var hasFields bool
@@ -102,7 +102,7 @@ func formatNDJSONObject(dec *json.Decoder, p *printer.Printer) error {
 	}
 }
 
-func formatNDJSONArray(dec *json.Decoder, p *printer.Printer) error {
+func formatNDJSONArray(dec *json.Decoder, p *core.Printer) error {
 	p.WriteString("[")
 
 	var hasFields bool
