@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -132,7 +131,7 @@ func parseShortFlag(arg string, args []string, short map[string]Flag) ([]string,
 		}
 
 		if flag.Args == "" && value != "" {
-			return nil, fmt.Errorf("option '-%s' does not take any arguments", c)
+			return nil, flagNoArgsError("-" + c)
 		}
 
 		if flag.Args != "" && value == "" {
@@ -140,7 +139,7 @@ func parseShortFlag(arg string, args []string, short map[string]Flag) ([]string,
 				value = arg[1:]
 				arg = arg[len(arg)-1:]
 			} else if len(args) == 0 {
-				return nil, fmt.Errorf("argument required for flag '-%s'", c)
+				return nil, argRequiredError("-" + c)
 			} else {
 				value = args[0]
 				args = args[1:]
@@ -166,12 +165,12 @@ func parseLongFlag(arg string, args []string, long map[string]Flag) ([]string, e
 	}
 
 	if (ok || value != "") && flag.Args == "" {
-		return nil, fmt.Errorf("flag '--%s' does not take any arguments", name)
+		return nil, flagNoArgsError("--" + name)
 	}
 
 	if flag.Args != "" && value == "" {
 		if len(args) == 0 {
-			return nil, fmt.Errorf("argument required for flag '--%s'", name)
+			return nil, argRequiredError("--" + name)
 		}
 
 		value = args[0]
@@ -198,13 +197,9 @@ func validateExclusives(exc []string, long map[string]Flag) error {
 			continue
 		}
 
-		return fmt.Errorf("flags '--%s' and '--%s' cannot be used together", lastSet, name)
+		return newExclusiveFlagsError(lastSet, name)
 	}
 	return nil
-}
-
-func unknownFlagError(name string) error {
-	return fmt.Errorf("unknown flag: '%s'", name)
 }
 
 func Parse(args []string) (*App, error) {

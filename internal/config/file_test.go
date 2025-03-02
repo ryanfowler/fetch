@@ -65,13 +65,13 @@ func TestParseFile(t *testing.T) {
 			config: `
 				color = off
 				invalidline`,
-			expErr: "line 3: invalid key/value pair: 'invalidline'",
+			expErr: "line 3: invalid key/value pair 'invalidline'",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			f, err := parseFile(test.config)
+			f, err := parseFile("test/config", test.config)
 			if err != nil {
 				if test.expErr == "" {
 					t.Fatalf("unexpected error: %s", err.Error())

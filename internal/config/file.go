@@ -21,54 +21,62 @@ type File struct {
 
 // GetFile returns a config File, or nil if one cannot be found.
 func GetFile(path string) (*File, error) {
-	buf, err := getConfigFile(path)
-	if err != nil || buf == nil {
+	path, buf, err := getConfigFile(path)
+	if err != nil || path == "" {
 		return nil, err
 	}
-	return parseFile(string(buf))
+	return parseFile(path, string(buf))
 }
 
 // getConfigFile searches for a local config file, returning the file contents
 // if it exists.
-func getConfigFile(path string) ([]byte, error) {
+func getConfigFile(path string) (string, []byte, error) {
 	if path != "" {
 		// Direct config path was provided.
-		return os.ReadFile(path)
+		return readFile(path)
 	}
 
 	if runtime.GOOS == "windows" {
 		appData := os.Getenv("AppData")
 		if appData == "" {
-			return nil, nil
+			return "", nil, nil
 		}
-		d, err := os.ReadFile(filepath.Join(appData, "fetch", "config"))
+		path, buf, err := readFile(filepath.Join(appData, "fetch", "config"))
 		if err != nil {
-			return nil, nil
+			return "", nil, nil
 		}
-		return d, nil
+		return path, buf, nil
 	}
 
 	xdgHome := os.Getenv("XDG_CONFIG_HOME")
 	if xdgHome != "" {
-		f, err := os.ReadFile(xdgHome + "/fetch/config")
+		path, buf, err := readFile(xdgHome + "/fetch/config")
 		if err == nil {
-			return f, nil
+			return path, buf, nil
 		}
 	}
 
 	home := os.Getenv("HOME")
 	if home != "" {
-		f, err := os.ReadFile(home + "/.config/fetch/config")
+		path, buf, err := readFile(home + "/.config/fetch/config")
 		if err == nil {
-			return f, nil
+			return path, buf, nil
 		}
 	}
 
-	return nil, nil
+	return "", nil, nil
+}
+
+func readFile(path string) (string, []byte, error) {
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		return "", nil, err
+	}
+	return path, buf, nil
 }
 
 // parseFile parses the provided File, returning any error encountered.
-func parseFile(s string) (*File, error) {
+func parseFile(path, s string) (*File, error) {
 	f := File{Global: &Config{isFile: true}}
 
 	config := f.Global
@@ -84,7 +92,7 @@ func parseFile(s string) (*File, error) {
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			hostStr := strings.TrimSpace(line[1 : len(line)-1])
 			if hostStr == "" {
-				return nil, newFileError(num, errors.New("empty hostname"))
+				return nil, newFileError(path, num, errors.New("hostname cannot be empty"))
 			}
 
 			config = &Config{isFile: true}
@@ -98,13 +106,13 @@ func parseFile(s string) (*File, error) {
 		// Pares a key and value pair.
 		key, val, ok := strings.Cut(line, "=")
 		if !ok {
-			return nil, newFileError(num, fmt.Errorf("invalid key/value pair: '%s'", line))
+			return nil, newFileError(path, num, fmt.Errorf("invalid key/value pair '%s'", line))
 		}
 		key, val = strings.TrimSpace(key), strings.TrimSpace(val)
 
 		err := config.Set(key, val)
 		if err != nil {
-			return nil, fileLineError{line: num, err: err}
+			return nil, newFileError(path, num, err)
 		}
 	}
 
@@ -139,25 +147,28 @@ func lines(s string) iter.Seq2[int, string] {
 	}
 }
 
-// fileLineError represents an error that prints a config file line with an err.
-type fileLineError struct {
+// fileError represents an error that prints a config file line with an err.
+type fileError struct {
+	file string
 	line int
 	err  error
 }
 
-func newFileError(line int, err error) fileLineError {
-	return fileLineError{line: line, err: err}
+func newFileError(file string, line int, err error) fileError {
+	return fileError{file: file, line: line, err: err}
 }
 
-func (err fileLineError) Error() string {
-	return fmt.Sprintf("config file: line %d: %s", err.line, err.err.Error())
+func (err fileError) Error() string {
+	return fmt.Sprintf("config file '%s': line %d: %s", err.file, err.line, err.err.Error())
 }
 
-func (err fileLineError) PrintTo(p *core.Printer) {
-	p.WriteString("config file: line ")
-	p.Set(core.Bold)
-	p.WriteString(strconv.Itoa(err.line))
+func (err fileError) PrintTo(p *core.Printer) {
+	p.WriteString("config file '")
+	p.Set(core.Dim)
+	p.WriteString(err.file)
 	p.Reset()
+	p.WriteString("': line ")
+	p.WriteString(strconv.Itoa(err.line))
 	p.WriteString(": ")
 
 	if pt, ok := err.err.(core.PrinterTo); ok {

@@ -123,7 +123,7 @@ func (c *Config) Set(key, val string) error {
 	case "verbosity":
 		err = c.ParseVerbosity(val)
 	default:
-		err = fmt.Errorf("invalid option '%s'", key)
+		err = invalidOptionError(key)
 	}
 	return err
 }
@@ -319,4 +319,18 @@ func cut(s, sep string) (string, string, bool) {
 	key, val, ok := strings.Cut(s, sep)
 	key, val = strings.TrimSpace(key), strings.TrimSpace(val)
 	return key, val, ok
+}
+
+type invalidOptionError string
+
+func (err invalidOptionError) Error() string {
+	return fmt.Sprintf("invalid option: '%s'", string(err))
+}
+
+func (err invalidOptionError) PrintTo(p *core.Printer) {
+	p.WriteString("invalid option: '")
+	p.Set(core.Bold)
+	p.WriteString(string(err))
+	p.Reset()
+	p.WriteString("'")
 }
