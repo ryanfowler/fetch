@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -81,7 +82,19 @@ func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) (s
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("received http status code: %d", resp.StatusCode)
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
+		if err != nil {
+			return "", fmt.Errorf("http response code: %d", resp.StatusCode)
+		}
+		type ErrRes struct {
+			Error string `json:"error"`
+		}
+		var errRes ErrRes
+		err = json.Unmarshal(raw, &errRes)
+		if err == nil && errRes.Error != "" {
+			return "", fmt.Errorf("%d: %s", resp.StatusCode, errRes.Error)
+		}
+		return "", fmt.Errorf("%d: %s", resp.StatusCode, raw)
 	}
 
 	var res Response
