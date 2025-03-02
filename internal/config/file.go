@@ -33,7 +33,11 @@ func GetFile(path string) (*File, error) {
 func getConfigFile(path string) (string, []byte, error) {
 	if path != "" {
 		// Direct config path was provided.
-		return readFile(path)
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", nil, err
+		}
+		return readFile(abs)
 	}
 
 	if runtime.GOOS == "windows" {
