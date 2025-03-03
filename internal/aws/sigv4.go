@@ -140,7 +140,7 @@ func getSignedHeaders(req *http.Request) []core.KeyVal {
 
 	for key, vals := range req.Header {
 		switch key {
-		case "Authorization", "Content-Length", "User-Agent":
+		case "Accept-Encoding", "Authorization", "Content-Length", "User-Agent":
 			// Avoid signing these headers.
 			continue
 		}
