@@ -100,17 +100,17 @@ type RequestConfig struct {
 	AWSSigV4    *aws.Config
 	Basic       *core.KeyVal
 	Bearer      string
-	Body        io.Reader
+	Data        io.Reader
 	Form        []core.KeyVal
 	Headers     []core.KeyVal
 	HTTP        core.HTTPVersion
-	JSON        bool
+	JSON        io.Reader
 	Method      string
 	Multipart   *multipart.Multipart
 	NoEncode    bool
 	QueryParams []core.KeyVal
 	URL         *url.URL
-	XML         bool
+	XML         io.Reader
 }
 
 // NewRequest returns an *http.Request given the provided configuration.
@@ -125,15 +125,22 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	// Set any form or multipart bodies.
+	var body io.Reader
 	switch {
+	case cfg.Data != nil:
+		body = cfg.Data
 	case len(cfg.Form) > 0:
 		q := make(url.Values, len(cfg.Form))
 		for _, f := range cfg.Form {
 			q.Add(f.Key, f.Val)
 		}
-		cfg.Body = strings.NewReader(q.Encode())
+		body = strings.NewReader(q.Encode())
+	case cfg.JSON != nil:
+		body = cfg.JSON
 	case cfg.Multipart != nil:
-		cfg.Body = cfg.Multipart
+		body = cfg.Multipart
+	case cfg.XML != nil:
+		body = cfg.XML
 	}
 
 	// If no scheme was provided, use various heuristics to choose between
@@ -153,7 +160,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	// Create the initial HTTP request.
-	req, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL.String(), cfg.Body)
+	req, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL.String(), body)
 	if err != nil {
 		return nil, err
 	}
@@ -181,9 +188,9 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	case cfg.Multipart != nil:
 		req.Header.Set("Content-Type", cfg.Multipart.ContentType())
-	case cfg.JSON:
+	case cfg.JSON != nil:
 		req.Header.Set("Content-Type", "application/json")
-	case cfg.XML:
+	case cfg.XML != nil:
 		req.Header.Set("Content-Type", "application/xml")
 	}
 
