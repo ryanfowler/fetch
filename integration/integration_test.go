@@ -202,7 +202,7 @@ func TestMain(t *testing.T) {
 			t.Fatalf("unexpected body: %s", req.body)
 		}
 
-		res = runFetch(t, fetchPath, server.URL, "--json", "--data", `{"key":"val"}`)
+		res = runFetch(t, fetchPath, server.URL, "--json", `{"key":"val"}`)
 		assertExitCode(t, 0, res)
 		req = <-chReq
 		if req.body != `{"key":"val"}` {
@@ -212,7 +212,7 @@ func TestMain(t *testing.T) {
 			t.Fatalf("unexpected content-type: %s", h)
 		}
 
-		res = runFetch(t, fetchPath, server.URL, "--xml", "--data", `<Tag></Tag>`)
+		res = runFetch(t, fetchPath, server.URL, "--xml", `<Tag></Tag>`)
 		assertExitCode(t, 0, res)
 		req = <-chReq
 		if req.body != `<Tag></Tag>` {

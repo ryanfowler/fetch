@@ -35,35 +35,34 @@ const (
 )
 
 type Request struct {
+	AWSSigv4      *aws.Config
+	Basic         *core.KeyVal
+	Bearer        string
+	Data          io.Reader
 	DNSServer     *url.URL
 	DryRun        bool
 	Edit          bool
+	Form          []core.KeyVal
 	Format        core.Format
+	Headers       []core.KeyVal
 	HTTP          core.HTTPVersion
 	IgnoreStatus  bool
 	Insecure      bool
+	JSON          io.Reader
 	NoEncode      bool
 	NoPager       bool
+	Method        string
+	Multipart     *multipart.Multipart
 	Output        string
 	PrinterHandle *core.Handle
+	Proxy         *url.URL
+	QueryParams   []core.KeyVal
 	Redirects     *int
+	Timeout       time.Duration
 	TLS           uint16
+	URL           *url.URL
 	Verbosity     core.Verbosity
-
-	Method      string
-	URL         *url.URL
-	Body        io.Reader
-	Form        []core.KeyVal
-	Multipart   *multipart.Multipart
-	Headers     []core.KeyVal
-	QueryParams []core.KeyVal
-	AWSSigv4    *aws.Config
-	Basic       *core.KeyVal
-	Bearer      string
-	JSON        bool
-	XML         bool
-	Proxy       *url.URL
-	Timeout     time.Duration
+	XML           io.Reader
 }
 
 func Fetch(ctx context.Context, r *Request) int {
@@ -103,7 +102,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		AWSSigV4:    r.AWSSigv4,
 		Basic:       r.Basic,
 		Bearer:      r.Bearer,
-		Body:        r.Body,
+		Data:        r.Data,
 		Form:        r.Form,
 		Headers:     r.Headers,
 		HTTP:        r.HTTP,
@@ -126,9 +125,9 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	if r.Edit {
 		var extension string
 		switch {
-		case r.JSON:
+		case r.JSON != nil:
 			extension = ".json"
-		case r.XML:
+		case r.XML != nil:
 			extension = ".xml"
 		}
 

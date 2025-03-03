@@ -28,13 +28,13 @@ type App struct {
 	Edit       bool
 	Form       []core.KeyVal
 	Help       bool
-	JSON       bool
+	JSON       io.Reader
 	Method     string
 	Multipart  []core.KeyVal
 	Output     string
 	Update     bool
 	Version    bool
-	XML        bool
+	XML        io.Reader
 }
 
 func (a *App) PrintHelp(p *core.Printer) {
@@ -75,8 +75,7 @@ func (a *App) CLI() *CLI {
 		},
 		ExclusiveFlags: [][]string{
 			{"aws-sigv4", "basic", "bearer"},
-			{"data", "form", "multipart"},
-			{"form", "json", "multipart", "xml"},
+			{"data", "form", "json", "multipart", "xml"},
 		},
 		Flags: []Flag{
 			{
@@ -199,28 +198,11 @@ func (a *App) CLI() *CLI {
 					return a.Data != nil
 				},
 				Fn: func(value string) error {
-					switch {
-					case len(value) == 0 || value[0] != '@':
-						a.Data = strings.NewReader(value)
-					case value == "@":
-						a.Data = os.Stdin
-					default:
-						f, err := os.Open(value[1:])
-						if err != nil {
-							if os.IsNotExist(err) {
-								return fmt.Errorf("file does not exist: '%s'", value[1:])
-							}
-							return err
-						}
-						info, err := f.Stat()
-						if err != nil {
-							return err
-						}
-						if info.IsDir() {
-							return fmt.Errorf("file is a directory: '%s'", value[1:])
-						}
-						a.Data = f
+					r, err := requestBody(value)
+					if err != nil {
+						return err
 					}
+					a.Data = r
 					return nil
 				},
 			},
@@ -354,7 +336,7 @@ func (a *App) CLI() *CLI {
 				Short:       "",
 				Long:        "insecure",
 				Args:        "",
-				Description: "Accept invalid TLS certificates - DANGER!",
+				Description: "Accept invalid TLS certs (!)",
 				Default:     "",
 				IsSet: func() bool {
 					return a.Cfg.Insecure != nil
@@ -368,14 +350,18 @@ func (a *App) CLI() *CLI {
 			{
 				Short:       "j",
 				Long:        "json",
-				Args:        "",
-				Description: "Set the content-type to application/json",
+				Args:        "[@]VALUE",
+				Description: "Send a JSON request body",
 				Default:     "",
 				IsSet: func() bool {
-					return a.JSON
+					return a.JSON != nil
 				},
 				Fn: func(value string) error {
-					a.JSON = true
+					r, err := requestBody(value)
+					if err != nil {
+						return err
+					}
+					a.JSON = r
 					return nil
 				},
 			},
@@ -440,7 +426,7 @@ func (a *App) CLI() *CLI {
 				Short:       "",
 				Long:        "no-pager",
 				Args:        "",
-				Description: "Avoid using a pager for the response body",
+				Description: "Avoid using a pager for the output",
 				Default:     "",
 				IsSet: func() bool {
 					return a.Cfg.NoPager != nil
@@ -523,7 +509,7 @@ func (a *App) CLI() *CLI {
 				Short:       "t",
 				Long:        "timeout",
 				Args:        "SECONDS",
-				Description: "Timeout in seconds applied to the request",
+				Description: "Timeout applied to the request",
 				Default:     "",
 				IsSet: func() bool {
 					return a.Cfg.Timeout != nil
@@ -595,18 +581,47 @@ func (a *App) CLI() *CLI {
 			{
 				Short:       "x",
 				Long:        "xml",
-				Args:        "",
-				Description: "Set the content-type to application/xml",
+				Args:        "[@]VALUE",
+				Description: "Send an XML request body",
 				Default:     "",
 				IsSet: func() bool {
-					return a.XML
+					return a.XML != nil
 				},
 				Fn: func(value string) error {
-					a.XML = true
+					r, err := requestBody(value)
+					if err != nil {
+						return err
+					}
+					a.XML = r
 					return nil
 				},
 			},
 		},
+	}
+}
+
+func requestBody(value string) (io.Reader, error) {
+	switch {
+	case len(value) == 0 || value[0] != '@':
+		return strings.NewReader(value), nil
+	case value == "@-":
+		return os.Stdin, nil
+	default:
+		f, err := os.Open(value[1:])
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, fileNotExistsError(value[1:])
+			}
+			return nil, err
+		}
+		info, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if info.IsDir() {
+			return nil, fileIsDirError(value[1:])
+		}
+		return f, nil
 	}
 }
 
@@ -617,9 +632,37 @@ func cut(s, sep string) (string, string, bool) {
 	return key, val, ok
 }
 
+type fileNotExistsError string
+
+func (err fileNotExistsError) Error() string {
+	return fmt.Sprintf("file '%s' does not exist", string(err))
+}
+
+func (err fileNotExistsError) PrintTo(p *core.Printer) {
+	p.WriteString("file '")
+	p.Set(core.Dim)
+	p.WriteString(string(err))
+	p.Reset()
+	p.WriteString("' does not exist")
+}
+
 type MissingEnvVarError struct {
 	EnvVar string
 	Flag   string
+}
+
+type fileIsDirError string
+
+func (err fileIsDirError) Error() string {
+	return fmt.Sprintf("file '%s' is a directory", string(err))
+}
+
+func (err fileIsDirError) PrintTo(p *core.Printer) {
+	p.WriteString("file '")
+	p.Set(core.Dim)
+	p.WriteString(string(err))
+	p.Reset()
+	p.WriteString("' is a directory")
 }
 
 func missingEnvVarErr(envVar, flag string) *MissingEnvVarError {
