@@ -184,14 +184,19 @@ func TestMain(t *testing.T) {
 
 	t.Run("data", func(t *testing.T) {
 		type requestData struct {
-			body    string
-			headers http.Header
+			body          string
+			headers       http.Header
+			contentLength int64
 		}
 		chReq := make(chan requestData, 1)
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			var buf bytes.Buffer
 			buf.ReadFrom(r.Body)
-			chReq <- requestData{body: buf.String(), headers: r.Header}
+			chReq <- requestData{
+				body:          buf.String(),
+				headers:       r.Header,
+				contentLength: r.ContentLength,
+			}
 		})
 		defer server.Close()
 
@@ -222,7 +227,8 @@ func TestMain(t *testing.T) {
 			t.Fatalf("unexpected content-type: %s", h)
 		}
 
-		tempFile := createTempFile(t, "temp file data")
+		const fileContent = "temp file data"
+		tempFile := createTempFile(t, fileContent)
 		defer os.Remove(tempFile)
 		res = runFetch(t, fetchPath, server.URL, "--data", "@"+tempFile)
 		assertExitCode(t, 0, res)
@@ -230,6 +236,11 @@ func TestMain(t *testing.T) {
 		if req.body != "temp file data" {
 			t.Fatalf("unexpected body: %s", req.body)
 		}
+		// Files should include content-length.
+		if req.contentLength != int64(len(fileContent)) {
+			t.Fatalf("unexpected content-length: %d", req.contentLength)
+		}
+
 	})
 
 	t.Run("dns over https", func(t *testing.T) {

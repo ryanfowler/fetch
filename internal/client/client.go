@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -193,6 +194,9 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		req = req.WithContext(ctx)
 	}
 
+	// Set the content-length header if the body is a file.
+	setFileContentLength(req)
+
 	// Optionally set the authohrization header.
 	switch {
 	case cfg.AWSSigV4 != nil:
@@ -227,6 +231,23 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+// setFileContentLength sets the content-length of a request if the body is an
+// *os.File that we can read of the size of.
+func setFileContentLength(req *http.Request) {
+	if req.ContentLength > 0 {
+		return
+	}
+
+	f, ok := req.Body.(*os.File)
+	if !ok {
+		return
+	}
+
+	if info, err := f.Stat(); err == nil {
+		req.ContentLength = info.Size()
+	}
 }
 
 // ctxEncodingRequestedKeyType represents the type for storing whether gzip
