@@ -169,19 +169,6 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	req.Header.Set("Accept", "application/json,application/xml,image/webp,*/*")
 	req.Header.Set("User-Agent", core.UserAgent)
 
-	// Optionally set the authohrization header.
-	switch {
-	case cfg.AWSSigV4 != nil:
-		err = aws.Sign(req, *cfg.AWSSigV4, time.Now().UTC())
-		if err != nil {
-			return nil, err
-		}
-	case cfg.Basic != nil:
-		req.SetBasicAuth(cfg.Basic.Key, cfg.Basic.Val)
-	case cfg.Bearer != "":
-		req.Header.Set("Authorization", "Bearer "+cfg.Bearer)
-	}
-
 	// Optionally set the content-type header.
 	switch {
 	case len(cfg.Form) > 0:
@@ -204,6 +191,19 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		req.Header.Set("Accept-Encoding", "gzip")
 		ctx = context.WithValue(ctx, ctxEncodingRequestedKey, true)
 		req = req.WithContext(ctx)
+	}
+
+	// Optionally set the authohrization header.
+	switch {
+	case cfg.AWSSigV4 != nil:
+		err = aws.Sign(req, *cfg.AWSSigV4, time.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
+	case cfg.Basic != nil:
+		req.SetBasicAuth(cfg.Basic.Key, cfg.Basic.Val)
+	case cfg.Bearer != "":
+		req.Header.Set("Authorization", "Bearer "+cfg.Bearer)
 	}
 
 	return req, nil
