@@ -117,29 +117,17 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if req.Body != nil {
-		defer req.Body.Close()
-	}
-
-	// Open an editor if necessary.
-	if r.Edit {
-		var extension string
-		switch {
-		case r.JSON != nil:
-			extension = ".json"
-		case r.XML != nil:
-			extension = ".xml"
+	defer func() {
+		if req.Body != nil {
+			req.Body.Close()
 		}
+	}()
 
-		buf, err := edit(req.Body, extension)
+	// Open an editor to modify the request body, if necessary.
+	if r.Edit {
+		err = editRequestBody(req)
 		if err != nil {
 			return 0, err
-		}
-
-		req.Body = io.NopCloser(bytes.NewReader(buf))
-		req.ContentLength = int64(len(buf))
-		req.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(buf)), nil
 		}
 	}
 
