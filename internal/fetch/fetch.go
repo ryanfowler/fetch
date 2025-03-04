@@ -205,8 +205,17 @@ func formatResponse(r *Request, resp *http.Response, p *core.Printer) (io.Reader
 		}
 		defer f.Close()
 
-		// TODO: show a progress bar on stderr?
-		_, err = io.Copy(f, resp.Body)
+		// Optionally show a progress bar on stderr.
+		var body io.Reader = resp.Body
+		contentLength := resp.ContentLength
+		if r.Verbosity > core.VSilent && contentLength > 0 && core.IsStderrTerm {
+			p := r.PrinterHandle.Stderr()
+			pr := newProgressReader(resp.Body, p, contentLength)
+			defer func() { pr.Close(err) }()
+			body = pr
+		}
+
+		_, err = io.Copy(f, body)
 		return nil, err
 	}
 
