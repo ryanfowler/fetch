@@ -222,12 +222,13 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 
 	// Automatically decode the gzipped response body if we requested it.
 	ce := resp.Header.Get("Content-Encoding")
-	if ce == "gzip" && encodingRequested(req) {
+	if strings.EqualFold(ce, "gzip") && encodingRequested(req) && resp.Body != nil {
 		gz, err := newGZIPReader(resp.Body)
 		if err != nil {
 			return nil, err
 		}
 		resp.Body = gz
+		resp.ContentLength = -1
 	}
 
 	return resp, nil
