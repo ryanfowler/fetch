@@ -10,24 +10,24 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
-// progressReader is a wrapper around an io.Reader that displays a progress bar
+// progressBar is a wrapper around an io.Reader that displays a progress bar
 // to stderr. When reading is complete, the Close method MUST be called.
-type progressReader struct {
+type progressBar struct {
 	r          io.Reader
 	printer    *core.Printer
 	bytesRead  int64
 	totalBytes int64
-	chRender   chan int64
+	chRead     chan int64
 	start      time.Time
 	wg         sync.WaitGroup
 }
 
-func newProgressReader(r io.Reader, p *core.Printer, totalBytes int64) *progressReader {
-	pr := &progressReader{
+func newProgressBar(r io.Reader, p *core.Printer, totalBytes int64) *progressBar {
+	pr := &progressBar{
 		r:          r,
 		printer:    p,
 		totalBytes: totalBytes,
-		chRender:   make(chan int64, 1),
+		chRead:     make(chan int64, 1),
 		start:      time.Now(),
 	}
 	pr.wg.Add(1)
@@ -35,20 +35,20 @@ func newProgressReader(r io.Reader, p *core.Printer, totalBytes int64) *progress
 	return pr
 }
 
-func (pr *progressReader) Read(p []byte) (int, error) {
-	n, err := pr.r.Read(p)
+func (pb *progressBar) Read(p []byte) (int, error) {
+	n, err := pb.r.Read(p)
 	if n > 0 {
-		pr.chRender <- int64(n)
+		pb.chRead <- int64(n)
 	}
 	return n, err
 }
 
-func (pr *progressReader) Close(err error) {
-	// Close the render channel and wait for the loop to exit.
-	close(pr.chRender)
-	pr.wg.Wait()
+func (pb *progressBar) Close(err error) {
+	// Close the reader channel and wait for the loop to exit.
+	close(pb.chRead)
+	pb.wg.Wait()
 
-	p := pr.printer
+	p := pb.printer
 	if err != nil {
 		// An error will be printed after this.
 		p.WriteString("\n\n")
@@ -57,13 +57,13 @@ func (pr *progressReader) Close(err error) {
 		end := time.Now()
 		p.WriteString("\rDownloaded ")
 		p.Set(core.Bold)
-		p.WriteString(formatSize(pr.bytesRead))
+		p.WriteString(formatSize(pb.bytesRead))
 		p.Reset()
 		p.WriteString(" in ")
 		p.Set(core.Italic)
-		p.WriteString(formatDuration(end.Sub(pr.start)))
+		p.WriteString(formatDuration(end.Sub(pb.start)))
 		p.Reset()
-		for range 42 {
+		for range 32 {
 			p.WriteString(" ")
 		}
 		p.WriteString("\n")
@@ -71,22 +71,22 @@ func (pr *progressReader) Close(err error) {
 	p.Flush()
 }
 
-func (pr *progressReader) renderLoop() {
-	defer pr.wg.Done()
+func (pb *progressBar) renderLoop() {
+	defer pb.wg.Done()
 
-	lastUpdateTime := pr.start
+	lastUpdateTime := pb.start
 	var chTimeout <-chan time.Time
 	for {
 		select {
 		case <-chTimeout:
 			chTimeout = nil
-		case n, ok := <-pr.chRender:
+		case n, ok := <-pb.chRead:
 			if !ok {
-				// Render channel has been closed, exit.
-				pr.render()
+				// Reader channel has been closed, exit.
+				pb.render()
 				return
 			}
-			pr.bytesRead += n
+			pb.bytesRead += n
 
 			if chTimeout != nil {
 				// We're waiting on a timeout to re-render.
@@ -104,16 +104,16 @@ func (pr *progressReader) renderLoop() {
 			lastUpdateTime = now
 		}
 
-		pr.render()
+		pb.render()
 	}
 }
 
-func (pr *progressReader) render() {
-	const barWidth = 40
-	percentage := pr.bytesRead * 100 / pr.totalBytes
+func (pb *progressBar) render() {
+	const barWidth = 30
+	percentage := pb.bytesRead * 100 / pb.totalBytes
 	completedWidth := min(barWidth*percentage/100, barWidth)
 
-	p := pr.printer
+	p := pb.printer
 	p.WriteString("\r")
 
 	p.Set(core.Bold)
@@ -138,11 +138,125 @@ func (pr *progressReader) render() {
 	p.Reset()
 
 	p.WriteString(" (")
-	p.WriteString(formatSize(pr.bytesRead))
+	p.WriteString(formatSize(pb.bytesRead))
 	p.WriteString(" / ")
-	p.WriteString(formatSize(pr.totalBytes))
+	p.WriteString(formatSize(pb.totalBytes))
 	p.WriteString(")")
 	p.Reset()
+	p.Flush()
+}
+
+// progressSpinner is a wrapper around an io.Reader that displays a progress
+// spinner to stderr. When reading is complete, the Close method MUST be called.
+type progressSpinner struct {
+	r         io.Reader
+	printer   *core.Printer
+	bytesRead int64
+	chRead    chan int64
+	position  int64
+	wg        sync.WaitGroup
+	start     time.Time
+}
+
+func newProgressSpinner(r io.Reader, p *core.Printer) *progressSpinner {
+	ps := &progressSpinner{
+		r:       r,
+		printer: p,
+		chRead:  make(chan int64, 1),
+		start:   time.Now(),
+	}
+	ps.wg.Add(1)
+	go ps.renderLoop()
+	return ps
+}
+
+func (ps *progressSpinner) Close(err error) {
+	close(ps.chRead)
+	ps.wg.Wait()
+
+	p := ps.printer
+	if err != nil {
+		p.WriteString("\n\n")
+	} else {
+		// Replace the progress spinner with a summary.
+		end := time.Now()
+		p.WriteString("\rDownloaded ")
+		p.Set(core.Bold)
+		p.WriteString(formatSize(ps.bytesRead))
+		p.Reset()
+		p.WriteString(" in ")
+		p.Set(core.Italic)
+		p.WriteString(formatDuration(end.Sub(ps.start)))
+		p.Reset()
+		for range 26 {
+			p.WriteString(" ")
+		}
+		p.WriteString("\n")
+	}
+	p.Flush()
+}
+
+func (ps *progressSpinner) Read(p []byte) (int, error) {
+	n, err := ps.r.Read(p)
+	if n > 0 {
+		ps.chRead <- int64(n)
+	}
+	return n, err
+}
+
+func (ps *progressSpinner) renderLoop() {
+	defer ps.wg.Done()
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			ps.render()
+			ps.position++
+		case n, ok := <-ps.chRead:
+			if !ok {
+				// Reader channel has been closed, exit.
+				ps.render()
+				return
+			}
+			ps.bytesRead += n
+		}
+	}
+}
+
+func (ps *progressSpinner) render() {
+	const width = 30
+
+	var value string
+	var offset int
+	position := ps.position % (width * 2)
+	if position < width {
+		value = "=>"
+		offset = int(position)
+	} else {
+		value = "<="
+		offset = int(width*2 - position - 1)
+	}
+
+	p := ps.printer
+	p.WriteString("\r")
+	p.Set(core.Bold)
+	p.WriteString("[")
+	for range offset {
+		p.WriteString(" ")
+	}
+	p.WriteString(value)
+	for range width - offset - 1 {
+		p.WriteString(" ")
+	}
+	p.WriteString("]")
+	p.Reset()
+
+	p.WriteString(" (")
+	p.WriteString(formatSize(ps.bytesRead))
+	p.WriteString(")")
+
 	p.Flush()
 }
 
