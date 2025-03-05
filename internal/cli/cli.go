@@ -117,6 +117,7 @@ func parse(cli *CLI, args []string) error {
 
 func parseShortFlag(arg string, args []string, short map[string]Flag) ([]string, error) {
 	arg = arg[1:]
+
 	for arg != "" {
 		c := arg[:1]
 		flag, exists := short[c]
@@ -126,31 +127,31 @@ func parseShortFlag(arg string, args []string, short map[string]Flag) ([]string,
 
 		var value string
 		if len(arg) >= 2 && arg[1] == '=' {
+			// -f=val
 			value = arg[2:]
-			arg = arg[len(arg)-1:]
-		}
-
-		if flag.Args == "" && value != "" {
-			return nil, flagNoArgsError("-" + c)
-		}
-
-		if flag.Args != "" && value == "" {
+			arg = ""
+			if flag.Args == "" {
+				return nil, flagNoArgsError("-" + c)
+			}
+		} else if flag.Args != "" {
 			if len(arg) > 1 {
+				// -fval
 				value = arg[1:]
-				arg = arg[len(arg)-1:]
-			} else if len(args) == 0 {
-				return nil, argRequiredError("-" + c)
-			} else {
+			} else if len(args) > 0 {
+				// -f val
 				value = args[0]
 				args = args[1:]
+			} else {
+				return nil, argRequiredError("-" + c)
 			}
+			arg = ""
+		} else {
+			arg = arg[1:]
 		}
 
 		if err := flag.Fn(value); err != nil {
 			return nil, err
 		}
-
-		arg = arg[1:]
 	}
 
 	return args, nil
