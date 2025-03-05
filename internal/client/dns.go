@@ -62,12 +62,13 @@ func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) (s
 		Answer []Answer `json:"Answer"`
 	}
 
-	q := serverURL.Query()
+	u := *serverURL
+	q := u.Query()
 	q.Set("name", host)
 	q.Set("type", dnsType)
-	serverURL.RawQuery = q.Encode()
+	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", serverURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
 		return "", err
 	}
