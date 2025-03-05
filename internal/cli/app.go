@@ -151,7 +151,6 @@ func (a *App) CLI() *CLI {
 				Args:        "",
 				Description: "Print the build information",
 				Default:     "",
-				IsHidden:    true,
 				IsSet: func() bool {
 					return a.BuildInfo
 				},
