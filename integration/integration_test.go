@@ -115,19 +115,37 @@ func TestMain(t *testing.T) {
 				return
 			}
 			amzSha := r.Header.Get("X-Amz-Content-Sha256")
-			if amzSha != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" {
-				w.WriteHeader(400)
-				return
-			}
+			w.WriteHeader(200)
+			io.WriteString(w, amzSha)
 		})
 		defer server.Close()
 
 		os.Setenv("AWS_ACCESS_KEY_ID", "1234")
+		defer os.Unsetenv("AWS_ACCESS_KEY_ID")
 		os.Setenv("AWS_SECRET_ACCESS_KEY", "5678")
+		defer os.Unsetenv("AWS_SECRET_ACCESS_KEY")
+
+		// No request body.
 		res := runFetch(t, fetchPath, server.URL, "--aws-sigv4", "us-east-1/s3")
-		os.Unsetenv("AWS_ACCESS_KEY_ID")
-		os.Unsetenv("AWS_SECRET_ACCESS_KEY")
 		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+		// Direct request body.
+		res = runFetch(t, fetchPath, server.URL, "--aws-sigv4=us-east-1/s3", "-d", "data")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7")
+
+		// Body from file.
+		temp := createTempFile(t, "data")
+		defer os.Remove(temp)
+		res = runFetch(t, fetchPath, server.URL, "--aws-sigv4=us-east-1/s3", "-d", "@"+temp)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7")
+
+		// Body from stdin.
+		res = runFetchStdin(t, "data", fetchPath, server.URL, "--aws-sigv4=us-east-1/s3", "-d", "@-")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "UNSIGNED-PAYLOAD")
 	})
 
 	t.Run("basic auth", func(t *testing.T) {
@@ -616,10 +634,17 @@ type runResult struct {
 }
 
 func runFetch(t *testing.T, path string, args ...string) runResult {
+	return runFetchStdin(t, "", path, args...)
+}
+
+func runFetchStdin(t *testing.T, input, path string, args ...string) runResult {
 	t.Helper()
 
 	var stderr, stdout = new(bytes.Buffer), new(bytes.Buffer)
 	cmd := exec.Command(path, args...)
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	cmd.Stderr = stderr
 	cmd.Stdout = stdout
 	if err := cmd.Run(); err != nil {

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -98,7 +99,7 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 
 	// If body implements io.ReadSeeker, calculate the hash and seek back
 	// to the start afterwards.
-	if rs, ok := req.Body.(io.ReadSeeker); ok {
+	if rs, ok := req.Body.(io.ReadSeeker); ok && rs != os.Stdin {
 		payload, err := hexSha256Reader(rs)
 		if err != nil {
 			return "", err
