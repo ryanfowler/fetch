@@ -80,6 +80,20 @@ func (a *App) CLI() *CLI {
 		Flags: []Flag{
 			{
 				Short:       "",
+				Long:        "auto-update",
+				Args:        "(ENABLED|INTERVAL)",
+				IsHidden:    true,
+				Description: "Enable/disable auto-updates",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Cfg.AutoUpdate != nil
+				},
+				Fn: func(value string) error {
+					return a.Cfg.ParseAutoUpdate(value)
+				},
+			},
+			{
+				Short:       "",
 				Long:        "aws-sigv4",
 				Args:        "REGION/SERVICE",
 				Description: "Sign the request using AWS signature V4",

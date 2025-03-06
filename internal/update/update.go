@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -20,10 +21,10 @@ import (
 
 // Update checks the API for the latest fetch version and upgrades the current
 // executable in-place, returning the exit code to use.
-func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool) bool {
+func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool) int {
 	err := update(ctx, p, timeout, silent)
 	if err == nil {
-		return true
+		return 0
 	}
 
 	p.Set(core.Bold)
@@ -34,12 +35,10 @@ func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	p.WriteString(err.Error())
 	p.WriteString("\n")
 	p.Flush()
-	return false
+	return 1
 }
 
 func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool) error {
-	c := client.NewClient(client.ClientConfig{})
-
 	if timeout > 0 {
 		// Ensure the context is cancelled after the provided timeout.
 		var cancel context.CancelFunc
@@ -48,15 +47,56 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 		defer cancel()
 	}
 
+	// Obtain the update lock.
+	cacheDir, err := getCacheDir()
+	if err != nil {
+		return err
+	}
+	unlock, err := acquireLock(ctx, p, cacheDir, true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	// Perform the update.
+	err = updateInner(ctx, p, silent)
+	if err != nil {
+		return err
+	}
+
+	// Update the last updated time in the metadata file.
+	err = updateLastUpdatedTime(cacheDir, time.Now())
+	if err != nil {
+		writeWarning(p, fmt.Sprintf("unable to update the 'last updated' timestamp: %s", err.Error()))
+	}
+
+	return nil
+}
+
+func updateInner(ctx context.Context, p *core.Printer, silent bool) error {
+	c := client.NewClient(client.ClientConfig{})
+
+	// Get the current version by calling `fetch --version` so that if the
+	// executable was updated while we were waiting for the update lock,
+	// we have the most up-to-date local version.
+	exePath, err := getExecutablePath()
+	if err != nil {
+		return err
+	}
+	version, err := getExeVersion(ctx, exePath)
+	if err != nil {
+		return err
+	}
+
 	writeInfo(p, silent, "fetching latest release tag")
 	latest, err := getLatestRelease(ctx, c)
 	if err != nil {
 		return fmt.Errorf("fetching latest release: %w", err)
 	}
 
-	if latest.TagName == core.Version {
+	if latest.TagName == version {
 		// Already using the latest version, exit successfully.
-		writeInfo(p, silent, fmt.Sprintf("currently using the latest version (%s)", core.Version))
+		writeInfo(p, silent, fmt.Sprintf("currently using the latest version (%s)", version))
 		return nil
 	}
 
@@ -86,19 +126,27 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	}
 
 	// Replace the current executable in-place.
-	exePath, err := getExecutablePath()
-	if err != nil {
-		return err
-	}
 	src := filepath.Join(tempDir, getFetchFilename())
 	err = selfReplace(exePath, src)
 	if err != nil {
 		return err
 	}
 
-	msg := fmt.Sprintf("fetch successfully updated (%s -> %s)", core.Version, latest.TagName)
+	msg := fmt.Sprintf("fetch successfully updated (%s -> %s)", version, latest.TagName)
 	writeInfo(p, silent, msg)
 	return nil
+}
+
+func getExeVersion(ctx context.Context, path string) (string, error) {
+	var buf strings.Builder
+	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd.Stdout = &buf
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+
+	_, version, _ := strings.Cut(buf.String(), " ")
+	return strings.TrimSpace(version), nil
 }
 
 type Asset struct {
@@ -230,6 +278,18 @@ func writeInfo(p *core.Printer, silent bool, s string) {
 	p.Flush()
 }
 
+func writeWarning(p *core.Printer, s string) {
+	p.Set(core.Bold)
+	p.Set(core.Yellow)
+	p.WriteString("warning")
+	p.Reset()
+	p.WriteString(": ")
+
+	p.WriteString(s)
+	p.WriteString("\n")
+	p.Flush()
+}
+
 // randomString returns a random string of lower-case letters of length "n".
 func randomString(n int) string {
 	var sb strings.Builder
@@ -287,4 +347,114 @@ func copyFile(dst, src string) error {
 	}
 
 	return dstFile.Sync()
+}
+
+type metadata struct {
+	LastUpdatedAt time.Time `json:"last_updated_at"`
+}
+
+// NeedsUpdate returns true if the application hasn't checked for an update
+// longer than the provided duration.
+func NeedsUpdate(ctx context.Context, p *core.Printer, dur time.Duration) (bool, error) {
+	dir, err := getCacheDir()
+	if err != nil {
+		return false, err
+	}
+
+	unlock, err := acquireLock(ctx, p, dir, false)
+	if err != nil {
+		return false, err
+	}
+	if unlock == nil {
+		// Lock is already acquired, assume no update is required.
+		return false, nil
+	}
+	defer unlock()
+
+	path := filepath.Join(dir, "metadata.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		// File doesn't exist, assume update is needed.
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	var m metadata
+	if err = json.Unmarshal(data, &m); err != nil {
+		// Invalid data, assume update is needed.
+		return true, nil
+	}
+
+	return time.Since(m.LastUpdatedAt) > dur, nil
+}
+
+func getCacheDir() (string, error) {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+
+	path := filepath.Join(dir, "fetch")
+	err = os.MkdirAll(path, 0755)
+	if err != nil {
+		return "", err
+	}
+
+	return path, nil
+}
+
+func updateLastUpdatedTime(dir string, now time.Time) error {
+	data, err := json.Marshal(metadata{LastUpdatedAt: now.UTC()})
+	if err != nil {
+		return err
+	}
+
+	path := filepath.Join(dir, "metadata.json")
+	tempPath := path + ".__temp"
+	err = os.WriteFile(tempPath, data, 0666)
+	if err != nil {
+		return err
+	}
+
+	return os.Rename(tempPath, path)
+}
+
+func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool) (func(), error) {
+	path := filepath.Join(dir, ".update-lock")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0666)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := 0; ; i++ {
+		ok, err := tryLockFile(f)
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		if ok {
+			return func() {
+				unlockFile(f)
+				f.Close()
+			}, nil
+		}
+		if !block {
+			f.Close()
+			return nil, nil
+		}
+
+		if i == 0 {
+			writeWarning(p, "waiting on lock to begin updating\n")
+		}
+
+		mult := time.Duration(min(i, 10))
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(mult * 50 * time.Millisecond):
+		}
+	}
 }

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ryanfowler/fetch/internal/cli"
 	"github.com/ryanfowler/fetch/internal/config"
@@ -62,6 +64,11 @@ func main() {
 	printerHandle := core.NewHandle(app.Cfg.Color)
 	verbosity := getVerbosity(app)
 
+	// Start async update, if necessary.
+	if !app.Update && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
+		checkForUpdate(ctx, printerHandle.Stderr(), *app.Cfg.AutoUpdate)
+	}
+
 	// Print help to stdout.
 	if app.Help {
 		p := printerHandle.Stdout()
@@ -93,11 +100,8 @@ func main() {
 	if app.Update {
 		p := printerHandle.Stderr()
 		timeout := getValue(app.Cfg.Timeout)
-		ok := update.Update(ctx, p, timeout, verbosity == core.VSilent)
-		if ok {
-			os.Exit(0)
-		}
-		os.Exit(1)
+		status := update.Update(ctx, p, timeout, verbosity == core.VSilent)
+		os.Exit(status)
 	}
 
 	// Otherwise, a URL must be provided.
@@ -165,6 +169,26 @@ func getVerbosity(app *cli.App) core.Verbosity {
 	}
 }
 
+func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration) {
+	// Check the metadata file to see if we should start an async update.
+	ok, err := update.NeedsUpdate(ctx, p, dur)
+	if err != nil {
+		writeWarning(p, fmt.Sprintf("unable to check if update is needed: %s", err.Error()))
+		return
+	}
+	if !ok {
+		return
+	}
+
+	// Asynchronously start an update process.
+	// Should we output a log here?
+	path, err := os.Executable()
+	if err != nil {
+		return
+	}
+	_ = exec.Command(path, "--update").Start()
+}
+
 // writeCLIErr writes the provided CLI error to the Printer.
 func writeCLIErr(p *core.Printer, err error) {
 	writeErrPrefix(p)
@@ -191,4 +215,16 @@ func writeErrPrefix(p *core.Printer) {
 	p.WriteString("error")
 	p.Reset()
 	p.WriteString(": ")
+}
+
+func writeWarning(p *core.Printer, s string) {
+	p.Set(core.Bold)
+	p.Set(core.Yellow)
+	p.WriteString("warning")
+	p.Reset()
+	p.WriteString(": ")
+
+	p.WriteString(s)
+	p.WriteString("\n")
+	p.Flush()
 }
