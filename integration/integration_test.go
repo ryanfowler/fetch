@@ -624,6 +624,26 @@ func TestMain(t *testing.T) {
 		// Ensure the new fetch binary still works.
 		res = runFetch(t, fetchPath, "--version")
 		assertExitCode(t, 0, res)
+
+		// Test the auto-update functionality.
+		res = runFetch(t, fetchPath, "--version", "--auto-update", "0s")
+		assertExitCode(t, 0, res)
+		var n int
+		for {
+			mt := getOptionalModTime(t, fetchPath)
+			if mt != nil && !mt.Equal(afterModTime) {
+				break
+			}
+			if n > 100 {
+				t.Fatal("timed out waiting for self-update to complete")
+			}
+			time.Sleep(100 * time.Millisecond)
+			n++
+		}
+
+		// Ensure the new fetch binary still works.
+		res = runFetch(t, fetchPath, "--version")
+		assertExitCode(t, 0, res)
 	})
 }
 
@@ -769,6 +789,20 @@ func getModTime(t *testing.T, path string) time.Time {
 		t.Fatalf("unable to get file info: %s", err.Error())
 	}
 	return info.ModTime()
+}
+
+func getOptionalModTime(t *testing.T, path string) *time.Time {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("unable to get file info: %s", err.Error())
+	}
+	mt := info.ModTime()
+	return &mt
 }
 
 func assertExitCode(t *testing.T, exp int, res runResult) {

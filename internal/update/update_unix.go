@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 // unpackArtifact decodes the gzipped tar archive from the provided io.Reader
@@ -79,4 +81,19 @@ func selfReplace(exePath, newExePath string) error {
 	}
 
 	return os.Rename(tempPath, exePath)
+}
+
+func tryLockFile(f *os.File) (bool, error) {
+	err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, unix.EAGAIN) {
+		return false, nil
+	}
+	return false, err
+}
+
+func unlockFile(f *os.File) error {
+	return unix.Flock(int(f.Fd()), unix.LOCK_UN)
 }

@@ -16,6 +16,7 @@ import (
 type Config struct {
 	isFile bool
 
+	AutoUpdate   *time.Duration
 	Color        core.Color
 	DNSServer    *url.URL
 	Format       core.Format
@@ -36,6 +37,9 @@ type Config struct {
 
 // Merge merges the two Configs together, with "c" taking priority.
 func (c *Config) Merge(c2 *Config) {
+	if c.AutoUpdate == nil {
+		c.AutoUpdate = c2.AutoUpdate
+	}
 	if c.Color == core.ColorUnknown {
 		c.Color = c2.Color
 	}
@@ -90,6 +94,8 @@ func (c *Config) Merge(c2 *Config) {
 func (c *Config) Set(key, val string) error {
 	var err error
 	switch key {
+	case "auto-update":
+		err = c.ParseAutoUpdate(val)
 	case "color":
 		err = c.ParseColor(val)
 	case "dns-server":
@@ -126,6 +132,26 @@ func (c *Config) Set(key, val string) error {
 		err = invalidOptionError(key)
 	}
 	return err
+}
+
+func (c *Config) ParseAutoUpdate(value string) error {
+	v, err := strconv.ParseBool(value)
+	if err == nil {
+		if v {
+			c.AutoUpdate = core.PointerTo(24 * time.Hour)
+		} else {
+			c.AutoUpdate = core.PointerTo(time.Duration(-1))
+		}
+		return nil
+	}
+
+	t, err := time.ParseDuration(value)
+	if err != nil {
+		usage := "must be either a boolean or interval"
+		return core.NewValueError("auto-update", value, usage, c.isFile)
+	}
+	c.AutoUpdate = &t
+	return nil
 }
 
 func (c *Config) ParseColor(value string) error {
