@@ -241,10 +241,14 @@ func formatResponse(r *Request, resp *http.Response, p *core.Printer) (io.Reader
 		return nil, format.FormatEventStream(resp.Body, p)
 	}
 
-	// TODO: Should probably limit the bytes read here.
-	buf, err := io.ReadAll(resp.Body)
+	const bytesLimit = 1 << 24 // 16MB
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, bytesLimit))
 	if err != nil {
 		return nil, err
+	}
+	if len(buf) >= bytesLimit {
+		// We've reached the limit of bytes read into memory, skip formatting.
+		return io.MultiReader(bytes.NewReader(buf), resp.Body), nil
 	}
 
 	switch contentType {
