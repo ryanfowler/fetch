@@ -27,14 +27,7 @@ func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 		return 0
 	}
 
-	p.Set(core.Bold)
-	p.Set(core.Red)
-	p.WriteString("error")
-	p.Reset()
-	p.WriteString(": ")
-	p.WriteString(err.Error())
-	p.WriteString("\n")
-	p.Flush()
+	core.WriteErrorMsg(p, err)
 	return 1
 }
 
@@ -67,7 +60,8 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	// Update the last updated time in the metadata file.
 	err = updateLastUpdatedTime(cacheDir, time.Now())
 	if err != nil {
-		writeWarning(p, fmt.Sprintf("unable to update the 'last updated' timestamp: %s", err.Error()))
+		msg := fmt.Sprintf("unable to update the 'last updated' timestamp: %s", err.Error())
+		core.WriteWarningMsg(p, msg)
 	}
 
 	return nil
@@ -278,18 +272,6 @@ func writeInfo(p *core.Printer, silent bool, s string) {
 	p.Flush()
 }
 
-func writeWarning(p *core.Printer, s string) {
-	p.Set(core.Bold)
-	p.Set(core.Yellow)
-	p.WriteString("warning")
-	p.Reset()
-	p.WriteString(": ")
-
-	p.WriteString(s)
-	p.WriteString("\n")
-	p.Flush()
-}
-
 // randomString returns a random string of lower-case letters of length "n".
 func randomString(n int) string {
 	var sb strings.Builder
@@ -446,7 +428,7 @@ func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool) (
 		}
 
 		if i == 0 {
-			writeWarning(p, "waiting on lock to begin updating\n")
+			core.WriteWarningMsg(p, "waiting on lock to begin updating\n")
 		}
 
 		mult := time.Duration(min(i, 10))

@@ -41,14 +41,7 @@ func main() {
 	file, err := config.GetFile(app.ConfigPath)
 	if err != nil {
 		p := core.NewHandle(app.Cfg.Color).Stderr()
-		writeErrPrefix(p)
-		if pt, ok := err.(core.PrinterTo); ok {
-			pt.PrintTo(p)
-		} else {
-			p.WriteString(err.Error())
-		}
-		p.WriteString("\n")
-		p.Flush()
+		core.WriteErrorMsg(p, err)
 		os.Exit(1)
 	}
 	if file != nil {
@@ -173,7 +166,8 @@ func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration) {
 	// Check the metadata file to see if we should start an async update.
 	ok, err := update.NeedsUpdate(ctx, p, dur)
 	if err != nil {
-		writeWarning(p, fmt.Sprintf("unable to check if update is needed: %s", err.Error()))
+		msg := fmt.Sprintf("unable to check if update is needed: %s", err.Error())
+		core.WriteWarningMsg(p, msg)
 		return
 	}
 	if !ok {
@@ -191,40 +185,14 @@ func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration) {
 
 // writeCLIErr writes the provided CLI error to the Printer.
 func writeCLIErr(p *core.Printer, err error) {
-	writeErrPrefix(p)
+	core.WriteErrorMsgNoFlush(p, err)
 
-	if pt, ok := err.(core.PrinterTo); ok {
-		pt.PrintTo(p)
-	} else {
-		p.WriteString(err.Error())
-	}
-
-	p.WriteString("\n\nFor more information, try '")
+	p.WriteString("\nFor more information, try '")
 
 	p.Set(core.Bold)
 	p.WriteString("--help")
 	p.Reset()
 
 	p.WriteString("'.\n")
-	p.Flush()
-}
-
-func writeErrPrefix(p *core.Printer) {
-	p.Set(core.Bold)
-	p.Set(core.Red)
-	p.WriteString("error")
-	p.Reset()
-	p.WriteString(": ")
-}
-
-func writeWarning(p *core.Printer, s string) {
-	p.Set(core.Bold)
-	p.Set(core.Yellow)
-	p.WriteString("warning")
-	p.Reset()
-	p.WriteString(": ")
-
-	p.WriteString(s)
-	p.WriteString("\n")
 	p.Flush()
 }
