@@ -113,13 +113,8 @@ func printResponseHeaders(p *core.Printer, resp *http.Response) {
 }
 
 func printBinaryWarning(p *core.Printer) {
-	p.Set(core.Bold)
-	p.Set(core.Yellow)
-	p.WriteString("warning")
-	p.Reset()
-	p.WriteString(": the response body appears to be binary\n\n")
-	p.WriteString("To output to the terminal anyway, use '--output -'\n")
-	p.Flush()
+	msg := "the response body appears to be binary\n\nTo output to the terminal anyway, use '--output -'"
+	core.WriteWarningMsg(p, msg)
 }
 
 func colorForStatus(code int) core.Sequence {

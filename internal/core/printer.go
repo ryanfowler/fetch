@@ -132,3 +132,52 @@ func (p *Printer) WriteString(s string) (int, error) {
 func (p *Printer) WriteRune(r rune) (int, error) {
 	return p.buf.WriteRune(r)
 }
+
+// WriteErrorMsg writes the provided error to the printer.
+func WriteErrorMsg(p *Printer, err error) {
+	WriteErrorMsgNoFlush(p, err)
+	p.Flush()
+}
+
+// WriteErrorMsgNoFlush writes the provided error msg to the printer, but does
+// not flush the printer.
+func WriteErrorMsgNoFlush(p *Printer, err error) {
+	p.Set(Red)
+	p.Set(Bold)
+	p.WriteString("error")
+	p.Reset()
+	p.WriteString(": ")
+
+	if pt, ok := err.(PrinterTo); ok {
+		pt.PrintTo(p)
+	} else {
+		p.WriteString(err.Error())
+	}
+	p.WriteString("\n")
+}
+
+// WriteWarningMsg writes the provided warning msg to the printer.
+func WriteWarningMsg(p *Printer, msg string) {
+	p.Set(Bold)
+	p.Set(Yellow)
+	p.WriteString("warning")
+	p.Reset()
+	p.WriteString(": ")
+
+	p.WriteString(msg)
+	p.WriteString("\n")
+	p.Flush()
+}
+
+// WriteInfoMsg writes the provided info msg to the printer.
+func WriteInfoMsg(p *Printer, msg string) {
+	p.Set(Bold)
+	p.Set(Green)
+	p.WriteString("info")
+	p.Reset()
+	p.WriteString(": ")
+
+	p.WriteString(msg)
+	p.WriteString("\n")
+	p.Flush()
+}

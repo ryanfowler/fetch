@@ -72,13 +72,7 @@ func Fetch(ctx context.Context, r *Request) int {
 	}
 
 	p := r.PrinterHandle.Stderr()
-	p.Set(core.Red)
-	p.Set(core.Bold)
-	p.WriteString("error")
-	p.Reset()
-	p.WriteString(": ")
-	p.WriteString(err.Error())
-	p.WriteString("\n")
+	core.WriteErrorMsgNoFlush(p, err)
 
 	if isCertificateErr(err) {
 		p.WriteString("\n")
