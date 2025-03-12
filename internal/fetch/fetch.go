@@ -204,7 +204,7 @@ func formatResponse(r *Request, resp *http.Response, p *core.Printer) (io.Reader
 		if r.Verbosity > core.VSilent && core.IsStderrTerm {
 			p := r.PrinterHandle.Stderr()
 			contentLength := resp.ContentLength
-			if contentLength >= 0 {
+			if contentLength > 0 {
 				pb := newProgressBar(resp.Body, p, contentLength)
 				defer func() { pb.Close(err) }()
 				body = pb
@@ -215,8 +215,10 @@ func formatResponse(r *Request, resp *http.Response, p *core.Printer) (io.Reader
 			}
 		}
 
-		_, err = io.Copy(f, body)
-		return nil, err
+		if _, err = io.Copy(f, body); err != nil {
+			return nil, err
+		}
+		return nil, f.Sync()
 	}
 
 	if r.Format == core.FormatOff || (!core.IsStdoutTerm && r.Format != core.FormatOn) {
