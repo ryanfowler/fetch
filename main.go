@@ -38,33 +38,24 @@ func main() {
 	}
 
 	// Parse any config file, and merge with it.
-	file, err := config.GetFile(app.ConfigPath)
+	err = parseConfigFile(app)
 	if err != nil {
 		p := core.NewHandle(app.Cfg.Color).Stderr()
 		core.WriteErrorMsg(p, err)
 		os.Exit(1)
 	}
-	if file != nil {
-		if app.URL != nil {
-			hostCfg, ok := file.Hosts[app.URL.Hostname()]
-			if ok {
-				app.Cfg.Merge(hostCfg)
-			}
-		}
-		app.Cfg.Merge(file.Global)
-	}
 
-	printerHandle := core.NewHandle(app.Cfg.Color)
+	handle := core.NewHandle(app.Cfg.Color)
 	verbosity := getVerbosity(app)
 
 	// Start async update, if necessary.
 	if !app.Update && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
-		checkForUpdate(ctx, printerHandle.Stderr(), *app.Cfg.AutoUpdate)
+		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate)
 	}
 
 	// Print help to stdout.
 	if app.Help {
-		p := printerHandle.Stdout()
+		p := handle.Stdout()
 		app.PrintHelp(p)
 		p.Flush()
 		os.Exit(0)
@@ -78,7 +69,7 @@ func main() {
 
 	// Print build info to stdout.
 	if app.BuildInfo {
-		p := printerHandle.Stdout()
+		p := handle.Stdout()
 		info := core.GetBuildInfo()
 		if app.Cfg.Format != core.FormatOff {
 			format.FormatJSON(info, p)
@@ -91,7 +82,7 @@ func main() {
 
 	// Attempt to update the current executable.
 	if app.Update {
-		p := printerHandle.Stderr()
+		p := handle.Stderr()
 		timeout := getValue(app.Cfg.Timeout)
 		status := update.Update(ctx, p, timeout, verbosity == core.VSilent)
 		os.Exit(status)
@@ -99,7 +90,7 @@ func main() {
 
 	// Otherwise, a URL must be provided.
 	if app.URL == nil {
-		p := printerHandle.Stderr()
+		p := handle.Stderr()
 		writeCLIErr(p, errors.New("<URL> must be provided"))
 		os.Exit(1)
 	}
@@ -125,7 +116,7 @@ func main() {
 		NoEncode:      getValue(app.Cfg.NoEncode),
 		NoPager:       getValue(app.Cfg.NoPager),
 		Output:        app.Output,
-		PrinterHandle: printerHandle,
+		PrinterHandle: handle,
 		Proxy:         app.Cfg.Proxy,
 		QueryParams:   app.Cfg.QueryParams,
 		Redirects:     app.Cfg.Redirects,
@@ -137,6 +128,27 @@ func main() {
 	}
 	status := fetch.Fetch(ctx, &req)
 	os.Exit(status)
+}
+
+// parse and merge any config file with the CLI app configuration.
+func parseConfigFile(app *cli.App) error {
+	file, err := config.GetFile(app.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if file == nil {
+		return nil
+	}
+
+	if app.URL != nil {
+		hostCfg, ok := file.Hosts[app.URL.Hostname()]
+		if ok {
+			app.Cfg.Merge(hostCfg)
+		}
+	}
+
+	app.Cfg.Merge(file.Global)
+	return nil
 }
 
 func getValue[T any](v *T) T {
