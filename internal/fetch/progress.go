@@ -188,7 +188,7 @@ func (ps *progressSpinner) Close(err error) {
 		p.Set(core.Italic)
 		p.WriteString(formatDuration(end.Sub(ps.start)))
 		p.Reset()
-		for range 26 {
+		for range 20 {
 			p.WriteString(" ")
 		}
 		p.WriteString("\n")
@@ -226,7 +226,7 @@ func (ps *progressSpinner) renderLoop() {
 }
 
 func (ps *progressSpinner) render() {
-	const width = 30
+	const width = 20
 
 	var value string
 	var offset int
