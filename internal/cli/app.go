@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ryanfowler/fetch/internal/aws"
@@ -32,6 +33,7 @@ type App struct {
 	Method     string
 	Multipart  []core.KeyVal
 	Output     string
+	Range      []string
 	Update     bool
 	Version    bool
 	XML        io.Reader
@@ -491,6 +493,37 @@ func (a *App) CLI() *CLI {
 				},
 			},
 			{
+				Short:       "r",
+				Long:        "range",
+				Args:        "RANGE",
+				Description: "Request a specific byte range",
+				Default:     "",
+				IsSet: func() bool {
+					return len(a.Range) > 0
+				},
+				Fn: func(value string) error {
+					value = strings.TrimSpace(value)
+					start, end, ok := strings.Cut(value, "-")
+					start = strings.TrimSpace(start)
+					end = strings.TrimSpace(end)
+					if !ok || (start == "" && end == "") {
+						const usage = "invalid byte range"
+						return core.NewValueError("range", value, usage, false)
+					}
+					if !isValidRangeValue(start) {
+						usage := fmt.Sprintf("invalid range start '%s'", start)
+						return core.NewValueError("range", value, usage, false)
+					}
+					if !isValidRangeValue(end) {
+						usage := fmt.Sprintf("invalid range end '%s'", end)
+						return core.NewValueError("range", value, usage, false)
+					}
+
+					a.Range = append(a.Range, start+"-"+end)
+					return nil
+				},
+			},
+			{
 				Short:       "",
 				Long:        "redirects",
 				Args:        "NUM",
@@ -643,6 +676,14 @@ func cut(s, sep string) (string, string, bool) {
 	key = strings.TrimSpace(key)
 	val = strings.TrimSpace(val)
 	return key, val, ok
+}
+
+func isValidRangeValue(value string) bool {
+	if value == "" {
+		return true
+	}
+	_, err := strconv.Atoi(value)
+	return err == nil
 }
 
 type fileNotExistsError string

@@ -24,6 +24,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 func TestMain(t *testing.T) {
@@ -443,6 +445,47 @@ func TestMain(t *testing.T) {
 		res = runFetch(t, fetchPath, server.URL)
 		assertExitCode(t, 6, res)
 		res = runFetch(t, fetchPath, server.URL, "--ignore-status")
+		assertExitCode(t, 0, res)
+	})
+
+	t.Run("range request", func(t *testing.T) {
+		var expectedRange atomic.Pointer[string]
+		expectedRange.Store(core.PointerTo(""))
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			exp := expectedRange.Load()
+			if r.Header.Get("Range") != *exp {
+				w.WriteHeader(400)
+				return
+			}
+		})
+		defer server.Close()
+
+		// Invalid range header.
+		res := runFetch(t, fetchPath, server.URL, "--range", "bad")
+		assertExitCode(t, 1, res)
+
+		// No range header.
+		res = runFetch(t, fetchPath, server.URL)
+		assertExitCode(t, 0, res)
+
+		// Range header with no start.
+		expectedRange.Store(core.PointerTo("bytes=-1023"))
+		res = runFetch(t, fetchPath, server.URL, "--range", "-1023")
+		assertExitCode(t, 0, res)
+
+		// Range header with no end.
+		expectedRange.Store(core.PointerTo("bytes=1023-"))
+		res = runFetch(t, fetchPath, server.URL, "--range", "1023-")
+		assertExitCode(t, 0, res)
+
+		// Range header with start and end.
+		expectedRange.Store(core.PointerTo("bytes=0-1023"))
+		res = runFetch(t, fetchPath, server.URL, "--range", "0-1023")
+		assertExitCode(t, 0, res)
+
+		// Multiple ranges.
+		expectedRange.Store(core.PointerTo("bytes=0-1023, 2047-3070"))
+		res = runFetch(t, fetchPath, server.URL, "-r", "0-1023", "-r", "2047-3070")
 		assertExitCode(t, 0, res)
 	})
 

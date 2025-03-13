@@ -110,6 +110,7 @@ type RequestConfig struct {
 	Multipart   *multipart.Multipart
 	NoEncode    bool
 	QueryParams []core.KeyVal
+	Range       []string
 	URL         *url.URL
 	XML         io.Reader
 }
@@ -180,6 +181,11 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		req.Header.Set("Content-Type", "application/json")
 	case cfg.XML != nil:
 		req.Header.Set("Content-Type", "application/xml")
+	}
+
+	// Optionally set the range header.
+	if len(cfg.Range) > 0 {
+		req.Header.Set("Range", "bytes="+strings.Join(cfg.Range, ", "))
 	}
 
 	// Set any provided headers.
