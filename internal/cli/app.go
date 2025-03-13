@@ -57,7 +57,8 @@ func (a *App) CLI() *CLI {
 				return fmt.Errorf("empty URL provided")
 			}
 
-			s = strings.ToLower(s)
+			// For URLs that have the scheme omitted, add two
+			// slashes so it can be parsed correctly.
 			if !strings.Contains(s, "://") && s[0] != '/' {
 				s = "//" + s
 			}
@@ -66,6 +67,9 @@ func (a *App) CLI() *CLI {
 			if err != nil {
 				return fmt.Errorf("invalid url: %w", err)
 			}
+
+			// Lowercase the scheme, and validate.
+			u.Scheme = strings.ToLower(u.Scheme)
 			switch u.Scheme {
 			case "", "http", "https":
 			default:
