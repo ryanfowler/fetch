@@ -212,7 +212,7 @@ fetch --no-pager example.com
 
 ### General Request Options
 
-**Method**: `-m, -X, --method`
+**Method**: `-m, -X, --method METHOD`
 
 Specify the HTTP method to use.
 
@@ -220,7 +220,7 @@ Specify the HTTP method to use.
 fetch -m POST example.com
 ```
 
-**Headers**: `-H, --header`
+**Headers**: `-H, --header NAME:VALUE`
 
 Set custom headers on the request.
 
@@ -228,12 +228,21 @@ Set custom headers on the request.
 fetch -H x-custom-header:value example.com
 ```
 
-**Query Parameters**: `-q, --query`
+**Query Parameters**: `-q, --query KEY=VALUE`
 
 Append query parameters to the URL.
 
 ```sh
 fetch -q hello=world example.com
+```
+
+**Range Requests**: `-r, --range RANGE`
+
+Set the [Range](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Range) request header.
+Can be specified multiple times for multiple ranges.
+
+```sh
+fetch -r 0-1023 example.com
 ```
 
 **Maximum Allowed Redirects**: `--redirects NUM`
