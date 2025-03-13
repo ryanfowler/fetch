@@ -57,6 +57,7 @@ type Request struct {
 	PrinterHandle *core.Handle
 	Proxy         *url.URL
 	QueryParams   []core.KeyVal
+	Range         []string
 	Redirects     *int
 	Timeout       time.Duration
 	TLS           uint16
@@ -105,6 +106,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		Multipart:   r.Multipart,
 		NoEncode:    r.NoEncode,
 		QueryParams: r.QueryParams,
+		Range:       r.Range,
 		URL:         r.URL,
 		XML:         r.XML,
 	})

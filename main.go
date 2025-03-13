@@ -119,6 +119,7 @@ func main() {
 		PrinterHandle: handle,
 		Proxy:         app.Cfg.Proxy,
 		QueryParams:   app.Cfg.QueryParams,
+		Range:         app.Range,
 		Redirects:     app.Cfg.Redirects,
 		Timeout:       getValue(app.Cfg.Timeout),
 		TLS:           getValue(app.Cfg.TLS),
