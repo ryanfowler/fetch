@@ -138,11 +138,14 @@ func (pb *progressBar) render() {
 	p.Reset()
 
 	p.WriteString(" (")
-	p.WriteString(formatSize(pb.bytesRead))
+	size := formatSize(pb.bytesRead)
+	for range 7 - len(size) {
+		p.WriteString(" ")
+	}
+	p.WriteString(size)
 	p.WriteString(" / ")
 	p.WriteString(formatSize(pb.totalBytes))
 	p.WriteString(")")
-	p.Reset()
 	p.Flush()
 }
 
@@ -246,16 +249,22 @@ func (ps *progressSpinner) render() {
 	for range offset {
 		p.WriteString(" ")
 	}
+	p.Set(core.Green)
 	p.WriteString(value)
+	p.Reset()
 	for range width - offset - 1 {
 		p.WriteString(" ")
 	}
+	p.Set(core.Bold)
 	p.WriteString("]")
 	p.Reset()
 
-	p.WriteString(" (")
-	p.WriteString(formatSize(ps.bytesRead))
-	p.WriteString(")")
+	p.WriteString(" ")
+	size := formatSize(ps.bytesRead)
+	for range 7 - len(size) {
+		p.WriteString(" ")
+	}
+	p.WriteString(size)
 
 	p.Flush()
 }
@@ -265,17 +274,17 @@ func formatSize(bytes int64) string {
 	const units = "KMGTPE"
 	const unit = 1024
 	if bytes < unit {
-		return strconv.FormatInt(bytes, 10) + " B"
+		return strconv.FormatInt(bytes, 10) + "B"
 	}
 	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
+	for n := bytes / unit; n >= 1000; n /= unit {
 		div *= unit
 		exp++
 	}
+	value := float64(bytes) / float64(div)
 	if exp >= len(units) {
 		return "NaN"
 	}
-	value := float64(bytes) / float64(div)
 	return strconv.FormatFloat(value, 'f', 1, 64) + string(units[exp]) + "B"
 }
 
