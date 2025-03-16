@@ -2,6 +2,7 @@ package image
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"image"
 	_ "image/jpeg"
@@ -15,8 +16,8 @@ import (
 
 // Render renders the provided raw image to stdout based on what protocol the
 // current terminal emulator supports.
-func Render(b []byte) error {
-	img, _, err := image.Decode(bytes.NewReader(b))
+func Render(ctx context.Context, b []byte) error {
+	img, err := decodeImage(ctx, b)
 	if err != nil {
 		return err
 	}
@@ -46,6 +47,22 @@ func Render(b []byte) error {
 	default:
 		return writeBlocks(img)
 	}
+}
+
+func decodeImage(ctx context.Context, b []byte) (image.Image, error) {
+	img, _, err := image.Decode(bytes.NewReader(b))
+	if err == nil {
+		return img, nil
+	}
+
+	// Unable to decode the image ourselves, attempt with the adaptors.
+	var errAdaptor error
+	img, errAdaptor = decodeWithAdaptors(ctx, b)
+	if errAdaptor == nil {
+		return img, nil
+	}
+
+	return nil, err
 }
 
 // resizeForTerm returns a new image that has been resized to fit in less than

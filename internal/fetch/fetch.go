@@ -156,10 +156,10 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		req = req.WithContext(ctx)
 	}
 
-	return makeRequest(r, c, req)
+	return makeRequest(ctx, r, c, req)
 }
 
-func makeRequest(r *Request, c *client.Client, req *http.Request) (int, error) {
+func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {
 	resp, err := c.Do(req)
 	if err != nil {
 		return 0, err
@@ -177,7 +177,7 @@ func makeRequest(r *Request, c *client.Client, req *http.Request) (int, error) {
 		p.Flush()
 	}
 
-	body, err := formatResponse(r, resp, r.PrinterHandle.Stdout())
+	body, err := formatResponse(ctx, r, resp, r.PrinterHandle.Stdout())
 	if err != nil {
 		return 0, err
 	}
@@ -193,7 +193,7 @@ func makeRequest(r *Request, c *client.Client, req *http.Request) (int, error) {
 	return exitCode, nil
 }
 
-func formatResponse(r *Request, resp *http.Response, p *core.Printer) (io.Reader, error) {
+func formatResponse(ctx context.Context, r *Request, resp *http.Response, p *core.Printer) (io.Reader, error) {
 	if r.Output != "" && r.Output != "-" {
 		f, err := os.Create(r.Output)
 		if err != nil {
@@ -251,7 +251,7 @@ func formatResponse(r *Request, resp *http.Response, p *core.Printer) (io.Reader
 
 	switch contentType {
 	case TypeImage:
-		return nil, image.Render(buf)
+		return nil, image.Render(ctx, buf)
 	case TypeJSON:
 		if format.FormatJSON(buf, p) == nil {
 			buf = p.Bytes()
@@ -278,12 +278,7 @@ func getContentType(headers http.Header) ContentType {
 	if typ, subtype, ok := strings.Cut(mediaType, "/"); ok {
 		switch typ {
 		case "image":
-			switch subtype {
-			case "jpeg", "png", "tiff", "webp":
-				return TypeImage
-			default:
-				return TypeUnknown
-			}
+			return TypeImage
 		case "application":
 			switch subtype {
 			case "json":
