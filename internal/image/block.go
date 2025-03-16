@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 
 	"golang.org/x/term"
@@ -62,11 +63,18 @@ func writeBlocks(img image.Image) error {
 	return nil
 }
 
-// supportsTrueColor checks the COLORTERM environment variable.
+// supportsTrueColor checks the current terminal emulator for true color support.
 func supportsTrueColor() bool {
 	ct := os.Getenv("COLORTERM")
-	ct = strings.ToLower(ct)
-	return strings.Contains(ct, "truecolor") || strings.Contains(ct, "24bit")
+	if strings.EqualFold(ct, "truecolor") || strings.EqualFold(ct, "24bit") {
+		return true
+	}
+
+	if runtime.GOOS == "windows" {
+		return os.Getenv("WT_SESSION") != "" || os.Getenv("ConEmuANSI") == "ON"
+	}
+
+	return false
 }
 
 // imageBlockOutputDimensions returns the desired number of block columns and rows.
