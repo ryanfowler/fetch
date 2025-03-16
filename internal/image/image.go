@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"image"
 	_ "image/jpeg"
 	"image/png"
@@ -50,7 +51,7 @@ func Render(ctx context.Context, b []byte) error {
 }
 
 func decodeImage(ctx context.Context, b []byte) (image.Image, error) {
-	img, _, err := image.Decode(bytes.NewReader(b))
+	img, err := decodeImageStd(b)
 	if err == nil {
 		return img, nil
 	}
@@ -63,6 +64,20 @@ func decodeImage(ctx context.Context, b []byte) (image.Image, error) {
 	}
 
 	return nil, err
+}
+
+func decodeImageStd(b []byte) (image.Image, error) {
+	const limit = 8192
+	config, _, err := image.DecodeConfig(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	if config.Height > limit || config.Width > limit {
+		return nil, fmt.Errorf("image dimensions are too large %dx%d", config.Width, config.Height)
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(b))
+	return img, err
 }
 
 // resizeForTerm returns a new image that has been resized to fit in less than
