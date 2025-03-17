@@ -97,8 +97,7 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool) error {
 	// Look for the artifact URL for our OS and architecture.
 	artifactURL := getArtifactURL(latest)
 	if artifactURL == "" {
-		return fmt.Errorf("no %s/%s artifact found for %s",
-			runtime.GOOS, runtime.GOARCH, latest.TagName)
+		return errNoReleaseArtifact{}
 	}
 
 	writeInfo(p, silent, fmt.Sprintf("downloading latest version (%s)", latest.TagName))
@@ -439,4 +438,27 @@ func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool) (
 		case <-time.After(mult * 50 * time.Millisecond):
 		}
 	}
+}
+
+type errNoReleaseArtifact struct{}
+
+func (err errNoReleaseArtifact) Error() string {
+	return fmt.Sprintf("no release artifact found for %s/%s", runtime.GOOS, runtime.GOARCH)
+}
+
+func (err errNoReleaseArtifact) PrintTo(p *core.Printer) {
+	p.WriteString("no release artifact found for ")
+	p.Set(core.Bold)
+	p.WriteString(runtime.GOOS)
+	p.Reset()
+	p.WriteString("/")
+	p.Set(core.Bold)
+	p.WriteString(runtime.GOARCH)
+	p.Reset()
+
+	p.WriteString("\n\nTry compiling from source by running: '")
+	p.Set(core.Dim)
+	p.WriteString("go install github.com/ryanfowler/fetch@latest")
+	p.Reset()
+	p.WriteString("'")
 }
