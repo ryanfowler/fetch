@@ -19,20 +19,29 @@
 
 ## Installation
 
-You can install `fetch` from the pre-built binaries or compile it from source.
+You can install `fetch` using an installation script, by compiling from source,
+or from pre-built binaries.
 
-### Using Pre-built Binaries
+### Installation Script
 
-Visit the [GitHub releases page](https://github.com/ryanfowler/fetch/releases)
-to download the binary for your operating system.
+For macOS or Linux, download and run the [install.sh](./install.sh) script:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ryanfowler/fetch/main/install.sh | bash
+```
 
 ### Building from Source
 
-Ensure you have Go 1.24+ installed, then run:
+Ensure you have Go installed, then run:
 
 ```sh
 go install github.com/ryanfowler/fetch@latest
 ```
+
+### Pre-built Binaries
+
+Visit the [GitHub releases page](https://github.com/ryanfowler/fetch/releases)
+to download the binary for your operating system.
 
 ### Updating
 
