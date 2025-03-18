@@ -353,6 +353,19 @@ func (a *App) CLI() *CLI {
 			},
 			{
 				Short:       "",
+				Long:        "image",
+				Args:        "OPTION",
+				Description: "Enable/disable image rendering",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Cfg.Image != core.ImageUnknown
+				},
+				Fn: func(value string) error {
+					return a.Cfg.ParseImageSetting(value)
+				},
+			},
+			{
+				Short:       "",
 				Long:        "insecure",
 				Args:        "",
 				Description: "Accept invalid TLS certs (!)",

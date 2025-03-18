@@ -177,10 +177,22 @@ fetch --color off example.com
 
 Set whether output should be formatted or not.
 By default, `fetch` automatically determines if output should be formatted.  
-Must be one of: `auto`, `off`, `on`.
+Must be one of: `auto`, `off`, or `on`.
 
 ```sh
 fetch --format off example.com
+```
+
+**Image Rendering**: `--image OPTION`
+
+Set how images should be rendered to the terminal.
+By default, `fetch` automatically attempts to decode the image and render it with the optimal image protocol.
+Setting the value to `native` disables the fallback to search the local machine for a tool that can decode the image.
+`fetch` natively supports the jpeg, png, tiff, and webp formats.
+Must be one of: `auto`, `native`, or `off`.
+
+```sh
+fetch --image native example.com
 ```
 
 **Verbosity**: `-v, --verbose`
@@ -345,6 +357,10 @@ http = 1
 # Don't determine exit code from the HTTP status (will always exit with 0).
 # By default, 4xx or 5xx statuses result in non-zero exit codes.
 ignore-status = true
+
+# Enable or disable image rendering. Value must be one of "auto", "native", or "off".
+# By default, image is set to "auto".
+image = native
 
 # Accept invalid TLS certificates (DANGER).
 insecure = true

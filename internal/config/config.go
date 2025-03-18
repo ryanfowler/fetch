@@ -23,6 +23,7 @@ type Config struct {
 	Headers      []core.KeyVal
 	HTTP         core.HTTPVersion
 	IgnoreStatus *bool
+	Image        core.ImageSetting
 	Insecure     *bool
 	NoEncode     *bool
 	NoPager      *bool
@@ -57,6 +58,9 @@ func (c *Config) Merge(c2 *Config) {
 	}
 	if c.IgnoreStatus == nil {
 		c.IgnoreStatus = c2.IgnoreStatus
+	}
+	if c.Image == core.ImageUnknown {
+		c.Image = c2.Image
 	}
 	if c.Insecure == nil {
 		c.Insecure = c2.Insecure
@@ -108,6 +112,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseHTTP(val)
 	case "ignore-status":
 		err = c.ParseIgnoreStatus(val)
+	case "image":
+		err = c.ParseImageSetting(val)
 	case "insecure":
 		err = c.ParseInsecure(val)
 	case "no-encode":
@@ -239,6 +245,21 @@ func (c *Config) ParseIgnoreStatus(value string) error {
 		return core.NewValueError("ignore-status", value, "must be a boolean", c.isFile)
 	}
 	c.IgnoreStatus = &v
+	return nil
+}
+
+func (c *Config) ParseImageSetting(value string) error {
+	switch value {
+	case "auto":
+		c.Image = core.ImageAuto
+	case "native":
+		c.Image = core.ImageNative
+	case "off":
+		c.Image = core.ImageOff
+	default:
+		const usage = "must be one of [auto, native, off]"
+		return core.NewValueError("image", value, usage, c.isFile)
+	}
 	return nil
 }
 

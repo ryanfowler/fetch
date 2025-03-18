@@ -17,8 +17,8 @@ import (
 
 // Render renders the provided raw image to stdout based on what protocol the
 // current terminal emulator supports.
-func Render(ctx context.Context, b []byte) error {
-	img, err := decodeImage(ctx, b)
+func Render(ctx context.Context, b []byte, nativeOnly bool) error {
+	img, err := decodeImage(ctx, b, nativeOnly)
 	if err != nil {
 		return err
 	}
@@ -50,10 +50,13 @@ func Render(ctx context.Context, b []byte) error {
 	}
 }
 
-func decodeImage(ctx context.Context, b []byte) (image.Image, error) {
+func decodeImage(ctx context.Context, b []byte, nativeOnly bool) (image.Image, error) {
 	img, err := decodeImageStd(b)
 	if err == nil {
 		return img, nil
+	}
+	if nativeOnly {
+		return nil, err
 	}
 
 	// Unable to decode the image ourselves, attempt with the adaptors.

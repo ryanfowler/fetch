@@ -47,6 +47,7 @@ type Request struct {
 	Headers       []core.KeyVal
 	HTTP          core.HTTPVersion
 	IgnoreStatus  bool
+	Image         core.ImageSetting
 	Insecure      bool
 	JSON          io.Reader
 	NoEncode      bool
@@ -239,6 +240,11 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, p *cor
 		return nil, format.FormatEventStream(resp.Body, p)
 	}
 
+	// If image rendering is disabled, return the reader immediately.
+	if contentType == TypeImage && r.Image == core.ImageOff {
+		return resp.Body, nil
+	}
+
 	const bytesLimit = 1 << 24 // 16MB
 	buf, err := io.ReadAll(io.LimitReader(resp.Body, bytesLimit))
 	if err != nil {
@@ -251,7 +257,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, p *cor
 
 	switch contentType {
 	case TypeImage:
-		return nil, image.Render(ctx, buf)
+		return nil, image.Render(ctx, buf, r.Image == core.ImageNative)
 	case TypeJSON:
 		if format.FormatJSON(buf, p) == nil {
 			buf = p.Bytes()
