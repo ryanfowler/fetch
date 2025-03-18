@@ -98,7 +98,7 @@ fi
 # Download the artifact.
 DOWNLOAD_URL=""
 if $HAS_JQ; then
-  DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r ".assets.[] | select(.name == \"fetch-v0.7.5-${PLATFORM}.tar.gz\") | .browser_download_url")
+  DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r ".assets.[] | select(.name == \"fetch-${VERSION}-${PLATFORM}.tar.gz\") | .browser_download_url")
 else
   DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\": *\"[^\"]*${PLATFORM}[^\"]*\"" | sed 's/"browser_download_url": *"//;s/"//')
 fi
