@@ -4,8 +4,6 @@ set -e
 # Installation script for fetch
 # Usage: curl -fsSL https://raw.githubusercontent.com/ryanfowler/fetch/main/install.sh | bash
 
-LATEST_RELEASE_URL="https://api.github.com/repos/ryanfowler/fetch/releases/latest"
-
 RESET=""
 BOLD=""
 DIM=""
@@ -44,14 +42,14 @@ compile_msg() {
 }
 
 # Determine OS and architecture.
-OS=$(uname -s)
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
 case "$OS" in
-  Darwin) OS="darwin" ;;
-  Linux) OS="linux" ;;
+  darwin) OS="darwin" ;;
+  linux) OS="linux" ;;
   *) 
-    error "no release artifact found for operating system: $OS"
+    error "platform not supported by install script: $OS/$ARCH"
     compile_msg
     exit 1
     ;;
@@ -61,7 +59,7 @@ case "$ARCH" in
   x86_64|amd64) ARCH="amd64" ;;
   aarch64|arm64) ARCH="arm64" ;;
   *)
-    error "no release artifact found for architecture: $ARCH"
+    error "platform not supported by install script: $OS/$ARCH"
     compile_msg
     exit 1
     ;;
@@ -69,7 +67,7 @@ esac
 
 PLATFORM="${OS}-${ARCH}"
 
-# Fetch the latest release asset
+# Fetch the latest release asset.
 info "fetching latest release tag"
 
 if ! command -v curl &> /dev/null; then
@@ -82,8 +80,9 @@ if command -v jq &> /dev/null; then
   HAS_JQ=true
 fi
 
-RELEASE_JSON=$(curl -s "$LATEST_RELEASE_URL")
+RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/ryanfowler/fetch/releases/latest)
 
+# Parse the version tag.
 VERSION=""
 if $HAS_JQ; then
   VERSION=$(echo "$RELEASE_JSON" | jq -r .tag_name)
@@ -95,7 +94,7 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-# Download the artifact.
+# Parse the artifact url.
 DOWNLOAD_URL=""
 if $HAS_JQ; then
   DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r ".assets.[] | select(.name == \"fetch-${VERSION}-${PLATFORM}.tar.gz\") | .browser_download_url")
@@ -111,6 +110,7 @@ fi
 TMP_DIR=$(mktemp -d)
 BINARY_PATH="${TMP_DIR}/fetch"
 
+# Download the artifact.
 info "downloading latest version (${VERSION})"
 if ! curl -fsSL "$DOWNLOAD_URL" -o "$BINARY_PATH.tar.gz"; then
   error "unable to download artifact"
