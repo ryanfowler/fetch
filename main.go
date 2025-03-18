@@ -178,7 +178,7 @@ func getVerbosity(app *cli.App) core.Verbosity {
 
 func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration) {
 	// Check the metadata file to see if we should start an async update.
-	ok, err := update.NeedsUpdate(ctx, p, dur)
+	ok, err := update.ShouldAttemptUpdate(ctx, p, dur)
 	if err != nil {
 		msg := fmt.Sprintf("unable to check if update is needed: %s", err.Error())
 		core.WriteWarningMsg(p, msg)
