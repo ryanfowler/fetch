@@ -109,6 +109,7 @@ func main() {
 		Headers:       app.Cfg.Headers,
 		HTTP:          app.Cfg.HTTP,
 		IgnoreStatus:  getValue(app.Cfg.IgnoreStatus),
+		Image:         app.Cfg.Image,
 		Insecure:      getValue(app.Cfg.Insecure),
 		JSON:          app.JSON,
 		Method:        app.Method,

@@ -29,6 +29,16 @@ const (
 	HTTP2
 )
 
+// ImageSetting represents the options for displaying images.
+type ImageSetting int
+
+const (
+	ImageUnknown ImageSetting = iota
+	ImageAuto
+	ImageNative
+	ImageOff
+)
+
 // Verbosity represents how verbose the output should be.
 type Verbosity int
 
