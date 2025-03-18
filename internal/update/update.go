@@ -51,20 +51,17 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	}
 	defer unlock()
 
+	defer func() {
+		// Update the last updated time in the metadata file.
+		err = updateLastAttemptTime(cacheDir, time.Now())
+		if err != nil {
+			msg := fmt.Sprintf("unable to record the 'last update attempt' timestamp: %s", err.Error())
+			core.WriteWarningMsg(p, msg)
+		}
+	}()
+
 	// Perform the update.
-	err = updateInner(ctx, p, silent)
-	if err != nil {
-		return err
-	}
-
-	// Update the last updated time in the metadata file.
-	err = updateLastUpdatedTime(cacheDir, time.Now())
-	if err != nil {
-		msg := fmt.Sprintf("unable to update the 'last updated' timestamp: %s", err.Error())
-		core.WriteWarningMsg(p, msg)
-	}
-
-	return nil
+	return updateInner(ctx, p, silent)
 }
 
 func updateInner(ctx context.Context, p *core.Printer, silent bool) error {
@@ -331,12 +328,12 @@ func copyFile(dst, src string) error {
 }
 
 type metadata struct {
-	LastUpdatedAt time.Time `json:"last_updated_at"`
+	LastAttemptAt time.Time `json:"last_attempt_at"`
 }
 
-// NeedsUpdate returns true if the application hasn't checked for an update
-// longer than the provided duration.
-func NeedsUpdate(ctx context.Context, p *core.Printer, dur time.Duration) (bool, error) {
+// ShouldAttemptUpdate returns true if the application hasn't checked for an
+// update longer than the provided duration.
+func ShouldAttemptUpdate(ctx context.Context, p *core.Printer, dur time.Duration) (bool, error) {
 	dir, err := getCacheDir()
 	if err != nil {
 		return false, err
@@ -368,7 +365,7 @@ func NeedsUpdate(ctx context.Context, p *core.Printer, dur time.Duration) (bool,
 		return true, nil
 	}
 
-	return time.Since(m.LastUpdatedAt) > dur, nil
+	return time.Since(m.LastAttemptAt) > dur, nil
 }
 
 func getCacheDir() (string, error) {
@@ -386,8 +383,8 @@ func getCacheDir() (string, error) {
 	return path, nil
 }
 
-func updateLastUpdatedTime(dir string, now time.Time) error {
-	data, err := json.Marshal(metadata{LastUpdatedAt: now.UTC()})
+func updateLastAttemptTime(dir string, now time.Time) error {
+	data, err := json.Marshal(metadata{LastAttemptAt: now.UTC()})
 	if err != nil {
 		return err
 	}
