@@ -245,3 +245,8 @@ func unlockFile(f *os.File) error {
 	var ol windows.Overlapped
 	return windows.UnlockFileEx(windows.Handle(f.Fd()), 0, allBytes, allBytes, &ol)
 }
+
+// canReplaceFile always returns true on windows.
+func canReplaceFile(path string) bool {
+	return true
+}
