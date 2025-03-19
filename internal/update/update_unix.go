@@ -97,3 +97,9 @@ func tryLockFile(f *os.File) (bool, error) {
 func unlockFile(f *os.File) error {
 	return unix.Flock(int(f.Fd()), unix.LOCK_UN)
 }
+
+// canReplaceFile returns true if this process can replace the file at the
+// provided location.
+func canReplaceFile(path string) bool {
+	return unix.Access(path, unix.W_OK) == nil
+}

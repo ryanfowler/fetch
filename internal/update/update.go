@@ -67,13 +67,19 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 func updateInner(ctx context.Context, p *core.Printer, silent bool) error {
 	c := client.NewClient(client.ClientConfig{})
 
-	// Get the current version by calling `fetch --version` so that if the
-	// executable was updated while we were waiting for the update lock,
-	// we have the most up-to-date local version.
+	// Get the current executable path and verify that we have write
+	// permission in order to replace the file.
 	exePath, err := getExecutablePath()
 	if err != nil {
 		return err
 	}
+	if !canReplaceFile(exePath) {
+		return errNoWritePermission(exePath)
+	}
+
+	// Get the current version by calling `fetch --version` so that if the
+	// executable was updated while we were waiting for the update lock,
+	// we have the most up-to-date local version.
 	version, err := getExeVersion(ctx, exePath)
 	if err != nil {
 		return err
@@ -456,6 +462,20 @@ func (err errNoReleaseArtifact) PrintTo(p *core.Printer) {
 	p.WriteString("\n\nTry compiling from source by running: '")
 	p.Set(core.Dim)
 	p.WriteString("go install github.com/ryanfowler/fetch@latest")
+	p.Reset()
+	p.WriteString("'")
+}
+
+type errNoWritePermission string
+
+func (err errNoWritePermission) Error() string {
+	return fmt.Sprintf("the current process does not have write permission to '%s'", string(err))
+}
+
+func (err errNoWritePermission) PrintTo(p *core.Printer) {
+	p.WriteString("the current process does not have write permission to '")
+	p.Set(core.Dim)
+	p.WriteString(string(err))
 	p.Reset()
 	p.WriteString("'")
 }
