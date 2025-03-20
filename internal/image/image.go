@@ -30,23 +30,23 @@ func Render(ctx context.Context, b []byte, nativeOnly bool) error {
 		return nil
 	}
 
-	termWidthPx, termHeightPx, err := getTermSizeInPixels()
+	size, err := getTerminalSize()
 	if err != nil {
 		return err
 	}
-	if termWidthPx == 0 || termHeightPx == 0 {
+	if size.widthPx == 0 || size.heightPx == 0 {
 		// If we're unable to get the terminal dimensions in pixels,
 		// render the image using blocks.
-		return writeBlocks(img)
+		return writeBlocks(img, size.cols, size.rows)
 	}
 
 	switch detectEmulator().Protocol() {
 	case protoInline:
-		return writeInline(img, termWidthPx, termHeightPx)
+		return writeInline(img, size.widthPx, size.heightPx)
 	case protoKitty:
-		return writeKitty(img, termWidthPx, termHeightPx)
+		return writeKitty(img, size.widthPx, size.heightPx)
 	default:
-		return writeBlocks(img)
+		return writeBlocks(img, size.cols, size.rows)
 	}
 }
 
@@ -143,4 +143,11 @@ func convertToRGBA(img image.Image) *image.RGBA {
 		draw.Draw(out, bounds, img, bounds.Min, draw.Src)
 		return out
 	}
+}
+
+type terminalSize struct {
+	cols     int
+	rows     int
+	widthPx  int
+	heightPx int
 }
