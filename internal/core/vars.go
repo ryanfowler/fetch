@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"runtime/debug"
-
-	"golang.org/x/term"
 )
 
 var (
@@ -20,8 +18,8 @@ var (
 
 func init() {
 	// Determine if stderr and stdout are TTYs.
-	IsStderrTerm = term.IsTerminal(int(os.Stderr.Fd()))
-	IsStdoutTerm = term.IsTerminal(int(os.Stdout.Fd()))
+	IsStderrTerm = isTerminal(int(os.Stderr.Fd()))
+	IsStdoutTerm = isTerminal(int(os.Stdout.Fd()))
 
 	// Set executable version and user-agent.
 	Version = getVersion()
