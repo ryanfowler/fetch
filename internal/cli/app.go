@@ -185,6 +185,7 @@ func (a *App) CLI() *CLI {
 				Args:        "OPTION",
 				Description: "Enable/disable color",
 				Default:     "",
+				Aliases:     []string{"colour"},
 				Values:      []string{"auto", "off", "on"},
 				IsSet: func() bool {
 					return a.Cfg.Color != core.ColorUnknown

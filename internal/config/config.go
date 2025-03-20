@@ -100,7 +100,7 @@ func (c *Config) Set(key, val string) error {
 	switch key {
 	case "auto-update":
 		err = c.ParseAutoUpdate(val)
-	case "color":
+	case "color", "colour":
 		err = c.ParseColor(val)
 	case "dns-server":
 		err = c.ParseDNSServer(val)
