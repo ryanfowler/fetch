@@ -9,8 +9,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-
-	"golang.org/x/term"
 )
 
 const (
@@ -24,16 +22,11 @@ type rgbColor struct {
 }
 
 // writeBlocks resizes the image and outputs it as terminal blocks.
-func writeBlocks(img image.Image) error {
+func writeBlocks(img image.Image, termWidth, termHeight int) error {
 	trueColor := supportsTrueColor()
 
-	termWidth, termHeight, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return err
-	}
-	cols, rows := imageBlockOutputDimensions(img, termWidth, termHeight)
-
 	// Each terminal block represents 2 vertical pixels.
+	cols, rows := imageBlockOutputDimensions(img, termWidth, termHeight)
 	targetWidth := cols
 	targetHeight := rows * 2
 

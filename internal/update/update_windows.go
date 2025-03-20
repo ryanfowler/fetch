@@ -247,6 +247,6 @@ func unlockFile(f *os.File) error {
 }
 
 // canReplaceFile always returns true on windows.
-func canReplaceFile(path string) bool {
+func canReplaceFile(_ string) bool {
 	return true
 }
