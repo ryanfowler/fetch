@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/cli"
+	"github.com/ryanfowler/fetch/internal/complete"
 	"github.com/ryanfowler/fetch/internal/config"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/fetch"
@@ -35,6 +36,17 @@ func main() {
 		p := core.NewHandle(app.Cfg.Color).Stderr()
 		writeCLIErr(p, err)
 		os.Exit(1)
+	}
+
+	// Handle completion requests.
+	if app.Complete != "" {
+		err := handleCompletion(app.Complete, app.ExtraArgs)
+		if err != nil {
+			p := core.NewHandle(app.Cfg.Color).Stderr()
+			core.WriteErrorMsg(p, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	// Parse any config file, and merge with it.
@@ -132,6 +144,21 @@ func main() {
 	os.Exit(status)
 }
 
+func handleCompletion(name string, args []string) error {
+	shell := complete.GetShell(name)
+	if shell == nil {
+		return errShellNotSupported(name)
+	}
+
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stdout, shell.Register())
+		return nil
+	}
+
+	os.Stdout.WriteString(complete.Complete(shell, args))
+	return nil
+}
+
 // parse and merge any config file with the CLI app configuration.
 func parseConfigFile(app *cli.App) error {
 	file, err := config.GetFile(app.ConfigPath)
@@ -209,4 +236,18 @@ func writeCLIErr(p *core.Printer, err error) {
 
 	p.WriteString("'.\n")
 	p.Flush()
+}
+
+type errShellNotSupported string
+
+func (err errShellNotSupported) Error() string {
+	return fmt.Sprintf("completions not supported for shell '%s'", string(err))
+}
+
+func (err errShellNotSupported) PrintTo(p *core.Printer) {
+	p.WriteString("completions not supported for shell '")
+	p.Set(core.Bold)
+	p.WriteString(string(err))
+	p.Reset()
+	p.WriteString("'")
 }

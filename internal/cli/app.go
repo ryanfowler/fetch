@@ -15,7 +15,8 @@ import (
 
 // App represents the full configuration for a fetch invocation.
 type App struct {
-	URL *url.URL
+	URL       *url.URL
+	ExtraArgs []string
 
 	Cfg config.Config
 
@@ -23,6 +24,7 @@ type App struct {
 	Basic      *core.KeyVal
 	Bearer     string
 	BuildInfo  bool
+	Complete   string
 	ConfigPath string
 	Data       io.Reader
 	DryRun     bool
@@ -44,12 +46,24 @@ func (a *App) PrintHelp(p *core.Printer) {
 }
 
 func (a *App) CLI() *CLI {
+	var extraArgs bool
 	return &CLI{
 		Description: "fetch is a modern HTTP(S) client for the command line",
 		Args: []Arguments{
 			{Name: "URL", Description: "The URL to make a request to"},
 		},
 		ArgFn: func(s string) error {
+			// Append extra args, if necessary.
+			if extraArgs {
+				a.ExtraArgs = append(a.ExtraArgs, s)
+				return nil
+			}
+			if s == "--" {
+				extraArgs = true
+				return nil
+			}
+
+			// Otherwise, parse the provided URL.
 			if a.URL != nil {
 				return fmt.Errorf("unexpected argument: %q", s)
 			}
@@ -186,12 +200,44 @@ func (a *App) CLI() *CLI {
 				Description: "Enable/disable color",
 				Default:     "",
 				Aliases:     []string{"colour"},
-				Values:      []string{"auto", "off", "on"},
+				Values: []core.KeyVal{
+					{
+						Key: "auto",
+						Val: "Automatically determine color",
+					},
+					{
+						Key: "off",
+						Val: "Disable color output",
+					},
+					{
+						Key: "on",
+						Val: "Enable color output",
+					},
+				},
 				IsSet: func() bool {
 					return a.Cfg.Color != core.ColorUnknown
 				},
 				Fn: func(value string) error {
 					return a.Cfg.ParseColor(value)
+				},
+			},
+			{
+				Short:       "",
+				Long:        "complete",
+				Args:        "SHELL",
+				Description: "Output shell completion",
+				Default:     "",
+				Values: []core.KeyVal{
+					{Key: "fish"},
+					{Key: "zsh"},
+				},
+				HideValues: true,
+				IsSet: func() bool {
+					return a.Complete != ""
+				},
+				Fn: func(value string) error {
+					a.Complete = value
+					return nil
 				},
 			},
 			{
@@ -288,7 +334,20 @@ func (a *App) CLI() *CLI {
 				Args:        "OPTION",
 				Description: "Enable/disable formatting",
 				Default:     "",
-				Values:      []string{"auto", "off", "on"},
+				Values: []core.KeyVal{
+					{
+						Key: "auto",
+						Val: "Automatically determine whether to format",
+					},
+					{
+						Key: "off",
+						Val: "Disable output formatting",
+					},
+					{
+						Key: "on",
+						Val: "Enable output formatting",
+					},
+				},
 				IsSet: func() bool {
 					return a.Cfg.Format != core.FormatUnknown
 				},
@@ -329,7 +388,16 @@ func (a *App) CLI() *CLI {
 				Args:        "VERSION",
 				Description: "Highest allowed HTTP version",
 				Default:     "",
-				Values:      []string{"1", "2"},
+				Values: []core.KeyVal{
+					{
+						Key: "1",
+						Val: "HTTP/1.1",
+					},
+					{
+						Key: "2",
+						Val: "HTTP/2.0",
+					},
+				},
 				IsSet: func() bool {
 					return a.Cfg.HTTP != core.HTTPDefault
 				},
@@ -358,6 +426,21 @@ func (a *App) CLI() *CLI {
 				Args:        "OPTION",
 				Description: "Enable/disable image rendering",
 				Default:     "",
+				Values: []core.KeyVal{
+					{
+						Key: "auto",
+						Val: "Automatically decide image display",
+					},
+					{
+						Key: "native",
+						Val: "Only use builtin decoders",
+					},
+					{
+						Key: "off",
+						Val: "Disable image display",
+					},
+				},
+				HideValues: true,
 				IsSet: func() bool {
 					return a.Cfg.Image != core.ImageUnknown
 				},
@@ -425,15 +508,28 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					key, val, _ := cut(value, "=")
 					if strings.HasPrefix(val, "@") {
-						stats, err := os.Stat(val[1:])
+						path := val[1:]
+
+						// Expand '~' to the home directory.
+						if len(path) >= 2 && path[0] == '~' && path[1] == os.PathSeparator {
+							home, err := os.UserHomeDir()
+							if err != nil {
+								return err
+							}
+							path = home + path[1:]
+							val = "@" + path
+						}
+
+						// Ensure the file exists.
+						stats, err := os.Stat(path)
 						if err != nil {
 							if os.IsNotExist(err) {
-								return fmt.Errorf("file does not exist: '%s'", val[1:])
+								return fmt.Errorf("file does not exist: '%s'", path)
 							}
 							return err
 						}
 						if stats.IsDir() {
-							return fmt.Errorf("file is a directory: '%s'", val[1:])
+							return fmt.Errorf("file is a directory: '%s'", path)
 						}
 					}
 					a.Multipart = append(a.Multipart, core.KeyVal{Key: key, Val: val})
@@ -588,7 +684,24 @@ func (a *App) CLI() *CLI {
 				Args:        "VERSION",
 				Description: "Minimum TLS version",
 				Default:     "",
-				Values:      []string{"1.0", "1.1", "1.2", "1.3"},
+				Values: []core.KeyVal{
+					{
+						Key: "1.0",
+						Val: "TLS v1.0",
+					},
+					{
+						Key: "1.1",
+						Val: "TLS v1.1",
+					},
+					{
+						Key: "1.2",
+						Val: "TLS v1.2",
+					},
+					{
+						Key: "1.3",
+						Val: "TLS v1.3",
+					},
+				},
 				IsSet: func() bool {
 					return a.Cfg.TLS != nil
 				},
@@ -671,7 +784,16 @@ func requestBody(value string) (io.Reader, error) {
 	case value == "@-":
 		return os.Stdin, nil
 	default:
-		f, err := os.Open(value[1:])
+		path := value[1:]
+		// Expand '~' to the home directory.
+		if len(path) >= 2 && path[0] == '~' && path[1] == os.PathSeparator {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, err
+			}
+			path = home + path[1:]
+		}
+		f, err := os.Open(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil, fileNotExistsError(value[1:])
