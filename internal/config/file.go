@@ -32,6 +32,14 @@ func GetFile(path string) (*File, error) {
 // if it exists.
 func getConfigFile(path string) (string, []byte, error) {
 	if path != "" {
+		// Expand '~' to the home directory.
+		if len(path) >= 2 && path[0] == '~' && path[1] == os.PathSeparator {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", nil, err
+			}
+			path = home + path[1:]
+		}
 		// Direct config path was provided.
 		abs, err := filepath.Abs(path)
 		if err != nil {

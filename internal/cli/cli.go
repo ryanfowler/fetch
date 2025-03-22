@@ -26,7 +26,8 @@ type Flag struct {
 	Args        string
 	Description string
 	Default     string
-	Values      []string
+	Values      []core.KeyVal
+	HideValues  bool
 	IsHidden    bool
 	IsSet       func() bool
 	Fn          func(value string) error
@@ -301,9 +302,14 @@ func printHelp(cli *CLI, p *core.Printer) {
 
 			p.WriteString(flag.Description)
 
-			if len(flag.Values) > 0 {
+			if !flag.HideValues && len(flag.Values) > 0 {
 				p.WriteString(" [")
-				p.WriteString(strings.Join(flag.Values, ", "))
+				for i, kv := range flag.Values {
+					if i > 0 {
+						p.WriteString(", ")
+					}
+					p.WriteString(kv.Key)
+				}
 				p.WriteString("]")
 			}
 
