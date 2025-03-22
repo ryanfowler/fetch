@@ -133,6 +133,22 @@ fi
 mv "$BINARY_PATH" "$INSTALL_DIR/fetch"
 info "fetch successfully installed to '${DIM}${INSTALL_DIR}/fetch${RESET}'"
 
+# Optionally install completions.
+case "$SHELL" in
+  */fish)
+    mkdir -p "$HOME/.config/fish/completions"
+    echo "fetch --complete=fish | source" > "$HOME/.config/fish/completions/fetch.fish"
+    info "completions installed to '${DIM}${HOME}/.config/fish/completions/fetch.fish${RESET}'"
+    ;;
+  */zsh)
+    COMPLETION_CMD='eval "$(fetch --complete=zsh)"'
+    if ! grep -qF "$COMPLETION_CMD" "$HOME/.zshrc" 2>/dev/null; then
+      printf "\n# fetch completions\n${COMPLETION_CMD}\n" >> "$HOME/.zshrc"
+      info "completions appended to '${DIM}${HOME}/.zshrc${RESET}'"
+    fi
+    ;;
+esac
+
 # Clean up.
 rm -rf "$TMP_DIR"
 
