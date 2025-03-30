@@ -35,6 +35,7 @@ type App struct {
 	Method     string
 	Multipart  []core.KeyVal
 	Output     string
+	OutputDir  bool
 	Range      []string
 	Update     bool
 	Version    bool
@@ -96,6 +97,7 @@ func (a *App) CLI() *CLI {
 		ExclusiveFlags: [][]string{
 			{"aws-sigv4", "basic", "bearer"},
 			{"data", "form", "json", "multipart", "xml"},
+			{"output", "output-current-dir"},
 		},
 		Flags: []Flag{
 			{
@@ -577,6 +579,20 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					a.Output = value
+					return nil
+				},
+			},
+			{
+				Short:       "O",
+				Long:        "output-current-dir",
+				Args:        "",
+				Description: "Write response body to the current directory",
+				Default:     "",
+				IsSet: func() bool {
+					return a.OutputDir
+				},
+				Fn: func(value string) error {
+					a.OutputDir = true
 					return nil
 				},
 			},

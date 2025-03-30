@@ -129,6 +129,7 @@ func main() {
 		NoEncode:      getValue(app.Cfg.NoEncode),
 		NoPager:       getValue(app.Cfg.NoPager),
 		Output:        app.Output,
+		OutputDir:     app.OutputDir,
 		PrinterHandle: handle,
 		Proxy:         app.Cfg.Proxy,
 		QueryParams:   app.Cfg.QueryParams,
