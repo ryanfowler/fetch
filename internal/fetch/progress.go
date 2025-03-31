@@ -43,7 +43,7 @@ func (pb *progressBar) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (pb *progressBar) Close(err error) {
+func (pb *progressBar) Close(path string, err error) {
 	// Close the reader channel and wait for the loop to exit.
 	close(pb.chRead)
 	pb.wg.Wait()
@@ -54,19 +54,7 @@ func (pb *progressBar) Close(err error) {
 		p.WriteString("\n\n")
 	} else {
 		// Replace the progress bar with a summary.
-		end := time.Now()
-		p.WriteString("\rDownloaded ")
-		p.Set(core.Bold)
-		p.WriteString(formatSize(pb.bytesRead))
-		p.Reset()
-		p.WriteString(" in ")
-		p.Set(core.Italic)
-		p.WriteString(formatDuration(end.Sub(pb.start)))
-		p.Reset()
-		for range 32 {
-			p.WriteString(" ")
-		}
-		p.WriteString("\n")
+		writeFinalProgress(p, pb.bytesRead, time.Since(pb.start), 32, path)
 	}
 	p.Flush()
 }
@@ -173,7 +161,7 @@ func newProgressSpinner(r io.Reader, p *core.Printer) *progressSpinner {
 	return ps
 }
 
-func (ps *progressSpinner) Close(err error) {
+func (ps *progressSpinner) Close(path string, err error) {
 	close(ps.chRead)
 	ps.wg.Wait()
 
@@ -182,19 +170,7 @@ func (ps *progressSpinner) Close(err error) {
 		p.WriteString("\n\n")
 	} else {
 		// Replace the progress spinner with a summary.
-		end := time.Now()
-		p.WriteString("\rDownloaded ")
-		p.Set(core.Bold)
-		p.WriteString(formatSize(ps.bytesRead))
-		p.Reset()
-		p.WriteString(" in ")
-		p.Set(core.Italic)
-		p.WriteString(formatDuration(end.Sub(ps.start)))
-		p.Reset()
-		for range 20 {
-			p.WriteString(" ")
-		}
-		p.WriteString("\n")
+		writeFinalProgress(p, ps.bytesRead, time.Since(ps.start), 20, path)
 	}
 	p.Flush()
 }
@@ -299,4 +275,27 @@ func formatDuration(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%.1fh", float64(d)/float64(time.Hour))
 	}
+}
+
+func writeFinalProgress(p *core.Printer, bytesRead int64, dur time.Duration, toClear int, path string) {
+	p.WriteString("\rDownloaded ")
+	p.Set(core.Bold)
+	p.WriteString(formatSize(bytesRead))
+	p.Reset()
+	p.WriteString(" in ")
+	p.Set(core.Italic)
+	p.WriteString(formatDuration(dur))
+	p.Reset()
+
+	p.WriteString(" to '")
+	p.Set(core.Dim)
+	p.WriteString(path)
+	p.Reset()
+	p.WriteString("'")
+
+	for range toClear - len(path) {
+		p.WriteString(" ")
+	}
+	p.WriteString("\n")
+
 }

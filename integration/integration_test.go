@@ -403,6 +403,45 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, data)
 	})
 
+	t.Run("output-current-dir", func(t *testing.T) {
+		const data = "this is the current dir data"
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		// Change the working directory to a temp one.
+		dir, err := os.MkdirTemp("", "")
+		if err != nil {
+			t.Fatalf("unable to create temp dir: %s", err.Error())
+		}
+		defer os.RemoveAll(dir)
+
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("unable to get current dir: %s", err.Error())
+		}
+		err = os.Chdir(dir)
+		if err != nil {
+			t.Fatalf("unable to change current dir: %s", err.Error())
+		}
+		defer os.Chdir(wd)
+
+		urlStr := server.URL + "/dir/path_to_file.txt"
+		res := runFetch(t, fetchPath, urlStr, "-O")
+		assertExitCode(t, 0, res)
+
+		expPath := filepath.Join(dir, "path_to_file.txt")
+		raw, err := os.ReadFile(expPath)
+		if err != nil {
+			t.Fatalf("unable to read from output file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("unexpected data in output file: %s", raw)
+		}
+	})
+
 	t.Run("timeout", func(t *testing.T) {
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			select {

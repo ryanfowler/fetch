@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -55,6 +56,7 @@ type Request struct {
 	Method        string
 	Multipart     *multipart.Multipart
 	Output        string
+	OutputDir     bool
 	PrinterHandle *core.Handle
 	Proxy         *url.URL
 	QueryParams   []core.KeyVal
@@ -195,12 +197,21 @@ func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Re
 }
 
 func formatResponse(ctx context.Context, r *Request, resp *http.Response, p *core.Printer) (io.Reader, error) {
-	if r.Output != "" && r.Output != "-" {
-		f, err := os.Create(r.Output)
+	output, err := getOutputValue(r, resp.Header)
+	if err != nil {
+		return nil, err
+	}
+
+	if output != "" && r.Output != "-" {
+		f, err := os.Create(output)
 		if err != nil {
 			return nil, err
 		}
 		defer f.Close()
+		name, err := filepath.Abs(f.Name())
+		if err != nil {
+			return nil, err
+		}
 
 		// Optionally show a progress bar/spinner on stderr.
 		var body io.Reader = resp.Body
@@ -209,11 +220,11 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, p *cor
 			contentLength := resp.ContentLength
 			if contentLength > 0 {
 				pb := newProgressBar(resp.Body, p, contentLength)
-				defer func() { pb.Close(err) }()
+				defer func() { pb.Close(name, err) }()
 				body = pb
 			} else {
 				ps := newProgressSpinner(resp.Body, p)
-				defer func() { ps.Close(err) }()
+				defer func() { ps.Close(name, err) }()
 				body = ps
 			}
 		}
@@ -221,7 +232,9 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, p *cor
 		if _, err = io.Copy(f, body); err != nil {
 			return nil, err
 		}
-		return nil, f.Sync()
+
+		err = f.Sync()
+		return nil, err
 	}
 
 	if r.Format == core.FormatOff || (!core.IsStdoutTerm && r.Format != core.FormatOn) {
@@ -374,6 +387,67 @@ func addHeader(headers []core.KeyVal, h core.KeyVal) []core.KeyVal {
 	return slices.Insert(headers, i, h)
 }
 
+func getOutputValue(r *Request, hdrs http.Header) (string, error) {
+	if r.Output != "" {
+		// Output was provided directly.
+		return r.Output, nil
+	}
+	if !r.OutputDir {
+		// Remote output option wasn't provided, return an empty string.
+		return "", nil
+	}
+
+	// Attempt to get filename from the Content-Disposition header first.
+	cdName := getContentDispositionFilename(hdrs)
+	if cdName != "" {
+		return cdName, nil
+	}
+
+	// Get the final path component as the file name.
+	path := r.URL.Path
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	for path != "" {
+		var after string
+		path, after, _ = cutLast(path, "/")
+		if after != "" {
+			return after, nil
+		}
+
+	}
+
+	// Fallback to the hostname as the file path and emit a warning.
+	host := r.URL.Hostname()
+	if host != "" {
+		return host, nil
+	}
+
+	return "", errNoInferFilePath{}
+}
+
+func getContentDispositionFilename(hdrs http.Header) string {
+	cd := hdrs.Get("Content-Disposition")
+	if cd == "" {
+		return ""
+	}
+
+	_, params, err := mime.ParseMediaType(cd)
+	if err != nil {
+		return ""
+	}
+
+	return params["filename"]
+}
+
+func cutLast(s, sep string) (string, string, bool) {
+	idx := strings.LastIndex(s, sep)
+	if idx < 0 {
+		return s, "", false
+	}
+	return s[:idx], s[idx+1:], true
+}
+
 // isCertificateErr returns true if the error has to do with TLS cert validation.
 func isCertificateErr(err error) bool {
 	var urlErr *url.Error
@@ -402,4 +476,21 @@ func printInsecureMsg(p *core.Printer) {
 	p.WriteString("--insecure")
 	p.Reset()
 	p.WriteString("'.\n")
+}
+
+type errNoInferFilePath struct{}
+
+func (err errNoInferFilePath) Error() string {
+	return "unable to infer a file name for the output\n\nTo specify an exact path, try '--output <PATH>'"
+}
+
+func (err errNoInferFilePath) PrintTo(p *core.Printer) {
+	p.WriteString("unable to infer a file name for the output\n\n")
+
+	p.WriteString("To specify an exact path, try '")
+	p.Set(core.Bold)
+	p.WriteString("--output")
+	p.Reset()
+	p.WriteString(" <PATH>")
+	p.WriteString("'")
 }
