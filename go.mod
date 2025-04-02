@@ -1,6 +1,6 @@
 module github.com/ryanfowler/fetch
 
-go 1.24.1
+go 1.24.2
 
 require (
 	golang.org/x/image v0.25.0
