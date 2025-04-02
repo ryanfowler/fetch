@@ -245,6 +245,37 @@ func (ps *progressSpinner) render() {
 	p.Flush()
 }
 
+type progressStatic struct {
+	r         io.Reader
+	printer   *core.Printer
+	bytesRead int64
+	start     time.Time
+}
+
+func newProgressStatic(r io.Reader, p *core.Printer) *progressStatic {
+	return &progressStatic{
+		r:       r,
+		printer: p,
+		start:   time.Now(),
+	}
+}
+
+func (ps *progressStatic) Read(p []byte) (int, error) {
+	n, err := ps.r.Read(p)
+	ps.bytesRead += int64(n)
+	return n, err
+}
+
+func (ps *progressStatic) Close(path string, err error) {
+	if err != nil {
+		return
+	}
+
+	dur := time.Since(ps.start)
+	writeFinalProgress(ps.printer, ps.bytesRead, dur, -1, path)
+	ps.printer.Flush()
+}
+
 // formatSize converts bytes to a human-readable string.
 func formatSize(bytes int64) string {
 	const units = "KMGTPE"
@@ -278,7 +309,11 @@ func formatDuration(d time.Duration) string {
 }
 
 func writeFinalProgress(p *core.Printer, bytesRead int64, dur time.Duration, toClear int, path string) {
-	p.WriteString("\rDownloaded ")
+	if toClear >= 0 {
+		p.WriteString("\r")
+	}
+
+	p.WriteString("Downloaded ")
 	p.Set(core.Bold)
 	p.WriteString(formatSize(bytesRead))
 	p.Reset()
