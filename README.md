@@ -339,7 +339,7 @@ An example of the configuration options are:
 # Global settings
 
 # Enable or disable auto-update or set the minimum interval to check for updates.
-# The value can either be a boolean, or a sepcific interval (e.g. '4h').
+# The value can either be a boolean, or a specific interval (e.g. '4h').
 # By default, auto-updating is disabled.
 auto-update = true
 
