@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"os/exec"
@@ -162,6 +163,11 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 }
 
 func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {
+	if r.Verbosity >= core.LDebug {
+		trace := newDebugTrace(r.PrinterHandle.Stderr())
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	}
+
 	resp, err := c.Do(req)
 	if err != nil {
 		return 0, err

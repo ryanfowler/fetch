@@ -102,6 +102,10 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "user-agent")
 		assertBufContains(t, res.stderr, "x-custom-header")
 		assertBufEquals(t, res.stdout, "hello")
+
+		res = runFetch(t, fetchPath, server.URL, "-vvv")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "GET / HTTP/1.1")
 	})
 
 	t.Run("aws-sigv4 auth", func(t *testing.T) {

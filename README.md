@@ -208,7 +208,7 @@ fetch --image native example.com
 
 Increase verbosity of the output to stderr; use multiple times for extra verbosity.
 
-One `-v` outputs response headers. Two `-v`s outputs request headers as well.
+One `-v` outputs response headers. Two `-v`s outputs request headers as well. Three `-v`s prints DNS and TLS details as they occur.
 
 ```sh
 fetch -vv example.com
@@ -402,6 +402,10 @@ timeout = 30s
 tls = 1.3
 
 # Specify the verbosity level. Must be 0 or greater.
+# 0 = normal
+# 1 = verbose
+# 2 = extra verbose
+# 3 = debug
 verbosity = 2
 
 # Domain-specific settings that take precedence over global options.
