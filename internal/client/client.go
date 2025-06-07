@@ -203,7 +203,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	// Set the content-length header if the body is a file.
 	setFileContentLength(req)
 
-	// Optionally set the authohrization header.
+	// Optionally set the authorization header.
 	switch {
 	case cfg.AWSSigV4 != nil:
 		err = aws.Sign(req, *cfg.AWSSigV4, time.Now().UTC())
