@@ -43,7 +43,7 @@ func (err *ValueError) Error() string {
 		option = "--" + option
 	}
 	msg := fmt.Sprintf("invalid value '%s' for option '%s'", err.value, option)
-	if err.usage == "" {
+	if err.usage != "" {
 		msg = fmt.Sprintf("%s: %s", msg, err.usage)
 	}
 	return msg
