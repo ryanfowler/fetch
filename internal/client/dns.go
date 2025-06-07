@@ -137,7 +137,7 @@ func rcodeName(n int) string {
 	case 8:
 		return "NXRRSet"
 	case 9:
-		return "NXRRSet"
+		return "NotAuth"
 	case 10:
 		return "NotZone"
 	case 11:
