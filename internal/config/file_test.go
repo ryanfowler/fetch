@@ -28,6 +28,7 @@ func TestParseFile(t *testing.T) {
 					Timeout: core.PointerTo(10 * time.Second),
 					TLS:     core.PointerTo(uint16(tls.VersionTLS13)),
 				},
+				Path: "test/config",
 			},
 		},
 		{
@@ -58,6 +59,7 @@ func TestParseFile(t *testing.T) {
 						IgnoreStatus: core.PointerTo(true),
 					},
 				},
+				Path: "test/config",
 			},
 		},
 		{

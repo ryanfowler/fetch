@@ -50,15 +50,13 @@ func main() {
 	}
 
 	// Parse any config file, and merge with it.
-	err = parseConfigFile(app)
+	handle := core.NewHandle(app.Cfg.Color)
+	err = parseConfigFile(app, handle.Stderr())
 	if err != nil {
-		p := core.NewHandle(app.Cfg.Color).Stderr()
+		p := handle.Stderr()
 		core.WriteErrorMsg(p, err)
 		os.Exit(1)
 	}
-
-	handle := core.NewHandle(app.Cfg.Color)
-	verbosity := getVerbosity(app)
 
 	// Start async update, if necessary.
 	if !app.Update && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
@@ -93,6 +91,7 @@ func main() {
 	}
 
 	// Attempt to update the current executable.
+	verbosity := getVerbosity(app)
 	if app.Update {
 		p := handle.Stderr()
 		timeout := getValue(app.Cfg.Timeout)
@@ -161,7 +160,7 @@ func handleCompletion(name string, args []string) error {
 }
 
 // parse and merge any config file with the CLI app configuration.
-func parseConfigFile(app *cli.App) error {
+func parseConfigFile(app *cli.App, p *core.Printer) error {
 	file, err := config.GetFile(app.ConfigPath)
 	if err != nil {
 		return err
@@ -178,6 +177,20 @@ func parseConfigFile(app *cli.App) error {
 	}
 
 	app.Cfg.Merge(file.Global)
+
+	if getVerbosity(app) >= core.LDebug {
+		p.Set(core.Bold)
+		p.WriteString("config")
+		p.Reset()
+
+		p.WriteString(": '")
+		p.Set(core.Dim)
+		p.WriteString(file.Path)
+		p.Reset()
+		p.WriteString("'\n\n")
+		p.Flush()
+	}
+
 	return nil
 }
 
@@ -199,8 +212,10 @@ func getVerbosity(app *cli.App) core.Verbosity {
 		return core.VNormal
 	case 1:
 		return core.VVerbose
-	default:
+	case 2:
 		return core.VExtraVerbose
+	default:
+		return core.LDebug
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 type File struct {
 	Global *Config
 	Hosts  map[string]*Config
+	Path   string
 }
 
 // GetFile returns a config File, or nil if one cannot be found.
@@ -89,7 +90,7 @@ func readFile(path string) (string, []byte, error) {
 
 // parseFile parses the provided File, returning any error encountered.
 func parseFile(path, s string) (*File, error) {
-	f := File{Global: &Config{isFile: true}}
+	f := File{Global: &Config{isFile: true}, Path: path}
 
 	config := f.Global
 	for num, line := range lines(s) {
