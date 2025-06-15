@@ -8,12 +8,21 @@ import (
 )
 
 func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
-	var host string
+	// hosts stores DNS lookup names in call order
+	var hosts []string
 	return &httptrace.ClientTrace{
-		DNSStart: func(info httptrace.DNSStartInfo) { host = info.Host },
+		DNSStart: func(info httptrace.DNSStartInfo) {
+			hosts = append(hosts, info.Host)
+		},
 		DNSDone: func(info httptrace.DNSDoneInfo) {
 			if info.Err != nil {
 				return
+			}
+
+			var host string
+			if n := len(hosts); n > 0 {
+				host = hosts[n-1]
+				hosts = hosts[:n-1]
 			}
 
 			p.Set(core.Bold)
