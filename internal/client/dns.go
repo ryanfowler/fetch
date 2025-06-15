@@ -44,15 +44,18 @@ func dialContextDOH(serverURL *url.URL) func(ctx context.Context, network, addre
 		}
 
 		// Lookup A record first, fallback to AAAA.
-		ip, err := lookupDOH(ctx, serverURL, host, "A")
+		ips, err := lookupDOH(ctx, serverURL, host, "A")
 		if err != nil {
-			ip, err = lookupDOH(ctx, serverURL, host, "AAAA")
+			ips, err = lookupDOH(ctx, serverURL, host, "AAAA")
 		}
 
 		if trace != nil && trace.DNSDone != nil {
 			info := httptrace.DNSDoneInfo{Err: err}
 			if err == nil {
-				info.Addrs = []net.IPAddr{{IP: net.ParseIP(ip)}}
+				for _, ip := range ips {
+					addr := net.IPAddr{IP: net.ParseIP(ip)}
+					info.Addrs = append(info.Addrs, addr)
+				}
 			}
 			trace.DNSDone(info)
 		}
@@ -62,13 +65,20 @@ func dialContextDOH(serverURL *url.URL) func(ctx context.Context, network, addre
 		}
 
 		var d net.Dialer
-		return d.DialContext(ctx, network, net.JoinHostPort(ip, port))
+		for _, ip := range ips {
+			var conn net.Conn
+			conn, err = d.DialContext(ctx, network, net.JoinHostPort(ip, port))
+			if err == nil {
+				return conn, nil
+			}
+		}
+		return nil, err
 	}
 }
 
 // lookupDOH performs a DNS lookup via DoH with the provided DoH server URL,
 // host to lookup, and DNS type.
-func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) (string, error) {
+func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) ([]string, error) {
 	type Answer struct {
 		Data string `json:"data"`
 	}
@@ -85,7 +95,7 @@ func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) (s
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	req.Header.Set("Accept", "application/dns-json")
 	req.Header.Set("User-Agent", core.UserAgent)
@@ -93,14 +103,14 @@ func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) (s
 	var client http.Client
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
 		if err != nil {
-			return "", fmt.Errorf("http response code: %d", resp.StatusCode)
+			return nil, fmt.Errorf("http response code: %d", resp.StatusCode)
 		}
 		type ErrRes struct {
 			Error string `json:"error"`
@@ -108,26 +118,30 @@ func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) (s
 		var errRes ErrRes
 		err = json.Unmarshal(raw, &errRes)
 		if err == nil && errRes.Error != "" {
-			return "", fmt.Errorf("%d: %s", resp.StatusCode, errRes.Error)
+			return nil, fmt.Errorf("%d: %s", resp.StatusCode, errRes.Error)
 		}
-		return "", fmt.Errorf("%d: %s", resp.StatusCode, raw)
+		return nil, fmt.Errorf("%d: %s", resp.StatusCode, raw)
 	}
 
 	var res Response
 	err = json.NewDecoder(resp.Body).Decode(&res)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	if res.Status != 0 || len(res.Answer) == 0 {
 		name := rcodeName(res.Status)
 		if name == "" {
-			return "", errors.New("no such host")
+			return nil, errors.New("no such host")
 		}
-		return "", fmt.Errorf("no such host: %s", name)
+		return nil, fmt.Errorf("no such host: %s", name)
 	}
 
-	return res.Answer[0].Data, nil
+	addrs := make([]string, len(res.Answer))
+	for i, answer := range res.Answer {
+		addrs[i] = answer.Data
+	}
+	return addrs, nil
 }
 
 // rcodeName returns the text for the provided rcode integer.
