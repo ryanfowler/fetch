@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -37,13 +38,27 @@ func dialContextDOH(serverURL *url.URL) func(ctx context.Context, network, addre
 			return nil, err
 		}
 
+		trace := httptrace.ContextClientTrace(ctx)
+		if trace != nil && trace.DNSStart != nil {
+			trace.DNSStart(httptrace.DNSStartInfo{Host: host})
+		}
+
 		// Lookup A record first, fallback to AAAA.
 		ip, err := lookupDOH(ctx, serverURL, host, "A")
 		if err != nil {
 			ip, err = lookupDOH(ctx, serverURL, host, "AAAA")
-			if err != nil {
-				return nil, fmt.Errorf("lookup %s: %w", host, err)
+		}
+
+		if trace != nil && trace.DNSDone != nil {
+			info := httptrace.DNSDoneInfo{Err: err}
+			if err == nil {
+				info.Addrs = []net.IPAddr{{IP: net.ParseIP(ip)}}
 			}
+			trace.DNSDone(info)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("lookup %s: %w", host, err)
 		}
 
 		var d net.Dialer
