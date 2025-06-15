@@ -180,7 +180,8 @@ func parseConfigFile(app *cli.App, p *core.Printer) error {
 
 	if getVerbosity(app) >= core.LDebug {
 		p.Set(core.Bold)
-		p.WriteString("config")
+		p.Set(core.Blue)
+		p.WriteString("Config")
 		p.Reset()
 
 		p.WriteString(": '")
