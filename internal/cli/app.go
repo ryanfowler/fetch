@@ -730,8 +730,9 @@ func (a *App) CLI() *CLI {
 				Short:       "",
 				Long:        "unix",
 				Args:        "PATH",
-				Description: "Make request over a unix socket",
+				Description: "Make the request over a unix socket",
 				Default:     "",
+				OS:          unixOS,
 				IsSet: func() bool {
 					return a.UnixSocket != ""
 				},

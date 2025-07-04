@@ -462,6 +462,15 @@ func TestMain(t *testing.T) {
 	})
 
 	t.Run("unix socket", func(t *testing.T) {
+		// Verify help output.
+		res := runFetch(t, fetchPath, "--help")
+		assertExitCode(t, 0, res)
+		if runtime.GOOS == "windows" {
+			assertBufNotContains(t, res.stdout, "unix")
+		} else {
+			assertBufContains(t, res.stdout, "unix")
+		}
+
 		if runtime.GOOS == "windows" {
 			t.Skip("unix sockets not supported")
 		}
@@ -478,7 +487,7 @@ func TestMain(t *testing.T) {
 		}
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, "--unix", sock, "http://unix/")
+		res = runFetch(t, fetchPath, "--unix", sock, "http://unix/")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "hello")
 	})

@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
+
+var unixOS = []string{"linux", "darwin", "freebsd", "openbsd", "netbsd", "aix", "dragonfly", "solaris"}
 
 type CLI struct {
 	Description    string
@@ -30,6 +34,7 @@ type Flag struct {
 	HideValues  bool
 	IsHidden    bool
 	IsSet       func() bool
+	OS          []string
 	Fn          func(value string) error
 }
 
@@ -37,12 +42,17 @@ func parse(cli *CLI, args []string) error {
 	short := make(map[string]Flag)
 	long := make(map[string]Flag)
 	for _, flag := range cli.Flags {
+		if !isFlagVisibleOnOS(flag.OS) {
+			continue
+		}
+
 		if flag.Short != "" {
 			short[flag.Short] = flag
 		}
 		if flag.Long != "" {
 			long[flag.Long] = flag
 		}
+
 		for _, alias := range flag.Aliases {
 			if len(alias) == 1 {
 				short[alias] = flag
@@ -204,6 +214,10 @@ func validateExclusives(exc []string, long map[string]Flag) error {
 	return nil
 }
 
+func isFlagVisibleOnOS(flagOS []string) bool {
+	return len(flagOS) == 0 || slices.Contains(flagOS, runtime.GOOS)
+}
+
 func Parse(args []string) (*App, error) {
 	var app App
 
@@ -271,6 +285,9 @@ func printHelp(cli *CLI, p *core.Printer) {
 		maxLen := maxFlagLength(cli.Flags)
 		for _, flag := range cli.Flags {
 			if flag.IsHidden {
+				continue
+			}
+			if !isFlagVisibleOnOS(flag.OS) {
 				continue
 			}
 
