@@ -298,6 +298,14 @@ Route the request through the specified proxy.
 fetch --proxy http://localhost:8000 example.com
 ```
 
+**Unix Socket**: `--unix PATH`
+
+Make the request over a Unix domain socket. Only available on Unix-like systems.
+
+```sh
+fetch --unix /var/run/service.sock http://unix/
+```
+
 **Insecure TLS**: `--insecure`
 
 Allow for invalid TLS certificates from the server.
