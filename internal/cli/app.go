@@ -37,6 +37,7 @@ type App struct {
 	Output     string
 	OutputDir  bool
 	Range      []string
+	UnixSocket string
 	Update     bool
 	Version    bool
 	XML        io.Reader
@@ -723,6 +724,20 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					return a.Cfg.ParseTLS(value)
+				},
+			},
+			{
+				Short:       "",
+				Long:        "unix",
+				Args:        "PATH",
+				Description: "Make request over a unix socket",
+				Default:     "",
+				IsSet: func() bool {
+					return a.UnixSocket != ""
+				},
+				Fn: func(value string) error {
+					a.UnixSocket = value
+					return nil
 				},
 			},
 			{

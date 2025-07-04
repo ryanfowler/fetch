@@ -136,6 +136,7 @@ func main() {
 		Redirects:     app.Cfg.Redirects,
 		Timeout:       getValue(app.Cfg.Timeout),
 		TLS:           getValue(app.Cfg.TLS),
+		UnixSocket:    app.UnixSocket,
 		URL:           app.URL,
 		Verbosity:     verbosity,
 		XML:           app.XML,

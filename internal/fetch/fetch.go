@@ -64,6 +64,7 @@ type Request struct {
 	Redirects     *int
 	Timeout       time.Duration
 	TLS           uint16
+	UnixSocket    string
 	URL           *url.URL
 	Verbosity     core.Verbosity
 	XML           io.Reader
@@ -89,12 +90,13 @@ func Fetch(ctx context.Context, r *Request) int {
 
 func fetch(ctx context.Context, r *Request) (int, error) {
 	c := client.NewClient(client.ClientConfig{
-		DNSServer: r.DNSServer,
-		HTTP:      r.HTTP,
-		Insecure:  r.Insecure,
-		Proxy:     r.Proxy,
-		Redirects: r.Redirects,
-		TLS:       r.TLS,
+		DNSServer:  r.DNSServer,
+		HTTP:       r.HTTP,
+		Insecure:   r.Insecure,
+		Proxy:      r.Proxy,
+		Redirects:  r.Redirects,
+		TLS:        r.TLS,
+		UnixSocket: r.UnixSocket,
 	})
 	req, err := c.NewRequest(ctx, client.RequestConfig{
 		AWSSigV4:    r.AWSSigv4,
