@@ -25,12 +25,13 @@ type Client struct {
 
 // ClientConfig represents the optional configuration parameters for a Client.
 type ClientConfig struct {
-	DNSServer *url.URL
-	HTTP      core.HTTPVersion
-	Insecure  bool
-	Proxy     *url.URL
-	Redirects *int
-	TLS       uint16
+	DNSServer  *url.URL
+	HTTP       core.HTTPVersion
+	Insecure   bool
+	Proxy      *url.URL
+	Redirects  *int
+	TLS        uint16
+	UnixSocket string
 }
 
 // NewClient returns an initialized Client given the provided configuration.
@@ -47,6 +48,13 @@ func NewClient(cfg ClientConfig) *Client {
 			transport.DialContext = dialContextUDP(cfg.DNSServer.Host)
 		} else {
 			transport.DialContext = dialContextDOH(cfg.DNSServer)
+		}
+	}
+
+	if cfg.UnixSocket != "" {
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", cfg.UnixSocket)
 		}
 	}
 

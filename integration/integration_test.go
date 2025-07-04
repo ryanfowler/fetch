@@ -461,6 +461,28 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "request timed out after 100ns")
 	})
 
+	t.Run("unix socket", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("unix sockets not supported")
+		}
+
+		sock := filepath.Join(tempDir, "server.sock")
+		defer os.Remove(sock)
+
+		server, err := startUnixServer(sock, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			io.WriteString(w, "hello")
+		})
+		if err != nil {
+			t.Fatalf("unable to start unix server: %s", err.Error())
+		}
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--unix", sock, "http://unix/")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "hello")
+	})
+
 	t.Run("ignore status", func(t *testing.T) {
 		var statusCode atomic.Int64
 		statusCode.Store(200)
@@ -850,6 +872,17 @@ func getFetchVersion(t *testing.T, path string) string {
 
 func startServer(h http.HandlerFunc) *httptest.Server {
 	return httptest.NewServer(h)
+}
+
+func startUnixServer(path string, h http.HandlerFunc) (*httptest.Server, error) {
+	server := httptest.NewUnstartedServer(h)
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	server.Listener = l
+	server.Start()
+	return server, nil
 }
 
 func listFiles(t *testing.T, dir string) []string {
