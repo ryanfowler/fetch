@@ -179,6 +179,7 @@ func (c *Config) ParseCACerts(value string) error {
 		return err
 	}
 
+	var ok bool
 	for len(data) > 0 {
 		var block *pem.Block
 		block, data = pem.Decode(data)
@@ -194,10 +195,11 @@ func (c *Config) ParseCACerts(value string) error {
 		if err != nil {
 			return invalidCACertError{path: value, err: err}
 		}
+		ok = true
 		c.CACerts = append(c.CACerts, cert)
 	}
 
-	if len(c.CACerts) == 0 {
+	if !ok {
 		return invalidCACertError{path: value, err: errors.New("no certificates found")}
 	}
 	return nil
