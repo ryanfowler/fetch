@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -25,6 +26,7 @@ type Client struct {
 
 // ClientConfig represents the optional configuration parameters for a Client.
 type ClientConfig struct {
+	CACerts    []*x509.Certificate
 	DNSServer  *url.URL
 	HTTP       core.HTTPVersion
 	Insecure   bool
@@ -85,6 +87,15 @@ func NewClient(cfg ClientConfig) *Client {
 		cfg.TLS = tls.VersionTLS12
 	}
 	transport.TLSClientConfig.MinVersion = cfg.TLS
+
+	// Set the RootCAs, if provided.
+	if len(cfg.CACerts) > 0 {
+		certPool := x509.NewCertPool()
+		for _, cert := range cfg.CACerts {
+			certPool.AddCert(cert)
+		}
+		transport.TLSClientConfig.RootCAs = certPool
+	}
 
 	// Optionally set the maximum number of redirects.
 	client := &http.Client{Transport: transport}

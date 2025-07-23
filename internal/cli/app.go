@@ -198,6 +198,19 @@ func (a *App) CLI() *CLI {
 			},
 			{
 				Short:       "",
+				Long:        "ca-cert",
+				Args:        "PATH",
+				Description: "CA certificate file path",
+				Default:     "",
+				IsSet: func() bool {
+					return len(a.Cfg.CACerts) > 0
+				},
+				Fn: func(value string) error {
+					return a.Cfg.ParseCACerts(value)
+				},
+			},
+			{
+				Short:       "",
 				Long:        "color",
 				Args:        "OPTION",
 				Description: "Enable/disable color",
@@ -572,7 +585,7 @@ func (a *App) CLI() *CLI {
 			{
 				Short:       "o",
 				Long:        "output",
-				Args:        "FILE",
+				Args:        "PATH",
 				Description: "Write the response body to a file",
 				Default:     "",
 				IsSet: func() bool {
@@ -828,7 +841,7 @@ func requestBody(value string) (io.Reader, error) {
 		f, err := os.Open(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return nil, fileNotExistsError(value[1:])
+				return nil, core.FileNotExistsError(value[1:])
 			}
 			return nil, err
 		}
@@ -856,20 +869,6 @@ func isValidRangeValue(value string) bool {
 	}
 	_, err := strconv.Atoi(value)
 	return err == nil
-}
-
-type fileNotExistsError string
-
-func (err fileNotExistsError) Error() string {
-	return fmt.Sprintf("file '%s' does not exist", string(err))
-}
-
-func (err fileNotExistsError) PrintTo(p *core.Printer) {
-	p.WriteString("file '")
-	p.Set(core.Dim)
-	p.WriteString(string(err))
-	p.Reset()
-	p.WriteString("' does not exist")
 }
 
 type MissingEnvVarError struct {

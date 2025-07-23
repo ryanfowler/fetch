@@ -2,9 +2,13 @@ package config
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +21,7 @@ type Config struct {
 	isFile bool
 
 	AutoUpdate   *time.Duration
+	CACerts      []*x509.Certificate
 	Color        core.Color
 	DNSServer    *url.URL
 	Format       core.Format
@@ -40,6 +45,9 @@ type Config struct {
 func (c *Config) Merge(c2 *Config) {
 	if c.AutoUpdate == nil {
 		c.AutoUpdate = c2.AutoUpdate
+	}
+	if len(c2.CACerts) > 0 {
+		c.CACerts = append(c2.CACerts, c.CACerts...)
 	}
 	if c.Color == core.ColorUnknown {
 		c.Color = c2.Color
@@ -100,6 +108,8 @@ func (c *Config) Set(key, val string) error {
 	switch key {
 	case "auto-update":
 		err = c.ParseAutoUpdate(val)
+	case "ca-cert":
+		err = c.ParseCACerts(val)
 	case "color", "colour":
 		err = c.ParseColor(val)
 	case "dns-server":
@@ -157,6 +167,39 @@ func (c *Config) ParseAutoUpdate(value string) error {
 		return core.NewValueError("auto-update", value, usage, c.isFile)
 	}
 	c.AutoUpdate = &t
+	return nil
+}
+
+func (c *Config) ParseCACerts(value string) error {
+	data, err := os.ReadFile(value)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return core.FileNotExistsError(value)
+		}
+		return err
+	}
+
+	for len(data) > 0 {
+		var block *pem.Block
+		block, data = pem.Decode(data)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			continue
+		}
+
+		certBytes := block.Bytes
+		cert, err := x509.ParseCertificate(certBytes)
+		if err != nil {
+			return invalidCACertError{path: value, err: err}
+		}
+		c.CACerts = append(c.CACerts, cert)
+	}
+
+	if len(c.CACerts) == 0 {
+		return invalidCACertError{path: value, err: errors.New("no certificates found")}
+	}
 	return nil
 }
 
@@ -380,4 +423,22 @@ func (err invalidOptionError) PrintTo(p *core.Printer) {
 	p.WriteString(string(err))
 	p.Reset()
 	p.WriteString("'")
+}
+
+type invalidCACertError struct {
+	path string
+	err  error
+}
+
+func (err invalidCACertError) Error() string {
+	return fmt.Sprintf("invalid CA certificate '%s': %s", err.path, err.err.Error())
+}
+
+func (err invalidCACertError) PrintTo(p *core.Printer) {
+	p.WriteString("invalid CA certificate '")
+	p.Set(core.Dim)
+	p.WriteString(err.path)
+	p.Reset()
+	p.WriteString("': ")
+	p.WriteString(err.err.Error())
 }

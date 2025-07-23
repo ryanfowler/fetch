@@ -257,6 +257,16 @@ Disable automatic gzip request/response compression.
 fetch --no-encode example.com
 ```
 
+### Custom CA Certificate
+
+**Flag**: `--ca-cert`
+
+Use a custom CA certificate.
+
+```sh
+fetch --ca-cert ca-cert.pem example.com
+```
+
 ## Output Options
 
 ### Output to File

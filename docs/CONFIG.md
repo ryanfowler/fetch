@@ -12,7 +12,7 @@ This guide provides comprehensive documentation for configuring `fetch` using a 
 
 1. **Specified path**: The file location specified with the `-c` or `--config` flag
 2. **Windows**: `%AppData%\fetch\config`
-3. **Unix-like systems**: 
+3. **Unix-like systems**:
    - `$XDG_CONFIG_HOME/fetch/config` (if `XDG_CONFIG_HOME` is set)
    - `$HOME/.config/fetch/config` (fallback)
 
@@ -45,7 +45,7 @@ option = host_specific_value
 ### Auto-Update Options
 
 #### `auto-update`
-**Type**: Boolean or duration interval  
+**Type**: Boolean or duration interval
 **Default**: `false` (disabled)
 
 Enable or disable automatic updates, or set the minimum interval between update checks.
@@ -66,8 +66,8 @@ auto-update = 1d
 ### Output Control Options
 
 #### `color` / `colour`
-**Type**: String  
-**Values**: `auto`, `off`, `on`  
+**Type**: String
+**Values**: `auto`, `off`, `on`
 **Default**: `auto`
 
 Control colored output in the terminal.
@@ -84,8 +84,8 @@ color = on
 ```
 
 #### `format`
-**Type**: String  
-**Values**: `auto`, `off`, `on`  
+**Type**: String
+**Values**: `auto`, `off`, `on`
 **Default**: `auto`
 
 Control automatic formatting of response bodies (JSON, XML, etc.).
@@ -102,8 +102,8 @@ format = on
 ```
 
 #### `image`
-**Type**: String  
-**Values**: `auto`, `native`, `off`  
+**Type**: String
+**Values**: `auto`, `native`, `off`
 **Default**: `auto`
 
 Control image rendering in the terminal.
@@ -120,7 +120,7 @@ image = off
 ```
 
 #### `no-pager`
-**Type**: Boolean  
+**Type**: Boolean
 **Default**: `false`
 
 Disable piping output through a pager like `less`.
@@ -134,7 +134,7 @@ no-pager = false
 ```
 
 #### `silent`
-**Type**: Boolean  
+**Type**: Boolean
 **Default**: `false`
 
 Suppress verbose output. Only warnings and errors are written to stderr.
@@ -148,8 +148,8 @@ silent = false
 ```
 
 #### `verbosity`
-**Type**: Integer  
-**Values**: `0` or greater  
+**Type**: Integer
+**Values**: `0` or greater
 **Default**: `0`
 
 Set the verbosity level for debug output.
@@ -170,8 +170,19 @@ verbosity = 3
 
 ### Network Options
 
+#### `ca-cert`
+**Type**: CA certificate path
+**Default**: System default
+
+Use a custom CA cert pool.
+
+```ini
+# Set to filepath to cert file
+ca-cert = ca-cert.pem
+```
+
 #### `dns-server`
-**Type**: IP address with optional port, or HTTPS URL  
+**Type**: IP address with optional port, or HTTPS URL
 **Default**: System default
 
 Use a custom DNS server for hostname resolution.
@@ -192,7 +203,7 @@ dns-server = https://dns.google/dns-query
 ```
 
 #### `proxy`
-**Type**: URL  
+**Type**: URL
 **Default**: None
 
 Route requests through the specified proxy server.
@@ -209,7 +220,7 @@ proxy = socks5://localhost:1080
 ```
 
 #### `timeout`
-**Type**: Number (seconds)  
+**Type**: Number (seconds)
 **Default**: System default
 
 Set a timeout for HTTP requests. Accepts decimal values.
@@ -223,7 +234,7 @@ timeout = 2.5
 ```
 
 #### `redirects`
-**Type**: Integer  
+**Type**: Integer
 **Default**: System default
 
 Set the maximum number of automatic redirects to follow.
@@ -237,8 +248,8 @@ redirects = 10
 ```
 
 #### `http`
-**Type**: String  
-**Values**: `1`, `2`  
+**Type**: String
+**Values**: `1`, `2`
 **Default**: `2`
 
 Specify the highest allowed HTTP version.
@@ -252,8 +263,8 @@ http = 2
 ```
 
 #### `tls`
-**Type**: String  
-**Values**: `1.0`, `1.1`, `1.2`, `1.3`  
+**Type**: String
+**Values**: `1.0`, `1.1`, `1.2`, `1.3`
 **Default**: System default
 
 Specify the minimum TLS version to use.
@@ -267,7 +278,7 @@ tls = 1.3
 ```
 
 #### `insecure`
-**Type**: Boolean  
+**Type**: Boolean
 **Default**: `false`
 
 Allow connections to servers with invalid TLS certificates.
@@ -281,7 +292,7 @@ insecure = false
 ```
 
 #### `no-encode`
-**Type**: Boolean  
+**Type**: Boolean
 **Default**: `false`
 
 Disable automatic gzip compression for requests and responses.
@@ -297,7 +308,7 @@ no-encode = false
 ### Request Options
 
 #### `header`
-**Type**: String (name:value format)  
+**Type**: String (name:value format)
 **Repeatable**: Yes
 
 Set custom HTTP headers. Can be specified multiple times.
@@ -313,7 +324,7 @@ header = User-Agent: MyApp/1.0
 ```
 
 #### `query`
-**Type**: String (key=value format)  
+**Type**: String (key=value format)
 **Repeatable**: Yes
 
 Append query parameters to requests. Can be specified multiple times.
@@ -329,7 +340,7 @@ query = sort=name
 ```
 
 #### `ignore-status`
-**Type**: Boolean  
+**Type**: Boolean
 **Default**: `false`
 
 Don't determine exit code from HTTP status. Always exit with code 0.
@@ -457,4 +468,3 @@ Common validation errors include:
 5. **Test configurations** with dry-run mode: `fetch --dry-run example.com`
 6. **Use comments** to document complex configurations
 7. **Enable auto-update** for security and feature updates
-

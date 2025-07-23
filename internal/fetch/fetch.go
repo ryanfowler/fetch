@@ -39,6 +39,7 @@ type Request struct {
 	AWSSigv4      *aws.Config
 	Basic         *core.KeyVal
 	Bearer        string
+	CACerts       []*x509.Certificate
 	Data          io.Reader
 	DNSServer     *url.URL
 	DryRun        bool
@@ -90,6 +91,7 @@ func Fetch(ctx context.Context, r *Request) int {
 
 func fetch(ctx context.Context, r *Request) (int, error) {
 	c := client.NewClient(client.ClientConfig{
+		CACerts:    r.CACerts,
 		DNSServer:  r.DNSServer,
 		HTTP:       r.HTTP,
 		Insecure:   r.Insecure,
