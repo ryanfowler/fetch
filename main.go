@@ -111,6 +111,7 @@ func main() {
 		AWSSigv4:      app.AWSSigv4,
 		Basic:         app.Basic,
 		Bearer:        app.Bearer,
+		CACerts:       app.Cfg.CACerts,
 		Data:          app.Data,
 		DNSServer:     app.Cfg.DNSServer,
 		DryRun:        app.DryRun,

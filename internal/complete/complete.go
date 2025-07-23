@@ -220,7 +220,7 @@ func completeValue(flag cli.Flag, prefix, value string) []core.KeyVal {
 	}
 
 	switch flag.Long {
-	case "config", "output":
+	case "ca-cert", "config", "output":
 		return completePath(prefix, value)
 	case "data", "json", "xml":
 		path, ok := strings.CutPrefix(value, "@")

@@ -69,3 +69,17 @@ func (err *ValueError) PrintTo(p *Printer) {
 		p.WriteString(err.usage)
 	}
 }
+
+type FileNotExistsError string
+
+func (err FileNotExistsError) Error() string {
+	return fmt.Sprintf("file '%s' does not exist", string(err))
+}
+
+func (err FileNotExistsError) PrintTo(p *Printer) {
+	p.WriteString("file '")
+	p.Set(Dim)
+	p.WriteString(string(err))
+	p.Reset()
+	p.WriteString("' does not exist")
+}
