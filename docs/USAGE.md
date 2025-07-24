@@ -430,17 +430,6 @@ Update the fetch binary in place.
 fetch --update
 ```
 
-### Auto-Update
-
-**Flag**: `--auto-update (ENABLED|INTERVAL)`
-
-Enable or configure auto-updates. This is a hidden flag not shown in help output.
-
-```sh
-fetch --auto-update true
-fetch --auto-update 24h
-```
-
 ### Shell Completion
 
 **Flag**: `--complete SHELL`
