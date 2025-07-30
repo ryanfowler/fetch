@@ -281,7 +281,7 @@ func getContentType(headers http.Header) ContentType {
 			return TypeImage
 		case "application":
 			switch subtype {
-			case "json":
+			case "json", "dns-json":
 				return TypeJSON
 			case "x-ndjson", "ndjson", "x-jsonl", "jsonl", "x-jsonlines":
 				return TypeNDJSON
