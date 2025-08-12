@@ -246,7 +246,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	// Automatically decode the gzipped response body if we requested it.
-	ce := resp.Header.Get("Content-Encoding")
+	ce := getContentEncoding(resp.Header)
 	if strings.EqualFold(ce, "gzip") && encodingRequested(req) && resp.Body != nil {
 		gz, err := newGZIPReader(resp.Body)
 		if err != nil {
@@ -257,6 +257,18 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+func getContentEncoding(h http.Header) string {
+	v := h.Get("Content-Encoding")
+	if v == "" {
+		return ""
+	}
+	idx := strings.LastIndex(v, ",")
+	if idx >= 0 {
+		v = v[idx+1:]
+	}
+	return strings.TrimSpace(v)
 }
 
 // setFileContentLength sets the content-length of a request if the body is an

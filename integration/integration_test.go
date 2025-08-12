@@ -618,6 +618,43 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, "[message]\n{ \"key\": \"val\" }\n\n[ev1]\nthis is my data\n")
 	})
 
+	t.Run("gzip compression", func(t *testing.T) {
+		const data = "this is the test data"
+
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Accept-Encoding") != "gzip" {
+				w.Write([]byte(data))
+				return
+			}
+
+			if r.URL.Path == "/chunked" {
+				w.Header().Set("Content-Encoding", "aws-chunked, gzip")
+			} else {
+				w.Header().Set("Content-Encoding", "gzip")
+			}
+
+			gw := gzip.NewWriter(w)
+			gw.Write([]byte(data))
+			gw.Close()
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "-v")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
+		assertBufContains(t, res.stderr, "gzip")
+
+		res = runFetch(t, fetchPath, server.URL+"/chunked", "-v")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
+		assertBufContains(t, res.stderr, "aws-chunked, gzip")
+
+		res = runFetch(t, fetchPath, server.URL, "-v", "--no-encode")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
+		assertBufNotContains(t, res.stderr, "gzip")
+	})
+
 	t.Run("update", func(t *testing.T) {
 		var empty string
 		var urlStr atomic.Pointer[string]
