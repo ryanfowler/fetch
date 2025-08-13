@@ -206,6 +206,11 @@ func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Re
 }
 
 func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Reader, error) {
+	// Avoid trying to format the response for HEAD requests.
+	if resp.Request.Method == "HEAD" {
+		return nil, nil
+	}
+
 	output, err := getOutputValue(r, resp)
 	if err != nil {
 		return nil, err
