@@ -91,8 +91,9 @@ func printResponseMetadata(p *core.Printer, v core.Verbosity, resp *http.Respons
 }
 
 func printResponseHeaders(p *core.Printer, resp *http.Response) {
+	method := resp.Request.Method
 	headers := getHeaders(resp.Header)
-	if resp.ContentLength >= 0 && resp.Header.Get("Content-Length") == "" {
+	if method != "HEAD" && resp.ContentLength >= 0 && resp.Header.Get("Content-Length") == "" {
 		val := strconv.FormatInt(resp.ContentLength, 10)
 		headers = addHeader(headers, core.KeyVal{Key: "content-length", Val: val})
 	}
