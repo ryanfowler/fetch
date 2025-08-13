@@ -206,7 +206,7 @@ func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Re
 }
 
 func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Reader, error) {
-	output, err := getOutputValue(r, resp.Header)
+	output, err := getOutputValue(r, resp)
 	if err != nil {
 		return nil, err
 	}
