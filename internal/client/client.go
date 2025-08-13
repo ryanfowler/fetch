@@ -213,7 +213,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	// Optionally request gzip encoding.
-	if !cfg.NoEncode && req.Header.Get("Accept-Encoding") == "" {
+	if !cfg.NoEncode && req.Method != "HEAD" && req.Header.Get("Accept-Encoding") == "" {
 		req.Header.Set("Accept-Encoding", "gzip")
 		ctx = context.WithValue(ctx, ctxEncodingRequestedKey, true)
 		req = req.WithContext(ctx)
