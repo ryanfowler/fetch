@@ -56,7 +56,7 @@ func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Prin
 
 }
 
-func getOutputValue(r *Request, hdrs http.Header) (string, error) {
+func getOutputValue(r *Request, resp *http.Response) (string, error) {
 	if r.Output != "" {
 		// Output was provided directly.
 		return r.Output, nil
@@ -67,13 +67,13 @@ func getOutputValue(r *Request, hdrs http.Header) (string, error) {
 	}
 
 	// Attempt to get filename from the Content-Disposition header first.
-	cdName := getContentDispositionFilename(hdrs)
+	cdName := getContentDispositionFilename(resp.Header)
 	if cdName != "" {
 		return cdName, nil
 	}
 
 	// Get the final path component as the file name.
-	path := r.URL.Path
+	path := resp.Request.URL.Path
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -83,11 +83,10 @@ func getOutputValue(r *Request, hdrs http.Header) (string, error) {
 		if after != "" {
 			return after, nil
 		}
-
 	}
 
 	// Fallback to the hostname as the file path and emit a warning.
-	host := r.URL.Hostname()
+	host := resp.Request.URL.Hostname()
 	if host != "" {
 		return host, nil
 	}
