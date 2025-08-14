@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"runtime"
 	"slices"
 	"strings"
@@ -47,16 +48,20 @@ func parse(cli *CLI, args []string) error {
 		}
 
 		if flag.Short != "" {
+			assertFlagNotExists(short, flag.Short)
 			short[flag.Short] = flag
 		}
 		if flag.Long != "" {
+			assertFlagNotExists(long, flag.Long)
 			long[flag.Long] = flag
 		}
 
 		for _, alias := range flag.Aliases {
 			if len(alias) == 1 {
+				assertFlagNotExists(short, alias)
 				short[alias] = flag
 			} else {
+				assertFlagNotExists(long, alias)
 				long[alias] = flag
 			}
 		}
@@ -361,4 +366,10 @@ func flagLength(f Flag) int {
 		out += 3 + len(f.Args)
 	}
 	return out
+}
+
+func assertFlagNotExists(m map[string]Flag, value string) {
+	if _, ok := m[value]; ok {
+		panic(fmt.Sprintf("flag '%s' defined multiple times", value))
+	}
 }
