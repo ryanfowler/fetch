@@ -30,6 +30,7 @@ const (
 	TypeUnknown ContentType = iota
 	TypeImage
 	TypeJSON
+	TypeMsgPack
 	TypeNDJSON
 	TypeSSE
 	TypeXML
@@ -261,6 +262,10 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		if format.FormatJSON(buf, p) == nil {
 			buf = p.Bytes()
 		}
+	case TypeMsgPack:
+		if format.FormatMsgPack(buf, p) == nil {
+			buf = p.Bytes()
+		}
 	case TypeXML:
 		if format.FormatXML(buf, p) == nil {
 			buf = p.Bytes()
@@ -288,6 +293,8 @@ func getContentType(headers http.Header) ContentType {
 			switch subtype {
 			case "json", "dns-json":
 				return TypeJSON
+			case "msgpack", "x-msgpack", "vnd.msgpack":
+				return TypeMsgPack
 			case "x-ndjson", "ndjson", "x-jsonl", "jsonl", "x-jsonlines":
 				return TypeNDJSON
 			case "xml":
