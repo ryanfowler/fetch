@@ -1,7 +1,6 @@
 package client
 
 import (
-	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -17,6 +16,9 @@ import (
 	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/multipart"
+
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/zstd"
 )
 
 // Client represents a wrapped HTTP client.
@@ -214,7 +216,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 
 	// Optionally request gzip encoding.
 	if !cfg.NoEncode && req.Method != "HEAD" && req.Header.Get("Accept-Encoding") == "" {
-		req.Header.Set("Accept-Encoding", "gzip")
+		req.Header.Set("Accept-Encoding", "gzip, zstd")
 		ctx = context.WithValue(ctx, ctxEncodingRequestedKey, true)
 		req = req.WithContext(ctx)
 	}
@@ -247,13 +249,22 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 
 	// Automatically decode the gzipped response body if we requested it.
 	ce := getContentEncoding(resp.Header)
-	if strings.EqualFold(ce, "gzip") && encodingRequested(req) && resp.Body != nil {
-		gz, err := newGZIPReader(resp.Body)
-		if err != nil {
-			return nil, err
+	if encodingRequested(req) && resp.Body != nil {
+		if strings.EqualFold(ce, "gzip") {
+			gz, err := newGZIPReader(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("gzip: %w", err)
+			}
+			resp.Body = gz
+			resp.ContentLength = -1
+		} else if strings.EqualFold(ce, "zstd") {
+			zs, err := newZSTDReader(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("zstd: %w", err)
+			}
+			resp.Body = zs
+			resp.ContentLength = -1
 		}
-		resp.Body = gz
-		resp.ContentLength = -1
 	}
 
 	return resp, nil
@@ -309,11 +320,11 @@ type gzipReader struct {
 // newGZIPReader returns a new io.ReadCloser that automatically decodes the
 // gzipped data.
 func newGZIPReader(rc io.ReadCloser) (*gzipReader, error) {
-	gzr, err := gzip.NewReader(rc)
+	gr, err := gzip.NewReader(rc)
 	if err != nil {
 		return nil, err
 	}
-	return &gzipReader{Reader: gzr, c: rc}, nil
+	return &gzipReader{Reader: gr, c: rc}, nil
 }
 
 func (r *gzipReader) Close() error {
@@ -323,4 +334,23 @@ func (r *gzipReader) Close() error {
 		return err
 	}
 	return err2
+}
+
+type zstdReader struct {
+	*zstd.Decoder
+	c io.Closer
+}
+
+func newZSTDReader(rc io.ReadCloser) (*zstdReader, error) {
+	zr, err := zstd.NewReader(rc, zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxWindow(1<<23))
+	if err != nil {
+		return nil, err
+	}
+	return &zstdReader{Decoder: zr, c: rc}, nil
+}
+
+func (r *zstdReader) Close() error {
+	r.Decoder.Close()
+	return r.c.Close()
 }
