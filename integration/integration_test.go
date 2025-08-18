@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
-	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -26,6 +25,9 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
+
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestMain(t *testing.T) {
@@ -622,7 +624,7 @@ func TestMain(t *testing.T) {
 		const data = "this is the test data"
 
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Accept-Encoding") != "gzip" {
+			if r.Header.Get("Accept-Encoding") != "gzip, zstd" {
 				w.Write([]byte(data))
 				return
 			}
@@ -653,6 +655,46 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, data)
 		assertBufNotContains(t, res.stderr, "gzip")
+	})
+
+	t.Run("zstd compression", func(t *testing.T) {
+		const data = "this is the test data"
+
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Accept-Encoding") != "gzip, zstd" {
+				w.Write([]byte(data))
+				return
+			}
+
+			if r.URL.Path == "/chunked" {
+				w.Header().Set("Content-Encoding", "aws-chunked, zstd")
+			} else {
+				w.Header().Set("Content-Encoding", "zstd")
+			}
+
+			zw, err := zstd.NewWriter(w)
+			if err != nil {
+				panic(err)
+			}
+			defer zw.Close()
+			zw.Write([]byte(data))
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "-v")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
+		assertBufContains(t, res.stderr, "zstd")
+
+		res = runFetch(t, fetchPath, server.URL+"/chunked", "-v")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
+		assertBufContains(t, res.stderr, "aws-chunked, zstd")
+
+		res = runFetch(t, fetchPath, server.URL, "-v", "--no-encode")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
+		assertBufNotContains(t, res.stderr, "zstd")
 	})
 
 	t.Run("update", func(t *testing.T) {
