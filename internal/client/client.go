@@ -187,7 +187,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	// Set the accept and user-agent headers.
-	req.Header.Set("Accept", "application/json,application/xml,image/webp,*/*")
+	req.Header.Set("Accept", "application/json,application/vnd.msgpack,application/xml,image/webp,*/*")
 	req.Header.Set("User-Agent", core.UserAgent)
 
 	// Optionally set the content-type header.

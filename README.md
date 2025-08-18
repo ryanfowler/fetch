@@ -6,7 +6,7 @@
 
 ### Features include:
 
-- **Response formatting**: automatically formats and colors output for supported types (json, xml, etc.)
+- **Response formatting**: automatically formats and colors output for supported types (json, msgpack, xml, etc.)
 - **Image rendering**: render images directly in your terminal
 - **Compression**: automatic gzip response body decompression
 - **Authentication**: support for Basic Auth, Bearer Token, and AWS Signature V4
@@ -121,4 +121,3 @@ For complete configuration documentation including all available options, file f
 ## License
 
 `fetch` is released under the [MIT License](LICENSE).
-
