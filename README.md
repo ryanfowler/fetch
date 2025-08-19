@@ -8,7 +8,7 @@
 
 - **Response formatting**: automatically formats and colors output for supported types (json, msgpack, xml, etc.)
 - **Image rendering**: render images directly in your terminal
-- **Compression**: automatic gzip response body decompression
+- **Compression**: automatic gzip and zstd response body decompression
 - **Authentication**: support for Basic Auth, Bearer Token, and AWS Signature V4
 - **Form body**: send multipart or urlencoded form bodies
 - **Editor integration**: use an editor to modify the request body

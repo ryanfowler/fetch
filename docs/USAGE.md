@@ -251,7 +251,7 @@ fetch --http 1 example.com
 
 **Flag**: `--no-encode`
 
-Disable automatic gzip request/response compression.
+Disable automatic gzip and zstd request/response compression.
 
 ```sh
 fetch --no-encode example.com
