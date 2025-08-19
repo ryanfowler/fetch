@@ -295,7 +295,7 @@ insecure = false
 **Type**: Boolean
 **Default**: `false`
 
-Disable automatic gzip compression for requests and responses.
+Disable automatic gzip and zstd compression for requests and responses.
 
 ```ini
 # Disable compression
