@@ -4,13 +4,14 @@ package update
 
 import (
 	"archive/tar"
-	"compress/gzip"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/klauspost/compress/gzip"
 )
 
 // unpackArtifact decodes the gzipped tar archive from the provided io.Reader
