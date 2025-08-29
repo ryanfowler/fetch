@@ -17,7 +17,6 @@ import (
 
 const (
 	datetimeFormat = "20060102T150405Z"
-	dateFormat     = "20060102"
 
 	headerContentSha256 = "X-Amz-Content-Sha256"
 	emptySha256         = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
