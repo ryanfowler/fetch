@@ -291,13 +291,19 @@ func getContentType(headers http.Header) ContentType {
 			return TypeImage
 		case "application":
 			switch subtype {
-			case "json", "dns-json":
+			case "json":
 				return TypeJSON
 			case "msgpack", "x-msgpack", "vnd.msgpack":
 				return TypeMsgPack
 			case "x-ndjson", "ndjson", "x-jsonl", "jsonl", "x-jsonlines":
 				return TypeNDJSON
 			case "xml":
+				return TypeXML
+			}
+			if strings.HasSuffix(subtype, "+json") || strings.HasSuffix(subtype, "-json") {
+				return TypeJSON
+			}
+			if strings.HasSuffix(subtype, "+xml") {
 				return TypeXML
 			}
 		case "text":
