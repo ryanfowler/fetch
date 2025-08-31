@@ -34,7 +34,10 @@ func FormatXML(buf []byte, w *core.Printer) error {
 			writeXMLTagName(w, t.Name.Local)
 			if len(t.Attr) > 0 {
 				w.WriteString(" ")
-				for _, attr := range t.Attr {
+				for i, attr := range t.Attr {
+					if i > 0 {
+						w.WriteString(" ")
+					}
 					writeXMLAttrName(w, attr.Name.Local)
 					w.WriteString("=\"")
 					writeXMLAttrVal(w, attr.Value)
