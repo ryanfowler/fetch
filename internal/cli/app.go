@@ -402,7 +402,7 @@ func (a *App) CLI() *CLI {
 				Short:       "",
 				Long:        "http",
 				Args:        "VERSION",
-				Description: "Highest allowed HTTP version",
+				Description: "HTTP version to use",
 				Default:     "",
 				Values: []core.KeyVal{
 					{

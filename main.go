@@ -106,6 +106,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Respond with an error if a proxy is specified with HTTP/2 or higher.
+	if app.Cfg.Proxy != nil && app.Cfg.HTTP >= core.HTTP2 {
+		p := handle.Stderr()
+		writeCLIErr(p, errors.New("a proxy can only be used with HTTP/1.1"))
+		os.Exit(1)
+	}
+
 	// Make the HTTP request using the parsed configuration.
 	req := fetch.Request{
 		AWSSigv4:      app.AWSSigv4,

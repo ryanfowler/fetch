@@ -322,6 +322,18 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 	})
 
+	t.Run("http version", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--http", "1")
+		assertExitCode(t, 0, res)
+
+		res = runFetch(t, fetchPath, server.URL, "--http", "2")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "http2:")
+	})
+
 	t.Run("multipart", func(t *testing.T) {
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))

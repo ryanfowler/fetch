@@ -19,6 +19,7 @@ import (
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/net/http2"
 )
 
 // Client represents a wrapped HTTP client.
@@ -40,46 +41,34 @@ type ClientConfig struct {
 
 // NewClient returns an initialized Client given the provided configuration.
 func NewClient(cfg ClientConfig) *Client {
-	transport := &http.Transport{
-		DisableCompression: true,
-		Protocols:          &http.Protocols{},
-		TLSClientConfig:    &tls.Config{},
-	}
+	var tlsConfig tls.Config
+	var proxy func(req *http.Request) (*url.URL, error)
+	var baseDial func(ctx context.Context, network, address string) (net.Conn, error)
 
 	// Set optional DNS server.
 	if cfg.DNSServer != nil {
 		if cfg.DNSServer.Scheme == "" {
-			transport.DialContext = dialContextUDP(cfg.DNSServer.Host)
+			baseDial = dialContextUDP(cfg.DNSServer.Host)
 		} else {
-			transport.DialContext = dialContextDOH(cfg.DNSServer)
+			baseDial = dialContextDOH(cfg.DNSServer)
 		}
 	}
 
 	if cfg.UnixSocket != "" {
-		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		baseDial = func(ctx context.Context, network, address string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", cfg.UnixSocket)
 		}
 	}
 
-	// Set the supported protocols.
-	if cfg.HTTP == core.HTTPDefault {
-		cfg.HTTP = core.HTTP2
-	}
-	transport.Protocols.SetHTTP1(true)
-	if cfg.HTTP >= core.HTTP2 {
-		transport.Protocols.SetHTTP2(true)
-		transport.Protocols.SetUnencryptedHTTP2(true)
-	}
-
 	// Accept invalid certs if insecure.
 	if cfg.Insecure {
-		transport.TLSClientConfig.InsecureSkipVerify = true
+		tlsConfig.InsecureSkipVerify = true
 	}
 
 	// Set the optinal proxy URL.
 	if cfg.Proxy != nil {
-		transport.Proxy = func(r *http.Request) (*url.URL, error) {
+		proxy = func(r *http.Request) (*url.URL, error) {
 			return cfg.Proxy, nil
 		}
 	}
@@ -88,7 +77,7 @@ func NewClient(cfg ClientConfig) *Client {
 	if cfg.TLS == 0 {
 		cfg.TLS = tls.VersionTLS12
 	}
-	transport.TLSClientConfig.MinVersion = cfg.TLS
+	tlsConfig.MinVersion = cfg.TLS
 
 	// Set the RootCAs, if provided.
 	if len(cfg.CACerts) > 0 {
@@ -96,7 +85,61 @@ func NewClient(cfg ClientConfig) *Client {
 		for _, cert := range cfg.CACerts {
 			certPool.AddCert(cert)
 		}
-		transport.TLSClientConfig.RootCAs = certPool
+		tlsConfig.RootCAs = certPool
+	}
+
+	// Create the http.RoundTripper based on the configured HTTP version.
+	var transport http.RoundTripper
+	switch cfg.HTTP {
+	case core.HTTP2:
+		rt := &http2.Transport{
+			AllowHTTP: false, // Disable h2c, for now.
+			DialTLSContext: func(ctx context.Context, network string, addr string, cfg *tls.Config) (net.Conn, error) {
+				dial := baseDial
+				if dial == nil {
+					var dialer net.Dialer
+					dial = dialer.DialContext
+				}
+
+				// Dial a connection and perform the TLS handshake.
+				conn, err := dial(ctx, network, addr)
+				if err != nil {
+					return nil, err
+				}
+
+				if cfg.ServerName == "" {
+					c := cfg.Clone()
+					host, _, err := net.SplitHostPort(addr)
+					if err != nil {
+						host = addr
+					}
+					c.ServerName = host
+					cfg = c
+				}
+
+				tlsConn := tls.Client(conn, cfg)
+				if err := tlsConn.HandshakeContext(ctx); err != nil {
+					conn.Close()
+					return nil, err
+				}
+				return tlsConn, nil
+			},
+			DisableCompression: true,
+			TLSClientConfig:    &tlsConfig,
+		}
+		transport = rt
+	default:
+		rt := &http.Transport{
+			DialContext:        baseDial,
+			DisableCompression: true,
+			ForceAttemptHTTP2:  cfg.HTTP != core.HTTP1,
+			Protocols:          &http.Protocols{},
+			Proxy:              proxy,
+			TLSClientConfig:    &tlsConfig,
+		}
+		rt.Protocols.SetHTTP1(true)
+		rt.Protocols.SetHTTP2(cfg.HTTP != core.HTTP1)
+		transport = rt
 	}
 
 	// Optionally set the maximum number of redirects.
