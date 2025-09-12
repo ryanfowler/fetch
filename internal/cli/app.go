@@ -444,7 +444,7 @@ func (a *App) CLI() *CLI {
 				Short:       "",
 				Long:        "image",
 				Args:        "OPTION",
-				Description: "Enable/disable image rendering",
+				Description: "Image rendering",
 				Default:     "",
 				Values: []core.KeyVal{
 					{
@@ -460,7 +460,6 @@ func (a *App) CLI() *CLI {
 						Val: "Disable image display",
 					},
 				},
-				HideValues: true,
 				IsSet: func() bool {
 					return a.Cfg.Image != core.ImageUnknown
 				},
@@ -560,7 +559,7 @@ func (a *App) CLI() *CLI {
 				Short:       "",
 				Long:        "no-encode",
 				Args:        "",
-				Description: "Avoid requesting gzip encoding",
+				Description: "Avoid requesting gzip/zstd encoding",
 				Default:     "",
 				IsSet: func() bool {
 					return a.Cfg.NoEncode != nil
