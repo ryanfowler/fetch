@@ -249,8 +249,7 @@ redirects = 10
 
 #### `http`
 **Type**: String
-**Values**: `1`, `2`
-**Default**: `2`
+**Values**: `1`, `2`, `3`
 
 Specify the highest allowed HTTP version.
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"strings"
@@ -19,6 +20,8 @@ import (
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/net/http2"
 )
 
@@ -92,42 +95,9 @@ func NewClient(cfg ClientConfig) *Client {
 	var transport http.RoundTripper
 	switch cfg.HTTP {
 	case core.HTTP2:
-		rt := &http2.Transport{
-			AllowHTTP: false, // Disable h2c, for now.
-			DialTLSContext: func(ctx context.Context, network string, addr string, cfg *tls.Config) (net.Conn, error) {
-				dial := baseDial
-				if dial == nil {
-					var dialer net.Dialer
-					dial = dialer.DialContext
-				}
-
-				// Dial a connection and perform the TLS handshake.
-				conn, err := dial(ctx, network, addr)
-				if err != nil {
-					return nil, err
-				}
-
-				if cfg.ServerName == "" {
-					c := cfg.Clone()
-					host, _, err := net.SplitHostPort(addr)
-					if err != nil {
-						host = addr
-					}
-					c.ServerName = host
-					cfg = c
-				}
-
-				tlsConn := tls.Client(conn, cfg)
-				if err := tlsConn.HandshakeContext(ctx); err != nil {
-					conn.Close()
-					return nil, err
-				}
-				return tlsConn, nil
-			},
-			DisableCompression: true,
-			TLSClientConfig:    &tlsConfig,
-		}
-		transport = rt
+		transport = getHTTP2Transport(baseDial, &tlsConfig)
+	case core.HTTP3:
+		transport = getHTTP3Transport(cfg.DNSServer, &tlsConfig)
 	default:
 		rt := &http.Transport{
 			DialContext:        baseDial,
@@ -158,6 +128,114 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 
 	return &Client{c: client}
+}
+
+func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config) http.RoundTripper {
+	return &http2.Transport{
+		AllowHTTP: false, // Disable h2c, for now.
+		DialTLSContext: func(ctx context.Context, network string, addr string, cfg *tls.Config) (net.Conn, error) {
+			dial := baseDial
+			if dial == nil {
+				var dialer net.Dialer
+				dial = dialer.DialContext
+			}
+
+			// Dial a connection and perform the TLS handshake.
+			conn, err := dial(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			if cfg.ServerName == "" {
+				c := cfg.Clone()
+				host, _, err := net.SplitHostPort(addr)
+				if err != nil {
+					host = addr
+				}
+				c.ServerName = host
+				cfg = c
+			}
+
+			tlsConn := tls.Client(conn, cfg)
+			if err := tlsConn.HandshakeContext(ctx); err != nil {
+				conn.Close()
+				return nil, err
+			}
+			return tlsConn, nil
+		},
+		DisableCompression: true,
+		TLSClientConfig:    tlsConfig,
+	}
+}
+
+func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config) http.RoundTripper {
+	rt := &http3.Transport{
+		DisableCompression: true,
+		TLSClientConfig:    tlsConfig,
+	}
+	if dnsServer != nil {
+		rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
+			// Resolve the address to IPs.
+			var ips []net.IPAddr
+			var portStr string
+			var err error
+			if dnsServer.Scheme == "" {
+				var host string
+				host, portStr, err = net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				resolver := udpResolver(dnsServer.Host)
+				ips, err = resolver.LookupIPAddr(ctx, host)
+			} else {
+				ips, portStr, err = resolveDOH(ctx, dnsServer, addr)
+			}
+			if err != nil {
+				return nil, err
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("lookup %s: no addresses found", addr)
+			}
+
+			port, err := net.LookupPort("udp", portStr)
+			if err != nil {
+				return nil, err
+			}
+
+			// Establish quic connection.
+			trace := httptrace.ContextClientTrace(ctx)
+			for _, ip := range ips {
+				udpAddr := &net.UDPAddr{IP: ip.IP, Port: port}
+				var lc net.ListenConfig
+				var packetConn net.PacketConn
+				packetConn, err = lc.ListenPacket(ctx, "udp", ":0")
+				if err != nil {
+					continue
+				}
+
+				if trace != nil && trace.TLSHandshakeStart != nil {
+					trace.TLSHandshakeStart()
+				}
+
+				var conn *quic.Conn
+				conn, err = quic.DialEarly(ctx, packetConn, udpAddr, tlsCfg, qcfg)
+				if trace != nil && trace.TLSHandshakeDone != nil {
+					var state tls.ConnectionState
+					if conn != nil {
+						state = conn.ConnectionState().TLS
+					}
+					trace.TLSHandshakeDone(state, err)
+				}
+				if err != nil {
+					continue
+				}
+				return conn, nil
+			}
+
+			return nil, err
+		}
+	}
+	return rt
 }
 
 // RequestConfig represents the configuration for creating an HTTP request.

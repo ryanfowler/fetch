@@ -113,6 +113,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Respond with an error if a unix socket is specified with HTTP/3.
+	if app.UnixSocket != "" && app.Cfg.HTTP == core.HTTP3 {
+		p := handle.Stderr()
+		writeCLIErr(p, errors.New("cannot use a unix socket with HTTP/3.0"))
+		os.Exit(1)
+	}
+
 	// Make the HTTP request using the parsed configuration.
 	req := fetch.Request{
 		AWSSigv4:      app.AWSSigv4,
