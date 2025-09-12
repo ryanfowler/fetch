@@ -137,7 +137,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
-		printRequestMetadata(errPrinter, req)
+		printRequestMetadata(errPrinter, req, r.HTTP)
 
 		if r.DryRun {
 			if req.Body == nil || req.Body == http.NoBody {

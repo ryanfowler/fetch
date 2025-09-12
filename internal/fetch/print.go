@@ -12,7 +12,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
-func printRequestMetadata(p *core.Printer, req *http.Request) {
+func printRequestMetadata(p *core.Printer, req *http.Request, v core.HTTPVersion) {
 	p.Set(core.Bold)
 	p.Set(core.Yellow)
 	p.WriteString(req.Method)
@@ -40,7 +40,15 @@ func printRequestMetadata(p *core.Printer, req *http.Request) {
 
 	p.WriteString(" ")
 	p.Set(core.Dim)
-	p.WriteString(req.Proto)
+	proto := req.Proto
+	// Force usage of protocol if explicitly specified.
+	switch v {
+	case core.HTTP2:
+		proto = "HTTP/2.0"
+	case core.HTTP3:
+		proto = "HTTP/3.0"
+	}
+	p.WriteString(proto)
 	p.Reset()
 
 	p.WriteString("\n")
