@@ -277,8 +277,10 @@ func (c *Config) ParseHTTP(value string) error {
 		c.HTTP = core.HTTP1
 	case "2":
 		c.HTTP = core.HTTP2
+	case "3":
+		c.HTTP = core.HTTP3
 	default:
-		const usage = "must be one of [1, 2]"
+		const usage = "must be one of [1, 2, 3]"
 		return core.NewValueError("http", value, usage, c.isFile)
 	}
 	return nil

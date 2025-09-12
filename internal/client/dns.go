@@ -17,63 +17,76 @@ import (
 // dialContextUDP returns a DialContext function that performs a DNS lookup
 // using the provided DNS server address and port.
 func dialContextUDP(serverAddr string) func(ctx context.Context, network, address string) (net.Conn, error) {
-	dialer := net.Dialer{
-		Resolver: &net.Resolver{
-			PreferGo: true,
-			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, network, serverAddr)
-			},
+	dialer := net.Dialer{Resolver: udpResolver(serverAddr)}
+	return dialer.DialContext
+}
+
+func udpResolver(serverAddr string) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, serverAddr)
 		},
 	}
-	return dialer.DialContext
 }
 
 // dialContextDOH returns a DialContext function that performs a DoH lookup
 // using the provided DoH server address.
 func dialContextDOH(serverURL *url.URL) func(ctx context.Context, network, address string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(address)
+		ips, port, err := resolveDOH(ctx, serverURL, address)
 		if err != nil {
 			return nil, err
-		}
-
-		trace := httptrace.ContextClientTrace(ctx)
-		if trace != nil && trace.DNSStart != nil {
-			trace.DNSStart(httptrace.DNSStartInfo{Host: host})
-		}
-
-		// Lookup A record first, fallback to AAAA.
-		ips, err := lookupDOH(ctx, serverURL, host, "A")
-		if err != nil {
-			ips, err = lookupDOH(ctx, serverURL, host, "AAAA")
-		}
-
-		if trace != nil && trace.DNSDone != nil {
-			info := httptrace.DNSDoneInfo{Err: err}
-			if err == nil {
-				for _, ip := range ips {
-					addr := net.IPAddr{IP: net.ParseIP(ip)}
-					info.Addrs = append(info.Addrs, addr)
-				}
-			}
-			trace.DNSDone(info)
-		}
-
-		if err != nil {
-			return nil, fmt.Errorf("lookup %s: %w", host, err)
 		}
 
 		var d net.Dialer
 		for _, ip := range ips {
 			var conn net.Conn
-			conn, err = d.DialContext(ctx, network, net.JoinHostPort(ip, port))
+			conn, err = d.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
 			if err == nil {
 				return conn, nil
 			}
 		}
 		return nil, err
 	}
+}
+
+func resolveDOH(ctx context.Context, serverURL *url.URL, address string) ([]net.IPAddr, string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, "", err
+	}
+
+	trace := httptrace.ContextClientTrace(ctx)
+	if trace != nil && trace.DNSStart != nil {
+		trace.DNSStart(httptrace.DNSStartInfo{Host: host})
+	}
+
+	// Lookup A record first, fallback to AAAA.
+	ipStrs, err := lookupDOH(ctx, serverURL, host, "A")
+	if err != nil {
+		ipStrs, err = lookupDOH(ctx, serverURL, host, "AAAA")
+	}
+
+	ips := make([]net.IPAddr, 0, len(ipStrs))
+	for _, ip := range ipStrs {
+		ips = append(ips, net.IPAddr{IP: net.ParseIP(ip)})
+	}
+
+	if trace != nil && trace.DNSDone != nil {
+		info := httptrace.DNSDoneInfo{Err: err}
+		if err == nil {
+			info.Addrs = append(info.Addrs, ips...)
+		}
+		trace.DNSDone(info)
+	}
+
+	if err != nil {
+		return nil, "", fmt.Errorf("lookup %s: %w", host, err)
+	}
+
+	return ips, port, nil
 }
 
 // lookupDOH performs a DNS lookup via DoH with the provided DoH server URL,

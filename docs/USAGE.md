@@ -241,7 +241,7 @@ fetch --tls 1.3 example.com
 
 **Flag**: `--http VERSION`
 
-Specify the exact HTTP version to use. Must be `1` or `2`.
+Specify the exact HTTP version to use. Must be `1`, `2`, or `3`.
 By default, HTTP/2 is preferred but will fallback to using HTTP/1.1.
 
 ```sh

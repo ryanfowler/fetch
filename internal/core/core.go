@@ -27,6 +27,7 @@ const (
 	HTTPDefault HTTPVersion = iota
 	HTTP1
 	HTTP2
+	HTTP3
 )
 
 // ImageSetting represents the options for displaying images.

@@ -413,6 +413,10 @@ func (a *App) CLI() *CLI {
 						Key: "2",
 						Val: "HTTP/2.0",
 					},
+					{
+						Key: "3",
+						Val: "HTTP/3.0",
+					},
 				},
 				IsSet: func() bool {
 					return a.Cfg.HTTP != core.HTTPDefault
