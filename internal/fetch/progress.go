@@ -49,6 +49,12 @@ func (pb *progressBar) Close(path string, err error) {
 	pb.wg.Wait()
 
 	p := pb.printer
+
+	// Clear native progress state.
+	if core.IsStdoutTerm {
+		emitProgress(0, 0, p)
+	}
+
 	if err != nil {
 		// An error will be printed after this.
 		p.WriteString("\n\n")
@@ -102,6 +108,12 @@ func (pb *progressBar) render() {
 	completedWidth := min(barWidth*percentage/100, barWidth)
 
 	p := pb.printer
+
+	// Render native progress bar.
+	if core.IsStdoutTerm {
+		emitProgress(1, int(percentage), p)
+	}
+
 	p.WriteString("\r")
 
 	p.Set(core.Bold)
@@ -166,6 +178,12 @@ func (ps *progressSpinner) Close(path string, err error) {
 	ps.wg.Wait()
 
 	p := ps.printer
+
+	// Clear native progress state.
+	if core.IsStdoutTerm {
+		emitProgress(0, 0, p)
+	}
+
 	if err != nil {
 		p.WriteString("\n\n")
 	} else {
@@ -185,6 +203,11 @@ func (ps *progressSpinner) Read(p []byte) (int, error) {
 
 func (ps *progressSpinner) renderLoop() {
 	defer ps.wg.Done()
+
+	// Render native progress bar.
+	if core.IsStdoutTerm {
+		emitProgress(3, 0, ps.printer)
+	}
 
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
@@ -333,4 +356,18 @@ func writeFinalProgress(p *core.Printer, bytesRead int64, dur time.Duration, toC
 	}
 	p.WriteString("\n")
 
+}
+
+func emitProgress(state, percent int, p *core.Printer) {
+	if percent < 0 {
+		percent = 0
+	} else if percent > 100 {
+		percent = 100
+	}
+
+	p.WriteString("\x1b]9;4;")
+	p.WriteString(strconv.Itoa(state))
+	p.WriteString(";")
+	p.WriteString(strconv.Itoa(percent))
+	p.WriteString("\x1b\\")
 }
