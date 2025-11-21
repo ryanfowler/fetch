@@ -4,7 +4,7 @@ go 1.25.4
 
 require (
 	github.com/klauspost/compress v1.18.1
-	github.com/quic-go/quic-go v0.56.0
+	github.com/quic-go/quic-go v0.57.0
 	github.com/tinylib/msgp v1.5.0
 	golang.org/x/image v0.33.0
 	golang.org/x/net v0.47.0
@@ -13,7 +13,7 @@ require (
 
 require (
 	github.com/philhofer/fwd v1.2.0 // indirect
-	github.com/quic-go/qpack v0.5.1 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
 	golang.org/x/crypto v0.44.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
 )
