@@ -1,6 +1,6 @@
 module github.com/ryanfowler/fetch
 
-go 1.25.4
+go 1.25.5
 
 require (
 	github.com/klauspost/compress v1.18.1
