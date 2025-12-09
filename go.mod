@@ -7,13 +7,13 @@ require (
 	github.com/quic-go/quic-go v0.57.1
 	github.com/tinylib/msgp v1.6.1
 	golang.org/x/image v0.34.0
-	golang.org/x/net v0.47.0
+	golang.org/x/net v0.48.0
 	golang.org/x/sys v0.39.0
 )
 
 require (
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	golang.org/x/crypto v0.44.0 // indirect
+	golang.org/x/crypto v0.46.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 )
