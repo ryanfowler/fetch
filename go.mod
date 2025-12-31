@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	github.com/klauspost/compress v1.18.2
 	github.com/quic-go/quic-go v0.58.0
-	github.com/tinylib/msgp v1.6.1
+	github.com/tinylib/msgp v1.6.2
 	golang.org/x/image v0.34.0
 	golang.org/x/net v0.48.0
 	golang.org/x/sys v0.39.0
