@@ -19,19 +19,18 @@ func escapeURIPath(w *bytes.Buffer, uri string) {
 		var buf [utf8.UTFMax]byte
 		length := utf8.EncodeRune(buf[:], c)
 
-		w.WriteByte('%')
-		encodeHexUpper(w, buf[:length])
+		for i := range length {
+			w.WriteByte('%')
+			encodeHexUpper(w, buf[i])
+		}
 	}
 	w.WriteString(uri[n:])
 }
 
-func encodeHexUpper(w *bytes.Buffer, s []byte) {
+func encodeHexUpper(w *bytes.Buffer, b byte) {
 	const hexUpper = "0123456789ABCDEF"
-	for i := range s {
-		b := s[i]
-		w.WriteByte(hexUpper[b>>4])
-		w.WriteByte(hexUpper[b&0x0F])
-	}
+	w.WriteByte(hexUpper[b>>4])
+	w.WriteByte(hexUpper[b&0x0F])
 }
 
 // mapping of valid uri path bytes.
