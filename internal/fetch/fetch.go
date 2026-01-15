@@ -41,6 +41,7 @@ type Request struct {
 	Basic         *core.KeyVal
 	Bearer        string
 	CACerts       []*x509.Certificate
+	ContentType   string
 	Data          io.Reader
 	DNSServer     *url.URL
 	DryRun        bool
@@ -52,7 +53,6 @@ type Request struct {
 	IgnoreStatus  bool
 	Image         core.ImageSetting
 	Insecure      bool
-	JSON          io.Reader
 	NoEncode      bool
 	NoPager       bool
 	Method        string
@@ -69,7 +69,6 @@ type Request struct {
 	UnixSocket    string
 	URL           *url.URL
 	Verbosity     core.Verbosity
-	XML           io.Reader
 }
 
 func Fetch(ctx context.Context, r *Request) int {
@@ -105,18 +104,17 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		AWSSigV4:    r.AWSSigv4,
 		Basic:       r.Basic,
 		Bearer:      r.Bearer,
+		ContentType: r.ContentType,
 		Data:        r.Data,
 		Form:        r.Form,
 		Headers:     r.Headers,
 		HTTP:        r.HTTP,
-		JSON:        r.JSON,
 		Method:      r.Method,
 		Multipart:   r.Multipart,
 		NoEncode:    r.NoEncode,
 		QueryParams: r.QueryParams,
 		Range:       r.Range,
 		URL:         r.URL,
-		XML:         r.XML,
 	})
 	if err != nil {
 		return 0, err
