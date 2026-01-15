@@ -365,7 +365,13 @@ func TestMain(t *testing.T) {
 				io.WriteString(w, fmt.Sprintf("invalid form files: %+v", form.File))
 				return
 			}
-			file, err := form.File["file1"][0].Open()
+			header := form.File["file1"][0]
+			if ct := header.Header.Get("Content-Type"); ct != "image/jpeg" {
+				w.WriteHeader(400)
+				io.WriteString(w, fmt.Sprintf("invalid content-type: %q", ct))
+				return
+			}
+			file, err := header.Open()
 			if err != nil {
 				w.WriteHeader(400)
 				io.WriteString(w, "cannot open form file: "+err.Error())
@@ -374,7 +380,7 @@ func TestMain(t *testing.T) {
 
 			var buf bytes.Buffer
 			buf.ReadFrom(file)
-			if buf.String() != "file content" {
+			if buf.String() != "\xFF\xD8\xFF" {
 				w.WriteHeader(400)
 				io.WriteString(w, "invalid file content: "+buf.String())
 				return
@@ -382,7 +388,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		tempFile := createTempFile(t, "file content")
+		tempFile := createTempFile(t, "\xFF\xD8\xFF") // JPEG signature.
 		defer os.Remove(tempFile)
 		res := runFetch(t, fetchPath, server.URL, "-F", "key1=val1", "-F", "file1=@"+tempFile)
 		assertExitCode(t, 0, res)
