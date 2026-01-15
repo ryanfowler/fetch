@@ -146,8 +146,18 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			errPrinter.WriteString("\n")
 			errPrinter.Flush()
 
-			_, err = io.Copy(os.Stderr, req.Body)
-			return 0, err
+			ok, r, err := isPrintable(req.Body)
+			if err != nil {
+				return 0, err
+			}
+			if ok {
+				_, err = io.Copy(os.Stderr, r)
+				return 0, err
+			}
+
+			msg := "the request body appears to be binary"
+			core.WriteWarningMsg(errPrinter, msg)
+			return 0, nil
 		}
 
 		errPrinter.WriteString("\n")
