@@ -126,6 +126,7 @@ func main() {
 		Basic:         app.Basic,
 		Bearer:        app.Bearer,
 		CACerts:       app.Cfg.CACerts,
+		ContentType:   app.ContentType,
 		Data:          app.Data,
 		DNSServer:     app.Cfg.DNSServer,
 		DryRun:        app.DryRun,
@@ -137,7 +138,6 @@ func main() {
 		IgnoreStatus:  getValue(app.Cfg.IgnoreStatus),
 		Image:         app.Cfg.Image,
 		Insecure:      getValue(app.Cfg.Insecure),
-		JSON:          app.JSON,
 		Method:        app.Method,
 		Multipart:     multipart.NewMultipart(app.Multipart),
 		NoEncode:      getValue(app.Cfg.NoEncode),
@@ -154,7 +154,6 @@ func main() {
 		UnixSocket:    app.UnixSocket,
 		URL:           app.URL,
 		Verbosity:     verbosity,
-		XML:           app.XML,
 	}
 	status := fetch.Fetch(ctx, &req)
 	os.Exit(status)

@@ -20,27 +20,28 @@ type App struct {
 
 	Cfg config.Config
 
-	AWSSigv4   *aws.Config
-	Basic      *core.KeyVal
-	Bearer     string
-	BuildInfo  bool
-	Complete   string
-	ConfigPath string
-	Data       io.Reader
-	DryRun     bool
-	Edit       bool
-	Form       []core.KeyVal
-	Help       bool
-	JSON       io.Reader
-	Method     string
-	Multipart  []core.KeyVal
-	Output     string
-	OutputDir  bool
-	Range      []string
-	UnixSocket string
-	Update     bool
-	Version    bool
-	XML        io.Reader
+	AWSSigv4    *aws.Config
+	Basic       *core.KeyVal
+	Bearer      string
+	BuildInfo   bool
+	Complete    string
+	ConfigPath  string
+	ContentType string
+	Data        io.Reader
+	DryRun      bool
+	Edit        bool
+	Form        []core.KeyVal
+	Help        bool
+	Method      string
+	Multipart   []core.KeyVal
+	Output      string
+	OutputDir   bool
+	Range       []string
+	UnixSocket  string
+	Update      bool
+	Version     bool
+
+	dataSet, jsonSet, xmlSet bool
 }
 
 func (a *App) PrintHelp(p *core.Printer) {
@@ -277,14 +278,18 @@ func (a *App) CLI() *CLI {
 				Description: "Send a request body",
 				Default:     "",
 				IsSet: func() bool {
-					return a.Data != nil
+					return a.dataSet
 				},
 				Fn: func(value string) error {
-					r, err := requestBody(value)
+					r, path, err := requestBody(value)
 					if err != nil {
 						return err
 					}
-					a.Data = r
+					a.Data, a.ContentType, err = core.DetectContentType(r, path)
+					if err != nil {
+						return err
+					}
+					a.dataSet = true
 					return nil
 				},
 			},
@@ -489,14 +494,16 @@ func (a *App) CLI() *CLI {
 				Description: "Send a JSON request body",
 				Default:     "",
 				IsSet: func() bool {
-					return a.JSON != nil
+					return a.jsonSet
 				},
 				Fn: func(value string) error {
-					r, err := requestBody(value)
+					r, _, err := requestBody(value)
 					if err != nil {
 						return err
 					}
-					a.JSON = r
+					a.Data = r
+					a.ContentType = "application/json"
+					a.jsonSet = true
 					return nil
 				},
 			},
@@ -810,14 +817,16 @@ func (a *App) CLI() *CLI {
 				Description: "Send an XML request body",
 				Default:     "",
 				IsSet: func() bool {
-					return a.XML != nil
+					return a.xmlSet
 				},
 				Fn: func(value string) error {
-					r, err := requestBody(value)
+					r, _, err := requestBody(value)
 					if err != nil {
 						return err
 					}
-					a.XML = r
+					a.Data = r
+					a.ContentType = "application/xml"
+					a.xmlSet = true
 					return nil
 				},
 			},
@@ -825,37 +834,37 @@ func (a *App) CLI() *CLI {
 	}
 }
 
-func requestBody(value string) (io.Reader, error) {
+func requestBody(value string) (io.Reader, string, error) {
 	switch {
 	case len(value) == 0 || value[0] != '@':
-		return strings.NewReader(value), nil
+		return strings.NewReader(value), "", nil
 	case value == "@-":
-		return os.Stdin, nil
+		return os.Stdin, "", nil
 	default:
 		path := value[1:]
 		// Expand '~' to the home directory.
 		if len(path) >= 2 && path[0] == '~' && path[1] == os.PathSeparator {
 			home, err := os.UserHomeDir()
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			path = home + path[1:]
 		}
 		f, err := os.Open(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return nil, core.FileNotExistsError(value[1:])
+				return nil, "", core.FileNotExistsError(value[1:])
 			}
-			return nil, err
+			return nil, "", err
 		}
 		info, err := f.Stat()
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if info.IsDir() {
-			return nil, fileIsDirError(value[1:])
+			return nil, "", fileIsDirError(value[1:])
 		}
-		return f, nil
+		return f, path, nil
 	}
 }
 

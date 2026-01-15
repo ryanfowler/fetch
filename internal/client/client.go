@@ -243,18 +243,17 @@ type RequestConfig struct {
 	AWSSigV4    *aws.Config
 	Basic       *core.KeyVal
 	Bearer      string
+	ContentType string
 	Data        io.Reader
 	Form        []core.KeyVal
 	Headers     []core.KeyVal
 	HTTP        core.HTTPVersion
-	JSON        io.Reader
 	Method      string
 	Multipart   *multipart.Multipart
 	NoEncode    bool
 	QueryParams []core.KeyVal
 	Range       []string
 	URL         *url.URL
-	XML         io.Reader
 }
 
 // NewRequest returns an *http.Request given the provided configuration.
@@ -279,12 +278,8 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 			q.Add(f.Key, f.Val)
 		}
 		body = strings.NewReader(q.Encode())
-	case cfg.JSON != nil:
-		body = cfg.JSON
 	case cfg.Multipart != nil:
 		body = cfg.Multipart
-	case cfg.XML != nil:
-		body = cfg.XML
 	}
 
 	// If no scheme was provided, use various heuristics to choose between
@@ -319,10 +314,8 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	case cfg.Multipart != nil:
 		req.Header.Set("Content-Type", cfg.Multipart.ContentType())
-	case cfg.JSON != nil:
-		req.Header.Set("Content-Type", "application/json")
-	case cfg.XML != nil:
-		req.Header.Set("Content-Type", "application/xml")
+	case cfg.ContentType != "":
+		req.Header.Set("Content-Type", cfg.ContentType)
 	}
 
 	// Optionally set the range header.
