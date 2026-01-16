@@ -54,6 +54,10 @@ func printRequestMetadata(p *core.Printer, req *http.Request, v core.HTTPVersion
 	p.WriteString("\n")
 
 	headers := getHeaders(req.Header)
+	if req.Body != nil && req.ContentLength > 0 {
+		val := strconv.FormatInt(req.ContentLength, 10)
+		headers = addHeader(headers, core.KeyVal{Key: "content-length", Val: val})
+	}
 	if req.Header.Get("Host") == "" {
 		headers = addHeader(headers, core.KeyVal{Key: "host", Val: req.URL.Host})
 	}
