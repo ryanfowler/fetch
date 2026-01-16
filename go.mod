@@ -3,7 +3,7 @@ module github.com/ryanfowler/fetch
 go 1.25.6
 
 require (
-	github.com/klauspost/compress v1.18.2
+	github.com/klauspost/compress v1.18.3
 	github.com/quic-go/quic-go v0.59.0
 	github.com/tinylib/msgp v1.6.3
 	golang.org/x/image v0.35.0
