@@ -51,6 +51,14 @@ func FormatXML(buf []byte, w *core.Printer) error {
 			}
 			stack = append(stack, false)
 		case xml.EndElement:
+			if len(stack) == 0 {
+				// Malformed XML: more closing tags than opening tags.
+				// Skip indent adjustment, just write the closing tag.
+				w.WriteString("</")
+				writeXMLTagName(w, t.Name.Local)
+				w.WriteString(">\n")
+				continue
+			}
 			last := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
 
@@ -162,6 +170,21 @@ func writeXMLProcInst(p *core.Printer, inst []byte) {
 // Mostly taken from the Go encoding/xml package in the standard library:
 // https://cs.opensource.google/go/go/+/refs/tags/go1.24.0:src/encoding/xml/xml.go;l=1964-1999
 func escapeXMLString(p *core.Printer, s string) {
+	// Fast path: check if string needs escaping.
+	needsEscape := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '"' || c == '\'' || c == '&' || c == '<' || c == '>' ||
+			c == '\t' || c == '\n' || c == '\r' || c >= 0x80 {
+			needsEscape = true
+			break
+		}
+	}
+	if !needsEscape {
+		p.WriteString(s)
+		return
+	}
+
 	var esc string
 	var last int
 	for i := 0; i < len(s); {
