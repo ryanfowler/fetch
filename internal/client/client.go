@@ -227,6 +227,7 @@ func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config) http.RoundTrip
 					trace.TLSHandshakeDone(state, err)
 				}
 				if err != nil {
+					packetConn.Close()
 					continue
 				}
 				return conn, nil
