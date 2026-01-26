@@ -283,11 +283,10 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		body = cfg.Multipart
 	}
 
-	// If no scheme was provided, use various heuristics to choose between
-	// http and https.
+	// If no scheme was provided, default to HTTPS except for loopback
+	// addresses (localhost, 127.x.x.x, ::1) which default to HTTP.
 	if cfg.URL.Scheme == "" {
-		host := cfg.URL.Hostname()
-		if !strings.Contains(host, ".") || net.ParseIP(host) != nil {
+		if isLoopback(cfg.URL.Hostname()) {
 			cfg.URL.Scheme = "http"
 		} else {
 			cfg.URL.Scheme = "https"
@@ -468,4 +467,17 @@ func newZSTDReader(rc io.ReadCloser) (*zstdReader, error) {
 func (r *zstdReader) Close() error {
 	r.Decoder.Close()
 	return r.c.Close()
+}
+
+// isLoopback returns true if the host is a loopback address.
+// This includes "localhost" and IP addresses in the loopback range
+// (127.0.0.0/8 for IPv4, ::1 for IPv6).
+func isLoopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }

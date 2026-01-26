@@ -10,6 +10,29 @@ To make a GET request to a URL:
 fetch example.com
 ```
 
+### URL Schemes
+
+When no scheme is provided, `fetch` defaults to HTTPS:
+
+```sh
+fetch example.com        # Uses https://example.com
+fetch 192.168.1.1:8080   # Uses https://192.168.1.1:8080
+```
+
+Loopback addresses default to HTTP for local development convenience:
+
+```sh
+fetch localhost:3000     # Uses http://localhost:3000
+fetch 127.0.0.1:8080     # Uses http://127.0.0.1:8080
+```
+
+You can always specify the scheme explicitly:
+
+```sh
+fetch http://example.com   # Force HTTP
+fetch https://localhost    # Force HTTPS for localhost
+```
+
 ## Authentication Options
 
 ### AWS Signature V4
