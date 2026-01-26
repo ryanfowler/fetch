@@ -6,6 +6,14 @@ import (
 	"runtime/debug"
 )
 
+// TerminalSize represents the dimensions of the terminal.
+type TerminalSize struct {
+	Cols     int // Number of columns (characters)
+	Rows     int // Number of rows (characters)
+	WidthPx  int // Width in pixels (0 if unavailable)
+	HeightPx int // Height in pixels (0 if unavailable)
+}
+
 var (
 	IsStderrTerm bool
 	IsStdoutTerm bool

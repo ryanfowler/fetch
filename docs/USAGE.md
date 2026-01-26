@@ -336,10 +336,13 @@ Supported formats for automatic formatting and syntax highlighting:
 - JSON (`application/json`)
 - HTML (`text/html`)
 - XML (`application/xml`, `text/xml`)
+- CSV (`text/csv`)
 - MessagePack (`application/msgpack`)
 - NDJSON/JSONLines (`application/x-ndjson`)
 - Protobuf (`application/x-protobuf`, `application/protobuf`)
 - Server-Sent Events (`text/event-stream`)
+
+CSV output is automatically column-aligned. When output is too wide for the terminal, it switches to a vertical "record view" format where each row is displayed with field names as labels.
 
 ```sh
 fetch --format off example.com

@@ -10,6 +10,8 @@ import (
 	"image/png"
 	"strings"
 
+	"github.com/ryanfowler/fetch/internal/core"
+
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
@@ -30,23 +32,23 @@ func Render(ctx context.Context, b []byte, nativeOnly bool) error {
 		return nil
 	}
 
-	size, err := getTerminalSize()
+	size, err := core.GetTerminalSize()
 	if err != nil {
 		return err
 	}
-	if size.widthPx == 0 || size.heightPx == 0 {
+	if size.WidthPx == 0 || size.HeightPx == 0 {
 		// If we're unable to get the terminal dimensions in pixels,
 		// render the image using blocks.
-		return writeBlocks(img, size.cols, size.rows)
+		return writeBlocks(img, size.Cols, size.Rows)
 	}
 
 	switch detectEmulator().Protocol() {
 	case protoInline:
-		return writeInline(img, size.widthPx, size.heightPx)
+		return writeInline(img, size.WidthPx, size.HeightPx)
 	case protoKitty:
-		return writeKitty(img, size.widthPx, size.heightPx)
+		return writeKitty(img, size.WidthPx, size.HeightPx)
 	default:
-		return writeBlocks(img, size.cols, size.rows)
+		return writeBlocks(img, size.Cols, size.Rows)
 	}
 }
 
@@ -143,11 +145,4 @@ func convertToRGBA(img image.Image) *image.RGBA {
 		draw.Draw(out, bounds, img, bounds.Min, draw.Src)
 		return out
 	}
-}
-
-type terminalSize struct {
-	cols     int
-	rows     int
-	widthPx  int
-	heightPx int
 }
