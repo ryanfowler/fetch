@@ -178,6 +178,19 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 }
 
 func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {
+	// Track if any redirects were printed.
+	var hadRedirects bool
+
+	// Set up redirect callback at -v and higher.
+	if r.Verbosity >= core.VVerbose {
+		p := r.PrinterHandle.Stderr()
+		ctx = client.WithRedirectCallback(req.Context(), func(hop client.RedirectHop) {
+			hadRedirects = true
+			printRedirectHop(p, r.Verbosity, hop, r.HTTP)
+		})
+		req = req.WithContext(ctx)
+	}
+
 	if r.Verbosity >= core.LDebug {
 		trace := newDebugTrace(r.PrinterHandle.Stderr())
 		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
@@ -196,6 +209,10 @@ func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Re
 
 	if r.Verbosity >= core.VNormal {
 		p := r.PrinterHandle.Stderr()
+		// Add blank line after redirect summaries at -v level.
+		if hadRedirects && r.Verbosity == core.VVerbose {
+			p.WriteString("\n")
+		}
 		printResponseMetadata(p, r.Verbosity, resp)
 		p.Flush()
 	}

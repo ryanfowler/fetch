@@ -9,6 +9,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
@@ -128,6 +129,53 @@ func printResponseHeaders(p *core.Printer, resp *http.Response) {
 func printBinaryWarning(p *core.Printer) {
 	msg := "the response body appears to be binary\n\nTo output to the terminal anyway, use '--output -'"
 	core.WriteWarningMsg(p, msg)
+}
+
+// printRedirectHop prints a single redirect hop based on verbosity level.
+func printRedirectHop(p *core.Printer, v core.Verbosity, hop client.RedirectHop, httpVersion core.HTTPVersion) {
+	switch {
+	case v >= core.VExtraVerbose:
+		// Print response to previous request, then the new request about to be made.
+		printResponseMetadata(p, v, hop.Response)
+		p.Flush()
+
+		printRequestMetadata(p, hop.NextRequest, httpVersion)
+		p.WriteString("\n")
+		p.Flush()
+	default:
+		// One-line summary at -v
+		printRedirectHopSummary(p, hop)
+	}
+}
+
+// printRedirectHopSummary prints a single redirect hop as a one-liner.
+func printRedirectHopSummary(p *core.Printer, hop client.RedirectHop) {
+	p.WriteString("-> ")
+
+	// Print status code with color
+	statusColor := colorForStatus(hop.Response.StatusCode)
+	p.Set(statusColor)
+	p.Set(core.Bold)
+	p.WriteString(strconv.Itoa(hop.Response.StatusCode))
+	p.Reset()
+	p.WriteString(" ")
+
+	// Print source URL
+	p.Set(core.Dim)
+	p.WriteString(hop.Request.URL.String())
+	p.Reset()
+
+	// Print arrow and location
+	p.WriteString(" -> ")
+	location := hop.Response.Header.Get("Location")
+	if location != "" {
+		p.Set(core.Cyan)
+		p.WriteString(location)
+		p.Reset()
+	}
+
+	p.WriteString("\n")
+	p.Flush()
 }
 
 func colorForStatus(code int) core.Sequence {

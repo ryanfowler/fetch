@@ -30,6 +30,26 @@ type Client struct {
 	c *http.Client
 }
 
+// RedirectHop represents a single redirect in the chain.
+type RedirectHop struct {
+	Request     *http.Request  // The request that triggered the redirect
+	Response    *http.Response // The redirect response (e.g., 302)
+	NextRequest *http.Request  // The new request about to be made
+}
+
+// RedirectCallback is called when a redirect occurs.
+type RedirectCallback func(hop RedirectHop)
+
+// ctxRedirectCallbackKeyType is the context key type for storing redirect callback.
+type ctxRedirectCallbackKeyType int
+
+const ctxRedirectCallbackKey ctxRedirectCallbackKeyType = 1
+
+// WithRedirectCallback returns a context with a redirect callback.
+func WithRedirectCallback(ctx context.Context, cb RedirectCallback) context.Context {
+	return context.WithValue(ctx, ctxRedirectCallbackKey, cb)
+}
+
 // ClientConfig represents the optional configuration parameters for a Client.
 type ClientConfig struct {
 	CACerts    []*x509.Certificate
@@ -112,19 +132,36 @@ func NewClient(cfg ClientConfig) *Client {
 		transport = rt
 	}
 
-	// Optionally set the maximum number of redirects.
+	// Set up the redirect handler.
 	client := &http.Client{Transport: transport}
+	maxRedirects := -1
 	if cfg.Redirects != nil {
-		redirects := *cfg.Redirects
-		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			if redirects == 0 {
-				return http.ErrUseLastResponse
+		maxRedirects = *cfg.Redirects
+	}
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// Call redirect callback if set.
+		// req is the new request about to be made.
+		// req.Response contains the redirect response that triggered this redirect.
+		// via contains the previous requests, with via[len(via)-1] being the request
+		// that received the redirect response.
+		if cb, ok := req.Context().Value(ctxRedirectCallbackKey).(RedirectCallback); ok && cb != nil {
+			if len(via) > 0 && req.Response != nil {
+				cb(RedirectHop{
+					Request:     via[len(via)-1],
+					Response:    req.Response,
+					NextRequest: req,
+				})
 			}
-			if len(via) > redirects {
-				return fmt.Errorf("exceeded maximum number of redirects: %d", redirects)
-			}
-			return nil
 		}
+
+		// Check redirect limits.
+		if maxRedirects == 0 {
+			return http.ErrUseLastResponse
+		}
+		if maxRedirects > 0 && len(via) > maxRedirects {
+			return fmt.Errorf("exceeded maximum number of redirects: %d", maxRedirects)
+		}
+		return nil
 	}
 
 	return &Client{c: client}
