@@ -157,6 +157,26 @@ func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) ([
 	return addrs, nil
 }
 
+// resolveWithTrace performs DNS lookup using system resolver with trace hooks.
+func resolveWithTrace(ctx context.Context, host string) ([]net.IPAddr, error) {
+	trace := httptrace.ContextClientTrace(ctx)
+	if trace != nil && trace.DNSStart != nil {
+		trace.DNSStart(httptrace.DNSStartInfo{Host: host})
+	}
+
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+
+	if trace != nil && trace.DNSDone != nil {
+		info := httptrace.DNSDoneInfo{Err: err}
+		if err == nil {
+			info.Addrs = ips
+		}
+		trace.DNSDone(info)
+	}
+
+	return ips, err
+}
+
 // rcodeName returns the text for the provided rcode integer.
 func rcodeName(n int) string {
 	switch n {
