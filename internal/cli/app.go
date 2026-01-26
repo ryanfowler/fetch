@@ -20,26 +20,28 @@ type App struct {
 
 	Cfg config.Config
 
-	AWSSigv4    *aws.Config
-	Basic       *core.KeyVal
-	Bearer      string
-	BuildInfo   bool
-	Complete    string
-	ConfigPath  string
-	ContentType string
-	Data        io.Reader
-	DryRun      bool
-	Edit        bool
-	Form        []core.KeyVal
-	Help        bool
-	Method      string
-	Multipart   []core.KeyVal
-	Output      string
-	OutputDir   bool
-	Range       []string
-	UnixSocket  string
-	Update      bool
-	Version     bool
+	AWSSigv4         *aws.Config
+	Basic            *core.KeyVal
+	Bearer           string
+	BuildInfo        bool
+	Clobber          bool
+	Complete         string
+	ConfigPath       string
+	ContentType      string
+	Data             io.Reader
+	DryRun           bool
+	Edit             bool
+	Form             []core.KeyVal
+	Help             bool
+	Method           string
+	Multipart        []core.KeyVal
+	Output           string
+	Range            []string
+	RemoteHeaderName bool
+	RemoteName       bool
+	UnixSocket       string
+	Update           bool
+	Version          bool
 
 	dataSet, jsonSet, xmlSet bool
 }
@@ -99,7 +101,7 @@ func (a *App) CLI() *CLI {
 		ExclusiveFlags: [][]string{
 			{"aws-sigv4", "basic", "bearer"},
 			{"data", "form", "json", "multipart", "xml"},
-			{"output", "output-current-dir"},
+			{"output", "remote-name"},
 		},
 		Flags: []Flag{
 			{
@@ -236,6 +238,20 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					return a.Cfg.ParseColor(value)
+				},
+			},
+			{
+				Short:       "",
+				Long:        "clobber",
+				Args:        "",
+				Description: "Overwrite existing output file",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Clobber
+				},
+				Fn: func(value string) error {
+					a.Clobber = true
+					return nil
 				},
 			},
 			{
@@ -608,15 +624,30 @@ func (a *App) CLI() *CLI {
 			},
 			{
 				Short:       "O",
-				Long:        "output-current-dir",
+				Long:        "remote-name",
+				Aliases:     []string{"output-current-dir"},
 				Args:        "",
-				Description: "Write response body to the current directory",
+				Description: "Use URL path component as output filename",
 				Default:     "",
 				IsSet: func() bool {
-					return a.OutputDir
+					return a.RemoteName
 				},
 				Fn: func(value string) error {
-					a.OutputDir = true
+					a.RemoteName = true
+					return nil
+				},
+			},
+			{
+				Short:       "J",
+				Long:        "remote-header-name",
+				Args:        "",
+				Description: "Use content-disposition header filename",
+				Default:     "",
+				IsSet: func() bool {
+					return a.RemoteHeaderName
+				},
+				Fn: func(value string) error {
+					a.RemoteHeaderName = true
 					return nil
 				},
 			},

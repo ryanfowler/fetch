@@ -466,6 +466,240 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("remote-name ignores content-disposition", func(t *testing.T) {
+		const data = "file content"
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Disposition", `attachment; filename="cd-filename.txt"`)
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		dir, err := os.MkdirTemp("", "")
+		if err != nil {
+			t.Fatalf("unable to create temp dir: %s", err.Error())
+		}
+		defer os.RemoveAll(dir)
+
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("unable to get current dir: %s", err.Error())
+		}
+		err = os.Chdir(dir)
+		if err != nil {
+			t.Fatalf("unable to change current dir: %s", err.Error())
+		}
+		defer os.Chdir(wd)
+
+		// -O should use URL path, NOT Content-Disposition
+		urlStr := server.URL + "/url-filename.txt"
+		res := runFetch(t, fetchPath, urlStr, "-O")
+		assertExitCode(t, 0, res)
+
+		// Verify URL-based filename was used
+		expPath := filepath.Join(dir, "url-filename.txt")
+		raw, err := os.ReadFile(expPath)
+		if err != nil {
+			t.Fatalf("unable to read from output file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("unexpected data in output file: %s", raw)
+		}
+
+		// Verify Content-Disposition filename was NOT used
+		cdPath := filepath.Join(dir, "cd-filename.txt")
+		if _, err := os.Stat(cdPath); !os.IsNotExist(err) {
+			t.Fatal("Content-Disposition filename should not exist when using -O without -J")
+		}
+	})
+
+	t.Run("remote-header-name uses content-disposition", func(t *testing.T) {
+		const data = "file content"
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Disposition", `attachment; filename="cd-filename.txt"`)
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		dir, err := os.MkdirTemp("", "")
+		if err != nil {
+			t.Fatalf("unable to create temp dir: %s", err.Error())
+		}
+		defer os.RemoveAll(dir)
+
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("unable to get current dir: %s", err.Error())
+		}
+		err = os.Chdir(dir)
+		if err != nil {
+			t.Fatalf("unable to change current dir: %s", err.Error())
+		}
+		defer os.Chdir(wd)
+
+		// -O -J should use Content-Disposition
+		urlStr := server.URL + "/url-filename.txt"
+		res := runFetch(t, fetchPath, urlStr, "-O", "-J")
+		assertExitCode(t, 0, res)
+
+		// Verify Content-Disposition filename was used
+		expPath := filepath.Join(dir, "cd-filename.txt")
+		raw, err := os.ReadFile(expPath)
+		if err != nil {
+			t.Fatalf("unable to read from output file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("unexpected data in output file: %s", raw)
+		}
+	})
+
+	t.Run("remote-header-name requires remote-name", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "http://example.com", "-J")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "--remote-header-name (-J) requires --remote-name (-O)")
+	})
+
+	t.Run("file exists error", func(t *testing.T) {
+		const data = "file content"
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		dir, err := os.MkdirTemp("", "")
+		if err != nil {
+			t.Fatalf("unable to create temp dir: %s", err.Error())
+		}
+		defer os.RemoveAll(dir)
+
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("unable to get current dir: %s", err.Error())
+		}
+		err = os.Chdir(dir)
+		if err != nil {
+			t.Fatalf("unable to change current dir: %s", err.Error())
+		}
+		defer os.Chdir(wd)
+
+		// Create existing file
+		existingPath := filepath.Join(dir, "existing.txt")
+		if err := os.WriteFile(existingPath, []byte("old content"), 0644); err != nil {
+			t.Fatalf("unable to create existing file: %s", err.Error())
+		}
+
+		// Attempt to overwrite without --clobber should fail
+		urlStr := server.URL + "/existing.txt"
+		res := runFetch(t, fetchPath, urlStr, "-O")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "already exists")
+		assertBufContains(t, res.stderr, "--clobber")
+
+		// Verify file was not modified
+		raw, err := os.ReadFile(existingPath)
+		if err != nil {
+			t.Fatalf("unable to read from existing file: %s", err.Error())
+		}
+		if string(raw) != "old content" {
+			t.Fatalf("existing file was modified: %s", raw)
+		}
+	})
+
+	t.Run("clobber overwrites existing file", func(t *testing.T) {
+		const data = "new content"
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		dir, err := os.MkdirTemp("", "")
+		if err != nil {
+			t.Fatalf("unable to create temp dir: %s", err.Error())
+		}
+		defer os.RemoveAll(dir)
+
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("unable to get current dir: %s", err.Error())
+		}
+		err = os.Chdir(dir)
+		if err != nil {
+			t.Fatalf("unable to change current dir: %s", err.Error())
+		}
+		defer os.Chdir(wd)
+
+		// Create existing file
+		existingPath := filepath.Join(dir, "existing.txt")
+		if err := os.WriteFile(existingPath, []byte("old content"), 0644); err != nil {
+			t.Fatalf("unable to create existing file: %s", err.Error())
+		}
+
+		// Overwrite with --clobber should succeed
+		urlStr := server.URL + "/existing.txt"
+		res := runFetch(t, fetchPath, urlStr, "-O", "--clobber")
+		assertExitCode(t, 0, res)
+
+		// Verify file was overwritten
+		raw, err := os.ReadFile(existingPath)
+		if err != nil {
+			t.Fatalf("unable to read from existing file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("existing file was not overwritten: %s", raw)
+		}
+	})
+
+	t.Run("path traversal blocked in content-disposition", func(t *testing.T) {
+		const data = "file content"
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			// Attempt path traversal in Content-Disposition header
+			w.Header().Set("Content-Disposition", `attachment; filename="../../../tmp/malicious.txt"`)
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		dir, err := os.MkdirTemp("", "")
+		if err != nil {
+			t.Fatalf("unable to create temp dir: %s", err.Error())
+		}
+		defer os.RemoveAll(dir)
+
+		wd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("unable to get current dir: %s", err.Error())
+		}
+		err = os.Chdir(dir)
+		if err != nil {
+			t.Fatalf("unable to change current dir: %s", err.Error())
+		}
+		defer os.Chdir(wd)
+
+		// -O -J with path traversal in Content-Disposition should sanitize to base name
+		urlStr := server.URL + "/fallback.txt"
+		res := runFetch(t, fetchPath, urlStr, "-O", "-J")
+		assertExitCode(t, 0, res)
+
+		// Verify sanitized filename was used (base name of the path)
+		expPath := filepath.Join(dir, "malicious.txt")
+		raw, err := os.ReadFile(expPath)
+		if err != nil {
+			t.Fatalf("unable to read from output file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("unexpected data in output file: %s", raw)
+		}
+
+		// Verify path traversal did not work
+		badPath := filepath.Join(dir, "..", "..", "..", "tmp", "malicious.txt")
+		if _, err := os.Stat(badPath); !os.IsNotExist(err) {
+			t.Fatal("path traversal should have been blocked")
+		}
+	})
+
 	t.Run("timeout", func(t *testing.T) {
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			select {
