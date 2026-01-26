@@ -45,9 +45,11 @@ func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Prin
 
 	if _, err = io.Copy(f, body); err != nil {
 		f.Close()
+		os.Remove(f.Name())
 		return err
 	}
 	if err = f.Close(); err != nil {
+		os.Remove(f.Name())
 		return err
 	}
 
