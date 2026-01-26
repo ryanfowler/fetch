@@ -120,40 +120,49 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Respond with an error if -J is specified without -O.
+	if app.RemoteHeaderName && !app.RemoteName {
+		p := handle.Stderr()
+		writeCLIErr(p, errors.New("--remote-header-name (-J) requires --remote-name (-O)"))
+		os.Exit(1)
+	}
+
 	// Make the HTTP request using the parsed configuration.
 	req := fetch.Request{
-		AWSSigv4:      app.AWSSigv4,
-		Basic:         app.Basic,
-		Bearer:        app.Bearer,
-		CACerts:       app.Cfg.CACerts,
-		ContentType:   app.ContentType,
-		Data:          app.Data,
-		DNSServer:     app.Cfg.DNSServer,
-		DryRun:        app.DryRun,
-		Edit:          app.Edit,
-		Form:          app.Form,
-		Format:        app.Cfg.Format,
-		Headers:       app.Cfg.Headers,
-		HTTP:          app.Cfg.HTTP,
-		IgnoreStatus:  getValue(app.Cfg.IgnoreStatus),
-		Image:         app.Cfg.Image,
-		Insecure:      getValue(app.Cfg.Insecure),
-		Method:        app.Method,
-		Multipart:     multipart.NewMultipart(app.Multipart),
-		NoEncode:      getValue(app.Cfg.NoEncode),
-		NoPager:       getValue(app.Cfg.NoPager),
-		Output:        app.Output,
-		OutputDir:     app.OutputDir,
-		PrinterHandle: handle,
-		Proxy:         app.Cfg.Proxy,
-		QueryParams:   app.Cfg.QueryParams,
-		Range:         app.Range,
-		Redirects:     app.Cfg.Redirects,
-		Timeout:       getValue(app.Cfg.Timeout),
-		TLS:           getValue(app.Cfg.TLS),
-		UnixSocket:    app.UnixSocket,
-		URL:           app.URL,
-		Verbosity:     verbosity,
+		AWSSigv4:         app.AWSSigv4,
+		Basic:            app.Basic,
+		Bearer:           app.Bearer,
+		CACerts:          app.Cfg.CACerts,
+		Clobber:          app.Clobber,
+		ContentType:      app.ContentType,
+		Data:             app.Data,
+		DNSServer:        app.Cfg.DNSServer,
+		DryRun:           app.DryRun,
+		Edit:             app.Edit,
+		Form:             app.Form,
+		Format:           app.Cfg.Format,
+		Headers:          app.Cfg.Headers,
+		HTTP:             app.Cfg.HTTP,
+		IgnoreStatus:     getValue(app.Cfg.IgnoreStatus),
+		Image:            app.Cfg.Image,
+		Insecure:         getValue(app.Cfg.Insecure),
+		Method:           app.Method,
+		Multipart:        multipart.NewMultipart(app.Multipart),
+		NoEncode:         getValue(app.Cfg.NoEncode),
+		NoPager:          getValue(app.Cfg.NoPager),
+		Output:           app.Output,
+		PrinterHandle:    handle,
+		Proxy:            app.Cfg.Proxy,
+		QueryParams:      app.Cfg.QueryParams,
+		Range:            app.Range,
+		Redirects:        app.Cfg.Redirects,
+		RemoteHeaderName: app.RemoteHeaderName,
+		RemoteName:       app.RemoteName,
+		Timeout:          getValue(app.Cfg.Timeout),
+		TLS:              getValue(app.Cfg.TLS),
+		UnixSocket:       app.UnixSocket,
+		URL:              app.URL,
+		Verbosity:        verbosity,
 	}
 	status := fetch.Fetch(ctx, &req)
 	os.Exit(status)

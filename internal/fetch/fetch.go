@@ -37,38 +37,40 @@ const (
 )
 
 type Request struct {
-	AWSSigv4      *aws.Config
-	Basic         *core.KeyVal
-	Bearer        string
-	CACerts       []*x509.Certificate
-	ContentType   string
-	Data          io.Reader
-	DNSServer     *url.URL
-	DryRun        bool
-	Edit          bool
-	Form          []core.KeyVal
-	Format        core.Format
-	Headers       []core.KeyVal
-	HTTP          core.HTTPVersion
-	IgnoreStatus  bool
-	Image         core.ImageSetting
-	Insecure      bool
-	NoEncode      bool
-	NoPager       bool
-	Method        string
-	Multipart     *multipart.Multipart
-	Output        string
-	OutputDir     bool
-	PrinterHandle *core.Handle
-	Proxy         *url.URL
-	QueryParams   []core.KeyVal
-	Range         []string
-	Redirects     *int
-	Timeout       time.Duration
-	TLS           uint16
-	UnixSocket    string
-	URL           *url.URL
-	Verbosity     core.Verbosity
+	AWSSigv4         *aws.Config
+	Basic            *core.KeyVal
+	Bearer           string
+	CACerts          []*x509.Certificate
+	Clobber          bool
+	ContentType      string
+	Data             io.Reader
+	DNSServer        *url.URL
+	DryRun           bool
+	Edit             bool
+	Form             []core.KeyVal
+	Format           core.Format
+	Headers          []core.KeyVal
+	HTTP             core.HTTPVersion
+	IgnoreStatus     bool
+	Image            core.ImageSetting
+	Insecure         bool
+	NoEncode         bool
+	NoPager          bool
+	Method           string
+	Multipart        *multipart.Multipart
+	Output           string
+	PrinterHandle    *core.Handle
+	Proxy            *url.URL
+	QueryParams      []core.KeyVal
+	Range            []string
+	Redirects        *int
+	RemoteHeaderName bool
+	RemoteName       bool
+	Timeout          time.Duration
+	TLS              uint16
+	UnixSocket       string
+	URL              *url.URL
+	Verbosity        core.Verbosity
 }
 
 func Fetch(ctx context.Context, r *Request) int {
