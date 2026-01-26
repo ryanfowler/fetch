@@ -28,6 +28,7 @@ type ContentType int
 
 const (
 	TypeUnknown ContentType = iota
+	TypeCSV
 	TypeHTML
 	TypeImage
 	TypeJSON
@@ -285,6 +286,10 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	}
 
 	switch contentType {
+	case TypeCSV:
+		if format.FormatCSV(buf, p) == nil {
+			buf = p.Bytes()
+		}
 	case TypeHTML:
 		if format.FormatHTML(buf, p) == nil {
 			buf = p.Bytes()
@@ -328,6 +333,8 @@ func getContentType(headers http.Header) ContentType {
 			return TypeImage
 		case "application":
 			switch subtype {
+			case "csv":
+				return TypeCSV
 			case "json":
 				return TypeJSON
 			case "msgpack", "x-msgpack", "vnd.msgpack":
@@ -350,6 +357,8 @@ func getContentType(headers http.Header) ContentType {
 			}
 		case "text":
 			switch subtype {
+			case "csv":
+				return TypeCSV
 			case "html":
 				return TypeHTML
 			case "event-stream":
