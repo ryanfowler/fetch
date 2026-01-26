@@ -97,7 +97,7 @@ fi
 # Parse the artifact url.
 DOWNLOAD_URL=""
 if $HAS_JQ; then
-  DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r ".assets.[] | select(.name == \"fetch-${VERSION}-${PLATFORM}.tar.gz\") | .browser_download_url")
+  DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r ".assets[] | select(.name == \"fetch-${VERSION}-${PLATFORM}.tar.gz\") | .browser_download_url")
 else
   DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o "\"browser_download_url\": *\"[^\"]*${PLATFORM}[^\"]*\"" | sed 's/"browser_download_url": *"//;s/"//')
 fi
@@ -108,6 +108,7 @@ fi
 
 # Create temporary directory.
 TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TMP_DIR"' EXIT
 BINARY_PATH="${TMP_DIR}/fetch"
 
 # Download the artifact.
@@ -117,7 +118,16 @@ if ! curl -fsSL "$DOWNLOAD_URL" -o "$BINARY_PATH.tar.gz"; then
   exit 1
 fi
 
-tar -xzf "$BINARY_PATH.tar.gz" -C "$TMP_DIR"
+if ! tar -xzf "$BINARY_PATH.tar.gz" -C "$TMP_DIR"; then
+  error "failed to extract archive"
+  exit 1
+fi
+
+if [ ! -f "$BINARY_PATH" ]; then
+  error "binary not found in archive"
+  exit 1
+fi
+
 chmod +x "$BINARY_PATH"
 
 # Determine installation directory.
