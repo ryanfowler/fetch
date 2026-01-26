@@ -210,70 +210,94 @@ func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config) http.RoundTrip
 		DisableCompression: true,
 		TLSClientConfig:    tlsConfig,
 	}
-	if dnsServer != nil {
-		rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
-			// Resolve the address to IPs.
-			var ips []net.IPAddr
-			var portStr string
-			var err error
+
+	// Always set custom Dial to ensure trace hooks work.
+	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
+		host, portStr, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+
+		// Resolve DNS with trace hooks.
+		var ips []net.IPAddr
+		if dnsServer != nil {
 			if dnsServer.Scheme == "" {
-				var host string
-				host, portStr, err = net.SplitHostPort(addr)
-				if err != nil {
-					return nil, err
-				}
 				resolver := udpResolver(dnsServer.Host)
 				ips, err = resolver.LookupIPAddr(ctx, host)
 			} else {
 				ips, portStr, err = resolveDOH(ctx, dnsServer, addr)
 			}
-			if err != nil {
-				return nil, err
-			}
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("lookup %s: no addresses found", addr)
-			}
-
-			port, err := net.LookupPort("udp", portStr)
-			if err != nil {
-				return nil, err
-			}
-
-			// Establish quic connection.
-			trace := httptrace.ContextClientTrace(ctx)
-			for _, ip := range ips {
-				udpAddr := &net.UDPAddr{IP: ip.IP, Port: port}
-				var lc net.ListenConfig
-				var packetConn net.PacketConn
-				packetConn, err = lc.ListenPacket(ctx, "udp", ":0")
-				if err != nil {
-					continue
-				}
-
-				if trace != nil && trace.TLSHandshakeStart != nil {
-					trace.TLSHandshakeStart()
-				}
-
-				var conn *quic.Conn
-				conn, err = quic.DialEarly(ctx, packetConn, udpAddr, tlsCfg, qcfg)
-				if trace != nil && trace.TLSHandshakeDone != nil {
-					var state tls.ConnectionState
-					if conn != nil {
-						state = conn.ConnectionState().TLS
-					}
-					trace.TLSHandshakeDone(state, err)
-				}
-				if err != nil {
-					packetConn.Close()
-					continue
-				}
-				return conn, nil
-			}
-
+		} else {
+			// Use system resolver with trace hooks.
+			ips, err = resolveWithTrace(ctx, host)
+		}
+		if err != nil {
 			return nil, err
 		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("lookup %s: no addresses found", addr)
+		}
+
+		port, err := net.LookupPort("udp", portStr)
+		if err != nil {
+			return nil, err
+		}
+
+		// Establish quic connection.
+		trace := httptrace.ContextClientTrace(ctx)
+		for _, ip := range ips {
+			udpAddr := &net.UDPAddr{IP: ip.IP, Port: port}
+			var lc net.ListenConfig
+			var packetConn net.PacketConn
+			packetConn, err = lc.ListenPacket(ctx, "udp", ":0")
+			if err != nil {
+				continue
+			}
+
+			if trace != nil && trace.TLSHandshakeStart != nil {
+				trace.TLSHandshakeStart()
+			}
+
+			var conn *quic.Conn
+			conn, err = quic.DialEarly(ctx, packetConn, udpAddr, tlsCfg, qcfg)
+			if trace != nil && trace.TLSHandshakeDone != nil {
+				var state tls.ConnectionState
+				if conn != nil {
+					state = conn.ConnectionState().TLS
+				}
+				trace.TLSHandshakeDone(state, err)
+			}
+			if err != nil {
+				packetConn.Close()
+				continue
+			}
+			return conn, nil
+		}
+
+		return nil, err
 	}
-	return rt
+
+	return &http3TimingTransport{rt: rt}
+}
+
+// http3TimingTransport wraps http3.Transport to provide TTFB trace hooks.
+type http3TimingTransport struct {
+	rt *http3.Transport
+}
+
+func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.rt.RoundTrip(req)
+
+	// Call GotFirstResponseByte when response headers arrive.
+	if err == nil {
+		if trace := httptrace.ContextClientTrace(req.Context()); trace != nil {
+			if trace.GotFirstResponseByte != nil {
+				trace.GotFirstResponseByte()
+			}
+		}
+	}
+
+	return resp, err
 }
 
 // RequestConfig represents the configuration for creating an HTTP request.
