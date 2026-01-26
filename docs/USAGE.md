@@ -332,6 +332,14 @@ fetch --colour on example.com
 
 Set whether output should be formatted. Options: `auto`, `off`, `on`.
 
+Supported formats for automatic formatting and syntax highlighting:
+- JSON (`application/json`)
+- HTML (`text/html`)
+- XML (`application/xml`, `text/xml`)
+- MessagePack (`application/msgpack`)
+- NDJSON/JSONLines (`application/x-ndjson`)
+- Server-Sent Events (`text/event-stream`)
+
 ```sh
 fetch --format off example.com
 fetch --format on example.com

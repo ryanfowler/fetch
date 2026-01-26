@@ -28,6 +28,7 @@ type ContentType int
 
 const (
 	TypeUnknown ContentType = iota
+	TypeHTML
 	TypeImage
 	TypeJSON
 	TypeMsgPack
@@ -283,6 +284,10 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	}
 
 	switch contentType {
+	case TypeHTML:
+		if format.FormatHTML(buf, p) == nil {
+			buf = p.Bytes()
+		}
 	case TypeImage:
 		return nil, image.Render(ctx, buf, r.Image == core.ImageNative)
 	case TypeJSON:
@@ -335,6 +340,8 @@ func getContentType(headers http.Header) ContentType {
 			}
 		case "text":
 			switch subtype {
+			case "html":
+				return TypeHTML
 			case "event-stream":
 				return TypeSSE
 			case "xml":

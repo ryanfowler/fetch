@@ -6,7 +6,7 @@
 
 ### Features include:
 
-- **Response formatting**: automatically formats and colors output for supported types (json, msgpack, xml, etc.)
+- **Response formatting**: automatically formats and colors output (json, html, msgpack, xml, etc.)
 - **Image rendering**: render images directly in your terminal
 - **Compression**: automatic gzip and zstd response body decompression
 - **Authentication**: support for Basic Auth, Bearer Token, and AWS Signature V4
@@ -67,6 +67,7 @@ To make a GET request to a URL and print the status code to stderr and the respo
 ```sh
 fetch example.com
 ```
+
 <pre><code><span style='opacity:0.67'>HTTP/1.1</span> <span style='color:green'><b>200</b></span> <span style='color:green'>OK</span>
 
 {
