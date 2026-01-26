@@ -136,6 +136,7 @@ func FormatHTML(buf []byte, w *core.Printer) error {
 			if err == io.EOF {
 				return nil
 			}
+			w.Reset()
 			return err
 
 		case html.DoctypeToken:
