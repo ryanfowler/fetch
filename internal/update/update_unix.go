@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 
 	"golang.org/x/sys/unix"
@@ -17,6 +18,12 @@ import (
 // unpackArtifact decodes the gzipped tar archive from the provided io.Reader
 // into "dir", returning any error.
 func unpackArtifact(dir string, r io.Reader) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
 	gr, err := gzip.NewReader(r)
 	if err != nil {
 		return err
@@ -32,7 +39,7 @@ func unpackArtifact(dir string, r io.Reader) error {
 		if err != nil {
 			return err
 		}
-		err = handleHeader(dir, tr, header)
+		err = handleHeader(root, tr, header)
 		if err != nil {
 			return err
 		}
@@ -40,20 +47,24 @@ func unpackArtifact(dir string, r io.Reader) error {
 }
 
 // handleHeader writes the provided file/directory as appropriate.
-func handleHeader(dir string, tr *tar.Reader, header *tar.Header) error {
-	target := filepath.Join(dir, header.Name)
+func handleHeader(root *os.Root, tr *tar.Reader, header *tar.Header) error {
+	name := header.Name
+
+	// Create parent directories if needed.
+	if dir := path.Dir(name); dir != "." {
+		if err := root.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+
 	if header.Typeflag == tar.TypeDir {
-		return os.MkdirAll(target, os.FileMode(header.Mode))
+		return root.Mkdir(name, os.FileMode(header.Mode))
 	}
 	if header.Typeflag != tar.TypeReg {
 		return nil
 	}
 
-	err := os.MkdirAll(filepath.Dir(target), 0755)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
+	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
 	if err != nil {
 		return err
 	}

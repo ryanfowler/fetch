@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,6 +24,12 @@ import (
 // unpackArtifact decodes the zip archive from the provided io.Reader into
 // "dir", returning any error encountered.
 func unpackArtifact(dir string, r io.Reader) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+
 	// Read the archive into memory, as we need an io.ReaderAt.
 	data, err := io.ReadAll(r)
 	if err != nil {
@@ -36,7 +43,7 @@ func unpackArtifact(dir string, r io.Reader) error {
 	}
 
 	for _, f := range zr.File {
-		err = handleZipFile(dir, f)
+		err = handleZipFile(root, f)
 		if err != nil {
 			return err
 		}
@@ -46,16 +53,18 @@ func unpackArtifact(dir string, r io.Reader) error {
 }
 
 // handleZipFile writes the provided directory/file to dir.
-func handleZipFile(dir string, f *zip.File) error {
-	target := filepath.Join(dir, f.Name)
+func handleZipFile(root *os.Root, f *zip.File) error {
+	name := f.Name
 
-	if f.FileInfo().IsDir() {
-		return os.MkdirAll(target, f.Mode())
+	// Create parent directories if needed.
+	if dir := path.Dir(name); dir != "." {
+		if err := root.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
 	}
 
-	err := os.MkdirAll(filepath.Dir(target), 0755)
-	if err != nil {
-		return err
+	if f.FileInfo().IsDir() {
+		return root.Mkdir(name, f.Mode())
 	}
 
 	rc, err := f.Open()
@@ -64,7 +73,7 @@ func handleZipFile(dir string, f *zip.File) error {
 	}
 	defer rc.Close()
 
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
 	if err != nil {
 		return err
 	}
