@@ -33,6 +33,7 @@ const (
 	TypeJSON
 	TypeMsgPack
 	TypeNDJSON
+	TypeProtobuf
 	TypeSSE
 	TypeXML
 )
@@ -298,6 +299,10 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		if format.FormatMsgPack(buf, p) == nil {
 			buf = p.Bytes()
 		}
+	case TypeProtobuf:
+		if format.FormatProtobuf(buf, p) == nil {
+			buf = p.Bytes()
+		}
 	case TypeXML:
 		if format.FormatXML(buf, p) == nil {
 			buf = p.Bytes()
@@ -329,11 +334,16 @@ func getContentType(headers http.Header) ContentType {
 				return TypeMsgPack
 			case "x-ndjson", "ndjson", "x-jsonl", "jsonl", "x-jsonlines":
 				return TypeNDJSON
+			case "protobuf", "x-protobuf", "grpc+proto", "x-google-protobuf", "vnd.google.protobuf":
+				return TypeProtobuf
 			case "xml":
 				return TypeXML
 			}
 			if strings.HasSuffix(subtype, "+json") || strings.HasSuffix(subtype, "-json") {
 				return TypeJSON
+			}
+			if strings.HasSuffix(subtype, "+proto") {
+				return TypeProtobuf
 			}
 			if strings.HasSuffix(subtype, "+xml") {
 				return TypeXML

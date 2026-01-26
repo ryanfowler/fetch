@@ -338,6 +338,7 @@ Supported formats for automatic formatting and syntax highlighting:
 - XML (`application/xml`, `text/xml`)
 - MessagePack (`application/msgpack`)
 - NDJSON/JSONLines (`application/x-ndjson`)
+- Protobuf (`application/x-protobuf`, `application/protobuf`)
 - Server-Sent Events (`text/event-stream`)
 
 ```sh
