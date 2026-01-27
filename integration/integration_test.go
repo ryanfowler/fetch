@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestMain(t *testing.T) {
@@ -947,6 +949,114 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, data)
 		assertBufNotContains(t, res.stderr, "zstd")
+	})
+
+	t.Run("protobuf response formatting", func(t *testing.T) {
+		// Build a simple protobuf message: field 1 = 123 (varint), field 2 = "hello" (string)
+		var protoData []byte
+		protoData = protowire.AppendTag(protoData, 1, protowire.VarintType)
+		protoData = protowire.AppendVarint(protoData, 123)
+		protoData = protowire.AppendTag(protoData, 2, protowire.BytesType)
+		protoData = protowire.AppendString(protoData, "hello")
+
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/protobuf")
+			w.WriteHeader(200)
+			w.Write(protoData)
+		})
+		defer server.Close()
+
+		// Without formatting, output is the raw protobuf.
+		res := runFetch(t, fetchPath, server.URL, "--format", "off")
+		assertExitCode(t, 0, res)
+		if !bytes.Equal(res.stdout.Bytes(), protoData) {
+			t.Fatalf("expected raw protobuf data")
+		}
+
+		// With formatting, protobuf is parsed and displayed.
+		res = runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "1:")
+		assertBufContains(t, res.stdout, "123")
+		assertBufContains(t, res.stdout, "2:")
+		assertBufContains(t, res.stdout, "hello")
+	})
+
+	t.Run("connect rpc error response", func(t *testing.T) {
+		// Simulate a Connect RPC error response.
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(404)
+			io.WriteString(w, `{"code":"not_found","message":"resource not found"}`)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 4, res) // 4xx status code
+		assertBufContains(t, res.stdout, "not_found")
+		assertBufContains(t, res.stdout, "resource not found")
+	})
+
+	t.Run("grpc response unframing", func(t *testing.T) {
+		// Build a gRPC-framed protobuf response.
+		var protoData []byte
+		protoData = protowire.AppendTag(protoData, 1, protowire.VarintType)
+		protoData = protowire.AppendVarint(protoData, 42)
+		protoData = protowire.AppendTag(protoData, 2, protowire.BytesType)
+		protoData = protowire.AppendString(protoData, "grpc test")
+
+		// gRPC framing: [compressed:1][length:4][data]
+		framedData := make([]byte, 5+len(protoData))
+		framedData[0] = 0 // not compressed
+		binary.BigEndian.PutUint32(framedData[1:5], uint32(len(protoData)))
+		copy(framedData[5:], protoData)
+
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/grpc+proto")
+			w.WriteHeader(200)
+			w.Write(framedData)
+		})
+		defer server.Close()
+
+		// With formatting, gRPC response is unframed and protobuf is parsed.
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "1:")
+		assertBufContains(t, res.stdout, "42")
+		assertBufContains(t, res.stdout, "2:")
+		assertBufContains(t, res.stdout, "grpc test")
+	})
+
+	t.Run("proto flags mutual exclusivity", func(t *testing.T) {
+		// proto-file and proto-desc cannot be used together
+		// Create temp files so we get past file existence validation
+		tmpDir := t.TempDir()
+		protoFile := filepath.Join(tmpDir, "a.proto")
+		descFile := filepath.Join(tmpDir, "b.pb")
+		os.WriteFile(protoFile, []byte("syntax = \"proto3\";"), 0644)
+		os.WriteFile(descFile, []byte{}, 0644)
+
+		res := runFetch(t, fetchPath, "http://example.com/svc/Method", "--grpc", "--proto-file", protoFile, "--proto-desc", descFile)
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "cannot be used together")
+	})
+
+	t.Run("proto-file requires protoc", func(t *testing.T) {
+		// If protoc isn't found, we should get a helpful error.
+		// This test will only fail if protoc is not installed.
+		// When protoc IS installed, it should fail because the file doesn't exist.
+		res := runFetch(t, fetchPath, "http://example.com/svc/Method", "--grpc", "--proto-file", "/nonexistent/file.proto")
+		assertExitCode(t, 1, res)
+		// Should either complain about protoc not found or file not found
+		if !strings.Contains(res.stderr.String(), "protoc") && !strings.Contains(res.stderr.String(), "exist") {
+			t.Fatalf("expected error about protoc or file not found, got: %s", res.stderr.String())
+		}
+	})
+
+	t.Run("proto-desc file not found", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "http://example.com/svc/Method", "--grpc", "--proto-desc", "/nonexistent/file.pb")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "does not exist")
 	})
 
 	t.Run("update", func(t *testing.T) {

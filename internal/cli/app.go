@@ -32,10 +32,14 @@ type App struct {
 	DryRun           bool
 	Edit             bool
 	Form             []core.KeyVal[string]
+	GRPC             bool
 	Help             bool
 	Method           string
 	Multipart        []core.KeyVal[string]
 	Output           string
+	ProtoDesc        string
+	ProtoFiles       []string
+	ProtoImports     []string
 	Range            []string
 	RemoteHeaderName bool
 	RemoteName       bool
@@ -102,8 +106,12 @@ func (a *App) CLI() *CLI {
 			{"aws-sigv4", "basic", "bearer"},
 			{"data", "form", "json", "multipart", "xml"},
 			{"output", "remote-name"},
+			{"proto-file", "proto-desc"},
 		},
 		RequiredFlags: []core.KeyVal[[]string]{
+			{Key: "proto-desc", Val: []string{"grpc"}},
+			{Key: "proto-file", Val: []string{"grpc"}},
+			{Key: "proto-import", Val: []string{"proto-file"}},
 			{Key: "remote-header-name", Val: []string{"remote-name"}},
 		},
 		Flags: []Flag{
@@ -396,6 +404,20 @@ func (a *App) CLI() *CLI {
 				},
 			},
 			{
+				Short:       "",
+				Long:        "grpc",
+				Args:        "",
+				Description: "Enable gRPC mode",
+				Default:     "",
+				IsSet: func() bool {
+					return a.GRPC
+				},
+				Fn: func(value string) error {
+					a.GRPC = true
+					return nil
+				},
+			},
+			{
 				Short:       "H",
 				Long:        "header",
 				Args:        "NAME:VALUE",
@@ -623,6 +645,59 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					a.Output = value
 					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "proto-desc",
+				Args:        "PATH",
+				Description: "Pre-compiled descriptor set file",
+				Default:     "",
+				IsSet: func() bool {
+					return a.ProtoDesc != ""
+				},
+				Fn: func(value string) error {
+					a.ProtoDesc = value
+					return checkFileExists(value)
+				},
+			},
+			{
+				Short:       "",
+				Long:        "proto-file",
+				Args:        "PATH",
+				Description: "Compile .proto file(s) via protoc",
+				Default:     "",
+				IsSet: func() bool {
+					return len(a.ProtoFiles) > 0
+				},
+				Fn: func(value string) error {
+					// Support comma-separated paths.
+					for p := range strings.SplitSeq(value, ",") {
+						p = strings.TrimSpace(p)
+						if p == "" {
+							continue
+						}
+						err := checkFileExists(p)
+						if err != nil {
+							return err
+						}
+						a.ProtoFiles = append(a.ProtoFiles, p)
+					}
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "proto-import",
+				Args:        "PATH",
+				Description: "Import path for proto compilation",
+				Default:     "",
+				IsSet: func() bool {
+					return len(a.ProtoImports) > 0
+				},
+				Fn: func(value string) error {
+					a.ProtoImports = append(a.ProtoImports, value)
+					return checkFileExists(value)
 				},
 			},
 			{
@@ -900,6 +975,17 @@ func requestBody(value string) (io.Reader, string, error) {
 		}
 		return f, path, nil
 	}
+}
+
+func checkFileExists(value string) error {
+	_, err := os.Stat(value)
+	if err == nil {
+		return nil
+	}
+	if os.IsNotExist(err) {
+		return core.FileNotExistsError(value)
+	}
+	return err
 }
 
 func cut(s, sep string) (string, string, bool) {

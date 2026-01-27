@@ -211,6 +211,7 @@ fetch --timeout 2.5 example.com
 **Flag**: `--dns-server IP[:PORT]|URL`
 
 Use a custom DNS server. Can be either:
+
 - IP address with optional port for UDP DNS
 - HTTPS URL for DNS-over-HTTPS
 
@@ -333,6 +334,7 @@ fetch --colour on example.com
 Set whether output should be formatted. Options: `auto`, `off`, `on`.
 
 Supported formats for automatic formatting and syntax highlighting:
+
 - JSON (`application/json`)
 - HTML (`text/html`)
 - XML (`application/xml`, `text/xml`)
@@ -517,6 +519,143 @@ fetch -j '{"message": "Hello \"World\""}' example.com
 
 # Use single quotes to avoid shell interpretation
 fetch -H 'Authorization: Bearer token-with-$pecial-chars' example.com
+```
+
+## gRPC Support
+
+`fetch` supports making gRPC calls with automatic protocol handling, JSON-to-protobuf conversion, and response formatting.
+
+### Basic gRPC Request
+
+**Flag**: `--grpc`
+
+Enable gRPC mode. This flag:
+
+- Uses the HTTP/2 protocol
+- Sets the method to `POST`
+- Adds gRPC headers (`Content-Type: application/grpc+proto`, `TE: trailers`, etc.)
+- Applies gRPC framing to the request body
+- Handles gRPC framing on the response
+
+The service and method are specified in the URL path in the format `/package.Service/Method`:
+
+```sh
+fetch https://localhost:50051/mypackage.MyService/MyMethod --grpc --insecure
+```
+
+### Proto Schema Options
+
+To enable JSON-to-protobuf conversion for request bodies and rich protobuf formatting for responses, provide a proto schema using one of these options:
+
+**Flag**: `--proto-file PATH`
+
+Compile `.proto` file(s) using `protoc`. Requires `protoc` to be installed. Can be specified multiple times or with comma-separated paths.
+
+```sh
+fetch https://localhost:50051/echo.EchoService/Echo \
+  --grpc \
+  --proto-file service.proto \
+  -j '{"message": "hello", "count": 42}' \
+  --insecure
+```
+
+**Flag**: `--proto-desc PATH`
+
+Use a pre-compiled descriptor set file. This is useful when `protoc` isn't available at runtime or to avoid recompilation.
+
+Generate a descriptor set with:
+
+```sh
+protoc --descriptor_set_out=service.pb --include_imports service.proto
+```
+
+Then use it:
+
+```sh
+fetch https://localhost:50051/echo.EchoService/Echo \
+  --grpc \
+  --proto-desc service.pb \
+  -j '{"message": "hello", "count": 42}' \
+  --insecure
+```
+
+**Flag**: `--proto-import PATH`
+
+Add import paths for proto compilation. Use with `--proto-file` when your proto files have imports.
+
+```sh
+fetch https://localhost:50051/mypackage.MyService/MyMethod \
+  --grpc \
+  --proto-file service.proto \
+  --proto-import ./proto \
+  --proto-import /usr/local/include \
+  -j '{"field": "value"}' \
+  --insecure
+```
+
+### How It Works
+
+When `--grpc` is used with a proto schema (`--proto-file` or `--proto-desc`):
+
+1. The service and method are extracted from the URL path
+2. The method's input/output message types are looked up in the schema
+3. JSON request bodies are automatically converted to protobuf
+4. Protobuf responses are formatted with field names from the schema
+
+Without a proto schema, `fetch` still handles gRPC framing but:
+
+- Request bodies must be raw protobuf (not JSON)
+- Responses are formatted using generic protobuf parsing (field numbers instead of names)
+
+### Examples
+
+**Simple gRPC call with JSON body:**
+
+```sh
+fetch https://api.example.com/package.Service/Method \
+  --grpc \
+  --proto-file service.proto \
+  -j '{"name": "test", "value": 123}'
+```
+
+**gRPC call with verbose output:**
+
+```sh
+fetch https://api.example.com/package.Service/Method \
+  --grpc \
+  --proto-file service.proto \
+  -j '{"request": "data"}' \
+  -vv
+```
+
+**gRPC call to local server with self-signed certificate:**
+
+```sh
+fetch https://localhost:50051/echo.EchoService/Echo \
+  --grpc \
+  --proto-desc echo.pb \
+  -j '{"message": "hello"}' \
+  --insecure
+```
+
+**Dry run to inspect the request:**
+
+```sh
+fetch https://api.example.com/package.Service/Method \
+  --grpc \
+  --proto-file service.proto \
+  -j '{"field": "value"}' \
+  --dry-run
+```
+
+**Use an editor to modify the request body:**
+
+```sh
+fetch https://api.example.com/package.Service/Method \
+  --grpc \
+  --proto-file service.proto \
+  -j '{"field": "value"}' \
+  --edit
 ```
 
 ## Advanced Usage
