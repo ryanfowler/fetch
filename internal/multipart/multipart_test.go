@@ -13,12 +13,12 @@ import (
 func TestMultipart(t *testing.T) {
 	tests := []struct {
 		name   string
-		fnPre  func(*testing.T) ([]core.KeyVal, func())
+		fnPre  func(*testing.T) ([]core.KeyVal[string], func())
 		fnPost func(*testing.T, *multipart.Form)
 	}{
 		{
 			name: "small json file",
-			fnPre: func(t *testing.T) ([]core.KeyVal, func()) {
+			fnPre: func(t *testing.T) ([]core.KeyVal[string], func()) {
 				t.Helper()
 
 				f, err := os.CreateTemp("", "*.json")
@@ -28,7 +28,7 @@ func TestMultipart(t *testing.T) {
 				defer f.Close()
 				f.WriteString(`{"key":"val"}`)
 
-				return []core.KeyVal{{Key: "key1", Val: "@" + f.Name()}}, func() {
+				return []core.KeyVal[string]{{Key: "key1", Val: "@" + f.Name()}}, func() {
 					os.Remove(f.Name())
 				}
 			},
@@ -55,7 +55,7 @@ func TestMultipart(t *testing.T) {
 		},
 		{
 			name: "file longer than 512 bytes with no extension",
-			fnPre: func(t *testing.T) ([]core.KeyVal, func()) {
+			fnPre: func(t *testing.T) ([]core.KeyVal[string], func()) {
 				t.Helper()
 
 				f, err := os.CreateTemp("", "")
@@ -67,7 +67,7 @@ func TestMultipart(t *testing.T) {
 				f.WriteString("\xFF\xD8\xFF") // JPEG signature.
 				f.Write(make([]byte, 512))
 
-				return []core.KeyVal{{Key: "key1", Val: "@" + f.Name()}}, func() {
+				return []core.KeyVal[string]{{Key: "key1", Val: "@" + f.Name()}}, func() {
 					os.Remove(f.Name())
 				}
 			},

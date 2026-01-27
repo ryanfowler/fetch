@@ -130,12 +130,12 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 	return hexSha256Reader(bytes.NewReader(body))
 }
 
-func getSignedHeaders(req *http.Request) []core.KeyVal {
-	out := make([]core.KeyVal, 0, len(req.Header)+1)
+func getSignedHeaders(req *http.Request) []core.KeyVal[string] {
+	out := make([]core.KeyVal[string], 0, len(req.Header)+1)
 
 	// Host header is required to be signed.
 	if _, ok := req.Header["Host"]; !ok {
-		out = append(out, core.KeyVal{Key: "host", Val: req.URL.Host})
+		out = append(out, core.KeyVal[string]{Key: "host", Val: req.URL.Host})
 	}
 
 	for key, vals := range req.Header {
@@ -146,16 +146,16 @@ func getSignedHeaders(req *http.Request) []core.KeyVal {
 		}
 		key = strings.ToLower(strings.TrimSpace(key))
 		val := strings.TrimSpace(strings.Join(vals, ","))
-		out = append(out, core.KeyVal{Key: key, Val: val})
+		out = append(out, core.KeyVal[string]{Key: key, Val: val})
 	}
 	// Headers should be ordered by key.
-	slices.SortFunc(out, func(a, b core.KeyVal) int {
+	slices.SortFunc(out, func(a, b core.KeyVal[string]) int {
 		return strings.Compare(a.Key, b.Key)
 	})
 	return out
 }
 
-func buildCanonicalRequest(req *http.Request, headers []core.KeyVal, payload string) []byte {
+func buildCanonicalRequest(req *http.Request, headers []core.KeyVal[string], payload string) []byte {
 	var buf bytes.Buffer
 	buf.Grow(512)
 

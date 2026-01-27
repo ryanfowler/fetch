@@ -21,7 +21,7 @@ type App struct {
 	Cfg config.Config
 
 	AWSSigv4         *aws.Config
-	Basic            *core.KeyVal
+	Basic            *core.KeyVal[string]
 	Bearer           string
 	BuildInfo        bool
 	Clobber          bool
@@ -31,10 +31,10 @@ type App struct {
 	Data             io.Reader
 	DryRun           bool
 	Edit             bool
-	Form             []core.KeyVal
+	Form             []core.KeyVal[string]
 	Help             bool
 	Method           string
-	Multipart        []core.KeyVal
+	Multipart        []core.KeyVal[string]
 	Output           string
 	Range            []string
 	RemoteHeaderName bool
@@ -103,6 +103,9 @@ func (a *App) CLI() *CLI {
 			{"data", "form", "json", "multipart", "xml"},
 			{"output", "remote-name"},
 		},
+		RequiredFlags: []core.KeyVal[[]string]{
+			{Key: "remote-header-name", Val: []string{"remote-name"}},
+		},
 		Flags: []Flag{
 			{
 				Short:       "",
@@ -167,7 +170,7 @@ func (a *App) CLI() *CLI {
 						const usage = "format must be <USERNAME:PASSWORD>"
 						return core.NewValueError("basic", value, usage, false)
 					}
-					a.Basic = &core.KeyVal{Key: user, Val: pass}
+					a.Basic = &core.KeyVal[string]{Key: user, Val: pass}
 					return nil
 				},
 			},
@@ -219,7 +222,7 @@ func (a *App) CLI() *CLI {
 				Description: "Enable/disable color",
 				Default:     "",
 				Aliases:     []string{"colour"},
-				Values: []core.KeyVal{
+				Values: []core.KeyVal[string]{
 					{
 						Key: "auto",
 						Val: "Automatically determine color",
@@ -260,7 +263,7 @@ func (a *App) CLI() *CLI {
 				Args:        "SHELL",
 				Description: "Output shell completion",
 				Default:     "",
-				Values: []core.KeyVal{
+				Values: []core.KeyVal[string]{
 					{Key: "fish"},
 					{Key: "zsh"},
 				},
@@ -361,7 +364,7 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					key, val, _ := cut(value, "=")
-					a.Form = append(a.Form, core.KeyVal{Key: key, Val: val})
+					a.Form = append(a.Form, core.KeyVal[string]{Key: key, Val: val})
 					return nil
 				},
 			},
@@ -371,7 +374,7 @@ func (a *App) CLI() *CLI {
 				Args:        "OPTION",
 				Description: "Enable/disable formatting",
 				Default:     "",
-				Values: []core.KeyVal{
+				Values: []core.KeyVal[string]{
 					{
 						Key: "auto",
 						Val: "Automatically determine whether to format",
@@ -425,7 +428,7 @@ func (a *App) CLI() *CLI {
 				Args:        "VERSION",
 				Description: "HTTP version to use",
 				Default:     "",
-				Values: []core.KeyVal{
+				Values: []core.KeyVal[string]{
 					{
 						Key: "1",
 						Val: "HTTP/1.1",
@@ -467,7 +470,7 @@ func (a *App) CLI() *CLI {
 				Args:        "OPTION",
 				Description: "Image rendering",
 				Default:     "",
-				Values: []core.KeyVal{
+				Values: []core.KeyVal[string]{
 					{
 						Key: "auto",
 						Val: "Automatically decide image display",
@@ -574,7 +577,7 @@ func (a *App) CLI() *CLI {
 							return fmt.Errorf("file is a directory: '%s'", path)
 						}
 					}
-					a.Multipart = append(a.Multipart, core.KeyVal{Key: key, Val: val})
+					a.Multipart = append(a.Multipart, core.KeyVal[string]{Key: key, Val: val})
 					return nil
 				},
 			},
@@ -619,35 +622,6 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					a.Output = value
-					return nil
-				},
-			},
-			{
-				Short:       "O",
-				Long:        "remote-name",
-				Aliases:     []string{"output-current-dir"},
-				Args:        "",
-				Description: "Use URL path component as output filename",
-				Default:     "",
-				IsSet: func() bool {
-					return a.RemoteName
-				},
-				Fn: func(value string) error {
-					a.RemoteName = true
-					return nil
-				},
-			},
-			{
-				Short:       "J",
-				Long:        "remote-header-name",
-				Args:        "",
-				Description: "Use content-disposition header filename",
-				Default:     "",
-				IsSet: func() bool {
-					return a.RemoteHeaderName
-				},
-				Fn: func(value string) error {
-					a.RemoteHeaderName = true
 					return nil
 				},
 			},
@@ -722,6 +696,35 @@ func (a *App) CLI() *CLI {
 				},
 			},
 			{
+				Short:       "J",
+				Long:        "remote-header-name",
+				Args:        "",
+				Description: "Use content-disposition header filename",
+				Default:     "",
+				IsSet: func() bool {
+					return a.RemoteHeaderName
+				},
+				Fn: func(value string) error {
+					a.RemoteHeaderName = true
+					return nil
+				},
+			},
+			{
+				Short:       "O",
+				Long:        "remote-name",
+				Aliases:     []string{"output-current-dir"},
+				Args:        "",
+				Description: "Use URL path component as output filename",
+				Default:     "",
+				IsSet: func() bool {
+					return a.RemoteName
+				},
+				Fn: func(value string) error {
+					a.RemoteName = true
+					return nil
+				},
+			},
+			{
 				Short:       "s",
 				Long:        "silent",
 				Args:        "",
@@ -755,7 +758,7 @@ func (a *App) CLI() *CLI {
 				Args:        "VERSION",
 				Description: "Minimum TLS version",
 				Default:     "",
-				Values: []core.KeyVal{
+				Values: []core.KeyVal[string]{
 					{
 						Key: "1.0",
 						Val: "TLS v1.0",

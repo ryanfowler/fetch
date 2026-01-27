@@ -57,10 +57,10 @@ func printRequestMetadata(p *core.Printer, req *http.Request, v core.HTTPVersion
 	headers := getHeaders(req.Header)
 	if req.Body != nil && req.ContentLength > 0 {
 		val := strconv.FormatInt(req.ContentLength, 10)
-		headers = addHeader(headers, core.KeyVal{Key: "content-length", Val: val})
+		headers = addHeader(headers, core.KeyVal[string]{Key: "content-length", Val: val})
 	}
 	if req.Header.Get("Host") == "" {
-		headers = addHeader(headers, core.KeyVal{Key: "host", Val: req.URL.Host})
+		headers = addHeader(headers, core.KeyVal[string]{Key: "host", Val: req.URL.Host})
 	}
 
 	for _, h := range headers {
@@ -108,11 +108,11 @@ func printResponseHeaders(p *core.Printer, resp *http.Response) {
 	headers := getHeaders(resp.Header)
 	if method != "HEAD" && resp.ContentLength >= 0 && resp.Header.Get("Content-Length") == "" {
 		val := strconv.FormatInt(resp.ContentLength, 10)
-		headers = addHeader(headers, core.KeyVal{Key: "content-length", Val: val})
+		headers = addHeader(headers, core.KeyVal[string]{Key: "content-length", Val: val})
 	}
 	if len(resp.TransferEncoding) > 0 && resp.Header.Get("Transfer-Encoding") == "" {
 		val := strings.Join(resp.TransferEncoding, ",")
-		headers = addHeader(headers, core.KeyVal{Key: "transfer-encoding", Val: val})
+		headers = addHeader(headers, core.KeyVal[string]{Key: "transfer-encoding", Val: val})
 	}
 
 	for _, h := range headers {

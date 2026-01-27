@@ -17,6 +17,7 @@ type CLI struct {
 	Args           []Arguments
 	Flags          []Flag
 	ExclusiveFlags [][]string
+	RequiredFlags  []core.KeyVal[[]string]
 }
 
 type Arguments struct {
@@ -31,7 +32,7 @@ type Flag struct {
 	Args        string
 	Description string
 	Default     string
-	Values      []core.KeyVal
+	Values      []core.KeyVal[string]
 	HideValues  bool
 	IsHidden    bool
 	IsSet       func() bool
@@ -128,6 +129,14 @@ func parse(cli *CLI, args []string) error {
 		}
 	}
 
+	// Check required flags.
+	for _, req := range cli.RequiredFlags {
+		err = validateRequired(req, long)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -217,6 +226,24 @@ func validateExclusives(exc []string, long map[string]Flag) error {
 		return newExclusiveFlagsError(lastSet, name)
 	}
 	return nil
+}
+
+func validateRequired(req core.KeyVal[[]string], long map[string]Flag) error {
+	flag := long[req.Key]
+	if !flag.IsSet() {
+		return nil
+	}
+
+	// Check if ANY of the required flags is set (OR logic).
+	for _, required := range req.Val {
+		requiredFlag := long[required]
+		if requiredFlag.IsSet() {
+			return nil
+		}
+	}
+
+	// None of the required flags are set.
+	return newRequiredFlagError(req.Key, req.Val)
 }
 
 func isFlagVisibleOnOS(flagOS []string) bool {

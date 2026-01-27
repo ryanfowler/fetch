@@ -17,7 +17,7 @@ type Multipart struct {
 }
 
 // NewMultipart returns a Multipart using the provided key/values.
-func NewMultipart(kvs []core.KeyVal) *Multipart {
+func NewMultipart(kvs []core.KeyVal[string]) *Multipart {
 	if len(kvs) == 0 {
 		return nil
 	}

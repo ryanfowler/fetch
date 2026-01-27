@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -72,4 +73,49 @@ func (err argRequiredError) PrintTo(p *core.Printer) {
 	p.WriteString(string(err))
 	p.Reset()
 	p.WriteString("'")
+}
+
+type requiredFlagError struct {
+	flag     string
+	required []string
+}
+
+func newRequiredFlagError(flag string, required []string) requiredFlagError {
+	return requiredFlagError{flag: flag, required: required}
+}
+
+func (err requiredFlagError) Error() string {
+	if len(err.required) == 1 {
+		return fmt.Sprintf("flag '--%s' requires '--%s'", err.flag, err.required[0])
+	}
+	return fmt.Sprintf("flag '--%s' requires one of '--%s'", err.flag, strings.Join(err.required, "', '--"))
+}
+
+func (err requiredFlagError) PrintTo(p *core.Printer) {
+	p.WriteString("flag '")
+	p.Set(core.Bold)
+	p.WriteString("--")
+	p.WriteString(err.flag)
+	p.Reset()
+
+	if len(err.required) == 1 {
+		p.WriteString("' requires '")
+		p.Set(core.Bold)
+		p.WriteString("--")
+		p.WriteString(err.required[0])
+		p.Reset()
+		p.WriteString("'")
+	} else {
+		p.WriteString("' requires one of '")
+		for i, req := range err.required {
+			if i > 0 {
+				p.WriteString("', '")
+			}
+			p.Set(core.Bold)
+			p.WriteString("--")
+			p.WriteString(req)
+			p.Reset()
+		}
+		p.WriteString("'")
+	}
 }

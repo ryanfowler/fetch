@@ -141,7 +141,7 @@ func getFlagMaps(flags []cli.Flag) (map[string]cli.Flag, map[string]cli.Flag) {
 	return short, long
 }
 
-func completeLongFlag(flags []cli.Flag, long map[string]cli.Flag, value string) []core.KeyVal {
+func completeLongFlag(flags []cli.Flag, long map[string]cli.Flag, value string) []core.KeyVal[string] {
 	if key, val, ok := strings.Cut(value, "="); ok {
 		flag, ok := long[key]
 		if !ok {
@@ -151,10 +151,10 @@ func completeLongFlag(flags []cli.Flag, long map[string]cli.Flag, value string) 
 		return completeValue(flag, prefix, val)
 	}
 
-	var out []core.KeyVal
+	var out []core.KeyVal[string]
 	for _, flag := range flags {
 		if strings.HasPrefix(flag.Long, value) {
-			out = append(out, core.KeyVal{
+			out = append(out, core.KeyVal[string]{
 				Key: "--" + flag.Long,
 				Val: flag.Description,
 			})
@@ -163,7 +163,7 @@ func completeLongFlag(flags []cli.Flag, long map[string]cli.Flag, value string) 
 	return out
 }
 
-func completeShortFlag(flags []cli.Flag, short map[string]cli.Flag, value string) []core.KeyVal {
+func completeShortFlag(flags []cli.Flag, short map[string]cli.Flag, value string) []core.KeyVal[string] {
 	values := make(map[string]struct{})
 	for i := range value {
 		name := value[i : i+1]
@@ -183,7 +183,7 @@ func completeShortFlag(flags []cli.Flag, short map[string]cli.Flag, value string
 		values[value[i:i+1]] = struct{}{}
 	}
 
-	var out []core.KeyVal
+	var out []core.KeyVal[string]
 	for _, flag := range flags {
 		if flag.Short == "" {
 			continue
@@ -191,7 +191,7 @@ func completeShortFlag(flags []cli.Flag, short map[string]cli.Flag, value string
 		if _, ok := values[flag.Short]; ok {
 			continue
 		}
-		out = append(out, core.KeyVal{
+		out = append(out, core.KeyVal[string]{
 			Key: "-" + value + flag.Short,
 			Val: flag.Description,
 		})
@@ -199,7 +199,7 @@ func completeShortFlag(flags []cli.Flag, short map[string]cli.Flag, value string
 	return out
 }
 
-func completeValue(flag cli.Flag, prefix, value string) []core.KeyVal {
+func completeValue(flag cli.Flag, prefix, value string) []core.KeyVal[string] {
 	if flag.Args == "" {
 		// This flag doesn't take any arguments.
 		return nil
@@ -207,10 +207,10 @@ func completeValue(flag cli.Flag, prefix, value string) []core.KeyVal {
 
 	if len(flag.Values) > 0 {
 		// There are specific values for this flag.
-		var kvs []core.KeyVal
+		var kvs []core.KeyVal[string]
 		for _, fv := range flag.Values {
 			if strings.HasPrefix(fv.Key, value) {
-				kvs = append(kvs, core.KeyVal{
+				kvs = append(kvs, core.KeyVal[string]{
 					Key: prefix + fv.Key,
 					Val: fv.Val,
 				})
@@ -237,12 +237,12 @@ func completeValue(flag cli.Flag, prefix, value string) []core.KeyVal {
 	return nil
 }
 
-func completePath(prefix, orig string) []core.KeyVal {
+func completePath(prefix, orig string) []core.KeyVal[string] {
 	path := os.ExpandEnv(orig)
 
 	if orig == "~" {
 		// Special case when path is '~'.
-		return []core.KeyVal{{Key: prefix + "~/", Val: "File"}}
+		return []core.KeyVal[string]{{Key: prefix + "~/", Val: "File"}}
 	}
 
 	if len(path) >= 2 && path[0] == '~' && path[1] == os.PathSeparator {
@@ -266,7 +266,7 @@ func completePath(prefix, orig string) []core.KeyVal {
 		base = filepath.Base(path)
 	}
 
-	var out []core.KeyVal
+	var out []core.KeyVal[string]
 	for _, entry := range entries {
 		name := entry.Name()
 
@@ -285,7 +285,7 @@ func completePath(prefix, orig string) []core.KeyVal {
 		if entry.IsDir() {
 			file = file + string(os.PathSeparator)
 		}
-		out = append(out, core.KeyVal{
+		out = append(out, core.KeyVal[string]{
 			Key: prefix + file,
 			Val: "File",
 		})
@@ -293,13 +293,13 @@ func completePath(prefix, orig string) []core.KeyVal {
 	return out
 }
 
-func allFlags(flags []cli.Flag) []core.KeyVal {
-	kvs := make([]core.KeyVal, 0, len(flags))
+func allFlags(flags []cli.Flag) []core.KeyVal[string] {
+	kvs := make([]core.KeyVal[string], 0, len(flags))
 	for _, flag := range flags {
 		if flag.IsHidden {
 			continue
 		}
-		kvs = append(kvs, core.KeyVal{
+		kvs = append(kvs, core.KeyVal[string]{
 			Key: "--" + flag.Long,
 			Val: flag.Description,
 		})
