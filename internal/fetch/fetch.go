@@ -20,8 +20,12 @@ import (
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/format"
+	fetchgrpc "github.com/ryanfowler/fetch/internal/grpc"
 	"github.com/ryanfowler/fetch/internal/image"
 	"github.com/ryanfowler/fetch/internal/multipart"
+	"github.com/ryanfowler/fetch/internal/proto"
+
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 type ContentType int
@@ -30,6 +34,7 @@ const (
 	TypeUnknown ContentType = iota
 	TypeCSS
 	TypeCSV
+	TypeGRPC
 	TypeHTML
 	TypeImage
 	TypeJSON
@@ -53,6 +58,7 @@ type Request struct {
 	Edit             bool
 	Form             []core.KeyVal[string]
 	Format           core.Format
+	GRPC             bool
 	Headers          []core.KeyVal[string]
 	HTTP             core.HTTPVersion
 	IgnoreStatus     bool
@@ -64,6 +70,9 @@ type Request struct {
 	Multipart        *multipart.Multipart
 	Output           string
 	PrinterHandle    *core.Handle
+	ProtoDesc        string
+	ProtoFiles       []string
+	ProtoImports     []string
 	Proxy            *url.URL
 	QueryParams      []core.KeyVal[string]
 	Range            []string
@@ -75,6 +84,9 @@ type Request struct {
 	UnixSocket       string
 	URL              *url.URL
 	Verbosity        core.Verbosity
+
+	// responseDescriptor is set internally after proto setup for response formatting.
+	responseDescriptor protoreflect.MessageDescriptor
 }
 
 func Fetch(ctx context.Context, r *Request) int {
@@ -96,6 +108,27 @@ func Fetch(ctx context.Context, r *Request) int {
 }
 
 func fetch(ctx context.Context, r *Request) (int, error) {
+	// 1. Load proto schema if configured.
+	var schema *proto.Schema
+	if len(r.ProtoFiles) > 0 || r.ProtoDesc != "" {
+		var err error
+		schema, err = loadProtoSchema(r)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	// 2. Setup gRPC (adds headers, sets HTTP version, finds descriptors).
+	var requestDesc protoreflect.MessageDescriptor
+	if r.GRPC {
+		var err error
+		requestDesc, r.responseDescriptor, err = setupGRPC(r, schema)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	// 3. Create HTTP client and request.
 	c := client.NewClient(client.ClientConfig{
 		CACerts:    r.CACerts,
 		DNSServer:  r.DNSServer,
@@ -131,7 +164,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}()
 
-	// Open an editor to modify the request body, if necessary.
+	// 4. Edit step (user edits request body).
 	if r.Edit {
 		err = editRequestBody(req)
 		if err != nil {
@@ -139,6 +172,30 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}
 
+	// 5. Convert JSON to protobuf AFTER edit.
+	if requestDesc != nil && req.Body != nil && req.Body != http.NoBody {
+		// Read the body and convert.
+		converted, err := convertJSONToProtobuf(req.Body, requestDesc)
+		if err != nil {
+			return 0, err
+		}
+		req.Body = io.NopCloser(converted)
+		if req.Header.Get("Content-Type") == "" {
+			req.Header.Set("Content-Type", "application/protobuf")
+		}
+	}
+
+	// 6. Frame gRPC request AFTER conversion.
+	// gRPC requires framing even for empty messages.
+	if r.GRPC {
+		framed, err := frameGRPCRequest(req.Body)
+		if err != nil {
+			return 0, err
+		}
+		req.Body = io.NopCloser(framed)
+	}
+
+	// 7. Print request metadata / dry-run.
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
 		printRequestMetadata(errPrinter, req, r.HTTP)
@@ -152,12 +209,12 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			errPrinter.WriteString("\n")
 			errPrinter.Flush()
 
-			ok, r, err := isPrintable(req.Body)
+			ok, rdr, err := isPrintable(req.Body)
 			if err != nil {
 				return 0, err
 			}
 			if ok {
-				_, err = io.Copy(os.Stderr, r)
+				_, err = io.Copy(os.Stderr, rdr)
 				return 0, err
 			}
 
@@ -178,6 +235,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		req = req.WithContext(ctx)
 	}
 
+	// 8. Make request.
 	return makeRequest(ctx, r, c, req)
 }
 
@@ -309,8 +367,29 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		if format.FormatMsgPack(buf, p) == nil {
 			buf = p.Bytes()
 		}
+	case TypeGRPC:
+		// Unframe gRPC response before processing.
+		unframedBuf, _, err := fetchgrpc.Unframe(buf)
+		if err != nil {
+			// If unframing fails, try to process as raw protobuf.
+			unframedBuf = buf
+		}
+		if r.responseDescriptor != nil {
+			err = format.FormatProtobufWithDescriptor(unframedBuf, r.responseDescriptor, p)
+		} else {
+			err = format.FormatProtobuf(unframedBuf, p)
+		}
+		if err == nil {
+			buf = p.Bytes()
+		}
 	case TypeProtobuf:
-		if format.FormatProtobuf(buf, p) == nil {
+		var err error
+		if r.responseDescriptor != nil {
+			err = format.FormatProtobufWithDescriptor(buf, r.responseDescriptor, p)
+		} else {
+			err = format.FormatProtobuf(buf, p)
+		}
+		if err == nil {
 			buf = p.Bytes()
 		}
 	case TypeXML:
@@ -340,13 +419,15 @@ func getContentType(headers http.Header) ContentType {
 			switch subtype {
 			case "csv":
 				return TypeCSV
+			case "grpc", "grpc+proto":
+				return TypeGRPC
 			case "json":
 				return TypeJSON
 			case "msgpack", "x-msgpack", "vnd.msgpack":
 				return TypeMsgPack
 			case "x-ndjson", "ndjson", "x-jsonl", "jsonl", "x-jsonlines":
 				return TypeNDJSON
-			case "protobuf", "x-protobuf", "grpc+proto", "x-google-protobuf", "vnd.google.protobuf":
+			case "protobuf", "x-protobuf", "x-google-protobuf", "vnd.google.protobuf":
 				return TypeProtobuf
 			case "xml":
 				return TypeXML

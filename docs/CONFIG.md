@@ -45,6 +45,7 @@ option = host_specific_value
 ### Auto-Update Options
 
 #### `auto-update`
+
 **Type**: Boolean or duration interval
 **Default**: `false` (disabled)
 
@@ -66,6 +67,7 @@ auto-update = 1d
 ### Output Control Options
 
 #### `color` / `colour`
+
 **Type**: String
 **Values**: `auto`, `off`, `on`
 **Default**: `auto`
@@ -84,6 +86,7 @@ color = on
 ```
 
 #### `format`
+
 **Type**: String
 **Values**: `auto`, `off`, `on`
 **Default**: `auto`
@@ -102,6 +105,7 @@ format = on
 ```
 
 #### `image`
+
 **Type**: String
 **Values**: `auto`, `native`, `off`
 **Default**: `auto`
@@ -120,6 +124,7 @@ image = off
 ```
 
 #### `no-pager`
+
 **Type**: Boolean
 **Default**: `false`
 
@@ -134,6 +139,7 @@ no-pager = false
 ```
 
 #### `silent`
+
 **Type**: Boolean
 **Default**: `false`
 
@@ -148,6 +154,7 @@ silent = false
 ```
 
 #### `verbosity`
+
 **Type**: Integer
 **Values**: `0` or greater
 **Default**: `0`
@@ -171,6 +178,7 @@ verbosity = 3
 ### Network Options
 
 #### `ca-cert`
+
 **Type**: CA certificate path
 **Default**: System default
 
@@ -182,6 +190,7 @@ ca-cert = ca-cert.pem
 ```
 
 #### `dns-server`
+
 **Type**: IP address with optional port, or HTTPS URL
 **Default**: System default
 
@@ -203,6 +212,7 @@ dns-server = https://dns.google/dns-query
 ```
 
 #### `proxy`
+
 **Type**: URL
 **Default**: None
 
@@ -220,6 +230,7 @@ proxy = socks5://localhost:1080
 ```
 
 #### `timeout`
+
 **Type**: Number (seconds)
 **Default**: System default
 
@@ -234,6 +245,7 @@ timeout = 2.5
 ```
 
 #### `redirects`
+
 **Type**: Integer
 **Default**: System default
 
@@ -248,6 +260,7 @@ redirects = 10
 ```
 
 #### `http`
+
 **Type**: String
 **Values**: `1`, `2`, `3`
 
@@ -262,6 +275,7 @@ http = 2
 ```
 
 #### `tls`
+
 **Type**: String
 **Values**: `1.0`, `1.1`, `1.2`, `1.3`
 **Default**: System default
@@ -277,6 +291,7 @@ tls = 1.3
 ```
 
 #### `insecure`
+
 **Type**: Boolean
 **Default**: `false`
 
@@ -291,6 +306,7 @@ insecure = false
 ```
 
 #### `no-encode`
+
 **Type**: Boolean
 **Default**: `false`
 
@@ -307,6 +323,7 @@ no-encode = false
 ### Request Options
 
 #### `header`
+
 **Type**: String (name:value format)
 **Repeatable**: Yes
 
@@ -323,6 +340,7 @@ header = User-Agent: MyApp/1.0
 ```
 
 #### `query`
+
 **Type**: String (key=value format)
 **Repeatable**: Yes
 
@@ -339,6 +357,7 @@ query = sort=name
 ```
 
 #### `ignore-status`
+
 **Type**: Boolean
 **Default**: `false`
 
@@ -453,6 +472,7 @@ config file '/home/user/.config/fetch/config': line 15: invalid option: 'invalid
 ```
 
 Common validation errors include:
+
 - Invalid option names
 - Invalid values for specific options (e.g., `color = invalid`)
 - Malformed key=value pairs

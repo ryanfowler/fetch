@@ -7,8 +7,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
+	fetchproto "github.com/ryanfowler/fetch/internal/proto"
 
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 // FormatProtobuf formats the provided raw protobuf data to the Printer.
@@ -18,6 +23,40 @@ func FormatProtobuf(buf []byte, p *core.Printer) error {
 		p.Reset()
 	}
 	return err
+}
+
+// FormatProtobufWithSchema formats protobuf data as JSON using the provided schema.
+func FormatProtobufWithSchema(buf []byte, schema *fetchproto.Schema, typeName string, p *core.Printer) error {
+	md, err := schema.FindMessage(typeName)
+	if err != nil {
+		return err
+	}
+
+	return FormatProtobufWithDescriptor(buf, md, p)
+}
+
+// FormatProtobufWithDescriptor formats protobuf data as JSON using a message descriptor.
+func FormatProtobufWithDescriptor(buf []byte, md protoreflect.MessageDescriptor, p *core.Printer) error {
+	msg := dynamicpb.NewMessage(md)
+	if err := proto.Unmarshal(buf, msg); err != nil {
+		return err
+	}
+
+	// Marshal to JSON.
+	opts := protojson.MarshalOptions{
+		Multiline:       true,
+		Indent:          "  ",
+		EmitUnpopulated: false,
+		UseProtoNames:   true,
+	}
+
+	jsonBytes, err := opts.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	// Format the JSON with syntax highlighting.
+	return FormatJSON(jsonBytes, p)
 }
 
 func formatProtobuf(buf []byte, p *core.Printer, indent int) error {

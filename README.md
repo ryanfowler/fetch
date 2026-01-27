@@ -11,6 +11,7 @@
 - **Compression**: automatic gzip and zstd response body decompression
 - **Authentication**: support for Basic Auth, Bearer Token, and AWS Signature V4
 - **Form body**: send multipart or urlencoded form bodies
+- **gRPC support**: make gRPC calls with automatic JSON-to-protobuf conversion
 - **Editor integration**: use an editor to modify the request body
 - **Configuration**: global and per-host configuration
 - _and more!_
