@@ -316,6 +316,138 @@ func TestFormatHTMLPlanExample(t *testing.T) {
 	}
 }
 
+func TestFormatHTMLEmbeddedCSS(t *testing.T) {
+	t.Run("basic embedded CSS", func(t *testing.T) {
+		input := `<style>body{color:red}</style>`
+		p := core.NewHandle(core.ColorOff).Stderr()
+		err := FormatHTML([]byte(input), p)
+		if err != nil {
+			t.Fatalf("FormatHTML() error = %v", err)
+		}
+
+		output := string(p.Bytes())
+		// Should contain formatted CSS with body selector and color property.
+		if !strings.Contains(output, "body") {
+			t.Errorf("output should contain 'body', got: %s", output)
+		}
+		if !strings.Contains(output, "color") {
+			t.Errorf("output should contain 'color', got: %s", output)
+		}
+		if !strings.Contains(output, "red") {
+			t.Errorf("output should contain 'red', got: %s", output)
+		}
+	})
+
+	t.Run("nested HTML with style", func(t *testing.T) {
+		input := `<html><head><style>.a{margin:0}</style></head></html>`
+		p := core.NewHandle(core.ColorOff).Stderr()
+		err := FormatHTML([]byte(input), p)
+		if err != nil {
+			t.Fatalf("FormatHTML() error = %v", err)
+		}
+
+		output := string(p.Bytes())
+		// Should contain formatted CSS.
+		if !strings.Contains(output, ".a") {
+			t.Errorf("output should contain '.a', got: %s", output)
+		}
+		if !strings.Contains(output, "margin") {
+			t.Errorf("output should contain 'margin', got: %s", output)
+		}
+	})
+
+	t.Run("empty style tag", func(t *testing.T) {
+		input := `<style></style>`
+		p := core.NewHandle(core.ColorOff).Stderr()
+		err := FormatHTML([]byte(input), p)
+		if err != nil {
+			t.Fatalf("FormatHTML() error = %v", err)
+		}
+
+		output := string(p.Bytes())
+		// Should just have the style tags.
+		if !strings.Contains(output, "<style>") {
+			t.Errorf("output should contain '<style>', got: %s", output)
+		}
+		if !strings.Contains(output, "</style>") {
+			t.Errorf("output should contain '</style>', got: %s", output)
+		}
+	})
+
+	t.Run("whitespace-only style", func(t *testing.T) {
+		input := `<style>
+   </style>`
+		p := core.NewHandle(core.ColorOff).Stderr()
+		err := FormatHTML([]byte(input), p)
+		if err != nil {
+			t.Fatalf("FormatHTML() error = %v", err)
+		}
+
+		output := string(p.Bytes())
+		// Should contain style tags but no CSS content other than newlines.
+		if !strings.Contains(output, "<style>") {
+			t.Errorf("output should contain '<style>', got: %s", output)
+		}
+	})
+
+	t.Run("script tag unchanged", func(t *testing.T) {
+		input := `<script>var x = 1;</script>`
+		p := core.NewHandle(core.ColorOff).Stderr()
+		err := FormatHTML([]byte(input), p)
+		if err != nil {
+			t.Fatalf("FormatHTML() error = %v", err)
+		}
+
+		output := string(p.Bytes())
+		// Script content should be preserved as-is.
+		if !strings.Contains(output, "var x = 1;") {
+			t.Errorf("script content should be preserved, got: %s", output)
+		}
+	})
+
+	t.Run("multiple style tags", func(t *testing.T) {
+		input := `<style>.a{}</style><style>.b{}</style>`
+		p := core.NewHandle(core.ColorOff).Stderr()
+		err := FormatHTML([]byte(input), p)
+		if err != nil {
+			t.Fatalf("FormatHTML() error = %v", err)
+		}
+
+		output := string(p.Bytes())
+		// Both should be formatted.
+		if !strings.Contains(output, ".a") {
+			t.Errorf("output should contain '.a', got: %s", output)
+		}
+		if !strings.Contains(output, ".b") {
+			t.Errorf("output should contain '.b', got: %s", output)
+		}
+	})
+
+	t.Run("complex CSS in nested HTML", func(t *testing.T) {
+		input := `<html><head><style>body{color:red;margin:0}.container{display:flex}</style></head></html>`
+		p := core.NewHandle(core.ColorOff).Stderr()
+		err := FormatHTML([]byte(input), p)
+		if err != nil {
+			t.Fatalf("FormatHTML() error = %v", err)
+		}
+
+		output := string(p.Bytes())
+		// Should contain formatted CSS with multiple rules.
+		if !strings.Contains(output, "body") {
+			t.Errorf("output should contain 'body', got: %s", output)
+		}
+		if !strings.Contains(output, ".container") {
+			t.Errorf("output should contain '.container', got: %s", output)
+		}
+		if !strings.Contains(output, "display") {
+			t.Errorf("output should contain 'display', got: %s", output)
+		}
+		if !strings.Contains(output, "flex") {
+			t.Errorf("output should contain 'flex', got: %s", output)
+		}
+	})
+}
+
 func TestEscapeHTMLAttrValue(t *testing.T) {
 	tests := []struct {
 		name  string
