@@ -25,7 +25,7 @@ type Config struct {
 	Color        core.Color
 	DNSServer    *url.URL
 	Format       core.Format
-	Headers      []core.KeyVal
+	Headers      []core.KeyVal[string]
 	HTTP         core.HTTPVersion
 	IgnoreStatus *bool
 	Image        core.ImageSetting
@@ -33,7 +33,7 @@ type Config struct {
 	NoEncode     *bool
 	NoPager      *bool
 	Proxy        *url.URL
-	QueryParams  []core.KeyVal
+	QueryParams  []core.KeyVal[string]
 	Redirects    *int
 	Silent       *bool
 	Timeout      *time.Duration
@@ -266,7 +266,7 @@ func (c *Config) ParseFormat(value string) error {
 
 func (c *Config) ParseHeader(value string) error {
 	key, val, _ := cut(value, ":")
-	c.Headers = append(c.Headers, core.KeyVal{Key: key, Val: val})
+	c.Headers = append(c.Headers, core.KeyVal[string]{Key: key, Val: val})
 	return nil
 
 }
@@ -348,7 +348,7 @@ func (c *Config) ParseProxy(value string) error {
 
 func (c *Config) ParseQuery(value string) error {
 	key, val, _ := cut(value, "=")
-	c.QueryParams = append(c.QueryParams, core.KeyVal{Key: key, Val: val})
+	c.QueryParams = append(c.QueryParams, core.KeyVal[string]{Key: key, Val: val})
 	return nil
 }
 

@@ -303,17 +303,17 @@ func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, err
 // RequestConfig represents the configuration for creating an HTTP request.
 type RequestConfig struct {
 	AWSSigV4    *aws.Config
-	Basic       *core.KeyVal
+	Basic       *core.KeyVal[string]
 	Bearer      string
 	ContentType string
 	Data        io.Reader
-	Form        []core.KeyVal
-	Headers     []core.KeyVal
+	Form        []core.KeyVal[string]
+	Headers     []core.KeyVal[string]
 	HTTP        core.HTTPVersion
 	Method      string
 	Multipart   *multipart.Multipart
 	NoEncode    bool
-	QueryParams []core.KeyVal
+	QueryParams []core.KeyVal[string]
 	Range       []string
 	URL         *url.URL
 }

@@ -120,13 +120,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Respond with an error if -J is specified without -O.
-	if app.RemoteHeaderName && !app.RemoteName {
-		p := handle.Stderr()
-		writeCLIErr(p, errors.New("--remote-header-name (-J) requires --remote-name (-O)"))
-		os.Exit(1)
-	}
-
 	// Make the HTTP request using the parsed configuration.
 	req := fetch.Request{
 		AWSSigv4:         app.AWSSigv4,

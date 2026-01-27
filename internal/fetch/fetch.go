@@ -41,7 +41,7 @@ const (
 
 type Request struct {
 	AWSSigv4         *aws.Config
-	Basic            *core.KeyVal
+	Basic            *core.KeyVal[string]
 	Bearer           string
 	CACerts          []*x509.Certificate
 	Clobber          bool
@@ -50,9 +50,9 @@ type Request struct {
 	DNSServer        *url.URL
 	DryRun           bool
 	Edit             bool
-	Form             []core.KeyVal
+	Form             []core.KeyVal[string]
 	Format           core.Format
-	Headers          []core.KeyVal
+	Headers          []core.KeyVal[string]
 	HTTP             core.HTTPVersion
 	IgnoreStatus     bool
 	Image            core.ImageSetting
@@ -64,7 +64,7 @@ type Request struct {
 	Output           string
 	PrinterHandle    *core.Handle
 	Proxy            *url.URL
-	QueryParams      []core.KeyVal
+	QueryParams      []core.KeyVal[string]
 	Range            []string
 	Redirects        *int
 	RemoteHeaderName bool
@@ -420,20 +420,20 @@ func getExitCodeForStatus(status int) int {
 	}
 }
 
-func getHeaders(headers http.Header) []core.KeyVal {
-	out := make([]core.KeyVal, 0, len(headers))
+func getHeaders(headers http.Header) []core.KeyVal[string] {
+	out := make([]core.KeyVal[string], 0, len(headers))
 	for k, v := range headers {
 		k = strings.ToLower(k)
-		out = append(out, core.KeyVal{Key: k, Val: strings.Join(v, ",")})
+		out = append(out, core.KeyVal[string]{Key: k, Val: strings.Join(v, ",")})
 	}
-	slices.SortFunc(out, func(a, b core.KeyVal) int {
+	slices.SortFunc(out, func(a, b core.KeyVal[string]) int {
 		return strings.Compare(a.Key, b.Key)
 	})
 	return out
 }
 
-func addHeader(headers []core.KeyVal, h core.KeyVal) []core.KeyVal {
-	i, _ := slices.BinarySearchFunc(headers, h, func(a, b core.KeyVal) int {
+func addHeader(headers []core.KeyVal[string], h core.KeyVal[string]) []core.KeyVal[string] {
+	i, _ := slices.BinarySearchFunc(headers, h, func(a, b core.KeyVal[string]) int {
 		return strings.Compare(a.Key, b.Key)
 	})
 	return slices.Insert(headers, i, h)

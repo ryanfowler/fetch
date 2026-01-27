@@ -557,7 +557,7 @@ func TestMain(t *testing.T) {
 	t.Run("remote-header-name requires remote-name", func(t *testing.T) {
 		res := runFetch(t, fetchPath, "http://example.com", "-J")
 		assertExitCode(t, 1, res)
-		assertBufContains(t, res.stderr, "--remote-header-name (-J) requires --remote-name (-O)")
+		assertBufContains(t, res.stderr, "flag '--remote-header-name' requires '--remote-name'")
 	})
 
 	t.Run("file exists error", func(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 type Shell interface {
 	Name() string
 	Register() string
-	Complete([]core.KeyVal) string
+	Complete([]core.KeyVal[string]) string
 }
 
 // GetShell returns the shell matching the provided name. If no shell matches,
@@ -36,7 +36,7 @@ func (f Fish) Register() string {
 	return `complete --keep-order --exclusive --command fetch --arguments "(fetch --complete=fish -- (commandline --current-process --tokens-expanded --cut-at-cursor) (commandline --cut-at-cursor --current-token))"`
 }
 
-func (f Fish) Complete(vals []core.KeyVal) string {
+func (f Fish) Complete(vals []core.KeyVal[string]) string {
 	var sb strings.Builder
 	for _, kv := range vals {
 		sb.WriteString(kv.Key)
@@ -76,7 +76,7 @@ _fetch_complete() {
 compdef _fetch_complete fetch`
 }
 
-func (z Zsh) Complete(vals []core.KeyVal) string {
+func (z Zsh) Complete(vals []core.KeyVal[string]) string {
 	var sb strings.Builder
 	for i, kv := range vals {
 		if i > 0 {

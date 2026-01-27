@@ -52,8 +52,9 @@ const (
 )
 
 // KeyVal represents a generic key & value struct.
-type KeyVal struct {
-	Key, Val string
+type KeyVal[T any] struct {
+	Key string
+	Val T
 }
 
 // PointerTo returns a pointer to the value provided.
