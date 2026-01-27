@@ -253,10 +253,26 @@ func FormatHTML(buf []byte, w *core.Printer) error {
 			}
 
 			if inRawText || inPreserveWS {
-				// Preserve content exactly.
-				w.Set(core.Green)
-				w.Write(text)
-				w.Reset()
+				if len(stack) > 0 && stack[len(stack)-1].tagName == "style" {
+					// Format CSS content inside <style> tags.
+					w.WriteString("\n")
+					trimmedText := bytes.TrimSpace(text)
+					if len(trimmedText) > 0 {
+						if FormatCSSIndented(trimmedText, w, len(stack)) != nil {
+							// Fallback to raw output on error.
+							w.Set(core.Green)
+							w.Write(text)
+							w.Reset()
+						}
+					}
+					// Mark parent as having block content so closing tag is indented.
+					stack[len(stack)-1].hasBlockChild = true
+				} else {
+					// Preserve content exactly (script tags, etc.).
+					w.Set(core.Green)
+					w.Write(text)
+					w.Reset()
+				}
 			} else {
 				// Skip text that is only whitespace (formatting whitespace in source).
 				// For text with content, normalize by trimming leading/trailing whitespace

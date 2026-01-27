@@ -6,7 +6,7 @@
 
 ### Features include:
 
-- **Response formatting**: automatically formats and colors output (json, html, csv, msgpack, protobuf, xml, etc.)
+- **Response formatting**: automatically formats and colors output (json, html, xml, css, csv, msgpack, protobuf, etc.)
 - **Image rendering**: render images directly in your terminal
 - **Compression**: automatic gzip and zstd response body decompression
 - **Authentication**: support for Basic Auth, Bearer Token, and AWS Signature V4

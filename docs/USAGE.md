@@ -336,6 +336,7 @@ Supported formats for automatic formatting and syntax highlighting:
 - JSON (`application/json`)
 - HTML (`text/html`)
 - XML (`application/xml`, `text/xml`)
+- CSS (`text/css`)
 - CSV (`text/csv`)
 - MessagePack (`application/msgpack`)
 - NDJSON/JSONLines (`application/x-ndjson`)
