@@ -53,6 +53,7 @@ func WithRedirectCallback(ctx context.Context, cb RedirectCallback) context.Cont
 // ClientConfig represents the optional configuration parameters for a Client.
 type ClientConfig struct {
 	CACerts    []*x509.Certificate
+	ClientCert *tls.Certificate
 	DNSServer  *url.URL
 	HTTP       core.HTTPVersion
 	Insecure   bool
@@ -109,6 +110,11 @@ func NewClient(cfg ClientConfig) *Client {
 			certPool.AddCert(cert)
 		}
 		tlsConfig.RootCAs = certPool
+	}
+
+	// Set the client certificate for mTLS, if provided.
+	if cfg.ClientCert != nil {
+		tlsConfig.Certificates = []tls.Certificate{*cfg.ClientCert}
 	}
 
 	// Create the http.RoundTripper based on the configured HTTP version.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -120,12 +121,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Parse any client certificate configuration for mTLS.
+	var clientCert *tls.Certificate
+	clientCert, err = app.Cfg.ClientCert()
+	if err != nil {
+		p := handle.Stderr()
+		writeCLIErr(p, err)
+		os.Exit(1)
+	}
+
 	// Make the HTTP request using the parsed configuration.
 	req := fetch.Request{
 		AWSSigv4:         app.AWSSigv4,
 		Basic:            app.Basic,
 		Bearer:           app.Bearer,
 		CACerts:          app.Cfg.CACerts,
+		ClientCert:       clientCert,
 		Clobber:          app.Clobber,
 		ContentType:      app.ContentType,
 		Data:             app.Data,

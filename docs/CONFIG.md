@@ -305,6 +305,54 @@ insecure = true
 insecure = false
 ```
 
+### mTLS (Mutual TLS) Options
+
+#### `cert`
+
+**Type**: File path
+**Default**: None
+
+Path to a client certificate file for mTLS authentication. The file should be in PEM format. If the file contains both the certificate and private key, no separate `key` option is needed.
+
+```ini
+# Client certificate for mTLS
+cert = /path/to/client.crt
+
+# Combined certificate and key file
+cert = /path/to/client.pem
+```
+
+#### `key`
+
+**Type**: File path
+**Default**: None
+
+Path to a client private key file for mTLS authentication. The file should be in PEM format. Required if `cert` points to a certificate-only file.
+
+```ini
+# Client private key for mTLS
+key = /path/to/client.key
+```
+
+**mTLS Example Configuration:**
+
+```ini
+# Global mTLS settings
+cert = /path/to/default-client.crt
+key = /path/to/default-client.key
+
+# Host-specific mTLS for API server
+[api.secure.example.com]
+cert = /path/to/api-client.crt
+key = /path/to/api-client.key
+ca-cert = /path/to/api-ca.crt
+```
+
+**Notes:**
+- If `cert` is provided without `key`, the tool will attempt to read the private key from the certificate file (combined PEM format)
+- If the private key cannot be found, an error will be displayed
+- Encrypted private keys are not supported
+
 #### `no-encode`
 
 **Type**: Boolean

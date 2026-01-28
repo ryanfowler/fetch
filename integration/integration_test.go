@@ -4,12 +4,19 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -1203,6 +1210,100 @@ func TestMain(t *testing.T) {
 		res = runFetch(t, fetchPath, "--version")
 		assertExitCode(t, 0, res)
 	})
+
+	t.Run("mtls", func(t *testing.T) {
+		// Generate test CA, server cert, and client cert.
+		caCert, caKey := generateCACert(t)
+		serverCert, serverKey := generateCert(t, caCert, caKey, "server")
+		clientCert, clientKey := generateCert(t, caCert, caKey, "client")
+
+		// Write certs to temp files.
+		caCertPath := writeTempPEM(t, tempDir, "ca.crt", "CERTIFICATE", caCert.Raw)
+		serverCertPath := writeTempPEM(t, tempDir, "server.crt", "CERTIFICATE", serverCert.Raw)
+		serverKeyPath := writeTempPEM(t, tempDir, "server.key", "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(serverKey))
+		clientCertPath := writeTempPEM(t, tempDir, "client.crt", "CERTIFICATE", clientCert.Raw)
+		clientKeyPath := writeTempPEM(t, tempDir, "client.key", "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(clientKey))
+
+		// Create combined cert+key file.
+		combinedPath := filepath.Join(tempDir, "client-combined.pem")
+		combinedData := append(
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientCert.Raw}),
+			pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(clientKey)})...,
+		)
+		if err := os.WriteFile(combinedPath, combinedData, 0600); err != nil {
+			t.Fatalf("unable to write combined pem: %s", err.Error())
+		}
+
+		// Create mTLS server.
+		server := startMTLSServer(t, serverCertPath, serverKeyPath, caCertPath)
+		defer server.Close()
+
+		t.Run("successful mtls with separate cert and key", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--ca-cert", caCertPath,
+				"--cert", clientCertPath,
+				"--key", clientKeyPath,
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "200 OK")
+			assertBufEquals(t, res.stdout, "mtls-success")
+		})
+
+		t.Run("successful mtls with combined cert+key file", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--ca-cert", caCertPath,
+				"--cert", combinedPath,
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "200 OK")
+			assertBufEquals(t, res.stdout, "mtls-success")
+		})
+
+		t.Run("missing client cert fails", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--ca-cert", caCertPath,
+			)
+			assertExitCode(t, 1, res)
+			// Server requires client cert, so connection should fail.
+			assertBufContains(t, res.stderr, "error")
+		})
+
+		t.Run("cert without key fails", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--ca-cert", caCertPath,
+				"--cert", clientCertPath,
+			)
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "may require a private key")
+		})
+
+		t.Run("key without cert fails", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--ca-cert", caCertPath,
+				"--key", clientKeyPath,
+			)
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "'--key' requires '--cert'")
+		})
+
+		t.Run("cert file not found", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--cert", "/nonexistent/client.crt",
+				"--key", clientKeyPath,
+			)
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "does not exist")
+		})
+
+		t.Run("key file not found", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--cert", clientCertPath,
+				"--key", "/nonexistent/client.key",
+			)
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "does not exist")
+		})
+	})
 }
 
 type runResult struct {
@@ -1423,4 +1524,115 @@ func assertBufEquals(t *testing.T, buf *bytes.Buffer, s string) {
 	if buf.String() != s {
 		t.Fatalf("unexpected buffer: %s", buf.String())
 	}
+}
+
+// generateCACert generates a self-signed CA certificate for testing.
+func generateCACert(t *testing.T) (*x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("unable to generate CA key: %s", err.Error())
+	}
+
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("unable to create CA cert: %s", err.Error())
+	}
+
+	caCert, err := x509.ParseCertificate(caCertDER)
+	if err != nil {
+		t.Fatalf("unable to parse CA cert: %s", err.Error())
+	}
+
+	return caCert, caKey
+}
+
+// generateCert generates a certificate signed by the provided CA.
+func generateCert(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKey, name string) (*x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("unable to generate %s key: %s", name, err.Error())
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: name},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:     []string{"localhost"},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("unable to create %s cert: %s", name, err.Error())
+	}
+
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		t.Fatalf("unable to parse %s cert: %s", name, err.Error())
+	}
+
+	return cert, key
+}
+
+// writeTempPEM writes a PEM-encoded file to the temp directory.
+func writeTempPEM(t *testing.T, dir, name, blockType string, data []byte) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	block := &pem.Block{Type: blockType, Bytes: data}
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0600); err != nil {
+		t.Fatalf("unable to write %s: %s", name, err.Error())
+	}
+	return path
+}
+
+// startMTLSServer starts an HTTPS server that requires client certificates.
+func startMTLSServer(t *testing.T, certPath, keyPath, caCertPath string) *httptest.Server {
+	t.Helper()
+
+	// Load server cert.
+	serverCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("unable to load server cert: %s", err.Error())
+	}
+
+	// Load CA cert for client verification.
+	caCertPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		t.Fatalf("unable to read CA cert: %s", err.Error())
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(caCertPEM) {
+		t.Fatal("unable to add CA cert to pool")
+	}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "mtls-success")
+	}))
+
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    clientCAs,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+
+	server.StartTLS()
+	return server
 }

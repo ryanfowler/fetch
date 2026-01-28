@@ -3,6 +3,7 @@ package fetch
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"io"
@@ -50,6 +51,7 @@ type Request struct {
 	Basic            *core.KeyVal[string]
 	Bearer           string
 	CACerts          []*x509.Certificate
+	ClientCert       *tls.Certificate
 	Clobber          bool
 	ContentType      string
 	Data             io.Reader
@@ -131,6 +133,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	// 3. Create HTTP client and request.
 	c := client.NewClient(client.ClientConfig{
 		CACerts:    r.CACerts,
+		ClientCert: r.ClientCert,
 		DNSServer:  r.DNSServer,
 		HTTP:       r.HTTP,
 		Insecure:   r.Insecure,
