@@ -349,6 +349,7 @@ ca-cert = /path/to/api-ca.crt
 ```
 
 **Notes:**
+
 - If `cert` is provided without `key`, the tool will attempt to read the private key from the certificate file (combined PEM format)
 - If the private key cannot be found, an error will be displayed
 - Encrypted private keys are not supported
@@ -513,13 +514,13 @@ header = X-Company-ID: company-identifier
 
 ## Configuration File Validation
 
-`fetch` validates configuration files when loading them and will report errors with specific line numbers:
+`fetch` validates configuration files when loading them and will report errors:
 
 ```
 config file '/home/user/.config/fetch/config': line 15: invalid option: 'invalid-option'
 ```
 
-Common validation errors include:
+Validation errors may include:
 
 - Invalid option names
 - Invalid values for specific options (e.g., `color = invalid`)
@@ -535,3 +536,9 @@ Common validation errors include:
 5. **Test configurations** with dry-run mode: `fetch --dry-run example.com`
 6. **Use comments** to document complex configurations
 7. **Enable auto-update** for security and feature updates
+
+## See Also
+
+- [CLI Reference](cli-reference.md) - All command-line options
+- [Authentication](authentication.md) - Detailed authentication setup
+- [Advanced Features](advanced-features.md) - DNS, proxies, and TLS configuration
