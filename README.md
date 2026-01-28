@@ -1,124 +1,45 @@
 # fetch
 
-`fetch` is a modern, high-level HTTP(S) client for the command line.
+A modern, high-level HTTP(S) client for the command line.
 
 ![Example of fetch with an image and JSON responses](./assets/example.jpg)
 
-### Features include:
+## Features
 
-- **Response formatting**: automatically formats and colors output (json, html, xml, css, csv, msgpack, protobuf, etc.)
-- **Image rendering**: render images directly in your terminal
-- **Compression**: automatic gzip and zstd response body decompression
-- **Authentication**: support for Basic Auth, Bearer Token, and AWS Signature V4
-- **Form body**: send multipart or urlencoded form bodies
-- **gRPC support**: make gRPC calls with automatic JSON-to-protobuf conversion
-- **Editor integration**: use an editor to modify the request body
-- **Configuration**: global and per-host configuration
-- _and more!_
+- **Response formatting** - Automatic formatting and syntax highlighting for JSON, XML, HTML, CSS, CSV, MessagePack, Protocol Buffers, and more
+- **Image rendering** - Display images directly in your terminal
+- **gRPC support** - Make gRPC calls with automatic JSON-to-protobuf conversion
+- **Authentication** - Built-in support for Basic Auth, Bearer Token, AWS Signature V4, and mTLS
+- **Compression** - Automatic gzip and zstd response body decompression
+- **Configuration** - Global and per-host configuration file support
 
----
+## Quick Start
 
-## Installation
-
-You can install `fetch` using an installation script, by compiling from source,
-or from pre-built binaries.
-
-### Installation Script
-
-For macOS or Linux, download and run the [install.sh](./install.sh) script:
+#### Install
 
 ```sh
+# Install fetch from shell script
 curl -fsSL https://raw.githubusercontent.com/ryanfowler/fetch/main/install.sh | bash
-```
 
-### Building from Source
-
-Ensure you have Go installed, then run:
-
-```sh
+# Or install fetch with Go
 go install github.com/ryanfowler/fetch@latest
+
+# Make a request
+fetch httpbin.org/json
 ```
 
-### Pre-built Binaries
+## Documentation
 
-Visit the [GitHub releases page](https://github.com/ryanfowler/fetch/releases)
-to download the binary for your operating system.
-
-### Updating
-
-Once installed, you can update the fetch binary in-place by running:
-
-```sh
-fetch --update
-```
-
-Or you can let the application auto-update by including the following setting in
-your [configuration file](#Configuration):
-
-```ini
-auto-update = true
-```
-
----
-
-## Usage
-
-To make a GET request to a URL and print the status code to stderr and the response body to stdout:
-
-```sh
-fetch example.com
-```
-
-<pre><code><span style='opacity:0.67'>HTTP/1.1</span> <span style='color:green'><b>200</b></span> <span style='color:green'>OK</span>
-
-{
-  &quot;<span style='color:blue'><b>name</b></span>&quot;: &quot;<span style='color:green'>example</span>&quot;,
-  &quot;<span style='color:blue'><b>value</b></span>&quot;: 42
-}
-</code></pre>
-
-For complete usage documentation including all available options and advanced features, see [USAGE.md](docs/USAGE.md).
-
----
-
-## Configuration
-
-`fetch` can be configured using a file with an ini-like format. Configuration files support both global settings and host-specific configurations.
-
-### File Locations
-
-`fetch` searches for configuration files in the following order:
-
-- the file location specified with the `-c` or `--config` flag
-- on Windows at `%AppData%\fetch\config`
-- on Unix-like systems at `$XDG_CONFIG_HOME/fetch/config` or `$HOME/.config/fetch/config`
-
-### Configuration Precedence
-
-Settings are applied in the following order of precedence:
-
-- CLI flags (highest priority)
-- domain-specific configuration
-- global configuration
-- default values (lowest priority)
-
-### Basic Example
-
-```ini
-# Global settings
-color = on
-format = on
-timeout = 30
-
-# Domain-specific settings
-[api.example.com]
-header = X-API-Key: your-api-key
-timeout = 10
-```
-
-For complete configuration documentation including all available options, file format details, and advanced examples, see [CONFIG.md](docs/CONFIG.md).
-
----
+- **[Getting Started](docs/getting-started.md)** - Installation, first steps, and basic concepts
+- **[CLI Reference](docs/cli-reference.md)** - Complete reference for all command-line options
+- **[Configuration](docs/configuration.md)** - Configuration file format and options
+- **[Authentication](docs/authentication.md)** - Basic, Bearer, AWS SigV4, and mTLS
+- **[Request Bodies](docs/request-bodies.md)** - JSON, XML, forms, multipart, and file uploads
+- **[Output Formatting](docs/output-formatting.md)** - Supported content types and formatting options
+- **[Image Rendering](docs/image-rendering.md)** - Terminal image protocols and formats
+- **[gRPC](docs/grpc.md)** - Making gRPC requests with Protocol Buffers
+- **[Advanced Features](docs/advanced-features.md)** - DNS, proxies, TLS, HTTP versions, and more
+- **[Troubleshooting](docs/troubleshooting.md)** - Common issues, debugging, and exit codes
 
 ## License
 
