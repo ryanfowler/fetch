@@ -22,6 +22,8 @@ type Config struct {
 
 	AutoUpdate   *time.Duration
 	CACerts      []*x509.Certificate
+	CertData     []byte
+	CertPath     string
 	Color        core.Color
 	DNSServer    *url.URL
 	Format       core.Format
@@ -30,6 +32,8 @@ type Config struct {
 	IgnoreStatus *bool
 	Image        core.ImageSetting
 	Insecure     *bool
+	KeyData      []byte
+	KeyPath      string
 	NoEncode     *bool
 	NoPager      *bool
 	Proxy        *url.URL
@@ -48,6 +52,10 @@ func (c *Config) Merge(c2 *Config) {
 	}
 	if len(c2.CACerts) > 0 {
 		c.CACerts = append(c2.CACerts, c.CACerts...)
+	}
+	if c.CertPath == "" && c.CertData == nil {
+		c.CertData = c2.CertData
+		c.CertPath = c2.CertPath
 	}
 	if c.Color == core.ColorUnknown {
 		c.Color = c2.Color
@@ -72,6 +80,10 @@ func (c *Config) Merge(c2 *Config) {
 	}
 	if c.Insecure == nil {
 		c.Insecure = c2.Insecure
+	}
+	if c.KeyPath == "" && c.KeyData == nil {
+		c.KeyData = c2.KeyData
+		c.KeyPath = c2.KeyPath
 	}
 	if c.NoEncode == nil {
 		c.NoEncode = c2.NoEncode
@@ -110,6 +122,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseAutoUpdate(val)
 	case "ca-cert":
 		err = c.ParseCACerts(val)
+	case "cert":
+		err = c.ParseCert(val)
 	case "color", "colour":
 		err = c.ParseColor(val)
 	case "dns-server":
@@ -126,6 +140,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseImageSetting(val)
 	case "insecure":
 		err = c.ParseInsecure(val)
+	case "key":
+		err = c.ParseKey(val)
 	case "no-encode":
 		err = c.ParseNoEncode(val)
 	case "no-pager":
@@ -202,6 +218,29 @@ func (c *Config) ParseCACerts(value string) error {
 	if !ok {
 		return invalidCACertError{path: value, err: errors.New("no certificates found")}
 	}
+	return nil
+}
+
+func (c *Config) ParseCert(value string) error {
+	data, err := os.ReadFile(value)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return core.FileNotExistsError(value)
+		}
+		return err
+	}
+
+	// Verify there's at least a certificate in the file.
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return invalidClientCertError{path: value, err: errors.New("no PEM data found")}
+	}
+	if block.Type != "CERTIFICATE" {
+		return invalidClientCertError{path: value, err: fmt.Errorf("expected CERTIFICATE, got %s", block.Type)}
+	}
+
+	c.CertData = data
+	c.CertPath = value
 	return nil
 }
 
@@ -319,6 +358,36 @@ func (c *Config) ParseInsecure(value string) error {
 	return nil
 }
 
+func (c *Config) ParseKey(value string) error {
+	data, err := os.ReadFile(value)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return core.FileNotExistsError(value)
+		}
+		return err
+	}
+
+	// Verify there's a private key in the file.
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return invalidClientKeyError{path: value, err: errors.New("no PEM data found")}
+	}
+
+	// Check for encrypted private keys.
+	if strings.Contains(block.Type, "ENCRYPTED") {
+		return invalidClientKeyError{path: value, err: errors.New("encrypted private keys are not supported")}
+	}
+
+	// Verify it looks like a key block.
+	if !strings.Contains(block.Type, "PRIVATE KEY") {
+		return invalidClientKeyError{path: value, err: fmt.Errorf("expected PRIVATE KEY, got %s", block.Type)}
+	}
+
+	c.KeyData = data
+	c.KeyPath = value
+	return nil
+}
+
 func (c *Config) ParseNoEncode(value string) error {
 	v, err := strconv.ParseBool(value)
 	if err != nil {
@@ -409,6 +478,31 @@ func (c *Config) ParseVerbosity(value string) error {
 	return nil
 }
 
+func (c *Config) ClientCert() (*tls.Certificate, error) {
+	if c.CertData == nil {
+		return nil, nil
+	}
+
+	keyData := c.KeyData
+	if keyData == nil {
+		// Try using cert file as combined cert+key
+		keyData = c.CertData
+	}
+
+	cert, err := tls.X509KeyPair(c.CertData, keyData)
+	if err == nil {
+		return &cert, nil
+	}
+
+	// If key was explicitly provided, it's a mismatch error
+	if c.KeyData != nil {
+		return nil, certKeyMismatchError{certPath: c.CertPath, keyPath: c.KeyPath, err: err}
+	}
+
+	// Key wasn't provided and cert file doesn't have embedded key
+	return nil, missingClientKeyError{certPath: c.CertPath, err: err}
+}
+
 func cut(s, sep string) (string, string, bool) {
 	key, val, ok := strings.Cut(s, sep)
 	key, val = strings.TrimSpace(key), strings.TrimSpace(val)
@@ -444,5 +538,86 @@ func (err invalidCACertError) PrintTo(p *core.Printer) {
 	p.WriteString(err.path)
 	p.Reset()
 	p.WriteString("': ")
+	p.WriteString(err.err.Error())
+}
+
+type invalidClientCertError struct {
+	path string
+	err  error
+}
+
+func (err invalidClientCertError) Error() string {
+	return fmt.Sprintf("invalid client certificate '%s': %s", err.path, err.err.Error())
+}
+
+func (err invalidClientCertError) PrintTo(p *core.Printer) {
+	p.WriteString("invalid client certificate '")
+	p.Set(core.Dim)
+	p.WriteString(err.path)
+	p.Reset()
+	p.WriteString("': ")
+	p.WriteString(err.err.Error())
+}
+
+type invalidClientKeyError struct {
+	path string
+	err  error
+}
+
+func (err invalidClientKeyError) Error() string {
+	return fmt.Sprintf("invalid client key '%s': %s", err.path, err.err.Error())
+}
+
+func (err invalidClientKeyError) PrintTo(p *core.Printer) {
+	p.WriteString("invalid client key '")
+	p.Set(core.Dim)
+	p.WriteString(err.path)
+	p.Reset()
+	p.WriteString("': ")
+	p.WriteString(err.err.Error())
+}
+
+type missingClientKeyError struct {
+	certPath string
+	err      error
+}
+
+func (err missingClientKeyError) Error() string {
+	return fmt.Sprintf("client certificate '%s' may require a private key (use --key): %s", err.certPath, err.err.Error())
+}
+
+func (err missingClientKeyError) PrintTo(p *core.Printer) {
+	p.WriteString("client certificate '")
+	p.Set(core.Dim)
+	p.WriteString(err.certPath)
+	p.Reset()
+	p.WriteString("' may require a private key (use '")
+	p.Set(core.Bold)
+	p.WriteString("--key")
+	p.Reset()
+	p.WriteString("'): ")
+	p.WriteString(err.err.Error())
+}
+
+type certKeyMismatchError struct {
+	certPath string
+	keyPath  string
+	err      error
+}
+
+func (err certKeyMismatchError) Error() string {
+	return fmt.Sprintf("certificate '%s' and key '%s' may not match: %s", err.certPath, err.keyPath, err.err.Error())
+}
+
+func (err certKeyMismatchError) PrintTo(p *core.Printer) {
+	p.WriteString("certificate '")
+	p.Set(core.Dim)
+	p.WriteString(err.certPath)
+	p.Reset()
+	p.WriteString("' and key '")
+	p.Set(core.Dim)
+	p.WriteString(err.keyPath)
+	p.Reset()
+	p.WriteString("' may not match: ")
 	p.WriteString(err.err.Error())
 }

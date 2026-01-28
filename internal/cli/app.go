@@ -109,6 +109,7 @@ func (a *App) CLI() *CLI {
 			{"proto-file", "proto-desc"},
 		},
 		RequiredFlags: []core.KeyVal[[]string]{
+			{Key: "key", Val: []string{"cert"}},
 			{Key: "proto-desc", Val: []string{"grpc"}},
 			{Key: "proto-file", Val: []string{"grpc"}},
 			{Key: "proto-import", Val: []string{"proto-file"}},
@@ -221,6 +222,22 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					return a.Cfg.ParseCACerts(value)
+				},
+			},
+			{
+				Short:       "",
+				Long:        "cert",
+				Args:        "PATH",
+				Description: "Client certificate for mTLS",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Cfg.CertPath != ""
+				},
+				Fn: func(value string) error {
+					if err := checkFileExists(value); err != nil {
+						return err
+					}
+					return a.Cfg.ParseCert(value)
 				},
 			},
 			{
@@ -546,6 +563,22 @@ func (a *App) CLI() *CLI {
 					a.ContentType = "application/json"
 					a.jsonSet = true
 					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "key",
+				Args:        "PATH",
+				Description: "Client private key for mTLS",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Cfg.KeyPath != ""
+				},
+				Fn: func(value string) error {
+					if err := checkFileExists(value); err != nil {
+						return err
+					}
+					return a.Cfg.ParseKey(value)
 				},
 			},
 			{
