@@ -55,6 +55,7 @@ prettier -w .
 - **internal/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
 - **internal/image** - Multipart form implementation.
 - **internal/proto** - Protocol buffer compilation and message handling for gRPC support.
+- **internal/session** - Named cookie sessions with persistent storage across invocations.
 - **internal/update** - Check for updates, download from Github, and self-update.
 
 ### Request Flow

@@ -166,6 +166,7 @@ func main() {
 		Redirects:        app.Cfg.Redirects,
 		RemoteHeaderName: app.RemoteHeaderName,
 		RemoteName:       app.RemoteName,
+		Session:          getValue(app.Cfg.Session),
 		Timeout:          getValue(app.Cfg.Timeout),
 		TLS:              getValue(app.Cfg.TLS),
 		UnixSocket:       app.UnixSocket,

@@ -1304,6 +1304,142 @@ func TestMain(t *testing.T) {
 			assertBufContains(t, res.stderr, "does not exist")
 		})
 	})
+
+	t.Run("session", func(t *testing.T) {
+		sessDir := filepath.Join(tempDir, "sessions")
+		os.MkdirAll(sessDir, 0755)
+		os.Setenv("FETCH_INTERNAL_SESSIONS_DIR", sessDir)
+		defer os.Unsetenv("FETCH_INTERNAL_SESSIONS_DIR")
+
+		t.Run("cookies persist across requests", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/login" {
+					http.SetCookie(w, &http.Cookie{
+						Name:  "session_id",
+						Value: "abc123",
+						Path:  "/",
+					})
+					io.WriteString(w, "logged in")
+					return
+				}
+				if r.URL.Path == "/dashboard" {
+					cookie, err := r.Cookie("session_id")
+					if err != nil || cookie.Value != "abc123" {
+						w.WriteHeader(401)
+						io.WriteString(w, "unauthorized")
+						return
+					}
+					io.WriteString(w, "welcome")
+					return
+				}
+			})
+			defer server.Close()
+
+			// First request: server sets cookie.
+			res := runFetch(t, fetchPath, server.URL+"/login", "--session", "integ-test")
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, "logged in")
+
+			// Second request: cookie is sent automatically.
+			res = runFetch(t, fetchPath, server.URL+"/dashboard", "--session", "integ-test")
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, "welcome")
+
+			// Without session: cookie is NOT sent.
+			res = runFetch(t, fetchPath, server.URL+"/dashboard")
+			assertExitCode(t, 4, res)
+			assertBufEquals(t, res.stdout, "unauthorized")
+		})
+
+		t.Run("expired cookies are not sent", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/set" {
+					http.SetCookie(w, &http.Cookie{
+						Name:    "expired",
+						Value:   "old",
+						Path:    "/",
+						Expires: time.Now().Add(-time.Hour),
+					})
+					http.SetCookie(w, &http.Cookie{
+						Name:    "valid",
+						Value:   "yes",
+						Path:    "/",
+						Expires: time.Now().Add(time.Hour),
+					})
+					return
+				}
+				if r.URL.Path == "/check" {
+					_, err := r.Cookie("expired")
+					if err == nil {
+						w.WriteHeader(400)
+						io.WriteString(w, "expired cookie was sent")
+						return
+					}
+					cookie, err := r.Cookie("valid")
+					if err != nil || cookie.Value != "yes" {
+						w.WriteHeader(400)
+						io.WriteString(w, "valid cookie missing")
+						return
+					}
+					io.WriteString(w, "ok")
+					return
+				}
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, server.URL+"/set", "--session", "expiry-integ")
+			assertExitCode(t, 0, res)
+
+			res = runFetch(t, fetchPath, server.URL+"/check", "--session", "expiry-integ")
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, "ok")
+		})
+
+		t.Run("different session names are isolated", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/set" {
+					http.SetCookie(w, &http.Cookie{
+						Name:  "token",
+						Value: r.URL.Query().Get("v"),
+						Path:  "/",
+					})
+					return
+				}
+				if r.URL.Path == "/get" {
+					cookie, err := r.Cookie("token")
+					if err != nil {
+						io.WriteString(w, "none")
+						return
+					}
+					io.WriteString(w, cookie.Value)
+					return
+				}
+			})
+			defer server.Close()
+
+			// Set different cookies in different sessions.
+			res := runFetch(t, fetchPath, server.URL+"/set?v=alpha", "--session", "sess-a")
+			assertExitCode(t, 0, res)
+
+			res = runFetch(t, fetchPath, server.URL+"/set?v=beta", "--session", "sess-b")
+			assertExitCode(t, 0, res)
+
+			// Verify sessions are isolated.
+			res = runFetch(t, fetchPath, server.URL+"/get", "--session", "sess-a")
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, "alpha")
+
+			res = runFetch(t, fetchPath, server.URL+"/get", "--session", "sess-b")
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, "beta")
+		})
+
+		t.Run("invalid session name rejected", func(t *testing.T) {
+			res := runFetch(t, fetchPath, "http://example.com", "--session", "../evil")
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "session")
+		})
+	})
 }
 
 type runResult struct {

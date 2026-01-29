@@ -229,6 +229,29 @@ Disable piping output to a pager (`less`).
 fetch --no-pager example.com
 ```
 
+## Sessions
+
+### `-S, --session NAME`
+
+Use a named session for persistent cookie storage across invocations. Cookies set by servers are saved to disk and automatically sent on subsequent requests using the same session name.
+
+Session names must contain only alphanumeric characters, hyphens, and underscores (`[a-zA-Z0-9_-]`).
+
+```sh
+# First request — server sets cookies, they get saved
+fetch --session api example.com/login -j '{"user":"me"}'
+
+# Second request — saved cookies are sent automatically
+fetch --session api example.com/dashboard
+```
+
+Session files are stored in the user's cache directory:
+
+- **Linux**: `~/.cache/fetch/sessions/<NAME>.json`
+- **macOS**: `~/Library/Caches/fetch/sessions/<NAME>.json`
+
+Can also be configured per-host in the [configuration file](configuration.md).
+
 ## Network Options
 
 ### `-t, --timeout SECONDS`

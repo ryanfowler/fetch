@@ -375,6 +375,62 @@ tls = 1.3
 timeout = 60
 ```
 
+## Cookie Sessions
+
+### `-S, --session NAME`
+
+Persistent cookie storage across invocations using named sessions.
+
+### Basic Usage
+
+```sh
+# First request — server sets cookies, they get saved
+fetch --session api https://example.com/login -j '{"user":"me"}'
+
+# Second request — saved cookies are sent automatically
+fetch --session api https://example.com/dashboard
+```
+
+### Session Isolation
+
+Different session names maintain separate cookie stores:
+
+```sh
+fetch --session prod https://api.example.com/login
+fetch --session staging https://staging.example.com/login
+```
+
+### Configuration File
+
+Set session names per-host so you don't need `--session` every time:
+
+```ini
+# Global default session
+session = default
+
+# Per-host session names
+[api.example.com]
+session = api-prod
+
+[staging.example.com]
+session = api-staging
+```
+
+### Session File Storage
+
+Sessions are stored as JSON in the user's cache directory:
+
+- **Linux**: `~/.cache/fetch/sessions/<NAME>.json`
+- **macOS**: `~/Library/Caches/fetch/sessions/<NAME>.json`
+
+### Behavior Details
+
+- **Expired cookies**: Cookies with an explicit expiry in the past are filtered out on load.
+- **Session cookies** (no explicit expiry): Persist across invocations since the session is explicitly named.
+- **Cookie domain matching**: Delegated to Go's `net/http/cookiejar`, which implements RFC 6265.
+- **Atomic writes**: Session files are written atomically (temp file + rename) to avoid corruption.
+- **Name validation**: Only `[a-zA-Z0-9_-]` characters are allowed to prevent path traversal.
+
 ## Debugging Network Issues
 
 ### Verbose Output
