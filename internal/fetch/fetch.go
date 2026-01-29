@@ -112,7 +112,7 @@ func Fetch(ctx context.Context, r *Request) int {
 	return 1
 }
 
-func fetch(ctx context.Context, r *Request) (int, error) {
+func fetch(ctx context.Context, r *Request) (retCode int, retErr error) {
 	// 1. Load proto schema if configured.
 	var schema *proto.Schema
 	if len(r.ProtoFiles) > 0 || r.ProtoDesc != "" {
@@ -249,6 +249,32 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 
 		errPrinter.WriteString("\n")
 		errPrinter.Flush()
+	}
+
+	// Wrap the request body with upload progress tracking.
+	// Only show progress for file uploads (-d @file) and multipart (-F),
+	// not for inline data (-d 'hello') or form data (-f).
+	if r.Verbosity > core.VSilent && req.Body != nil && req.Body != http.NoBody {
+		_, isFileData := r.Data.(*os.File)
+		if isFileData || r.Multipart != nil {
+			p := r.PrinterHandle.Stderr()
+			origBody := req.Body
+			if core.IsStderrTerm {
+				if req.ContentLength > 0 {
+					pb := newUploadProgressBar(origBody, p, req.ContentLength)
+					defer func() { pb.Close(retErr) }()
+					req.Body = &uploadReadCloser{Reader: pb, closer: origBody}
+				} else {
+					ps := newUploadProgressSpinner(origBody, p)
+					defer func() { ps.Close(retErr) }()
+					req.Body = &uploadReadCloser{Reader: ps, closer: origBody}
+				}
+			} else {
+				ps := newUploadProgressStatic(origBody, p)
+				defer func() { ps.Close(retErr) }()
+				req.Body = &uploadReadCloser{Reader: ps, closer: origBody}
+			}
+		}
 	}
 
 	if r.Timeout > 0 {

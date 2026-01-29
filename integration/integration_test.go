@@ -1211,6 +1211,63 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 	})
 
+	t.Run("upload progress", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(200)
+		})
+		defer server.Close()
+
+		tempFile := createTempFile(t, "upload progress test data")
+		defer os.Remove(tempFile)
+
+		res := runFetch(t, fetchPath, server.URL, "-d", "@"+tempFile)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "Uploaded")
+	})
+
+	t.Run("upload progress silent", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(200)
+		})
+		defer server.Close()
+
+		tempFile := createTempFile(t, "upload progress silent data")
+		defer os.Remove(tempFile)
+
+		res := runFetch(t, fetchPath, server.URL, "-d", "@"+tempFile, "-s")
+		assertExitCode(t, 0, res)
+		assertBufNotContains(t, res.stderr, "Uploaded")
+	})
+
+	t.Run("upload progress multipart", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(200)
+		})
+		defer server.Close()
+
+		tempFile := createTempFile(t, "multipart upload data")
+		defer os.Remove(tempFile)
+
+		res := runFetch(t, fetchPath, server.URL, "-F", "file=@"+tempFile)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "Uploaded")
+	})
+
+	t.Run("upload progress inline data", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(200)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "-d", "hello")
+		assertExitCode(t, 0, res)
+		assertBufNotContains(t, res.stderr, "Uploaded")
+	})
+
 	t.Run("mtls", func(t *testing.T) {
 		// Generate test CA, server cert, and client cert.
 		caCert, caKey := generateCACert(t)
