@@ -848,6 +848,19 @@ func (a *App) CLI() *CLI {
 				},
 			},
 			{
+				Short:       "S",
+				Long:        "session",
+				Args:        "NAME",
+				Description: "Use a named session for cookies",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Cfg.Session != nil
+				},
+				Fn: func(value string) error {
+					return a.Cfg.ParseSession(value)
+				},
+			},
+			{
 				Short:       "t",
 				Long:        "timeout",
 				Args:        "SECONDS",

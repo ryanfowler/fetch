@@ -369,6 +369,29 @@ no-encode = true
 no-encode = false
 ```
 
+### Session Options
+
+#### `session`
+
+**Type**: String
+**Default**: None
+
+Set a named session for persistent cookie storage. Cookies set by servers are saved to disk and automatically sent on subsequent requests using the same session name. The name must contain only alphanumeric characters, hyphens, and underscores.
+
+```ini
+# Global default session
+session = default
+
+# Per-host session names
+[api.example.com]
+session = api-prod
+
+[staging.example.com]
+session = api-staging
+```
+
+CLI `--session` flag overrides the config value. See [CLI Reference](cli-reference.md) for more details.
+
 ### Request Options
 
 #### `header`

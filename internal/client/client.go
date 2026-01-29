@@ -306,6 +306,11 @@ func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, err
 	return resp, err
 }
 
+// SetJar sets the cookie jar on the HTTP client.
+func (c *Client) SetJar(jar http.CookieJar) {
+	c.c.Jar = jar
+}
+
 // RequestConfig represents the configuration for creating an HTTP request.
 type RequestConfig struct {
 	AWSSigV4    *aws.Config

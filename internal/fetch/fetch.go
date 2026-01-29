@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/image"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/proto"
+	"github.com/ryanfowler/fetch/internal/session"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -81,6 +83,7 @@ type Request struct {
 	Redirects        *int
 	RemoteHeaderName bool
 	RemoteName       bool
+	Session          string
 	Timeout          time.Duration
 	TLS              uint16
 	UnixSocket       string
@@ -142,6 +145,24 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		TLS:        r.TLS,
 		UnixSocket: r.UnixSocket,
 	})
+
+	// Load session and set cookie jar, if configured.
+	var sess *session.Session
+	if r.Session != "" {
+		var loadErr error
+		sess, loadErr = session.Load(r.Session)
+		if loadErr != nil {
+			if sess == nil {
+				return 0, loadErr
+			}
+			// Session file was corrupted; warn and start fresh.
+			p := r.PrinterHandle.Stderr()
+			msg := fmt.Sprintf("session '%s' is corrupted, starting fresh: %s", r.Session, loadErr.Error())
+			core.WriteWarningMsg(p, msg)
+		}
+		c.SetJar(sess.Jar())
+	}
+
 	req, err := c.NewRequest(ctx, client.RequestConfig{
 		AWSSigV4:    r.AWSSigv4,
 		Basic:       r.Basic,
@@ -239,7 +260,18 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	}
 
 	// 8. Make request.
-	return makeRequest(ctx, r, c, req)
+	code, err := makeRequest(ctx, r, c, req)
+
+	// Save session cookies after request completes.
+	if sess != nil {
+		if saveErr := sess.Save(); saveErr != nil {
+			p := r.PrinterHandle.Stderr()
+			msg := fmt.Sprintf("unable to save session '%s': %s", sess.Name, saveErr.Error())
+			core.WriteWarningMsg(p, msg)
+		}
+	}
+
+	return code, err
 }
 
 func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/session"
 )
 
 // Config represents the configuration options for fetch.
@@ -39,6 +40,7 @@ type Config struct {
 	Proxy        *url.URL
 	QueryParams  []core.KeyVal[string]
 	Redirects    *int
+	Session      *string
 	Silent       *bool
 	Timeout      *time.Duration
 	TLS          *uint16
@@ -100,6 +102,9 @@ func (c *Config) Merge(c2 *Config) {
 	if c.Redirects == nil {
 		c.Redirects = c2.Redirects
 	}
+	if c.Session == nil {
+		c.Session = c2.Session
+	}
 	if c.Silent == nil {
 		c.Silent = c2.Silent
 	}
@@ -152,6 +157,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseQuery(val)
 	case "redirects":
 		err = c.ParseRedirects(val)
+	case "session":
+		err = c.ParseSession(val)
 	case "silent":
 		err = c.ParseSilent(val)
 	case "timeout":
@@ -428,6 +435,15 @@ func (c *Config) ParseRedirects(value string) error {
 		return core.NewValueError("redirects", value, usage, c.isFile)
 	}
 	c.Redirects = &n
+	return nil
+}
+
+func (c *Config) ParseSession(value string) error {
+	if !session.IsValidName(value) {
+		const usage = "must contain only alphanumeric characters, hyphens, and underscores"
+		return core.NewValueError("session", value, usage, c.isFile)
+	}
+	c.Session = &value
 	return nil
 }
 
