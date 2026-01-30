@@ -85,15 +85,22 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool) error {
 		return err
 	}
 
-	writeInfo(p, silent, "fetching latest release tag")
+	writeMsg(p, silent, "Fetching latest release...\n")
 	latest, err := getLatestRelease(ctx, c)
 	if err != nil {
-		return fmt.Errorf("fetching latest release: %w", err)
+		return fmt.Errorf("unable to fetch the latest release: %w", err)
 	}
 
 	if latest.TagName == version {
 		// Already using the latest version, exit successfully.
-		writeInfo(p, silent, fmt.Sprintf("currently using the latest version (%s)", version))
+		if !silent {
+			p.WriteString("Already using the latest version (")
+			p.Set(core.Bold)
+			p.WriteString(version)
+			p.Reset()
+			p.WriteString(").\n")
+			p.Flush()
+		}
 		return nil
 	}
 
@@ -103,20 +110,33 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool) error {
 		return errNoReleaseArtifact{}
 	}
 
-	writeInfo(p, silent, fmt.Sprintf("downloading latest version (%s)", latest.TagName))
-	rc, err := getArtifactReader(ctx, c, artifactURL)
+	if !silent {
+		p.WriteString("Downloading ")
+		p.Set(core.Bold)
+		p.WriteString(latest.TagName)
+		p.Reset()
+		p.WriteString("\n\n")
+		p.Flush()
+	}
+
+	rc, contentLength, err := getArtifactReader(ctx, c, artifactURL)
 	if err != nil {
 		return fmt.Errorf("fetching artifact: %w", err)
 	}
-	defer rc.Close()
 
 	// Create a temporary directory, and unpack the artifact into it.
 	tempDir, err := os.MkdirTemp("", "fetch-")
 	if err != nil {
+		rc.Close()
 		return err
 	}
 	defer os.RemoveAll(tempDir)
+
+	// Wrap reader with progress indicator if appropriate.
+	rc = wrapProgress(rc, p, silent, contentLength)
+
 	err = unpackArtifact(tempDir, rc)
+	rc.Close()
 	if err != nil {
 		return err
 	}
@@ -128,8 +148,7 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool) error {
 		return err
 	}
 
-	msg := fmt.Sprintf("fetch successfully updated (%s -> %s)", version, latest.TagName)
-	writeInfo(p, silent, msg)
+	writeUpdateSuccess(p, silent, version, latest.TagName)
 	return nil
 }
 
@@ -194,11 +213,12 @@ func getLatestRelease(ctx context.Context, c *client.Client) (*Release, error) {
 	return &release, nil
 }
 
-// getArtifactReader returns an io.ReadCloser of the artifact data.
-func getArtifactReader(ctx context.Context, c *client.Client, urlStr string) (io.ReadCloser, error) {
+// getArtifactReader returns an io.ReadCloser of the artifact data and the
+// content length (or -1 if unknown).
+func getArtifactReader(ctx context.Context, c *client.Client, urlStr string) (io.ReadCloser, int64, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	cfg := client.RequestConfig{
@@ -207,20 +227,31 @@ func getArtifactReader(ctx context.Context, c *client.Client, urlStr string) (io
 	}
 	req, err := c.NewRequest(ctx, cfg)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if resp.StatusCode != 200 {
 		resp.Body.Close()
-		return nil, fmt.Errorf("downloading artifact: received status: %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("downloading artifact: received status: %d", resp.StatusCode)
 	}
 
-	return resp.Body, nil
+	return resp.Body, resp.ContentLength, nil
+}
+
+// wrapProgress wraps the reader with a progress indicator if appropriate.
+func wrapProgress(rc io.ReadCloser, p *core.Printer, silent bool, contentLength int64) io.ReadCloser {
+	if silent || !core.IsStderrTerm {
+		return rc
+	}
+	if contentLength > 0 {
+		return newUpdateProgress(rc, p, contentLength)
+	}
+	return newUpdateSpinner(rc, p)
 }
 
 // getArtifactURL finds and returns the artifact URL for the current OS and
@@ -258,18 +289,34 @@ func getFetchFilename() string {
 	return name
 }
 
-func writeInfo(p *core.Printer, silent bool, s string) {
+func writeMsg(p *core.Printer, silent bool, s string) {
+	if silent {
+		return
+	}
+	p.WriteString(s)
+	p.Flush()
+}
+
+func writeUpdateSuccess(p *core.Printer, silent bool, oldVersion, newVersion string) {
 	if silent {
 		return
 	}
 
+	p.WriteString("Updated fetch: ")
+	p.WriteString(oldVersion)
+	p.WriteString(" -> ")
 	p.Set(core.Bold)
-	p.Set(core.Green)
-	p.WriteString("info")
+	p.WriteString(newVersion)
 	p.Reset()
-	p.WriteString(": ")
+	p.WriteString("\n\n")
 
-	p.WriteString(s)
+	p.WriteString("Changelog: ")
+	p.Set(core.Underline)
+	p.WriteString("https://github.com/ryanfowler/fetch/compare/")
+	p.WriteString(oldVersion)
+	p.WriteString("...")
+	p.WriteString(newVersion)
+	p.Reset()
 	p.WriteString("\n")
 	p.Flush()
 }
