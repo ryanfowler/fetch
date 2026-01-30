@@ -1191,6 +1191,29 @@ func TestMain(t *testing.T) {
 		res = runFetch(t, fetchPath, "--version")
 		assertExitCode(t, 0, res)
 
+		// Test dry-run update when already on latest version.
+		newVersion.Store(&version)
+		dryRunModTime := getModTime(t, fetchPath)
+		res = runFetch(t, fetchPath, server.URL, "--update", "--dry-run")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "Already using the latest version")
+		if !getModTime(t, fetchPath).Equal(dryRunModTime) {
+			t.Fatal("binary was modified during dry-run update (same version)")
+		}
+
+		// Test dry-run update when a new version is available.
+		newVersion.Store(&newStr)
+		dryRunModTime = getModTime(t, fetchPath)
+		res = runFetch(t, fetchPath, server.URL, "--update", "--dry-run")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "Update available")
+		assertBufContains(t, res.stderr, newStr)
+		assertBufNotContains(t, res.stderr, "Updated fetch:")
+		assertBufNotContains(t, res.stderr, "Downloading")
+		if !getModTime(t, fetchPath).Equal(dryRunModTime) {
+			t.Fatal("binary was modified during dry-run update")
+		}
+
 		// Test the auto-update functionality.
 		res = runFetch(t, fetchPath, "--version", "--auto-update", "0s")
 		assertExitCode(t, 0, res)

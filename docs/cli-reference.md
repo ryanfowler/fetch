@@ -456,7 +456,7 @@ Print detailed build information.
 
 ### `--update`
 
-Update fetch binary in place.
+Update fetch binary in place. Use with `--dry-run` to check for updates without installing.
 
 ### `--complete SHELL`
 
@@ -469,10 +469,11 @@ fetch --complete fish > ~/.config/fish/completions/fetch.fish
 
 ### `--dry-run`
 
-Print request information without sending.
+Print request information without sending. When used with `--update`, checks for the latest version without installing.
 
 ```sh
 fetch --dry-run -m POST -j '{"test": true}' example.com
+fetch --update --dry-run
 ```
 
 ## Environment Variables

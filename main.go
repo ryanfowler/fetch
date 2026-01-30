@@ -96,7 +96,7 @@ func main() {
 	if app.Update {
 		p := handle.Stderr()
 		timeout := getValue(app.Cfg.Timeout)
-		status := update.Update(ctx, p, timeout, verbosity == core.VSilent)
+		status := update.Update(ctx, p, timeout, verbosity == core.VSilent, app.DryRun)
 		os.Exit(status)
 	}
 
