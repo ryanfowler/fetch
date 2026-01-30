@@ -108,6 +108,13 @@ func parseFile(path, s string) (*File, error) {
 				return nil, newFileError(path, num, errors.New("hostname cannot be empty"))
 			}
 
+			if strings.Contains(hostStr, "*") {
+				if !strings.HasPrefix(hostStr, "*.") || len(hostStr) < 3 || strings.Contains(hostStr[2:], "*") {
+					err := fmt.Errorf("invalid wildcard hostname '%s': must be in the format '*.domain'", hostStr)
+					return nil, newFileError(path, num, err)
+				}
+			}
+
 			config = &Config{isFile: true}
 			if f.Hosts == nil {
 				f.Hosts = make(map[string]*Config)
@@ -173,6 +180,34 @@ func newFileError(file string, line int, err error) fileError {
 
 func (err fileError) Error() string {
 	return fmt.Sprintf("config file '%s': line %d: %s", err.file, err.line, err.err.Error())
+}
+
+// HostConfig returns the Config for the given hostname, using exact match
+// first, then falling back to the most-specific wildcard match.
+func (f *File) HostConfig(hostname string) *Config {
+	if hostname == "" {
+		return nil
+	}
+
+	// Exact match first.
+	if cfg, ok := f.Hosts[hostname]; ok {
+		return cfg
+	}
+
+	// Wildcard: find longest (most specific) suffix match.
+	var best *Config
+	var bestLen int
+	for key, cfg := range f.Hosts {
+		if !strings.HasPrefix(key, "*.") {
+			continue
+		}
+		suffix := key[1:] // e.g. ".example.com"
+		if strings.HasSuffix(hostname, suffix) && len(suffix) > bestLen {
+			bestLen = len(suffix)
+			best = cfg
+		}
+	}
+	return best
 }
 
 func (err fileError) PrintTo(p *core.Printer) {

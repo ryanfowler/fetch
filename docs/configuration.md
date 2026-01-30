@@ -470,9 +470,35 @@ timeout = 120
 redirects = 0
 ```
 
+### Wildcard Subdomain Matching
+
+You can use `[*.domain.com]` syntax to match any subdomain of a domain:
+
+```ini
+# Match any subdomain of example.com
+[*.example.com]
+header = X-API-Key: shared-key
+
+# Match any subdomain of api.example.com (more specific)
+[*.api.example.com]
+header = X-API-Key: api-specific-key
+
+# Exact match always takes priority
+[admin.example.com]
+header = X-API-Key: admin-key
+```
+
+**Matching rules:**
+
+- `*.example.com` matches `api.example.com`, `a.b.example.com`, etc.
+- `*.example.com` does **not** match `example.com` itself
+- Exact matches always take priority over wildcard matches
+- When multiple wildcards match, the most specific (longest suffix) wins
+- Only one host config section is applied per request (no merging across sections)
+
 ### Host Section Rules
 
-- Section names should be the exact hostname (without protocol or path)
+- Section names should be the exact hostname (without protocol or path), or a wildcard pattern like `*.domain.com`
 - Host-specific settings override global settings
 - Command-line flags override both global and host-specific settings
 - Multiple headers and query parameters are merged (host-specific first, then global)
