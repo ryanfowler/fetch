@@ -203,8 +203,8 @@ func parseConfigFile(app *cli.App, p *core.Printer) error {
 	}
 
 	if app.URL != nil {
-		hostCfg, ok := file.Hosts[app.URL.Hostname()]
-		if ok {
+		hostname := app.URL.Hostname()
+		if hostCfg := file.HostConfig(hostname); hostCfg != nil {
 			app.Cfg.Merge(hostCfg)
 		}
 	}
