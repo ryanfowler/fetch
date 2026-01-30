@@ -271,7 +271,7 @@ func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration) {
 	if err != nil {
 		return
 	}
-	_ = exec.Command(path, "--update", "--timeout=300").Start()
+	_ = exec.Command(path, "--update", "--timeout=300", "--silent").Start()
 }
 
 // writeCLIErr writes the provided CLI error to the Printer.

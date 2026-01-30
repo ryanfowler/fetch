@@ -1163,7 +1163,7 @@ func TestMain(t *testing.T) {
 		// Test update using latest version.
 		res := runFetch(t, fetchPath, server.URL, "--update")
 		assertExitCode(t, 0, res)
-		assertBufContains(t, res.stderr, "currently using the latest version")
+		assertBufContains(t, res.stderr, "Already using the latest version")
 		if s := listFiles(t, filepath.Dir(fetchPath)); len(s) > 1 {
 			t.Fatalf("unexpected files after updating: %v", s)
 		}
@@ -1176,7 +1176,8 @@ func TestMain(t *testing.T) {
 		newVersion.Store(&newStr)
 		res = runFetch(t, fetchPath, server.URL, "--update")
 		assertExitCode(t, 0, res)
-		assertBufContains(t, res.stderr, "fetch successfully updated")
+		assertBufContains(t, res.stderr, "Updated fetch:")
+		assertBufContains(t, res.stderr, "Changelog:")
 		if s := listFiles(t, filepath.Dir(fetchPath)); len(s) > 1 {
 			t.Fatalf("unexpected files after updating: %v", s)
 		}
