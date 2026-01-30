@@ -21,8 +21,8 @@ import (
 
 // Update checks the API for the latest fetch version and upgrades the current
 // executable in-place, returning the exit code to use.
-func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool) int {
-	err := update(ctx, p, timeout, silent)
+func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool, dryRun bool) int {
+	err := update(ctx, p, timeout, silent, dryRun)
 	if err == nil {
 		return 0
 	}
@@ -31,7 +31,7 @@ func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	return 1
 }
 
-func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool) error {
+func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool, dryRun bool) error {
 	if timeout > 0 {
 		// Ensure the context is cancelled after the provided timeout.
 		var cancel context.CancelFunc
@@ -61,10 +61,10 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	}()
 
 	// Perform the update.
-	return updateInner(ctx, p, silent)
+	return updateInner(ctx, p, silent, dryRun)
 }
 
-func updateInner(ctx context.Context, p *core.Printer, silent bool) error {
+func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool) error {
 	c := client.NewClient(client.ClientConfig{})
 
 	// Get the current executable path and verify that we have write
@@ -99,6 +99,20 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool) error {
 			p.WriteString(version)
 			p.Reset()
 			p.WriteString(").\n")
+			p.Flush()
+		}
+		return nil
+	}
+
+	if dryRun {
+		if !silent {
+			p.WriteString("Update available: ")
+			p.WriteString(version)
+			p.WriteString(" -> ")
+			p.Set(core.Bold)
+			p.WriteString(latest.TagName)
+			p.Reset()
+			p.WriteString("\n")
 			p.Flush()
 		}
 		return nil
