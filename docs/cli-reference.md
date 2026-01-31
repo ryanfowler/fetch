@@ -187,6 +187,23 @@ Overwrite existing output file (default behavior is to fail if file exists).
 fetch -o output.json --clobber example.com/data
 ```
 
+### `--copy`
+
+Copy the response body to the system clipboard. The response is still printed
+to stdout normally.
+
+Requires a clipboard command to be available on the system:
+
+- **macOS**: `pbcopy` (built-in)
+- **Linux/Wayland**: `wl-copy`
+- **Linux/X11**: `xclip` or `xsel`
+- **Windows**: `clip.exe` (built-in)
+
+```sh
+fetch --copy example.com/api/data
+fetch --copy -o response.json example.com/api/data
+```
+
 ## Formatting Options
 
 ### `--format OPTION`

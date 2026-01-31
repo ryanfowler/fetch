@@ -139,6 +139,7 @@ func main() {
 		ClientCert:       clientCert,
 		Clobber:          app.Clobber,
 		ContentType:      app.ContentType,
+		Copy:             getValue(app.Cfg.Copy),
 		Data:             app.Data,
 		DNSServer:        app.Cfg.DNSServer,
 		DryRun:           app.DryRun,

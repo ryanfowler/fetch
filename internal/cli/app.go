@@ -316,6 +316,21 @@ func (a *App) CLI() *CLI {
 				},
 			},
 			{
+				Short:       "",
+				Long:        "copy",
+				Args:        "",
+				Description: "Copy the response body to clipboard",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Cfg.Copy != nil
+				},
+				Fn: func(value string) error {
+					v := true
+					a.Cfg.Copy = &v
+					return nil
+				},
+			},
+			{
 				Short:       "d",
 				Long:        "data",
 				Args:        "[@]VALUE",

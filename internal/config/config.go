@@ -26,6 +26,7 @@ type Config struct {
 	CertData     []byte
 	CertPath     string
 	Color        core.Color
+	Copy         *bool
 	DNSServer    *url.URL
 	Format       core.Format
 	Headers      []core.KeyVal[string]
@@ -61,6 +62,9 @@ func (c *Config) Merge(c2 *Config) {
 	}
 	if c.Color == core.ColorUnknown {
 		c.Color = c2.Color
+	}
+	if c.Copy == nil {
+		c.Copy = c2.Copy
 	}
 	if c.DNSServer == nil {
 		c.DNSServer = c2.DNSServer
@@ -131,6 +135,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseCert(val)
 	case "color", "colour":
 		err = c.ParseColor(val)
+	case "copy":
+		err = c.ParseCopy(val)
 	case "dns-server":
 		err = c.ParseDNSServer(val)
 	case "format":
@@ -248,6 +254,15 @@ func (c *Config) ParseCert(value string) error {
 
 	c.CertData = data
 	c.CertPath = value
+	return nil
+}
+
+func (c *Config) ParseCopy(value string) error {
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return core.NewValueError("copy", value, "must be a boolean", c.isFile)
+	}
+	c.Copy = &v
 	return nil
 }
 
