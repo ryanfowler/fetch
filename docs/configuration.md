@@ -66,6 +66,18 @@ auto-update = 1d
 
 ### Output Control Options
 
+#### `copy`
+
+**Type**: Boolean
+**Default**: `false`
+
+Copy the response body to the system clipboard.
+
+```ini
+copy = true
+copy = false
+```
+
 #### `color` / `colour`
 
 **Type**: String

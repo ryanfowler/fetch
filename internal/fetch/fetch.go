@@ -56,6 +56,7 @@ type Request struct {
 	ClientCert       *tls.Certificate
 	Clobber          bool
 	ContentType      string
+	Copy             bool
 	Data             io.Reader
 	DNSServer        *url.URL
 	DryRun           bool
@@ -314,6 +315,9 @@ func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Re
 		p.Flush()
 	}
 
+	// If --copy is requested, wrap the response body to capture raw bytes.
+	cc := newClipboardCopier(r, resp)
+
 	body, err := formatResponse(ctx, r, resp)
 	if err != nil {
 		return 0, err
@@ -326,6 +330,9 @@ func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Re
 			return 0, err
 		}
 	}
+
+	// Copy captured bytes to clipboard.
+	cc.finish(r.PrinterHandle.Stderr())
 
 	return exitCode, nil
 }

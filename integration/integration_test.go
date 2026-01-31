@@ -1464,6 +1464,74 @@ func TestMain(t *testing.T) {
 			assertBufContains(t, res.stderr, "session")
 		})
 	})
+
+	t.Run("copy", func(t *testing.T) {
+		t.Run("stdout still has body", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(200)
+				io.WriteString(w, `{"hello":"world"}`)
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, "--copy", "--no-pager", "--format=off", server.URL)
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, `{"hello":"world"}`)
+		})
+
+		t.Run("works with output flag", func(t *testing.T) {
+			const data = "file and clipboard data"
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(200)
+				io.WriteString(w, data)
+			})
+			defer server.Close()
+
+			dir, err := os.MkdirTemp("", "")
+			if err != nil {
+				t.Fatalf("unable to create temp dir: %s", err.Error())
+			}
+			defer os.RemoveAll(dir)
+
+			path := filepath.Join(dir, "output")
+			res := runFetch(t, fetchPath, "--copy", "-o", path, server.URL)
+			assertExitCode(t, 0, res)
+
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("unable to read output file: %s", err.Error())
+			}
+			if string(raw) != data {
+				t.Fatalf("unexpected data in output file: %q", raw)
+			}
+		})
+
+		t.Run("head request with copy", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(200)
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, "--copy", "-m", "HEAD", server.URL)
+			assertExitCode(t, 0, res)
+			assertBufEmpty(t, res.stdout)
+		})
+
+		t.Run("copy with silent mode", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/plain")
+				w.WriteHeader(200)
+				io.WriteString(w, "silent copy")
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, "--copy", "-s", "--no-pager", server.URL)
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, "silent copy")
+			// In silent mode, stderr should not contain response metadata.
+			assertBufNotContains(t, res.stderr, "200 OK")
+		})
+	})
 }
 
 type runResult struct {
