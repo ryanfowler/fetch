@@ -190,7 +190,8 @@ fetch -o output.json --clobber example.com/data
 ### `--copy`
 
 Copy the response body to the system clipboard. The response is still printed
-to stdout normally.
+to stdout normally. Works with all response types including streaming responses
+(SSE, NDJSON, gRPC). Responses exceeding 1 MiB are not copied to the clipboard.
 
 Requires a clipboard command to be available on the system:
 
