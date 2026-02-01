@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,22 +74,24 @@ func parseGRPCPath(urlPath string) (serviceName, methodName string, err error) {
 }
 
 // setupGRPC configures request for gRPC protocol.
-// Returns headers to add, HTTP version, and request/response descriptors.
-func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor, protoreflect.MessageDescriptor, error) {
+// Returns request/response descriptors, whether the method is client-streaming, and any error.
+func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor, protoreflect.MessageDescriptor, bool, error) {
 	var requestDesc, responseDesc protoreflect.MessageDescriptor
+	var isClientStreaming bool
 	if schema != nil && r.URL != nil {
 		serviceName, methodName, err := parseGRPCPath(r.URL.Path)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 
 		fullMethod := serviceName + "/" + methodName
 		method, err := schema.FindMethod(fullMethod)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		requestDesc = method.Input()
 		responseDesc = method.Output()
+		isClientStreaming = method.IsStreamingClient()
 	}
 
 	if r.HTTP == core.HTTPDefault {
@@ -100,7 +103,7 @@ func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor
 	r.Headers = append(r.Headers, fetchgrpc.Headers()...)
 	r.Headers = append(r.Headers, fetchgrpc.AcceptHeader())
 
-	return requestDesc, responseDesc, nil
+	return requestDesc, responseDesc, isClientStreaming, nil
 }
 
 // convertJSONToProtobuf converts JSON body to protobuf.
@@ -135,4 +138,36 @@ func frameGRPCRequest(data io.Reader) (io.Reader, error) {
 	// Frame with gRPC format (works for empty data too).
 	framedData := fetchgrpc.Frame(rawData, false)
 	return bytes.NewReader(framedData), nil
+}
+
+// streamGRPCRequest reads JSON objects from data, converts each to protobuf,
+// frames each as a gRPC message, and streams them through an io.Pipe.
+// Returns an io.ReadCloser to use as the request body.
+func streamGRPCRequest(data io.Reader, desc protoreflect.MessageDescriptor) io.ReadCloser {
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		decoder := json.NewDecoder(data)
+		for {
+			var raw json.RawMessage
+			err := decoder.Decode(&raw)
+			if err == io.EOF {
+				return
+			}
+			if err != nil {
+				pw.CloseWithError(fmt.Errorf("failed to decode JSON message: %w", err))
+				return
+			}
+			protoData, err := proto.JSONToProtobuf(raw, desc)
+			if err != nil {
+				pw.CloseWithError(fmt.Errorf("failed to convert JSON to protobuf: %w", err))
+				return
+			}
+			frame := fetchgrpc.Frame(protoData, false)
+			if _, err := pw.Write(frame); err != nil {
+				return // pipe closed by reader
+			}
+		}
+	}()
+	return pr
 }
