@@ -31,6 +31,10 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
+// maxBodyBytes is the maximum number of bytes read into memory for
+// formatting a response body or copying it to the clipboard.
+const maxBodyBytes = 1 << 20 // 1MiB
+
 type ContentType int
 
 const (
@@ -376,12 +380,11 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		return resp.Body, nil
 	}
 
-	const bytesLimit = 1 << 24 // 16MB
-	buf, err := io.ReadAll(io.LimitReader(resp.Body, bytesLimit))
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if err != nil {
 		return nil, err
 	}
-	if len(buf) >= bytesLimit {
+	if len(buf) >= maxBodyBytes {
 		// We've reached the limit of bytes read into memory, skip formatting.
 		return io.MultiReader(bytes.NewReader(buf), resp.Body), nil
 	}
