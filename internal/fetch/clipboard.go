@@ -11,12 +11,41 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
+// limitedBuffer is an io.Writer that captures up to max bytes into buf,
+// then silently discards overflow. It always returns len(p), nil so that
+// an io.TeeReader using this writer never sees a write error.
+type limitedBuffer struct {
+	buf      bytes.Buffer
+	max      int64
+	written  int64
+	overflow bool
+}
+
+func (lb *limitedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if lb.overflow {
+		return n, nil
+	}
+	remaining := lb.max - lb.written
+	if int64(n) > remaining {
+		lb.overflow = true
+		if remaining > 0 {
+			lb.buf.Write(p[:remaining])
+		}
+		lb.written = lb.max
+		return n, nil
+	}
+	lb.buf.Write(p)
+	lb.written += int64(n)
+	return n, nil
+}
+
 // clipboardCopier handles capturing the raw response body and copying it
 // to the system clipboard. Use newClipboardCopier to set up body wrapping,
 // then call finish after the response has been consumed.
 type clipboardCopier struct {
 	cmd *clipboardCmd
-	buf *bytes.Buffer
+	buf *limitedBuffer
 }
 
 // newClipboardCopier sets up clipboard copying for the response. If copying
@@ -44,16 +73,9 @@ func newClipboardCopier(r *Request, resp *http.Response) *clipboardCopier {
 		return nil
 	}
 
-	contentType := getContentType(resp.Header)
-	if contentType == TypeSSE || contentType == TypeNDJSON || contentType == TypeGRPC {
-		p := r.PrinterHandle.Stderr()
-		core.WriteWarningMsg(p, "--copy is not supported for streaming responses")
-		return nil
-	}
-
-	buf := &bytes.Buffer{}
+	buf := &limitedBuffer{max: maxBodyBytes}
 	resp.Body = readCloserTee{
-		Reader: io.TeeReader(io.LimitReader(resp.Body, maxBodyBytes), buf),
+		Reader: io.TeeReader(resp.Body, buf),
 		Closer: resp.Body,
 	}
 	return &clipboardCopier{cmd: cmd, buf: buf}
@@ -62,10 +84,14 @@ func newClipboardCopier(r *Request, resp *http.Response) *clipboardCopier {
 // finish copies the captured bytes to the system clipboard. It writes a
 // warning to stderr on failure but never returns an error.
 func (cc *clipboardCopier) finish(p *core.Printer) {
-	if cc == nil || cc.buf.Len() == 0 {
+	if cc == nil || cc.buf.buf.Len() == 0 {
 		return
 	}
-	if err := copyToClipboard(cc.cmd, cc.buf.Bytes()); err != nil {
+	if cc.buf.overflow {
+		core.WriteWarningMsg(p, "--copy: response body too large to copy to clipboard")
+		return
+	}
+	if err := copyToClipboard(cc.cmd, cc.buf.buf.Bytes()); err != nil {
 		core.WriteWarningMsg(p, "unable to copy to clipboard: "+err.Error())
 	}
 }

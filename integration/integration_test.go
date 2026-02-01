@@ -1732,6 +1732,36 @@ func TestMain(t *testing.T) {
 			// In silent mode, stderr should not contain response metadata.
 			assertBufNotContains(t, res.stderr, "200 OK")
 		})
+
+		t.Run("copy with SSE response", func(t *testing.T) {
+			const data = "data:{\"key\":\"val\"}\n\nevent:ev1\ndata: hello\n\n"
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(200)
+				io.WriteString(w, data)
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, "--copy", "--no-pager", "--format", "off", server.URL)
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, data)
+			assertBufNotContains(t, res.stderr, "not supported")
+		})
+
+		t.Run("copy with NDJSON response", func(t *testing.T) {
+			const data = "{\"a\":1}\n{\"b\":2}\n"
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/x-ndjson")
+				w.WriteHeader(200)
+				io.WriteString(w, data)
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, "--copy", "--no-pager", "--format", "off", server.URL)
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, data)
+			assertBufNotContains(t, res.stderr, "not supported")
+		})
 	})
 }
 
