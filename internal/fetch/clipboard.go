@@ -11,8 +11,6 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
-const clipboardLimit = 1 << 24 // 16MB
-
 // clipboardCopier handles capturing the raw response body and copying it
 // to the system clipboard. Use newClipboardCopier to set up body wrapping,
 // then call finish after the response has been consumed.
@@ -55,7 +53,7 @@ func newClipboardCopier(r *Request, resp *http.Response) *clipboardCopier {
 
 	buf := &bytes.Buffer{}
 	resp.Body = readCloserTee{
-		Reader: io.TeeReader(io.LimitReader(resp.Body, clipboardLimit), buf),
+		Reader: io.TeeReader(io.LimitReader(resp.Body, maxBodyBytes), buf),
 		Closer: resp.Body,
 	}
 	return &clipboardCopier{cmd: cmd, buf: buf}
