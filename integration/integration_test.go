@@ -1034,6 +1034,75 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stdout, "grpc test")
 	})
 
+	t.Run("grpc streaming response", func(t *testing.T) {
+		// Build 3 separate gRPC-framed protobuf messages.
+		makeFrame := func(fieldNum protowire.Number, value string) []byte {
+			var protoData []byte
+			protoData = protowire.AppendTag(protoData, fieldNum, protowire.BytesType)
+			protoData = protowire.AppendString(protoData, value)
+			framedData := make([]byte, 5+len(protoData))
+			framedData[0] = 0 // not compressed
+			binary.BigEndian.PutUint32(framedData[1:5], uint32(len(protoData)))
+			copy(framedData[5:], protoData)
+			return framedData
+		}
+
+		frame1 := makeFrame(1, "message one")
+		frame2 := makeFrame(1, "message two")
+		frame3 := makeFrame(1, "message three")
+
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/grpc+proto")
+			w.WriteHeader(200)
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				http.Error(w, "no flusher", 500)
+				return
+			}
+			w.Write(frame1)
+			flusher.Flush()
+			w.Write(frame2)
+			flusher.Flush()
+			w.Write(frame3)
+			flusher.Flush()
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "message one")
+		assertBufContains(t, res.stdout, "message two")
+		assertBufContains(t, res.stdout, "message three")
+	})
+
+	t.Run("grpc streaming error status", func(t *testing.T) {
+		// Build a single gRPC-framed protobuf message.
+		var protoData []byte
+		protoData = protowire.AppendTag(protoData, 1, protowire.BytesType)
+		protoData = protowire.AppendString(protoData, "partial data")
+		framedData := make([]byte, 5+len(protoData))
+		framedData[0] = 0
+		binary.BigEndian.PutUint32(framedData[1:5], uint32(len(protoData)))
+		copy(framedData[5:], protoData)
+
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/grpc+proto")
+			w.Header().Set("Trailer", "Grpc-Status, Grpc-Message")
+			w.WriteHeader(200)
+			w.Write(framedData)
+			w.(http.Flusher).Flush()
+			// Set trailers after body.
+			w.Header().Set("Grpc-Status", "13")      // INTERNAL
+			w.Header().Set("Grpc-Message", "oh no!") // error message
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL+"/pkg.Svc/Method", "--grpc", "--http", "1", "--format", "on")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "INTERNAL")
+		assertBufContains(t, res.stderr, "oh no!")
+	})
+
 	t.Run("proto flags mutual exclusivity", func(t *testing.T) {
 		// proto-file and proto-desc cannot be used together
 		// Create temp files so we get past file existence validation

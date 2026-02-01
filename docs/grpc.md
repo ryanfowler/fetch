@@ -353,10 +353,26 @@ apt install protobuf-compiler
 - Verify proto schema matches server's actual message format
 - Try without schema to see raw wire format
 
+## Server Streaming
+
+`fetch` supports server-side streaming gRPC responses. Each response message is formatted and displayed as it arrives, following the same real-time streaming pattern used for SSE and NDJSON responses.
+
+```sh
+fetch --grpc --proto-file service.proto \
+  -j '{"query": "search term"}' \
+  https://localhost:50051/search.SearchService/StreamResults
+```
+
+For streaming responses, messages are separated by blank lines in the output. Formatting and flushing happen incrementally, so results appear in real time.
+
+### gRPC Status
+
+`fetch` reports gRPC status errors from response trailers. If the server returns a non-OK gRPC status (e.g., `INTERNAL`, `NOT_FOUND`), the error is printed to stderr and the exit code is set to 1.
+
 ## Limitations
 
-- **Unary calls only**: Streaming RPCs are not supported
-- **Single message**: Cannot send multiple messages in one request
+- **Client-side and bidirectional streaming are not supported**: Only unary and server-streaming RPCs are supported
+- **Single request message**: Cannot send multiple messages in one request
 - **gRPC-Web**: Standard gRPC protocol only, not gRPC-Web
 
 ## See Also
