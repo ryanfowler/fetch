@@ -22,7 +22,6 @@ import (
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/format"
-	fetchgrpc "github.com/ryanfowler/fetch/internal/grpc"
 	"github.com/ryanfowler/fetch/internal/image"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/proto"
@@ -338,6 +337,11 @@ func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Re
 	// Copy captured bytes to clipboard.
 	cc.finish(r.PrinterHandle.Stderr())
 
+	// Check gRPC trailer status after the body has been fully consumed.
+	if r.GRPC {
+		exitCode = checkGRPCStatus(r, resp, exitCode)
+	}
+
 	return exitCode, nil
 }
 
@@ -367,6 +371,9 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	switch contentType {
 	case TypeUnknown:
 		return resp.Body, nil
+	case TypeGRPC:
+		// NOTE: This bypasses the isPrintable check for binary data.
+		return nil, format.FormatGRPCStream(resp.Body, r.responseDescriptor, p)
 	case TypeNDJSON:
 		// NOTE: This bypasses the isPrintable check for binary data.
 		return nil, format.FormatNDJSON(resp.Body, p)
@@ -410,21 +417,6 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		}
 	case TypeMsgPack:
 		if format.FormatMsgPack(buf, p) == nil {
-			buf = p.Bytes()
-		}
-	case TypeGRPC:
-		// Unframe gRPC response before processing.
-		unframedBuf, _, err := fetchgrpc.Unframe(buf)
-		if err != nil {
-			// If unframing fails, try to process as raw protobuf.
-			unframedBuf = buf
-		}
-		if r.responseDescriptor != nil {
-			err = format.FormatProtobufWithDescriptor(unframedBuf, r.responseDescriptor, p)
-		} else {
-			err = format.FormatProtobuf(unframedBuf, p)
-		}
-		if err == nil {
 			buf = p.Bytes()
 		}
 	case TypeProtobuf:

@@ -14,6 +14,33 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
+// checkGRPCStatus checks gRPC status from trailers (or headers for
+// trailers-only responses) and prints an error to stderr if the status
+// is non-OK. Returns the updated exit code.
+func checkGRPCStatus(r *Request, resp *http.Response, exitCode int) int {
+	grpcStatus := resp.Trailer.Get("Grpc-Status")
+	grpcMessage := resp.Trailer.Get("Grpc-Message")
+
+	// Fall back to headers for trailers-only error responses.
+	if grpcStatus == "" {
+		grpcStatus = resp.Header.Get("Grpc-Status")
+		grpcMessage = resp.Header.Get("Grpc-Message")
+	}
+
+	if grpcStatus == "" || grpcStatus == "0" {
+		return exitCode
+	}
+
+	status := fetchgrpc.ParseStatus(grpcStatus, grpcMessage)
+	p := r.PrinterHandle.Stderr()
+	core.WriteErrorMsg(p, status)
+
+	if exitCode == 0 {
+		return 1
+	}
+	return exitCode
+}
+
 // loadProtoSchema loads schema from files or descriptor set.
 func loadProtoSchema(r *Request) (*proto.Schema, error) {
 	if len(r.ProtoFiles) > 0 {

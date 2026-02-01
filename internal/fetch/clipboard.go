@@ -45,7 +45,7 @@ func newClipboardCopier(r *Request, resp *http.Response) *clipboardCopier {
 	}
 
 	contentType := getContentType(resp.Header)
-	if contentType == TypeSSE || contentType == TypeNDJSON {
+	if contentType == TypeSSE || contentType == TypeNDJSON || contentType == TypeGRPC {
 		p := r.PrinterHandle.Stderr()
 		core.WriteWarningMsg(p, "--copy is not supported for streaming responses")
 		return nil
