@@ -129,9 +129,10 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 
 	// 2. Setup gRPC (adds headers, sets HTTP version, finds descriptors).
 	var requestDesc protoreflect.MessageDescriptor
+	var isClientStreaming bool
 	if r.GRPC {
 		var err error
-		requestDesc, r.responseDescriptor, err = setupGRPC(r, schema)
+		requestDesc, r.responseDescriptor, isClientStreaming, err = setupGRPC(r, schema)
 		if err != nil {
 			return 0, err
 		}
@@ -200,30 +201,35 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}
 
-	// 5. Convert JSON to protobuf AFTER edit.
-	if requestDesc != nil && req.Body != nil && req.Body != http.NoBody {
-		// Read the body and convert.
-		converted, err := convertJSONToProtobuf(req.Body, requestDesc)
-		if err != nil {
-			return 0, err
-		}
-		req.Body = io.NopCloser(converted)
-		if req.Header.Get("Content-Type") == "" {
-			req.Header.Set("Content-Type", "application/protobuf")
-		}
-	}
-
-	// 6. Frame gRPC request AFTER conversion.
-	// gRPC requires framing even for empty messages.
+	// 5. Convert and frame gRPC request AFTER edit.
 	if r.GRPC {
-		framed, err := frameGRPCRequest(req.Body)
-		if err != nil {
-			return 0, err
+		if isClientStreaming && requestDesc != nil {
+			// Client/bidi streaming: stream multiple JSON objects as gRPC frames.
+			if req.Body != nil && req.Body != http.NoBody {
+				req.Body = streamGRPCRequest(req.Body, requestDesc)
+				req.ContentLength = -1 // Unknown length; use chunked encoding.
+			} else {
+				// Empty client stream: no frames, just close immediately.
+				req.Body = http.NoBody
+			}
+		} else {
+			// Unary / server-streaming: existing single-message path.
+			if requestDesc != nil && req.Body != nil && req.Body != http.NoBody {
+				converted, err := convertJSONToProtobuf(req.Body, requestDesc)
+				if err != nil {
+					return 0, err
+				}
+				req.Body = io.NopCloser(converted)
+			}
+			framed, err := frameGRPCRequest(req.Body)
+			if err != nil {
+				return 0, err
+			}
+			req.Body = io.NopCloser(framed)
 		}
-		req.Body = io.NopCloser(framed)
 	}
 
-	// 7. Print request metadata / dry-run.
+	// 6. Print request metadata / dry-run.
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
 		printRequestMetadata(errPrinter, req, r.HTTP)
@@ -263,7 +269,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		req = req.WithContext(ctx)
 	}
 
-	// 8. Make request.
+	// 7. Make request.
 	code, err := makeRequest(ctx, r, c, req)
 
 	// Save session cookies after request completes.

@@ -369,10 +369,53 @@ For streaming responses, messages are separated by blank lines in the output. Fo
 
 `fetch` reports gRPC status errors from response trailers. If the server returns a non-OK gRPC status (e.g., `INTERNAL`, `NOT_FOUND`), the error is printed to stderr and the exit code is set to 1.
 
+## Client Streaming
+
+`fetch` supports client-side streaming gRPC calls. When the proto schema indicates a method is client-streaming, multiple JSON objects in the request body are each converted to a separate protobuf message and sent as individual gRPC frames.
+
+Detection is automatic via the method descriptor in the proto schema — no additional flags are needed.
+
+### Inline Data
+
+Provide multiple JSON objects separated by whitespace:
+
+```sh
+fetch --grpc --proto-file service.proto \
+  -d '{"value":"one"}{"value":"two"}{"value":"three"}' \
+  https://localhost:50051/pkg.Service/ClientStream
+```
+
+### NDJSON from File
+
+```sh
+fetch --grpc --proto-file service.proto \
+  -d @messages.ndjson \
+  https://localhost:50051/pkg.Service/ClientStream
+```
+
+### Streaming from Stdin
+
+Pipe data from stdin for real-time streaming — each JSON object is sent as soon as it is parsed:
+
+```sh
+cat messages.ndjson | fetch --grpc --proto-file service.proto \
+  -d @- https://localhost:50051/pkg.Service/ClientStream
+```
+
+## Bidirectional Streaming
+
+Bidirectional streaming is supported with the same mechanism as client streaming. When piping from stdin, request frames are sent incrementally while response frames are received and displayed concurrently:
+
+```sh
+cat messages.ndjson | fetch --grpc --proto-file service.proto \
+  -d @- https://localhost:50051/pkg.Service/BidiStream
+```
+
+Both directions flow on the same HTTP/2 stream. The response is formatted and displayed as messages arrive, just like server streaming.
+
 ## Limitations
 
-- **Client-side and bidirectional streaming are not supported**: Only unary and server-streaming RPCs are supported
-- **Single request message**: Cannot send multiple messages in one request
+- **Client/bidi streaming requires a proto schema**: The `--proto-file` or `--proto-desc` flag must be provided so `fetch` can detect that a method is client-streaming
 - **gRPC-Web**: Standard gRPC protocol only, not gRPC-Web
 
 ## See Also

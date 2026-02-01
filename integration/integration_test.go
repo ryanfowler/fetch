@@ -37,6 +37,8 @@ import (
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 	"google.golang.org/protobuf/encoding/protowire"
+	protoMarshal "google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 func TestMain(t *testing.T) {
@@ -1103,6 +1105,136 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "oh no!")
 	})
 
+	t.Run("grpc client streaming", func(t *testing.T) {
+		// Build a FileDescriptorSet with a client-streaming method.
+		boolTrue := true
+		strType := descriptorpb.FieldDescriptorProto_TYPE_STRING
+		int64Type := descriptorpb.FieldDescriptorProto_TYPE_INT64
+		fds := &descriptorpb.FileDescriptorSet{
+			File: []*descriptorpb.FileDescriptorProto{
+				{
+					Name:    strPtr("stream.proto"),
+					Package: strPtr("streampkg"),
+					Syntax:  strPtr("proto3"),
+					MessageType: []*descriptorpb.DescriptorProto{
+						{
+							Name: strPtr("StreamRequest"),
+							Field: []*descriptorpb.FieldDescriptorProto{
+								{
+									Name:   strPtr("value"),
+									Number: int32Ptr(1),
+									Type:   &strType,
+								},
+							},
+						},
+						{
+							Name: strPtr("StreamResponse"),
+							Field: []*descriptorpb.FieldDescriptorProto{
+								{
+									Name:   strPtr("count"),
+									Number: int32Ptr(1),
+									Type:   &int64Type,
+								},
+							},
+						},
+					},
+					Service: []*descriptorpb.ServiceDescriptorProto{
+						{
+							Name: strPtr("StreamService"),
+							Method: []*descriptorpb.MethodDescriptorProto{
+								{
+									Name:            strPtr("ClientStream"),
+									InputType:       strPtr(".streampkg.StreamRequest"),
+									OutputType:      strPtr(".streampkg.StreamResponse"),
+									ClientStreaming: &boolTrue,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		// Serialize the descriptor set to a temp file.
+		descData, err := protoMarshal.Marshal(fds)
+		if err != nil {
+			t.Fatalf("failed to marshal descriptor set: %v", err)
+		}
+		descFile := filepath.Join(t.TempDir(), "stream.pb")
+		if err := os.WriteFile(descFile, descData, 0644); err != nil {
+			t.Fatalf("failed to write descriptor file: %v", err)
+		}
+
+		// Server reads gRPC frames from request body, counts them,
+		// and returns count as a gRPC-framed protobuf response.
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			// Count incoming gRPC frames.
+			var count int
+			for {
+				var header [5]byte
+				_, err := io.ReadFull(r.Body, header[:])
+				if err != nil {
+					break
+				}
+				length := binary.BigEndian.Uint32(header[1:5])
+				if length > 0 {
+					buf := make([]byte, length)
+					_, err = io.ReadFull(r.Body, buf)
+					if err != nil {
+						break
+					}
+				}
+				count++
+			}
+
+			// Build response: field 1 (count) as varint.
+			var respData []byte
+			respData = protowire.AppendTag(respData, 1, protowire.VarintType)
+			respData = protowire.AppendVarint(respData, uint64(count))
+
+			// Frame the response.
+			framedResp := make([]byte, 5+len(respData))
+			framedResp[0] = 0
+			binary.BigEndian.PutUint32(framedResp[1:5], uint32(len(respData)))
+			copy(framedResp[5:], respData)
+
+			w.Header().Set("Content-Type", "application/grpc+proto")
+			w.WriteHeader(200)
+			w.Write(framedResp)
+		})
+		defer server.Close()
+
+		t.Run("multiple messages", func(t *testing.T) {
+			data := `{"value":"one"}{"value":"two"}{"value":"three"}`
+			res := runFetch(t, fetchPath,
+				server.URL+"/streampkg.StreamService/ClientStream",
+				"--grpc", "--proto-desc", descFile,
+				"-d", data,
+				"--http", "1", "--format", "on")
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, "3")
+		})
+
+		t.Run("single message", func(t *testing.T) {
+			data := `{"value":"only"}`
+			res := runFetch(t, fetchPath,
+				server.URL+"/streampkg.StreamService/ClientStream",
+				"--grpc", "--proto-desc", descFile,
+				"-d", data,
+				"--http", "1", "--format", "on")
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, "1")
+		})
+
+		t.Run("empty stream", func(t *testing.T) {
+			res := runFetch(t, fetchPath,
+				server.URL+"/streampkg.StreamService/ClientStream",
+				"--grpc", "--proto-desc", descFile,
+				"--http", "1", "--format", "on")
+			assertExitCode(t, 0, res)
+		})
+	})
+
 	t.Run("proto flags mutual exclusivity", func(t *testing.T) {
 		// proto-file and proto-desc cannot be used together
 		// Create temp files so we get past file existence validation
@@ -1933,3 +2065,6 @@ func startMTLSServer(t *testing.T, certPath, keyPath, caCertPath string) *httpte
 	server.StartTLS()
 	return server
 }
+
+func strPtr(s string) *string { return &s }
+func int32Ptr(i int32) *int32 { return &i }
