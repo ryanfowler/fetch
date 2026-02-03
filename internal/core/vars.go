@@ -14,9 +14,13 @@ type TerminalSize struct {
 	HeightPx int // Height in pixels (0 if unavailable)
 }
 
+var packageManager string // set via ldflags to disable self-update (e.g. "Homebrew")
+
 var (
-	IsStderrTerm bool
-	IsStdoutTerm bool
+	IsStderrTerm   bool
+	IsStdoutTerm   bool
+	NoSelfUpdate   bool
+	PackageManager string
 
 	UserAgent string
 	Version   string
@@ -28,6 +32,10 @@ func init() {
 	// Determine if stderr and stdout are TTYs.
 	IsStderrTerm = isTerminal(int(os.Stderr.Fd()))
 	IsStdoutTerm = isTerminal(int(os.Stdout.Fd()))
+
+	// Set whether self-update is disabled.
+	PackageManager = packageManager
+	NoSelfUpdate = PackageManager != ""
 
 	// Set executable version and user-agent.
 	Version = getVersion()
