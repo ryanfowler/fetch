@@ -305,6 +305,13 @@ func (err errSelfUpdateDisabled) PrintTo(p *core.Printer) {
 	p.Set(core.Bold)
 	p.WriteString(string(err))
 	p.Reset()
+
+	if err == "Homebrew" {
+		p.WriteString("\n\n  ")
+		p.Set(core.Dim)
+		p.WriteString("brew upgrade ryanfowler/tap/fetch")
+		p.Reset()
+	}
 }
 
 type errShellNotSupported string
