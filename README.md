@@ -18,14 +18,24 @@ A modern, high-level HTTP(S) client for the command line.
 #### Install
 
 ```sh
-# Install fetch from shell script
+# Install fetch from the shell script (macOS or Linux)
 curl -fsSL https://raw.githubusercontent.com/ryanfowler/fetch/main/install.sh | bash
+
+# Or install fetch with homebrew (macOS or Linux)
+brew install ryanfowler/tap/fetch
 
 # Or install fetch with Go
 go install github.com/ryanfowler/fetch@latest
+```
 
-# Make a request
+#### Usage
+
+```sh
+# Make a request for JSON
 fetch httpbin.org/json
+
+# Make a request for an image
+fetch picsum.photos/1024/1024
 ```
 
 ## Documentation
