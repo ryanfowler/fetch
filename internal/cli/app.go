@@ -242,6 +242,20 @@ func (a *App) CLI() *CLI {
 			},
 			{
 				Short:       "",
+				Long:        "clobber",
+				Args:        "",
+				Description: "Overwrite existing output file",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Clobber
+				},
+				Fn: func(value string) error {
+					a.Clobber = true
+					return nil
+				},
+			},
+			{
+				Short:       "",
 				Long:        "color",
 				Args:        "OPTION",
 				Description: "Enable/disable color",
@@ -270,25 +284,12 @@ func (a *App) CLI() *CLI {
 			},
 			{
 				Short:       "",
-				Long:        "clobber",
-				Args:        "",
-				Description: "Overwrite existing output file",
-				Default:     "",
-				IsSet: func() bool {
-					return a.Clobber
-				},
-				Fn: func(value string) error {
-					a.Clobber = true
-					return nil
-				},
-			},
-			{
-				Short:       "",
 				Long:        "complete",
 				Args:        "SHELL",
 				Description: "Output shell completion",
 				Default:     "",
 				Values: []core.KeyVal[string]{
+					{Key: "bash"},
 					{Key: "fish"},
 					{Key: "zsh"},
 				},
@@ -848,6 +849,19 @@ func (a *App) CLI() *CLI {
 				},
 			},
 			{
+				Short:       "S",
+				Long:        "session",
+				Args:        "NAME",
+				Description: "Use a named session for cookies",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Cfg.Session != nil
+				},
+				Fn: func(value string) error {
+					return a.Cfg.ParseSession(value)
+				},
+			},
+			{
 				Short:       "s",
 				Long:        "silent",
 				Args:        "",
@@ -860,19 +874,6 @@ func (a *App) CLI() *CLI {
 					v := true
 					a.Cfg.Silent = &v
 					return nil
-				},
-			},
-			{
-				Short:       "S",
-				Long:        "session",
-				Args:        "NAME",
-				Description: "Use a named session for cookies",
-				Default:     "",
-				IsSet: func() bool {
-					return a.Cfg.Session != nil
-				},
-				Fn: func(value string) error {
-					return a.Cfg.ParseSession(value)
 				},
 			},
 			{

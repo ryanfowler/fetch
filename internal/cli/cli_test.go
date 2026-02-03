@@ -8,6 +8,21 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
+func TestFlagsAlphabeticalOrder(t *testing.T) {
+	app, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("unable to parse cli: %s", err.Error())
+	}
+	cli := app.CLI()
+	for i := 1; i < len(cli.Flags); i++ {
+		prev := cli.Flags[i-1].Long
+		curr := cli.Flags[i].Long
+		if curr < prev {
+			t.Errorf("flags out of alphabetical order: %q should come before %q", curr, prev)
+		}
+	}
+}
+
 func TestCLI(t *testing.T) {
 	app, err := Parse(nil)
 	if err != nil {
