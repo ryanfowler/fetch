@@ -99,3 +99,11 @@ jobs:
         run: |
           gh release edit ${{ github.ref_name }} --prerelease=false
           gh release edit ${{ github.ref_name }} --latest
+
+      - name: Notify tap repository
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          gh api repos/ryanfowler/tap/dispatches \
+            -f event_type=update-fetch \
+            -f 'client_payload[version]=${{ github.ref_name }}'
