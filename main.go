@@ -60,7 +60,7 @@ func main() {
 	}
 
 	// Start async update, if necessary.
-	if !app.Update && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
+	if !app.Update && !core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
 		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate)
 	}
 
@@ -94,6 +94,11 @@ func main() {
 	// Attempt to update the current executable.
 	verbosity := getVerbosity(app)
 	if app.Update {
+		if core.NoSelfUpdate {
+			p := handle.Stderr()
+			core.WriteErrorMsg(p, errSelfUpdateDisabled(core.PackageManager))
+			os.Exit(1)
+		}
 		p := handle.Stderr()
 		timeout := getValue(app.Cfg.Timeout)
 		status := update.Update(ctx, p, timeout, verbosity == core.VSilent, app.DryRun)
@@ -287,6 +292,19 @@ func writeCLIErr(p *core.Printer, err error) {
 
 	p.WriteString("'.\n")
 	p.Flush()
+}
+
+type errSelfUpdateDisabled string
+
+func (err errSelfUpdateDisabled) Error() string {
+	return "self-update is disabled for this installation; please update using " + string(err)
+}
+
+func (err errSelfUpdateDisabled) PrintTo(p *core.Printer) {
+	p.WriteString("self-update is disabled for this installation; please update using ")
+	p.Set(core.Bold)
+	p.WriteString(string(err))
+	p.Reset()
 }
 
 type errShellNotSupported string

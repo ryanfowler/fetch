@@ -938,6 +938,7 @@ func (a *App) CLI() *CLI {
 				Short:       "",
 				Long:        "update",
 				Args:        "",
+				IsHidden:    core.NoSelfUpdate,
 				Description: "Update the fetch binary in place",
 				Default:     "",
 				IsSet: func() bool {
