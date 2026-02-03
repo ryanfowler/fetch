@@ -145,6 +145,13 @@ info "fetch successfully installed to '${DIM}${INSTALL_DIR}/fetch${RESET}'"
 
 # Optionally install completions.
 case "$SHELL" in
+  */bash)
+    COMPLETION_CMD='eval "$(fetch --complete=bash)"'
+    if ! grep -qF "$COMPLETION_CMD" "$HOME/.bashrc" 2>/dev/null; then
+      printf "\n# fetch completions\n${COMPLETION_CMD}\n" >> "$HOME/.bashrc"
+      info "completions appended to '${DIM}${HOME}/.bashrc${RESET}'"
+    fi
+    ;;
   */fish)
     mkdir -p "$HOME/.config/fish/completions"
     echo "fetch --complete=fish | source" > "$HOME/.config/fish/completions/fetch.fish"

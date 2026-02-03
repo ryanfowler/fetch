@@ -17,6 +17,8 @@ type Shell interface {
 // nil is returned.
 func GetShell(name string) Shell {
 	switch name {
+	case "bash":
+		return Bash{}
 	case "fish":
 		return Fish{}
 	case "zsh":
@@ -24,6 +26,36 @@ func GetShell(name string) Shell {
 	default:
 		return nil
 	}
+}
+
+type Bash struct{}
+
+func (b Bash) Name() string {
+	return "bash"
+}
+
+func (b Bash) Register() string {
+	return `_fetch_complete() {
+  local cur prev_tokens
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev_tokens=("${COMP_WORDS[@]:0:COMP_CWORD}")
+  local IFS=$'\n'
+  COMPREPLY=($(fetch --complete=bash -- "${prev_tokens[@]}" "$cur"))
+  IFS=$' \t\n'
+}
+complete -o nosort -o nospace -F _fetch_complete fetch`
+}
+
+func (b Bash) Complete(vals []core.KeyVal[string]) string {
+	var sb strings.Builder
+	for _, kv := range vals {
+		sb.WriteString(kv.Key)
+		if !strings.HasSuffix(kv.Key, "/") && !strings.HasSuffix(kv.Key, "=") {
+			sb.WriteByte(' ')
+		}
+		sb.WriteByte('\n')
+	}
+	return sb.String()
 }
 
 type Fish struct{}

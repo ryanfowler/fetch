@@ -126,6 +126,9 @@ auto-update = true
 Generate shell completion scripts:
 
 ```sh
+# Bash
+echo 'eval "$(fetch --complete bash)"' >> ~/.bashrc
+
 # Zsh
 fetch --complete zsh > ~/.zshrc.d/fetch-completion.zsh
 

@@ -478,9 +478,10 @@ Update fetch binary in place. Use with `--dry-run` to check for updates without 
 
 ### `--complete SHELL`
 
-Output shell completion scripts. Values: `fish`, `zsh`.
+Output shell completion scripts. Values: `bash`, `fish`, `zsh`.
 
 ```sh
+echo 'eval "$(fetch --complete bash)"' >> ~/.bashrc
 fetch --complete zsh > ~/.zshrc.d/_fetch
 fetch --complete fish > ~/.config/fish/completions/fetch.fish
 ```
