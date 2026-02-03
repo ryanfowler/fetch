@@ -2,7 +2,7 @@
 
 A modern, high-level HTTP(S) client for the command line.
 
-![Example of fetch with an image and JSON responses](./assets/example.jpg)
+![Example of fetch with an image and JSON responses](./assets/example.png)
 
 ## Features
 
