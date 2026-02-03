@@ -12,6 +12,14 @@ For macOS or Linux, use the installation script:
 curl -fsSL https://raw.githubusercontent.com/ryanfowler/fetch/main/install.sh | bash
 ```
 
+### Homebrew
+
+For macOS or Linux, install with [Homebrew](https://brew.sh):
+
+```sh
+brew install ryanfowler/tap/fetch
+```
+
 ### Building from Source
 
 If you have Go installed:
