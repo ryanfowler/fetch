@@ -104,6 +104,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
         run: |
-          gh api repos/ryanfowler/tap/dispatches \
+          gh api repos/ryanfowler/homebrew-tap/dispatches \
             -f event_type=update-fetch \
             -f 'client_payload[version]=${{ github.ref_name }}'
