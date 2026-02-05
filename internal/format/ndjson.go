@@ -14,6 +14,7 @@ import (
 // flushing every line.
 func FormatNDJSON(r io.Reader, p *core.Printer) error {
 	dec := json.NewDecoder(r)
+	dec.UseNumber()
 	for {
 		err := formatNDJSONValue(dec, p)
 		if errors.Is(err, io.EOF) {
@@ -53,8 +54,6 @@ func formatNDJSONValueToken(dec *json.Decoder, p *core.Printer, token any) error
 		p.WriteString(strconv.FormatBool(t))
 	case string:
 		writeJSONString(p, t)
-	case float64:
-		p.WriteString(strconv.FormatFloat(t, 'f', -1, 64))
 	case json.Number:
 		p.WriteString(string(t))
 	case nil:

@@ -44,6 +44,7 @@ func writeEventStreamType(t string, p *core.Printer) {
 
 func writeEventStreamData(d string, p *core.Printer) {
 	dec := json.NewDecoder(strings.NewReader(d))
+	dec.UseNumber()
 	if formatNDJSONValue(dec, p) == nil {
 		// Ensure there are no more tokens in the event.
 		_, err := dec.Token()
