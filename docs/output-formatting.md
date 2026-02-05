@@ -85,6 +85,30 @@ Output:
 </users>
 ```
 
+### YAML
+
+**Content-Types**: `application/yaml`, `application/x-yaml`, `text/yaml`, `text/x-yaml`, `*/*+yaml`
+
+Features:
+
+- Syntax highlighting for keys, string values, comments, anchors/aliases, tags, and document markers
+- Original formatting preserved exactly
+
+```sh
+fetch example.com/config.yaml
+```
+
+Output:
+
+```yaml
+server:
+  host: localhost
+  port: 8080
+  features:
+    - auth
+    - logging
+```
+
 ### HTML
 
 **Content-Type**: `text/html`

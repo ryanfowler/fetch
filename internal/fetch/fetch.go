@@ -49,6 +49,7 @@ const (
 	TypeProtobuf
 	TypeSSE
 	TypeXML
+	TypeYAML
 )
 
 type Request struct {
@@ -439,6 +440,10 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		if format.FormatXML(buf, p) == nil {
 			buf = p.Bytes()
 		}
+	case TypeYAML:
+		if format.FormatYAML(buf, p) == nil {
+			buf = p.Bytes()
+		}
 	}
 
 	return bytes.NewReader(buf), nil
@@ -474,6 +479,8 @@ func getContentType(headers http.Header) ContentType {
 				return TypeProtobuf
 			case "xml":
 				return TypeXML
+			case "yaml", "x-yaml":
+				return TypeYAML
 			}
 			if strings.HasSuffix(subtype, "+json") || strings.HasSuffix(subtype, "-json") {
 				return TypeJSON
@@ -483,6 +490,9 @@ func getContentType(headers http.Header) ContentType {
 			}
 			if strings.HasSuffix(subtype, "+xml") {
 				return TypeXML
+			}
+			if strings.HasSuffix(subtype, "+yaml") {
+				return TypeYAML
 			}
 		case "text":
 			switch subtype {
@@ -496,6 +506,8 @@ func getContentType(headers http.Header) ContentType {
 				return TypeSSE
 			case "xml":
 				return TypeXML
+			case "yaml", "x-yaml":
+				return TypeYAML
 			}
 		}
 	}
