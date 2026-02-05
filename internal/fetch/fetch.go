@@ -374,7 +374,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	}
 
 	p := r.PrinterHandle.Stdout()
-	contentType := getContentType(resp.Header)
+	contentType, charset := getContentType(resp.Header)
 	switch contentType {
 	case TypeUnknown:
 		return resp.Body, nil
@@ -383,10 +383,10 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		return nil, format.FormatGRPCStream(resp.Body, r.responseDescriptor, p)
 	case TypeNDJSON:
 		// NOTE: This bypasses the isPrintable check for binary data.
-		return nil, format.FormatNDJSON(resp.Body, p)
+		return nil, format.FormatNDJSON(transcodeReader(resp.Body, charset), p)
 	case TypeSSE:
 		// NOTE: This bypasses the isPrintable check for binary data.
-		return nil, format.FormatEventStream(resp.Body, p)
+		return nil, format.FormatEventStream(transcodeReader(resp.Body, charset), p)
 	}
 
 	// If image rendering is disabled, return the reader immediately.
@@ -401,6 +401,13 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	if len(buf) >= maxBodyBytes {
 		// We've reached the limit of bytes read into memory, skip formatting.
 		return io.MultiReader(bytes.NewReader(buf), resp.Body), nil
+	}
+
+	// Transcode non-UTF-8 text to UTF-8, skipping binary formats.
+	switch contentType {
+	case TypeImage, TypeMsgPack, TypeProtobuf:
+	default:
+		buf = transcodeBytes(buf, charset)
 	}
 
 	switch contentType {
@@ -449,70 +456,71 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	return bytes.NewReader(buf), nil
 }
 
-func getContentType(headers http.Header) ContentType {
+func getContentType(headers http.Header) (ContentType, string) {
 	contentType := headers.Get("Content-Type")
 	if contentType == "" {
-		return TypeUnknown
+		return TypeUnknown, ""
 	}
-	mediaType, _, err := mime.ParseMediaType(contentType)
+	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		return TypeUnknown
+		return TypeUnknown, ""
 	}
+	charset := params["charset"]
 
 	if typ, subtype, ok := strings.Cut(mediaType, "/"); ok {
 		switch typ {
 		case "image":
-			return TypeImage
+			return TypeImage, charset
 		case "application":
 			switch subtype {
 			case "csv":
-				return TypeCSV
+				return TypeCSV, charset
 			case "grpc", "grpc+proto":
-				return TypeGRPC
+				return TypeGRPC, charset
 			case "json":
-				return TypeJSON
+				return TypeJSON, charset
 			case "msgpack", "x-msgpack", "vnd.msgpack":
-				return TypeMsgPack
+				return TypeMsgPack, charset
 			case "x-ndjson", "ndjson", "x-jsonl", "jsonl", "x-jsonlines":
-				return TypeNDJSON
+				return TypeNDJSON, charset
 			case "protobuf", "x-protobuf", "x-google-protobuf", "vnd.google.protobuf":
-				return TypeProtobuf
+				return TypeProtobuf, charset
 			case "xml":
-				return TypeXML
+				return TypeXML, charset
 			case "yaml", "x-yaml":
-				return TypeYAML
+				return TypeYAML, charset
 			}
 			if strings.HasSuffix(subtype, "+json") || strings.HasSuffix(subtype, "-json") {
-				return TypeJSON
+				return TypeJSON, charset
 			}
 			if strings.HasSuffix(subtype, "+proto") {
-				return TypeProtobuf
+				return TypeProtobuf, charset
 			}
 			if strings.HasSuffix(subtype, "+xml") {
-				return TypeXML
+				return TypeXML, charset
 			}
 			if strings.HasSuffix(subtype, "+yaml") {
-				return TypeYAML
+				return TypeYAML, charset
 			}
 		case "text":
 			switch subtype {
 			case "css":
-				return TypeCSS
+				return TypeCSS, charset
 			case "csv":
-				return TypeCSV
+				return TypeCSV, charset
 			case "html":
-				return TypeHTML
+				return TypeHTML, charset
 			case "event-stream":
-				return TypeSSE
+				return TypeSSE, charset
 			case "xml":
-				return TypeXML
+				return TypeXML, charset
 			case "yaml", "x-yaml":
-				return TypeYAML
+				return TypeYAML, charset
 			}
 		}
 	}
 
-	return TypeUnknown
+	return TypeUnknown, charset
 }
 
 func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager bool) error {
