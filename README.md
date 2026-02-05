@@ -6,7 +6,7 @@ A modern HTTP(S) client for the command line.
 
 ## Features
 
-- **Response formatting** - Automatic formatting and syntax highlighting for JSON, XML, HTML, CSS, CSV, MessagePack, Protocol Buffers, and more
+- **Response formatting** - Automatic formatting and syntax highlighting for JSON, XML, YAML, HTML, CSS, CSV, MessagePack, Protocol Buffers, and more
 - **Image rendering** - Display images directly in your terminal
 - **gRPC support** - Make gRPC calls with automatic JSON-to-protobuf conversion
 - **Authentication** - Built-in support for Basic Auth, Bearer Token, AWS Signature V4, and mTLS

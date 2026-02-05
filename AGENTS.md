@@ -4,7 +4,7 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## Project Overview
 
-`fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support with JSON-to-protobuf conversion, and authentication (Basic, Bearer, AWS SigV4).
+`fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support with JSON-to-protobuf conversion, and authentication (Basic, Bearer, AWS SigV4).
 
 ## Common Commands
 
@@ -50,7 +50,7 @@ prettier -w .
 - **internal/config** - INI-format config file parsing with host-specific overrides.
 - **internal/core** - Shared types (`Printer`, `Color`, `Format`, `HTTPVersion`) and utilities.
 - **internal/fetch** - Core HTTP request execution. `fetch.go:Fetch()` is the main entry point that builds requests, handles gRPC framing, and routes to formatters.
-- **internal/format** - Response body formatters (JSON, XML, HTML, CSS, CSV, msgpack, protobuf, SSE, NDJSON). Each formatter writes colored output to a `Printer`.
+- **internal/format** - Response body formatters (JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, SSE, NDJSON). Each formatter writes colored output to a `Printer`.
 - **internal/grpc** - gRPC framing, headers, and status code handling.
 - **internal/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
 - **internal/image** - Multipart form implementation.
@@ -69,7 +69,7 @@ prettier -w .
 
 ### Content Type Detection
 
-`internal/fetch/fetch.go:getContentType()` maps MIME types to formatters. Supported types include JSON, XML, HTML, CSS, CSV, msgpack, protobuf, gRPC, SSE, NDJSON, and images.
+`internal/fetch/fetch.go:getContentType()` maps MIME types to formatters. Supported types include JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, gRPC, SSE, NDJSON, and images.
 
 ## Testing
 
