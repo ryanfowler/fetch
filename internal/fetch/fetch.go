@@ -10,7 +10,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"net/http/httptrace"
 	"net/url"
 	"os"
 	"os/exec"
@@ -88,6 +87,8 @@ type Request struct {
 	Redirects        *int
 	RemoteHeaderName bool
 	RemoteName       bool
+	Retry            int
+	RetryDelay       time.Duration
 	Session          string
 	Timeout          time.Duration
 	TLS              uint16
@@ -262,16 +263,8 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		errPrinter.Flush()
 	}
 
-	if r.Timeout > 0 {
-		var cancel context.CancelFunc
-		cause := core.ErrRequestTimedOut{Timeout: r.Timeout}
-		ctx, cancel = context.WithTimeoutCause(req.Context(), r.Timeout, cause)
-		defer cancel()
-		req = req.WithContext(ctx)
-	}
-
-	// 7. Make request.
-	code, err := makeRequest(ctx, r, c, req)
+	// 7. Make request (with optional retries and per-attempt timeout).
+	code, err := retryableRequest(ctx, r, c, req)
 
 	// Save session cookies after request completes.
 	if sess != nil {
@@ -285,31 +278,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	return code, err
 }
 
-func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {
-	// Track if any redirects were printed.
-	var hadRedirects bool
-
-	// Set up redirect callback at -v and higher.
-	if r.Verbosity >= core.VVerbose {
-		p := r.PrinterHandle.Stderr()
-		ctx = client.WithRedirectCallback(req.Context(), func(hop client.RedirectHop) {
-			hadRedirects = true
-			printRedirectHop(p, r.Verbosity, hop, r.HTTP)
-		})
-		req = req.WithContext(ctx)
-	}
-
-	if r.Verbosity >= core.LDebug {
-		trace := newDebugTrace(r.PrinterHandle.Stderr())
-		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	}
-
-	resp, err := c.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
+func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRedirects, hadRetries bool) (int, error) {
 	var exitCode int
 	if !r.IgnoreStatus {
 		exitCode = getExitCodeForStatus(resp.StatusCode)
@@ -317,8 +286,8 @@ func makeRequest(ctx context.Context, r *Request, c *client.Client, req *http.Re
 
 	if r.Verbosity >= core.VNormal {
 		p := r.PrinterHandle.Stderr()
-		// Add blank line after redirect summaries at -v level.
-		if hadRedirects && r.Verbosity == core.VVerbose {
+		// Add blank line to separate retry/redirect output from response metadata.
+		if hadRetries || (hadRedirects && r.Verbosity == core.VVerbose) {
 			p.WriteString("\n")
 		}
 		printResponseMetadata(p, r.Verbosity, resp)

@@ -1763,6 +1763,237 @@ func TestMain(t *testing.T) {
 			assertBufNotContains(t, res.stderr, "not supported")
 		})
 	})
+
+	t.Run("retry on 503", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			n := count.Add(1)
+			if n <= 2 {
+				w.WriteHeader(503)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "3", "--retry-delay", "0.01")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+		assertBufContains(t, res.stderr, "retry")
+		if count.Load() != 3 {
+			t.Fatalf("expected 3 requests, got %d", count.Load())
+		}
+	})
+
+	t.Run("retry on 502", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			n := count.Add(1)
+			if n <= 1 {
+				w.WriteHeader(502)
+				return
+			}
+			io.WriteString(w, "recovered")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", "0.01")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "recovered")
+	})
+
+	t.Run("retry on 504", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			n := count.Add(1)
+			if n <= 1 {
+				w.WriteHeader(504)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+	})
+
+	t.Run("retry on 429", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			n := count.Add(1)
+			if n <= 1 {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(429)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+	})
+
+	t.Run("no retry on 404", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			count.Add(1)
+			w.WriteHeader(404)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "3", "--retry-delay", "0.01")
+		assertExitCode(t, 4, res)
+		assertBufNotContains(t, res.stderr, "retry")
+		if count.Load() != 1 {
+			t.Fatalf("expected 1 request (no retries), got %d", count.Load())
+		}
+	})
+
+	t.Run("no retry on 200", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			count.Add(1)
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "3", "--retry-delay", "0.01")
+		assertExitCode(t, 0, res)
+		if count.Load() != 1 {
+			t.Fatalf("expected 1 request, got %d", count.Load())
+		}
+	})
+
+	t.Run("retry exhausted", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			count.Add(1)
+			w.WriteHeader(503)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", "0.01")
+		assertExitCode(t, 5, res)
+		if count.Load() != 3 { // 1 initial + 2 retries
+			t.Fatalf("expected 3 requests, got %d", count.Load())
+		}
+	})
+
+	t.Run("retry with request body", func(t *testing.T) {
+		var count atomic.Int64
+		var lastBody atomic.Pointer[string]
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			s := string(body)
+			lastBody.Store(&s)
+			n := count.Add(1)
+			if n <= 1 {
+				w.WriteHeader(503)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01",
+			"-d", "test-body")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+		if *lastBody.Load() != "test-body" {
+			t.Fatalf("body not replayed correctly: %s", *lastBody.Load())
+		}
+	})
+
+	t.Run("retry silent", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			n := count.Add(1)
+			if n <= 1 {
+				w.WriteHeader(503)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "-s")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufEquals(t, res.stdout, "ok")
+	})
+
+	t.Run("retry verbose", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			n := count.Add(1)
+			if n <= 1 {
+				w.WriteHeader(503)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "-v")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "retry")
+		assertBufContains(t, res.stderr, "200 OK")
+		assertBufEquals(t, res.stdout, "ok")
+	})
+
+	t.Run("no retry on redirect limit exceeded", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			count.Add(1)
+			// Always redirect to self.
+			http.Redirect(w, r, r.URL.Path, http.StatusFound)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", "0.01", "--redirects", "1")
+		assertExitCode(t, 1, res)
+		assertBufNotContains(t, res.stderr, "retry")
+		assertBufContains(t, res.stderr, "exceeded maximum number of redirects")
+	})
+
+	t.Run("retry 0 no retry", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			count.Add(1)
+			w.WriteHeader(503)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "0", "--retry-delay", "0.01")
+		assertExitCode(t, 5, res)
+		if count.Load() != 1 {
+			t.Fatalf("expected 1 request, got %d", count.Load())
+		}
+	})
+
+	t.Run("retry on per-attempt timeout", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			n := count.Add(1)
+			if n <= 1 {
+				// First attempt: delay longer than the per-attempt timeout.
+				time.Sleep(2 * time.Second)
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "--timeout", "0.5")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+		if count.Load() != 2 {
+			t.Fatalf("expected 2 requests, got %d", count.Load())
+		}
+	})
 }
 
 type runResult struct {

@@ -41,6 +41,8 @@ type Config struct {
 	Proxy        *url.URL
 	QueryParams  []core.KeyVal[string]
 	Redirects    *int
+	Retry        *int
+	RetryDelay   *time.Duration
 	Session      *string
 	Silent       *bool
 	Timeout      *time.Duration
@@ -106,6 +108,12 @@ func (c *Config) Merge(c2 *Config) {
 	if c.Redirects == nil {
 		c.Redirects = c2.Redirects
 	}
+	if c.Retry == nil {
+		c.Retry = c2.Retry
+	}
+	if c.RetryDelay == nil {
+		c.RetryDelay = c2.RetryDelay
+	}
 	if c.Session == nil {
 		c.Session = c2.Session
 	}
@@ -163,6 +171,10 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseQuery(val)
 	case "redirects":
 		err = c.ParseRedirects(val)
+	case "retry":
+		err = c.ParseRetry(val)
+	case "retry-delay":
+		err = c.ParseRetryDelay(val)
 	case "session":
 		err = c.ParseSession(val)
 	case "silent":
@@ -450,6 +462,25 @@ func (c *Config) ParseRedirects(value string) error {
 		return core.NewValueError("redirects", value, usage, c.isFile)
 	}
 	c.Redirects = &n
+	return nil
+}
+
+func (c *Config) ParseRetry(value string) error {
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		const usage = "must be a non-negative integer"
+		return core.NewValueError("retry", value, usage, c.isFile)
+	}
+	c.Retry = &n
+	return nil
+}
+
+func (c *Config) ParseRetryDelay(value string) error {
+	secs, err := strconv.ParseFloat(value, 64)
+	if err != nil || secs < 0 {
+		return core.NewValueError("retry-delay", value, "must be a non-negative number", c.isFile)
+	}
+	c.RetryDelay = core.PointerTo(time.Duration(float64(time.Second) * secs))
 	return nil
 }
 

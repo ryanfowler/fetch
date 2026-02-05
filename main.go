@@ -172,6 +172,8 @@ func main() {
 		Redirects:        app.Cfg.Redirects,
 		RemoteHeaderName: app.RemoteHeaderName,
 		RemoteName:       app.RemoteName,
+		Retry:            getValue(app.Cfg.Retry),
+		RetryDelay:       getValue(app.Cfg.RetryDelay),
 		Session:          getValue(app.Cfg.Session),
 		Timeout:          getValue(app.Cfg.Timeout),
 		TLS:              getValue(app.Cfg.TLS),
