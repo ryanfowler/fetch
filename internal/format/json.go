@@ -22,6 +22,7 @@ func FormatJSON(buf []byte, p *core.Printer) error {
 
 func formatJSON(r io.Reader, p *core.Printer) error {
 	dec := json.NewDecoder(r)
+	dec.UseNumber()
 	err := formatJSONValue(dec, p, 0)
 	if err != nil {
 		return err
@@ -62,8 +63,6 @@ func formatJSONValueToken(dec *json.Decoder, p *core.Printer, indent int, token 
 		p.WriteString(strconv.FormatBool(t))
 	case string:
 		writeJSONString(p, t)
-	case float64:
-		p.WriteString(strconv.FormatFloat(t, 'f', -1, 64))
 	case json.Number:
 		p.WriteString(string(t))
 	case nil:
