@@ -1031,9 +1031,11 @@ func requestBody(value string) (io.Reader, string, error) {
 		}
 		info, err := f.Stat()
 		if err != nil {
+			f.Close()
 			return nil, "", err
 		}
 		if info.IsDir() {
+			f.Close()
 			return nil, "", fileIsDirError(value[1:])
 		}
 		return f, path, nil
