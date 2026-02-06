@@ -1975,6 +1975,61 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("sniff json without content-type", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			// Deliberately omit Content-Type header.
+			w.Header().Del("Content-Type")
+			w.WriteHeader(200)
+			io.WriteString(w, `{"key":"value"}`)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "\"key\"")
+		assertBufContains(t, res.stdout, "\"value\"")
+	})
+
+	t.Run("sniff xml without content-type", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Del("Content-Type")
+			w.WriteHeader(200)
+			io.WriteString(w, `<?xml version="1.0"?><root><item>hello</item></root>`)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "<root>")
+		assertBufContains(t, res.stdout, "hello")
+	})
+
+	t.Run("sniff html without content-type", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Del("Content-Type")
+			w.WriteHeader(200)
+			io.WriteString(w, `<!doctype html><html><body>hello</body></html>`)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "hello")
+	})
+
+	t.Run("no sniff plain text without content-type", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Del("Content-Type")
+			w.WriteHeader(200)
+			io.WriteString(w, "just plain text")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "just plain text")
+	})
+
 	t.Run("retry on per-attempt timeout", func(t *testing.T) {
 		var count atomic.Int64
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
