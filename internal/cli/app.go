@@ -849,6 +849,32 @@ func (a *App) CLI() *CLI {
 				},
 			},
 			{
+				Short:       "",
+				Long:        "retry",
+				Args:        "NUM",
+				Description: "Maximum number of retries",
+				Default:     "0",
+				IsSet: func() bool {
+					return a.Cfg.Retry != nil
+				},
+				Fn: func(value string) error {
+					return a.Cfg.ParseRetry(value)
+				},
+			},
+			{
+				Short:       "",
+				Long:        "retry-delay",
+				Args:        "SECONDS",
+				Description: "Initial delay between retries",
+				Default:     "1",
+				IsSet: func() bool {
+					return a.Cfg.RetryDelay != nil
+				},
+				Fn: func(value string) error {
+					return a.Cfg.ParseRetryDelay(value)
+				},
+			},
+			{
 				Short:       "S",
 				Long:        "session",
 				Args:        "NAME",

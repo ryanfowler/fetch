@@ -271,6 +271,36 @@ redirects = 0
 redirects = 10
 ```
 
+#### `retry`
+
+**Type**: Integer
+**Default**: `0` (no retries)
+
+Maximum number of retries for transient failures. Retries occur on connection errors and retryable status codes (429, 502, 503, 504).
+
+```ini
+# Retry up to 3 times
+retry = 3
+
+# Disable retries (default)
+retry = 0
+```
+
+#### `retry-delay`
+
+**Type**: Number (seconds)
+**Default**: `1`
+
+Initial delay between retries in seconds. Uses exponential backoff with jitter. Accepts decimal values.
+
+```ini
+# 2 second initial delay
+retry-delay = 2
+
+# 500ms initial delay
+retry-delay = 0.5
+```
+
 #### `http`
 
 **Type**: String
