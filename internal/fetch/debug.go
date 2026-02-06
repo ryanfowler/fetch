@@ -24,9 +24,6 @@ type connectionMetrics struct {
 
 	// Time to first byte
 	ttfbStart time.Time
-
-	// Connection reuse
-	connReused bool
 }
 
 func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
@@ -44,8 +41,9 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 
 			duration := time.Since(m.dnsStart)
 
+			p.WriteInfoPrefix()
 			p.Set(core.Bold)
-			p.Set(core.Cyan)
+			p.Set(core.Yellow)
 			p.WriteString("DNS")
 			p.Reset()
 			p.WriteString(": ")
@@ -58,13 +56,13 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 				p.WriteString("\n")
 			}
 			for _, addr := range info.Addrs {
-				p.WriteString("  -> ")
+				p.WriteInfoPrefix()
+				p.WriteString("  ")
 				p.Set(core.Italic)
 				p.WriteString(addr.String())
 				p.Reset()
 				p.WriteString("\n")
 			}
-			p.WriteString("\n")
 			p.Flush()
 		},
 		ConnectStart: func(network, addr string) {
@@ -78,8 +76,9 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 
 			duration := time.Since(m.tcpStart)
 
+			p.WriteInfoPrefix()
 			p.Set(core.Bold)
-			p.Set(core.Magenta)
+			p.Set(core.Yellow)
 			p.WriteString("TCP")
 			p.Reset()
 			p.WriteString(": ")
@@ -88,7 +87,7 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 			p.Set(core.Dim)
 			p.WriteString(fmt.Sprintf("(%s)", formatTimingDuration(duration)))
 			p.Reset()
-			p.WriteString("\n\n")
+			p.WriteString("\n")
 			p.Flush()
 		},
 		TLSHandshakeStart: func() {
@@ -101,8 +100,9 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 
 			duration := time.Since(m.tlsStart)
 
+			p.WriteInfoPrefix()
 			p.Set(core.Bold)
-			p.Set(core.Blue)
+			p.Set(core.Yellow)
 			p.WriteString(tls.VersionName(cs.Version))
 			p.Reset()
 			p.WriteString(": ")
@@ -115,6 +115,7 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 
 			// Print ALPN negotiated protocol
 			if cs.NegotiatedProtocol != "" {
+				p.WriteInfoPrefix()
 				p.WriteString("  ALPN: ")
 				p.Set(core.Italic)
 				p.WriteString(cs.NegotiatedProtocol)
@@ -123,7 +124,8 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 			}
 
 			// Print session resumption status
-			p.WriteString("  Session Resumed: ")
+			p.WriteInfoPrefix()
+			p.WriteString("  Resumed: ")
 			if cs.DidResume {
 				p.WriteString("yes")
 			} else {
@@ -134,24 +136,28 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 			// Print certificate info if available
 			if len(cs.PeerCertificates) > 0 {
 				cert := cs.PeerCertificates[0]
-				p.WriteString("\n")
+				p.WriteInfoPrefix()
 				p.Set(core.Bold)
+				p.Set(core.Yellow)
 				p.WriteString("Certificate")
 				p.Reset()
 				p.WriteString(":\n")
 
+				p.WriteInfoPrefix()
 				p.WriteString("  Subject: ")
 				p.Set(core.Italic)
 				p.WriteString(cert.Subject.String())
 				p.Reset()
 				p.WriteString("\n")
 
+				p.WriteInfoPrefix()
 				p.WriteString("  Issuer: ")
 				p.Set(core.Italic)
 				p.WriteString(cert.Issuer.String())
 				p.Reset()
 				p.WriteString("\n")
 
+				p.WriteInfoPrefix()
 				p.WriteString("  Valid: ")
 				p.Set(core.Italic)
 				p.WriteString(cert.NotBefore.Format("2006-01-02"))
@@ -161,17 +167,14 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 				p.WriteString("\n")
 			}
 
-			p.WriteString("\n")
 			p.Flush()
 		},
 		GotConn: func(info httptrace.GotConnInfo) {
-			m.connReused = info.Reused
 			m.ttfbStart = time.Now()
 
 			if info.Reused {
-				p.Set(core.Dim)
-				p.WriteString("(connection reused)\n\n")
-				p.Reset()
+				p.WriteInfoPrefix()
+				p.WriteString("Connection reused\n")
 				p.Flush()
 			}
 		},
@@ -182,13 +185,16 @@ func newDebugTrace(p *core.Printer) *httptrace.ClientTrace {
 
 			duration := time.Since(m.ttfbStart)
 
+			p.WriteInfoPrefix()
 			p.Set(core.Bold)
-			p.Set(core.Green)
+			p.Set(core.Yellow)
 			p.WriteString("TTFB")
 			p.Reset()
 			p.WriteString(": ")
 			p.WriteString(formatTimingDuration(duration))
-			p.WriteString("\n\n")
+			p.WriteString("\n")
+			p.WriteInfoPrefix()
+			p.WriteString("\n")
 			p.Flush()
 		},
 	}

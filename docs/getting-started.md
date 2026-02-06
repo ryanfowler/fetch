@@ -149,19 +149,20 @@ fetch -vv httpbin.org/json
 ```
 
 ```
-GET /json HTTP/1.1
-accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
-accept-encoding: gzip, zstd
-host: httpbin.org
-user-agent: fetch/v0.17.3
-
-HTTP/2.0 200 OK
-access-control-allow-credentials: true
-access-control-allow-origin: *
-content-length: 429
-content-type: application/json
-date: Thu, 05 Feb 2026 00:33:27 GMT
-server: gunicorn/19.9.0
+> GET /json HTTP/1.1
+> accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
+> accept-encoding: gzip, zstd
+> host: httpbin.org
+> user-agent: fetch/v0.17.3
+>
+< HTTP/2.0 200 OK
+< access-control-allow-credentials: true
+< access-control-allow-origin: *
+< content-length: 429
+< content-type: application/json
+< date: Thu, 05 Feb 2026 00:33:27 GMT
+< server: gunicorn/19.9.0
+<
 
 {
   "slideshow": {
@@ -170,6 +171,8 @@ server: gunicorn/19.9.0
   }
 }
 ```
+
+The `> ` and `< ` prefixes indicate outgoing request and incoming response lines.
 
 ### `-vvv` - DNS, TLS, and Timing Details
 
@@ -180,32 +183,30 @@ fetch -vvv httpbin.org/json
 ```
 
 ```
-GET /json HTTP/1.1
-accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
-accept-encoding: gzip, zstd
-host: httpbin.org
-user-agent: fetch/v0.17.3
-
-DNS: httpbin.org (2.7ms)
-  -> 3.210.41.225
-  -> 3.223.36.72
-
-TCP: 3.210.41.225:443 (81.9ms)
-
-TLS 1.2: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (176.6ms)
-  ALPN: h2
-  Session Resumed: no
-
-Certificate:
-  Subject: CN=httpbin.org
-  Issuer: CN=Amazon RSA 2048 M03,O=Amazon,C=US
-  Valid: 2025-07-20 to 2026-08-17
-
-TTFB: 87.9ms
-
-HTTP/2.0 200 OK
-...
+> GET /json HTTP/1.1
+> accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
+> accept-encoding: gzip, zstd
+> host: httpbin.org
+> user-agent: fetch/v0.17.3
+>
+* DNS: httpbin.org (2.7ms)
+*   3.210.41.225
+*   3.223.36.72
+* TCP: 3.210.41.225:443 (81.9ms)
+* TLS 1.2: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (176.6ms)
+*   ALPN: h2
+*   Resumed: no
+* Certificate:
+*   Subject: CN=httpbin.org
+*   Issuer: CN=Amazon RSA 2048 M03,O=Amazon,C=US
+*   Valid: 2025-07-20 to 2026-08-17
+* TTFB: 87.9ms
+*
+< HTTP/2.0 200 OK
+< ...
 ```
+
+The `> `, `< `, and `* ` prefixes make the direction of data instantly clear: outgoing request lines, incoming response lines, and informational/connection details.
 
 This is useful for diagnosing latency issues, verifying TLS configuration, and understanding connection behavior.
 
@@ -218,14 +219,14 @@ fetch --dry-run -vv -j '{"hello":"world"}' -m POST httpbin.org/post
 ```
 
 ```
-POST /post HTTP/1.1
-accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
-accept-encoding: gzip, zstd
-content-length: 17
-content-type: application/json
-host: httpbin.org
-user-agent: fetch/v0.17.3
-
+> POST /post HTTP/1.1
+> accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
+> accept-encoding: gzip, zstd
+> content-length: 17
+> content-type: application/json
+> host: httpbin.org
+> user-agent: fetch/v0.17.3
+>
 {"hello":"world"}
 ```
 

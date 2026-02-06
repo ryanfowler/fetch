@@ -234,7 +234,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	// 6. Print request metadata / dry-run.
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
-		printRequestMetadata(errPrinter, req, r.HTTP)
+		printRequestMetadata(errPrinter, req, r.HTTP, r.Verbosity)
 
 		if r.DryRun {
 			if req.Body == nil || req.Body == http.NoBody {
@@ -242,7 +242,9 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 				return 0, nil
 			}
 
-			errPrinter.WriteString("\n")
+			if r.Verbosity < core.VExtraVerbose {
+				errPrinter.WriteString("\n")
+			}
 			errPrinter.Flush()
 
 			ok, rdr, err := isPrintable(req.Body)
@@ -259,7 +261,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			return 0, nil
 		}
 
-		errPrinter.WriteString("\n")
+		// Trailing "> \n" already written by printRequestMetadata.
 		errPrinter.Flush()
 	}
 
@@ -287,7 +289,11 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 	if r.Verbosity >= core.VNormal {
 		p := r.PrinterHandle.Stderr()
 		// Add blank line to separate retry/redirect output from response metadata.
-		if hadRetries || (hadRedirects && r.Verbosity == core.VVerbose) {
+		// At VDebug, the TTFB trace callback already writes a trailing "* \n".
+		if (hadRetries && r.Verbosity < core.VDebug) || (hadRedirects && r.Verbosity == core.VVerbose) {
+			if r.Verbosity >= core.VExtraVerbose {
+				p.WriteInfoPrefix()
+			}
 			p.WriteString("\n")
 		}
 		printResponseMetadata(p, r.Verbosity, resp)

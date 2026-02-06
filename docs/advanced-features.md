@@ -437,8 +437,8 @@ Sessions are stored as JSON in the user's cache directory:
 
 ```sh
 fetch -v example.com    # Response headers
-fetch -vv example.com   # Request + response headers
-fetch -vvv example.com  # DNS + TLS details
+fetch -vv example.com   # Request + response headers with direction prefixes
+fetch -vvv example.com  # DNS + TLS details with direction prefixes
 ```
 
 ### Dry Run

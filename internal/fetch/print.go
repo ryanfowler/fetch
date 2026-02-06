@@ -13,7 +13,12 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
-func printRequestMetadata(p *core.Printer, req *http.Request, v core.HTTPVersion) {
+func printRequestMetadata(p *core.Printer, req *http.Request, httpVersion core.HTTPVersion, verbosity core.Verbosity) {
+	debug := verbosity >= core.VExtraVerbose
+
+	if debug {
+		p.WriteRequestPrefix()
+	}
 	p.Set(core.Bold)
 	p.Set(core.Yellow)
 	p.WriteString(req.Method)
@@ -43,7 +48,7 @@ func printRequestMetadata(p *core.Printer, req *http.Request, v core.HTTPVersion
 	p.Set(core.Dim)
 	proto := req.Proto
 	// Force usage of protocol if explicitly specified.
-	switch v {
+	switch httpVersion {
 	case core.HTTP2:
 		proto = "HTTP/2.0"
 	case core.HTTP3:
@@ -64,6 +69,9 @@ func printRequestMetadata(p *core.Printer, req *http.Request, v core.HTTPVersion
 	}
 
 	for _, h := range headers {
+		if debug {
+			p.WriteRequestPrefix()
+		}
 		p.Set(core.Bold)
 		p.Set(core.Blue)
 		p.WriteString(h.Key)
@@ -72,9 +80,19 @@ func printRequestMetadata(p *core.Printer, req *http.Request, v core.HTTPVersion
 		p.WriteString(h.Val)
 		p.WriteString("\n")
 	}
+
+	if debug {
+		p.WriteRequestPrefix()
+		p.WriteString("\n")
+	}
 }
 
 func printResponseMetadata(p *core.Printer, v core.Verbosity, resp *http.Response) {
+	debug := v >= core.VExtraVerbose
+
+	if debug {
+		p.WriteResponsePrefix()
+	}
 	p.Set(core.Dim)
 	p.WriteString(resp.Proto)
 	p.Reset()
@@ -97,13 +115,16 @@ func printResponseMetadata(p *core.Printer, v core.Verbosity, resp *http.Respons
 	p.WriteString("\n")
 
 	if v > core.VNormal {
-		printResponseHeaders(p, resp)
+		printResponseHeaders(p, resp, debug)
 	}
 
+	if debug {
+		p.WriteResponsePrefix()
+	}
 	p.WriteString("\n")
 }
 
-func printResponseHeaders(p *core.Printer, resp *http.Response) {
+func printResponseHeaders(p *core.Printer, resp *http.Response, usePrefix bool) {
 	method := resp.Request.Method
 	headers := getHeaders(resp.Header)
 	if method != "HEAD" && resp.ContentLength >= 0 && resp.Header.Get("Content-Length") == "" {
@@ -116,6 +137,9 @@ func printResponseHeaders(p *core.Printer, resp *http.Response) {
 	}
 
 	for _, h := range headers {
+		if usePrefix {
+			p.WriteResponsePrefix()
+		}
 		p.Set(core.Bold)
 		p.Set(core.Cyan)
 		p.WriteString(h.Key)
@@ -135,12 +159,10 @@ func printBinaryWarning(p *core.Printer) {
 func printRedirectHop(p *core.Printer, v core.Verbosity, hop client.RedirectHop, httpVersion core.HTTPVersion) {
 	switch {
 	case v >= core.VExtraVerbose:
-		// Print response to previous request, then the new request about to be made.
+		// Prefixes handle visual separation at -vv and -vvv.
 		printResponseMetadata(p, v, hop.Response)
 		p.Flush()
-
-		printRequestMetadata(p, hop.NextRequest, httpVersion)
-		p.WriteString("\n")
+		printRequestMetadata(p, hop.NextRequest, httpVersion, v)
 		p.Flush()
 	default:
 		// One-line summary at -v

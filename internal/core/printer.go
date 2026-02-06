@@ -133,6 +133,27 @@ func (p *Printer) WriteRune(r rune) (int, error) {
 	return p.buf.WriteRune(r)
 }
 
+// WriteRequestPrefix writes a dim "> " prefix for request lines.
+func (p *Printer) WriteRequestPrefix() {
+	p.Set(Dim)
+	p.buf.WriteString("> ")
+	p.Reset()
+}
+
+// WriteResponsePrefix writes a dim "< " prefix for response lines.
+func (p *Printer) WriteResponsePrefix() {
+	p.Set(Dim)
+	p.buf.WriteString("< ")
+	p.Reset()
+}
+
+// WriteInfoPrefix writes a dim "* " prefix for informational lines.
+func (p *Printer) WriteInfoPrefix() {
+	p.Set(Dim)
+	p.buf.WriteString("* ")
+	p.Reset()
+}
+
 // WriteErrorMsg writes the provided error to the printer.
 func WriteErrorMsg(p *Printer, err error) {
 	WriteErrorMsgNoFlush(p, err)

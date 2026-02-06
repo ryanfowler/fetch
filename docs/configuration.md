@@ -180,10 +180,10 @@ verbosity = 0
 # Verbose - show response headers
 verbosity = 1
 
-# Extra verbose - show request and response headers
+# Extra verbose - show request and response headers with direction prefixes
 verbosity = 2
 
-# Debug - show DNS and TLS details
+# Debug - show DNS and TLS details with direction prefixes
 verbosity = 3
 ```
 
