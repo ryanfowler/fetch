@@ -52,6 +52,19 @@ func getVersion() string {
 	return buildInfo.Main.Version
 }
 
+// GetVCSRevision returns the git commit hash from Go's embedded build info.
+func GetVCSRevision() string {
+	if buildInfo == nil {
+		return ""
+	}
+	for _, setting := range buildInfo.Settings {
+		if setting.Key == "vcs.revision" {
+			return setting.Value
+		}
+	}
+	return ""
+}
+
 // GetBuildInfo returns the JSON encoded build information for the executable.
 func GetBuildInfo() []byte {
 	type BuildInfo struct {
