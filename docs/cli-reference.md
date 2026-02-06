@@ -434,6 +434,17 @@ Don't use HTTP status code for exit code. Always exit 0 on successful request.
 fetch --ignore-status example.com/not-found
 ```
 
+## WebSocket
+
+Use `ws://` or `wss://` URL schemes to open a WebSocket connection:
+
+```sh
+fetch ws://echo.websocket.events
+fetch wss://echo.websocket.events -d "hello"
+```
+
+See [WebSocket documentation](websocket.md) for details.
+
 ## gRPC Options
 
 ### `--grpc`

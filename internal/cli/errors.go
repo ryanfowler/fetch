@@ -47,6 +47,28 @@ func (err exclusiveFlagsError) PrintTo(p *core.Printer) {
 	p.WriteString("' cannot be used together")
 }
 
+type schemeExclusiveError struct {
+	scheme string
+	flag   string
+}
+
+func (err schemeExclusiveError) Error() string {
+	return fmt.Sprintf("'%s://' scheme and '--%s' flag cannot be used together", err.scheme, err.flag)
+}
+
+func (err schemeExclusiveError) PrintTo(p *core.Printer) {
+	p.WriteString("'")
+	p.Set(core.Bold)
+	p.WriteString(err.scheme + "://")
+	p.Reset()
+	p.WriteString("' scheme and '")
+	p.Set(core.Bold)
+	p.WriteString("--")
+	p.WriteString(err.flag)
+	p.Reset()
+	p.WriteString("' flag cannot be used together")
+}
+
 type flagNoArgsError string
 
 func (err flagNoArgsError) Error() string {

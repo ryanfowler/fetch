@@ -57,6 +57,7 @@ prettier -w .
 - **internal/proto** - Protocol buffer compilation and message handling for gRPC support.
 - **internal/session** - Named cookie sessions with persistent storage across invocations.
 - **internal/update** - Check for updates, download from Github, and self-update.
+- **internal/ws** - WebSocket message loop (read, write, bidirectional coordination).
 
 ### Request Flow
 

@@ -126,6 +126,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Respond with an error if WebSocket is used with HTTP/3.
+	if app.WS && app.Cfg.HTTP > core.HTTP1 {
+		p := handle.Stderr()
+		writeCLIErr(p, fmt.Errorf("cannot use WebSocket with %s", app.Cfg.HTTP.String()))
+		os.Exit(1)
+	}
+
 	// Parse any client certificate configuration for mTLS.
 	var clientCert *tls.Certificate
 	clientCert, err = app.Cfg.ClientCert()
@@ -180,6 +187,7 @@ func main() {
 		UnixSocket:       app.UnixSocket,
 		URL:              app.URL,
 		Verbosity:        verbosity,
+		WS:               app.WS,
 	}
 	status := fetch.Fetch(ctx, &req)
 	os.Exit(status)

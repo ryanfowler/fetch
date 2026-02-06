@@ -28,12 +28,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
 
+	"github.com/coder/websocket"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -2064,6 +2067,215 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, "just plain text")
 	})
 
+	t.Run("websocket echo with data flag", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			// Read one message, echo it, then close.
+			typ, data, err := conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+			conn.Write(r.Context(), typ, data)
+			conn.Close(websocket.StatusNormalClosure, "done")
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		res := runFetch(t, fetchPath, wsURL, "-d", "hello", "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "hello")
+	})
+
+	t.Run("websocket scheme auto-detection", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			conn.Write(r.Context(), websocket.MessageText, []byte("pong"))
+			conn.Close(websocket.StatusNormalClosure, "done")
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		res := runFetch(t, fetchPath, wsURL, "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "pong")
+	})
+
+	t.Run("websocket verbose shows upgrade", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			conn.Write(r.Context(), websocket.MessageText, []byte("hi"))
+			conn.Close(websocket.StatusNormalClosure, "done")
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		res := runFetch(t, fetchPath, "-vv", wsURL, "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "101")
+	})
+
+	t.Run("websocket json formatting", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			conn.Write(r.Context(), websocket.MessageText, []byte(`{"key":"value"}`))
+			conn.Close(websocket.StatusNormalClosure, "done")
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		res := runFetch(t, fetchPath, wsURL, "--format", "on", "--color", "off", "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, `{ "key": "value" }`)
+	})
+
+	t.Run("websocket piped stdin", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			for {
+				typ, data, err := conn.Read(r.Context())
+				if err != nil {
+					return
+				}
+				conn.Write(r.Context(), typ, data)
+			}
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		res := runFetchStdin(t, "line1\nline2\n", fetchPath, wsURL, "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "line1")
+		assertBufContains(t, res.stdout, "line2")
+	})
+
+	t.Run("websocket auth header sent", func(t *testing.T) {
+		var gotAuth string
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			gotAuth = r.Header.Get("Authorization")
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			conn.Write(r.Context(), websocket.MessageText, []byte("authed"))
+			conn.Close(websocket.StatusNormalClosure, "done")
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		res := runFetch(t, fetchPath, wsURL, "--bearer", "mytoken", "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "authed")
+		if gotAuth != "Bearer mytoken" {
+			t.Fatalf("expected auth header 'Bearer mytoken', got %q", gotAuth)
+		}
+	})
+
+	t.Run("websocket exclusive with grpc", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "--grpc", "ws://localhost:1234")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "cannot be used together")
+	})
+
+	t.Run("websocket non-GET method warns", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			conn.Write(r.Context(), websocket.MessageText, []byte("ok"))
+			conn.Close(websocket.StatusNormalClosure, "done")
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		res := runFetch(t, fetchPath, "-X", "POST", wsURL, "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "ignoring method POST")
+		assertBufContains(t, res.stdout, "ok")
+	})
+
+	t.Run("websocket dry-run", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "--dry-run", "ws://localhost:1234/chat")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "GET")
+		assertBufContains(t, res.stderr, "/chat")
+	})
+
+	t.Run("websocket ctrl-c exits", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("signal test not supported on Windows")
+		}
+
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			conn.Write(r.Context(), websocket.MessageText, []byte("hello"))
+			// Keep connection open until client disconnects.
+			<-r.Context().Done()
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		var stdout syncBuffer
+		cmd := exec.Command(fetchPath, wsURL, "--no-pager")
+		cmd.Stdout = &stdout
+		cmd.Stderr = io.Discard
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("failed to start: %v", err)
+		}
+
+		// Wait for the message to appear in stdout.
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if strings.Contains(stdout.String(), "hello") {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if !strings.Contains(stdout.String(), "hello") {
+			t.Fatal("timed out waiting for WebSocket message")
+		}
+
+		// Send SIGINT and verify process exits promptly.
+		cmd.Process.Signal(syscall.SIGINT)
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+		select {
+		case <-done:
+			// Process exited — success.
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+			t.Fatal("process did not exit after SIGINT")
+		}
+	})
+
 	t.Run("retry on per-attempt timeout", func(t *testing.T) {
 		var count atomic.Int64
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
@@ -2303,6 +2515,24 @@ func assertBufEquals(t *testing.T, buf *bytes.Buffer, s string) {
 	if buf.String() != s {
 		t.Fatalf("unexpected buffer: %s", buf.String())
 	}
+}
+
+// syncBuffer is a thread-safe wrapper around bytes.Buffer.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // generateCACert generates a self-signed CA certificate for testing.

@@ -259,7 +259,45 @@ func Parse(args []string) (*App, error) {
 		return &app, err
 	}
 
+	if err := app.validateWSExclusives(); err != nil {
+		return &app, err
+	}
+
 	return &app, nil
+}
+
+// validateWSExclusives checks that ws:// / wss:// scheme is not combined
+// with incompatible flags.
+func (a *App) validateWSExclusives() error {
+	if !a.WS {
+		return nil
+	}
+
+	type flagCheck struct {
+		name  string
+		isSet bool
+	}
+	conflicts := []flagCheck{
+		{"grpc", a.GRPC},
+		{"form", len(a.Form) > 0},
+		{"multipart", len(a.Multipart) > 0},
+		{"xml", a.xmlSet},
+		{"edit", a.Edit},
+	}
+
+	// The URL scheme was rewritten from ws->http / wss->https during
+	// parsing, so reverse the mapping for the error message.
+	scheme := "ws"
+	if a.URL != nil && a.URL.Scheme == "https" {
+		scheme = "wss"
+	}
+
+	for _, c := range conflicts {
+		if c.isSet {
+			return schemeExclusiveError{scheme: scheme, flag: c.name}
+		}
+	}
+	return nil
 }
 
 func printHelp(cli *CLI, p *core.Printer) {

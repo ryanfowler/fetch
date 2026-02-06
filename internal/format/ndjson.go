@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,25 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
+
+// FormatJSONLine formats the provided raw JSON data as a single compact line
+// to the Printer.
+func FormatJSONLine(buf []byte, p *core.Printer) error {
+	dec := json.NewDecoder(bytes.NewReader(buf))
+	dec.UseNumber()
+	err := formatNDJSONValue(dec, p)
+	if err != nil {
+		p.Reset()
+		return err
+	}
+	tok, err := dec.Token()
+	if !errors.Is(err, io.EOF) {
+		p.Reset()
+		return fmt.Errorf("unexpected token: %v", tok)
+	}
+	p.WriteString("\n")
+	return nil
+}
 
 // FormatNDJSON streams the provided newline-delimited JSON to the Printer,
 // flushing every line.

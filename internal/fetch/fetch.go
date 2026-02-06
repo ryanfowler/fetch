@@ -95,6 +95,7 @@ type Request struct {
 	UnixSocket       string
 	URL              *url.URL
 	Verbosity        core.Verbosity
+	WS               bool
 
 	// responseDescriptor is set internally after proto setup for response formatting.
 	responseDescriptor protoreflect.MessageDescriptor
@@ -195,7 +196,12 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}()
 
-	// 4. Edit step (user edits request body).
+	// 4. WebSocket: branch to handleWebSocket before edit/gRPC/retry.
+	if r.WS {
+		return handleWebSocket(ctx, r, c, req)
+	}
+
+	// 5. Edit step (user edits request body).
 	if r.Edit {
 		err = editRequestBody(req)
 		if err != nil {
@@ -203,7 +209,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}
 
-	// 5. Convert and frame gRPC request AFTER edit.
+	// 6. Convert and frame gRPC request AFTER edit.
 	if r.GRPC {
 		if isClientStreaming && requestDesc != nil {
 			// Client/bidi streaming: stream multiple JSON objects as gRPC frames.
@@ -231,7 +237,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}
 
-	// 6. Print request metadata / dry-run.
+	// 7. Print request metadata / dry-run.
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
 		printRequestMetadata(errPrinter, req, r.HTTP, r.Verbosity)
@@ -265,7 +271,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		errPrinter.Flush()
 	}
 
-	// 7. Make request (with optional retries and per-attempt timeout).
+	// 8. Make request (with optional retries and per-attempt timeout).
 	code, err := retryableRequest(ctx, r, c, req)
 
 	// Save session cookies after request completes.

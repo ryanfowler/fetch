@@ -30,6 +30,20 @@ const (
 	HTTP3
 )
 
+// String returns the HTTP version string (e.g. "HTTP/1.1").
+func (v HTTPVersion) String() string {
+	switch v {
+	case HTTP1:
+		return "HTTP/1.1"
+	case HTTP2:
+		return "HTTP/2.0"
+	case HTTP3:
+		return "HTTP/3.0"
+	default:
+		return ""
+	}
+}
+
 // ImageSetting represents the options for displaying images.
 type ImageSetting int
 
