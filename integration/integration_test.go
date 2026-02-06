@@ -111,14 +111,19 @@ func TestMain(t *testing.T) {
 
 		res = runFetch(t, fetchPath, server.URL, "-vv")
 		assertExitCode(t, 0, res)
-		assertBufContains(t, res.stderr, "GET / HTTP/1.1")
-		assertBufContains(t, res.stderr, "user-agent")
-		assertBufContains(t, res.stderr, "x-custom-header")
+		assertBufContains(t, res.stderr, "> GET / HTTP/1.1")
+		assertBufContains(t, res.stderr, "> user-agent")
+		assertBufContains(t, res.stderr, "< x-custom-header")
+		assertBufContains(t, res.stderr, "< HTTP/1.1 200 OK")
+		assertBufNotContains(t, res.stderr, "* ")
 		assertBufEquals(t, res.stdout, "hello")
 
 		res = runFetch(t, fetchPath, server.URL, "-vvv")
 		assertExitCode(t, 0, res)
-		assertBufContains(t, res.stderr, "GET / HTTP/1.1")
+		assertBufContains(t, res.stderr, "> GET / HTTP/1.1")
+		assertBufContains(t, res.stderr, "< HTTP/1.1 200 OK")
+		assertBufContains(t, res.stderr, "* TCP:")
+		assertBufContains(t, res.stderr, "* TTFB:")
 	})
 
 	t.Run("aws-sigv4 auth", func(t *testing.T) {
@@ -867,6 +872,14 @@ func TestMain(t *testing.T) {
 		res = runFetch(t, fetchPath, server.URL, "--redirects", "1")
 		assertExitCode(t, 1, res)
 		assertBufContains(t, res.stderr, "exceeded maximum number of redirects")
+
+		// Redirect at -vv shows prefixed request/response for each hop.
+		count.Store(1)
+		res = runFetch(t, fetchPath, server.URL, "-vv")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "> GET / HTTP/1.1")
+		assertBufContains(t, res.stderr, "< HTTP/1.1 301 Moved Permanently")
+		assertBufContains(t, res.stderr, "< HTTP/1.1 200 OK")
 	})
 
 	t.Run("server sent events", func(t *testing.T) {
@@ -1941,7 +1954,28 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "-v")
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "retry")
+		assertBufNotContains(t, res.stderr, "* retry")
 		assertBufContains(t, res.stderr, "200 OK")
+		assertBufEquals(t, res.stdout, "ok")
+	})
+
+	t.Run("retry verbose vv", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			n := count.Add(1)
+			if n <= 1 {
+				w.WriteHeader(503)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "-vv")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "* retry")
+		assertBufContains(t, res.stderr, "> GET / HTTP/1.1")
+		assertBufContains(t, res.stderr, "< HTTP/1.1 200 OK")
 		assertBufEquals(t, res.stdout, "ok")
 	})
 
