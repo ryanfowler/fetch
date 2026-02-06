@@ -345,8 +345,6 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	p := r.PrinterHandle.Stdout()
 	contentType, charset := getContentType(resp.Header)
 	switch contentType {
-	case TypeUnknown:
-		return resp.Body, nil
 	case TypeGRPC:
 		// NOTE: This bypasses the isPrintable check for binary data.
 		return nil, format.FormatGRPCStream(resp.Body, r.responseDescriptor, p)
@@ -370,6 +368,17 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	if len(buf) >= maxBodyBytes {
 		// We've reached the limit of bytes read into memory, skip formatting.
 		return io.MultiReader(bytes.NewReader(buf), resp.Body), nil
+	}
+
+	// If the Content-Type is unknown, attempt to sniff the body.
+	if contentType == TypeUnknown {
+		contentType = sniffContentType(buf)
+		if contentType == TypeUnknown {
+			return bytes.NewReader(buf), nil
+		}
+		if contentType == TypeImage && r.Image == core.ImageOff {
+			return bytes.NewReader(buf), nil
+		}
 	}
 
 	// Transcode non-UTF-8 text to UTF-8, skipping binary formats.
