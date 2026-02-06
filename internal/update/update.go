@@ -322,17 +322,43 @@ func writeUpdateSuccess(p *core.Printer, silent bool, oldVersion, newVersion str
 	p.Set(core.Bold)
 	p.WriteString(newVersion)
 	p.Reset()
-	p.WriteString("\n\n")
-
-	p.WriteString("Changelog: ")
-	p.Set(core.Underline)
-	p.WriteString("https://github.com/ryanfowler/fetch/compare/")
-	p.WriteString(oldVersion)
-	p.WriteString("...")
-	p.WriteString(newVersion)
-	p.Reset()
 	p.WriteString("\n")
+
+	compareRef := oldVersion
+	if !isVersionTag(compareRef) {
+		compareRef = core.GetVCSRevision()
+	}
+	if compareRef != "" {
+		p.WriteString("\nChangelog: ")
+		p.Set(core.Underline)
+		p.WriteString("https://github.com/ryanfowler/fetch/compare/")
+		p.WriteString(compareRef)
+		p.WriteString("...")
+		p.WriteString(newVersion)
+		p.Reset()
+		p.WriteString("\n")
+	}
 	p.Flush()
+}
+
+// isVersionTag returns true if s matches the pattern vX.Y.Z where X, Y, and Z
+// are non-empty sequences of digits.
+func isVersionTag(s string) bool {
+	if len(s) < 6 || s[0] != 'v' {
+		return false
+	}
+	dots := 0
+	for i := 1; i < len(s); i++ {
+		if s[i] == '.' {
+			if i == 1 || i == len(s)-1 || s[i-1] == '.' {
+				return false
+			}
+			dots++
+		} else if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return dots == 2
 }
 
 // randomString returns a random string of lower-case letters of length "n".
