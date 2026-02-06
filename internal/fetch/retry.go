@@ -65,7 +65,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 		attemptReq := req.WithContext(attemptCtx)
 
 		// Set up debug trace for this attempt if -vvv.
-		if r.Verbosity >= core.LDebug {
+		if r.Verbosity >= core.VDebug {
 			trace := newDebugTrace(r.PrinterHandle.Stderr())
 			attemptReq = attemptReq.WithContext(httptrace.WithClientTrace(attemptReq.Context(), trace))
 		}
@@ -298,6 +298,9 @@ func printRetryMsg(r *Request, nextAttempt, total int, delay time.Duration, reas
 	}
 
 	p := r.PrinterHandle.Stderr()
+	if r.Verbosity >= core.VExtraVerbose {
+		p.WriteInfoPrefix()
+	}
 	p.Set(core.Bold)
 	p.Set(core.Yellow)
 	p.WriteString("retry")

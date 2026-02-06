@@ -43,9 +43,8 @@ fetch -vv example.com
 
 Shows:
 
-- Request method and URL
-- Request headers
-- Response headers
+- `> ` prefixed request lines
+- `< ` prefixed response lines
 
 ### `-vvv` - Full Debug Output
 
@@ -55,9 +54,9 @@ fetch -vvv example.com
 
 Shows:
 
-- DNS resolution details
-- TLS handshake information
-- All headers
+- `> ` prefixed request lines
+- `* ` prefixed connection info (DNS, TCP, TLS, TTFB)
+- `< ` prefixed response lines
 
 ## Dry Run Mode
 

@@ -219,9 +219,10 @@ func parseConfigFile(app *cli.App, p *core.Printer) error {
 
 	app.Cfg.Merge(file.Global)
 
-	if getVerbosity(app) >= core.LDebug {
+	if getVerbosity(app) >= core.VDebug {
+		p.WriteInfoPrefix()
 		p.Set(core.Bold)
-		p.Set(core.Blue)
+		p.Set(core.Yellow)
 		p.WriteString("Config")
 		p.Reset()
 
@@ -229,7 +230,9 @@ func parseConfigFile(app *cli.App, p *core.Printer) error {
 		p.Set(core.Dim)
 		p.WriteString(file.Path)
 		p.Reset()
-		p.WriteString("'\n\n")
+		p.WriteString("'\n")
+		p.WriteInfoPrefix()
+		p.WriteString("\n")
 		p.Flush()
 	}
 
@@ -257,7 +260,7 @@ func getVerbosity(app *cli.App) core.Verbosity {
 	case 2:
 		return core.VExtraVerbose
 	default:
-		return core.LDebug
+		return core.VDebug
 	}
 }
 

@@ -48,7 +48,7 @@ const (
 	VNormal
 	VVerbose
 	VExtraVerbose
-	LDebug
+	VDebug
 )
 
 // KeyVal represents a generic key & value struct.

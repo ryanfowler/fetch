@@ -410,8 +410,8 @@ fetch -r 0-499 -r 1000-1499 example.com/file.bin
 Increase output verbosity. Can be stacked.
 
 - `-v` - Show response headers
-- `-vv` - Show request and response headers
-- `-vvv` - Show DNS and TLS details
+- `-vv` - Show request and response headers with `> ` / `< ` prefixes
+- `-vvv` - Show DNS and TLS details with `> ` / `< ` / `* ` prefixes
 
 ```sh
 fetch -v example.com
