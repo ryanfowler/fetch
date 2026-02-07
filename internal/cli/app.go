@@ -34,6 +34,7 @@ type App struct {
 	Form             []core.KeyVal[string]
 	GRPC             bool
 	Help             bool
+	WS               bool // set when URL scheme is ws:// or wss://
 	Method           string
 	Multipart        []core.KeyVal[string]
 	Output           string
@@ -95,6 +96,12 @@ func (a *App) CLI() *CLI {
 			u.Scheme = strings.ToLower(u.Scheme)
 			switch u.Scheme {
 			case "", "http", "https":
+			case "ws":
+				u.Scheme = "http"
+				a.WS = true
+			case "wss":
+				u.Scheme = "https"
+				a.WS = true
 			default:
 				return fmt.Errorf("unsupported url scheme: %s", u.Scheme)
 			}

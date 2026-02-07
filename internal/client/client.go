@@ -306,6 +306,11 @@ func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, err
 	return resp, err
 }
 
+// HTTPClient returns the underlying *http.Client.
+func (c *Client) HTTPClient() *http.Client {
+	return c.c
+}
+
 // SetJar sets the cookie jar on the HTTP client.
 func (c *Client) SetJar(jar http.CookieJar) {
 	c.c.Jar = jar
