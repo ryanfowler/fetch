@@ -160,8 +160,17 @@ func splitEndOfLine(data []byte, atEOF bool) (advance int, token []byte, err err
 			return i + 1, data[:i], nil
 		case '\r':
 			// If CR is followed by LF, skip both.
-			if i+1 < len(data) && data[i+1] == '\n' {
-				return i + 2, data[:i], nil
+			if i+1 < len(data) {
+				if data[i+1] == '\n' {
+					return i + 2, data[:i], nil
+				}
+				return i + 1, data[:i], nil
+			}
+			// CR is the last byte; if not at EOF, request more data
+			// to check if the next byte is LF (avoids splitting \r\n
+			// across buffer boundaries).
+			if !atEOF {
+				return 0, nil, nil
 			}
 			return i + 1, data[:i], nil
 		}
