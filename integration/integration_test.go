@@ -291,7 +291,7 @@ func TestMain(t *testing.T) {
 	t.Run("dns over https", func(t *testing.T) {
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/dns-query" {
-				io.WriteString(w, `{"Status":0,"Answer":[{"data":"127.0.0.1"}]}`)
+				io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}`)
 				return
 			}
 			if r.URL.Path == "/dns-query-nxdomain" {

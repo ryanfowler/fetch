@@ -70,8 +70,11 @@ func resolveDOH(ctx context.Context, serverURL *url.URL, address string) ([]net.
 	}
 
 	ips := make([]net.IPAddr, 0, len(ipStrs))
-	for _, ip := range ipStrs {
-		ips = append(ips, net.IPAddr{IP: net.ParseIP(ip)})
+	for _, ipStr := range ipStrs {
+		ip := net.ParseIP(ipStr)
+		if ip != nil {
+			ips = append(ips, net.IPAddr{IP: ip})
+		}
 	}
 
 	if trace != nil && trace.DNSDone != nil {
@@ -93,6 +96,7 @@ func resolveDOH(ctx context.Context, serverURL *url.URL, address string) ([]net.
 // host to lookup, and DNS type.
 func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) ([]string, error) {
 	type Answer struct {
+		Type int    `json:"type"`
 		Data string `json:"data"`
 	}
 	type Response struct {
@@ -150,9 +154,16 @@ func lookupDOH(ctx context.Context, serverURL *url.URL, host, dnsType string) ([
 		return nil, fmt.Errorf("no such host: %s", name)
 	}
 
-	addrs := make([]string, len(res.Answer))
-	for i, answer := range res.Answer {
-		addrs[i] = answer.Data
+	// DNS type constants: A=1, AAAA=28. Filter out non-IP answers
+	// (e.g. CNAME records) that may be included in the response.
+	addrs := make([]string, 0, len(res.Answer))
+	for _, answer := range res.Answer {
+		if answer.Type == 1 || answer.Type == 28 {
+			addrs = append(addrs, answer.Data)
+		}
+	}
+	if len(addrs) == 0 {
+		return nil, errors.New("no such host")
 	}
 	return addrs, nil
 }
