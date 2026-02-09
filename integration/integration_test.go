@@ -1546,6 +1546,130 @@ func TestMain(t *testing.T) {
 		})
 	})
 
+	t.Run("inspect-tls", func(t *testing.T) {
+		// Generate test CA and server cert with SANs.
+		caCert, caKey := generateCACert(t)
+		serverCert, serverKey := generateCert(t, caCert, caKey, "test-server")
+		caCertPath := writeTempPEM(t, tempDir, "inspect-ca.crt", "CERTIFICATE", caCert.Raw)
+		serverCertPath := writeTempPEM(t, tempDir, "inspect-server.crt", "CERTIFICATE", serverCert.Raw)
+		serverKeyPath := writeTempPEM(t, tempDir, "inspect-server.key", "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(serverKey))
+
+		// Start a TLS server.
+		tlsCert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
+		if err != nil {
+			t.Fatalf("unable to load server cert: %s", err.Error())
+		}
+		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "tls-body")
+		}))
+		server.TLS = &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+		}
+		server.StartTLS()
+		defer server.Close()
+
+		t.Run("shows certificate chain", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--ca-cert", caCertPath,
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufContains(t, res.stderr, "test-server")
+			assertBufContains(t, res.stderr, "Test CA")
+			// Body should NOT be printed.
+			assertBufEmpty(t, res.stdout)
+		})
+
+		t.Run("shows TLS version", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--ca-cert", caCertPath,
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "TLS 1.3")
+		})
+
+		t.Run("shows SANs", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--ca-cert", caCertPath,
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "SANs:")
+			assertBufContains(t, res.stderr, "localhost")
+		})
+
+		t.Run("shows expiry info", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--ca-cert", caCertPath,
+			)
+			assertExitCode(t, 0, res)
+			// The test cert expires in 1 hour, so < 1 day.
+			assertBufContains(t, res.stderr, "expires in <1 day")
+		})
+
+		t.Run("works with insecure flag", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--insecure",
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufContains(t, res.stderr, "test-server")
+		})
+
+		t.Run("rejects http url", func(t *testing.T) {
+			httpServer := startServer(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, "ok")
+			})
+			defer httpServer.Close()
+
+			res := runFetch(t, fetchPath, httpServer.URL, "--inspect-tls")
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "--inspect-tls requires an HTTPS URL")
+		})
+
+		t.Run("works with verbose flag", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--ca-cert", caCertPath,
+				"-v",
+			)
+			assertExitCode(t, 0, res)
+			// No HTTP request is made, so no response metadata.
+			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufEmpty(t, res.stdout)
+		})
+
+		t.Run("warns when timing flag is used", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--timing",
+				"--ca-cert", caCertPath,
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "--inspect-tls ignores: --timing")
+			assertBufContains(t, res.stderr, "Certificate chain")
+		})
+
+		t.Run("warns on incompatible flags", func(t *testing.T) {
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--ca-cert", caCertPath,
+				"-d", "hello",
+				"--timing",
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "--inspect-tls ignores:")
+			assertBufContains(t, res.stderr, "--data/--json/--xml")
+			assertBufContains(t, res.stderr, "--timing")
+			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufEmpty(t, res.stdout)
+		})
+	})
+
 	t.Run("session", func(t *testing.T) {
 		sessDir := filepath.Join(tempDir, "sessions")
 		os.MkdirAll(sessDir, 0755)

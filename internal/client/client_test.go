@@ -30,9 +30,9 @@ func TestIsLoopback(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
-			got := isLoopback(tt.host)
+			got := IsLoopback(tt.host)
 			if got != tt.want {
-				t.Errorf("isLoopback(%q) = %v, want %v", tt.host, got, tt.want)
+				t.Errorf("IsLoopback(%q) = %v, want %v", tt.host, got, tt.want)
 			}
 		})
 	}

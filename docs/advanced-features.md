@@ -212,6 +212,34 @@ Use cases:
 - Development with self-signed certificates
 - Corporate environments with SSL inspection
 
+### TLS Certificate Inspection
+
+`--inspect-tls` performs a TLS handshake only (no HTTP request is made) and provides a focused view of the TLS certificate chain, useful as a standalone diagnostic tool:
+
+```sh
+fetch --inspect-tls example.com
+```
+
+Output includes:
+
+- **TLS version and cipher suite** (e.g., TLS 1.3: TLS_AES_256_GCM_SHA384)
+- **ALPN negotiated protocol** (e.g., h2)
+- **Certificate chain** with tree visualization and expiry status
+- **Subject Alternative Names** (DNS names and IP addresses)
+- **OCSP staple status** (good, revoked, or unknown)
+
+Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
+
+HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning when used with `--inspect-tls`.
+
+```sh
+# Check certificate chain
+fetch --inspect-tls example.com
+
+# Inspect certificates even if invalid
+fetch --inspect-tls --insecure expired.badssl.com
+```
+
 ### Configuration File
 
 ```ini

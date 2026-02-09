@@ -34,6 +34,7 @@ type App struct {
 	Form             []core.KeyVal[string]
 	GRPC             bool
 	Help             bool
+	InspectTLS       bool
 	WS               bool // set when URL scheme is ws:// or wss://
 	Method           string
 	Multipart        []core.KeyVal[string]
@@ -565,6 +566,20 @@ func (a *App) CLI() *CLI {
 				Fn: func(value string) error {
 					v := true
 					a.Cfg.Insecure = &v
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "inspect-tls",
+				Args:        "",
+				Description: "Inspect the TLS certificate chain",
+				Default:     "",
+				IsSet: func() bool {
+					return a.InspectTLS
+				},
+				Fn: func(value string) error {
+					a.InspectTLS = true
 					return nil
 				},
 			},
