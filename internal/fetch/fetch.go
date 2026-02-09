@@ -62,6 +62,7 @@ type Request struct {
 	ContentType      string
 	Copy             bool
 	Data             io.Reader
+	Discard          bool
 	DNSServer        *url.URL
 	DryRun           bool
 	Edit             bool
@@ -314,6 +315,22 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 	if r.Timing && metrics != nil {
 		bodyTimer = newTimedReader(resp.Body)
 		resp.Body = bodyTimer
+	}
+
+	if r.Discard {
+		_, err := io.Copy(io.Discard, resp.Body)
+		if err != nil {
+			return 0, err
+		}
+		if bodyTimer != nil {
+			p := r.PrinterHandle.Stderr()
+			renderWaterfall(p, metrics, bodyTimer)
+			p.Flush()
+		}
+		if r.GRPC {
+			exitCode = checkGRPCStatus(r, resp, exitCode)
+		}
+		return exitCode, nil
 	}
 
 	// If --copy is requested, wrap the response body to capture raw bytes.

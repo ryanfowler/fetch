@@ -298,6 +298,7 @@ func (a *App) validateWSExclusives() error {
 		isSet bool
 	}
 	conflicts := []flagCheck{
+		{"discard", a.Discard},
 		{"grpc", a.GRPC},
 		{"form", len(a.Form) > 0},
 		{"multipart", len(a.Multipart) > 0},
