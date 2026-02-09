@@ -91,6 +91,7 @@ type Request struct {
 	RetryDelay       time.Duration
 	Session          string
 	Timeout          time.Duration
+	Timing           bool
 	TLS              uint16
 	UnixSocket       string
 	URL              *url.URL
@@ -286,7 +287,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	return code, err
 }
 
-func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRedirects, hadRetries bool) (int, error) {
+func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRedirects, hadRetries bool, metrics *connectionMetrics) (int, error) {
 	var exitCode int
 	if !r.IgnoreStatus {
 		exitCode = getExitCodeForStatus(resp.StatusCode)
@@ -304,6 +305,13 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 		}
 		printResponseMetadata(p, r.Verbosity, resp)
 		p.Flush()
+	}
+
+	// Wrap response body to measure body download time for --timing.
+	var bodyTimer *timedReader
+	if r.Timing && metrics != nil {
+		bodyTimer = newTimedReader(resp.Body)
+		resp.Body = bodyTimer
 	}
 
 	// If --copy is requested, wrap the response body to capture raw bytes.
@@ -324,6 +332,13 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 
 	// Copy captured bytes to clipboard.
 	cc.finish(r.PrinterHandle.Stderr())
+
+	// Render timing waterfall after body is fully consumed.
+	if bodyTimer != nil {
+		p := r.PrinterHandle.Stderr()
+		renderWaterfall(p, metrics, bodyTimer)
+		p.Flush()
+	}
 
 	// Check gRPC trailer status after the body has been fully consumed.
 	if r.GRPC {

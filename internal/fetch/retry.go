@@ -64,9 +64,15 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 
 		attemptReq := req.WithContext(attemptCtx)
 
-		// Set up debug trace for this attempt if -vvv.
-		if r.Verbosity >= core.VDebug {
-			trace := newDebugTrace(r.PrinterHandle.Stderr())
+		// Set up debug trace for this attempt if -vvv or --timing.
+		var metrics *connectionMetrics
+		if r.Verbosity >= core.VDebug || r.Timing {
+			var p *core.Printer
+			if r.Verbosity >= core.VDebug {
+				p = r.PrinterHandle.Stderr()
+			}
+			var trace *httptrace.ClientTrace
+			trace, metrics = newDebugTrace(p)
 			attemptReq = attemptReq.WithContext(httptrace.WithClientTrace(attemptReq.Context(), trace))
 		}
 
@@ -89,7 +95,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 				return 0, doErr
 			}
 			defer resp.Body.Close()
-			return processResponse(ctx, r, resp, hadRedirects, attempt > 0)
+			return processResponse(ctx, r, resp, hadRedirects, attempt > 0, metrics)
 		}
 
 		// Drain and close the response body before retrying.

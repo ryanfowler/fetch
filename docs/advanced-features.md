@@ -433,6 +433,22 @@ Sessions are stored as JSON in the user's cache directory:
 
 ## Debugging Network Issues
 
+### Timing Waterfall
+
+`--timing` (or `-T`) displays a timing waterfall chart after the response, showing how time was spent across DNS resolution, TCP connection, TLS handshake, time to first byte, and body download:
+
+```sh
+fetch --timing https://example.com
+```
+
+The chart adapts to the request: TLS is omitted for HTTP, TCP is omitted for HTTP/3 (QUIC), and DNS/TCP/TLS are omitted when the connection is reused. Combine with `-vvv` for both inline debug text and the waterfall summary.
+
+Can also be configured in the [configuration file](configuration.md):
+
+```ini
+timing = true
+```
+
 ### Verbose Output
 
 ```sh

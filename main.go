@@ -183,6 +183,7 @@ func main() {
 		RetryDelay:       getValue(app.Cfg.RetryDelay),
 		Session:          getValue(app.Cfg.Session),
 		Timeout:          getValue(app.Cfg.Timeout),
+		Timing:           getValue(app.Cfg.Timing),
 		TLS:              getValue(app.Cfg.TLS),
 		UnixSocket:       app.UnixSocket,
 		URL:              app.URL,

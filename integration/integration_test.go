@@ -2295,6 +2295,115 @@ func TestMain(t *testing.T) {
 			t.Fatalf("expected 2 requests, got %d", count.Load())
 		}
 	})
+
+	t.Run("timing waterfall", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "hello")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--timing")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "hello")
+		// Don't assert specific phases (TCP, TTFB) — on fast local
+		// connections they can be 0-duration and omitted.
+		assertBufContains(t, res.stderr, "Total")
+		assertBufContains(t, res.stderr, "█")
+		assertBufContains(t, res.stderr, "─")
+	})
+
+	t.Run("timing waterfall short flag", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "hello")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "-T")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "hello")
+		assertBufContains(t, res.stderr, "Total")
+		assertBufContains(t, res.stderr, "█")
+	})
+
+	t.Run("timing waterfall without debug text", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "hello")
+		})
+		defer server.Close()
+
+		// --timing alone should NOT produce -vvv inline debug text.
+		res := runFetch(t, fetchPath, server.URL, "--timing")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "Total")
+		assertBufNotContains(t, res.stderr, "* TCP:")
+		assertBufNotContains(t, res.stderr, "* TTFB:")
+	})
+
+	t.Run("timing waterfall with debug", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "hello")
+		})
+		defer server.Close()
+
+		// --timing -vvv should produce both inline debug text AND waterfall.
+		res := runFetch(t, fetchPath, server.URL, "--timing", "-vvv")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "* TCP:")
+		assertBufContains(t, res.stderr, "* TTFB:")
+		assertBufContains(t, res.stderr, "Total")
+		assertBufContains(t, res.stderr, "█")
+	})
+
+	t.Run("timing waterfall HEAD request", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--timing", "-m", "HEAD")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "Total")
+		// No Body phase for HEAD requests.
+		assertBufNotContains(t, res.stderr, "Body")
+	})
+
+	t.Run("timing waterfall with retry", func(t *testing.T) {
+		var count atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			n := count.Add(1)
+			if n <= 1 {
+				w.WriteHeader(503)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--timing", "--retry", "1", "--retry-delay", "0.01")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+		assertBufContains(t, res.stderr, "Total")
+		assertBufContains(t, res.stderr, "█")
+	})
+
+	t.Run("timing waterfall websocket warning", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			conn.Write(r.Context(), websocket.MessageText, []byte("ok"))
+			conn.Close(websocket.StatusNormalClosure, "done")
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		res := runFetch(t, fetchPath, wsURL, "--timing", "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "--timing is not supported for WebSocket")
+	})
 }
 
 type runResult struct {
