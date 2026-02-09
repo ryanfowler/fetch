@@ -29,6 +29,7 @@ type App struct {
 	ConfigPath       string
 	ContentType      string
 	Data             io.Reader
+	Discard          bool
 	DryRun           bool
 	Edit             bool
 	Form             []core.KeyVal[string]
@@ -114,6 +115,9 @@ func (a *App) CLI() *CLI {
 		ExclusiveFlags: [][]string{
 			{"aws-sigv4", "basic", "bearer"},
 			{"data", "form", "json", "multipart", "xml"},
+			{"discard", "copy"},
+			{"discard", "output"},
+			{"discard", "remote-name"},
 			{"output", "remote-name"},
 			{"proto-file", "proto-desc"},
 		},
@@ -372,6 +376,20 @@ func (a *App) CLI() *CLI {
 						return err
 					}
 					a.dataSet = true
+					return nil
+				},
+			},
+			{
+				Short:       "",
+				Long:        "discard",
+				Args:        "",
+				Description: "Discard the response body",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Discard
+				},
+				Fn: func(value string) error {
+					a.Discard = true
 					return nil
 				},
 			},

@@ -162,6 +162,7 @@ func main() {
 		ContentType:      app.ContentType,
 		Copy:             getValue(app.Cfg.Copy),
 		Data:             app.Data,
+		Discard:          app.Discard,
 		DNSServer:        app.Cfg.DNSServer,
 		DryRun:           app.DryRun,
 		Edit:             app.Edit,
@@ -407,6 +408,9 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 	}
 	if app.Cfg.Proxy != nil {
 		ignored = append(ignored, "--proxy")
+	}
+	if app.Discard {
+		ignored = append(ignored, "--discard")
 	}
 	if app.UnixSocket != "" {
 		ignored = append(ignored, "--unix")

@@ -1921,6 +1921,77 @@ func TestMain(t *testing.T) {
 		})
 	})
 
+	t.Run("discard", func(t *testing.T) {
+		t.Run("basic", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(200)
+				io.WriteString(w, "hello world")
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, "--discard", server.URL)
+			assertExitCode(t, 0, res)
+			assertBufEmpty(t, res.stdout)
+		})
+
+		t.Run("with verbose", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Test", "value")
+				w.WriteHeader(200)
+				io.WriteString(w, "body content")
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, "--discard", "-v", server.URL)
+			assertExitCode(t, 0, res)
+			assertBufEmpty(t, res.stdout)
+			assertBufContains(t, res.stderr, "x-test")
+		})
+
+		t.Run("with timing", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(200)
+				io.WriteString(w, "body content")
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, "--discard", "--timing", server.URL)
+			assertExitCode(t, 0, res)
+			assertBufEmpty(t, res.stdout)
+			assertBufContains(t, res.stderr, "TTFB")
+		})
+
+		t.Run("error status", func(t *testing.T) {
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(404)
+				io.WriteString(w, "not found")
+			})
+			defer server.Close()
+
+			res := runFetch(t, fetchPath, "--discard", server.URL)
+			assertExitCode(t, 4, res)
+			assertBufEmpty(t, res.stdout)
+		})
+
+		t.Run("exclusive with output", func(t *testing.T) {
+			res := runFetch(t, fetchPath, "--discard", "-o", "file.txt", "http://example.com")
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "cannot be used together")
+		})
+
+		t.Run("exclusive with copy", func(t *testing.T) {
+			res := runFetch(t, fetchPath, "--discard", "--copy", "http://example.com")
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "cannot be used together")
+		})
+
+		t.Run("exclusive with remote-name", func(t *testing.T) {
+			res := runFetch(t, fetchPath, "--discard", "-O", "http://example.com")
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "cannot be used together")
+		})
+	})
+
 	t.Run("retry on 503", func(t *testing.T) {
 		var count atomic.Int64
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {

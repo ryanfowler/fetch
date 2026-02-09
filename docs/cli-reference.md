@@ -205,6 +205,18 @@ fetch --copy example.com/api/data
 fetch --copy -o response.json example.com/api/data
 ```
 
+### `--discard`
+
+Discard the response body. Useful for checking status codes, viewing headers (with `-v`), or measuring timing (with `--timing`) without printing the response body.
+
+Cannot be combined with `--output`, `--remote-name`, or `--copy`.
+
+```sh
+fetch --discard example.com
+fetch --discard -v example.com              # View headers only
+fetch --discard --timing example.com        # Measure timing only
+```
+
 ## Formatting Options
 
 ### `--format OPTION`
