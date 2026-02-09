@@ -46,6 +46,7 @@ type Config struct {
 	Session      *string
 	Silent       *bool
 	Timeout      *time.Duration
+	Timing       *bool
 	TLS          *uint16
 	Verbosity    *int
 }
@@ -123,6 +124,9 @@ func (c *Config) Merge(c2 *Config) {
 	if c.Timeout == nil {
 		c.Timeout = c2.Timeout
 	}
+	if c.Timing == nil {
+		c.Timing = c2.Timing
+	}
 	if c.TLS == nil {
 		c.TLS = c2.TLS
 	}
@@ -181,6 +185,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseSilent(val)
 	case "timeout":
 		err = c.ParseTimeout(val)
+	case "timing":
+		err = c.ParseTiming(val)
 	case "tls":
 		err = c.ParseTLS(val)
 	case "verbosity":
@@ -508,6 +514,15 @@ func (c *Config) ParseTimeout(value string) error {
 		return core.NewValueError("timeout", value, "must be a valid number", c.isFile)
 	}
 	c.Timeout = core.PointerTo(time.Duration(float64(time.Second) * secs))
+	return nil
+}
+
+func (c *Config) ParseTiming(value string) error {
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return core.NewValueError("timing", value, "must be a boolean", c.isFile)
+	}
+	c.Timing = &v
 	return nil
 }
 

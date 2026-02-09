@@ -22,7 +22,12 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	if req.Method != "GET" {
 		p := r.PrinterHandle.Stderr()
 		core.WriteWarningMsg(p, "WebSocket requires GET; ignoring method "+req.Method)
-		p.Flush()
+	}
+
+	// Timing waterfall is not supported for persistent WebSocket connections.
+	if r.Timing {
+		p := r.PrinterHandle.Stderr()
+		core.WriteWarningMsg(p, "--timing is not supported for WebSocket connections")
 	}
 
 	// Extract Sec-WebSocket-Protocol for DialOptions.Subprotocols.
@@ -57,7 +62,7 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 
 	// Attach debug trace for -vvv.
 	if r.Verbosity >= core.VDebug {
-		trace := newDebugTrace(r.PrinterHandle.Stderr())
+		trace, _ := newDebugTrace(r.PrinterHandle.Stderr())
 		dialCtx = httptrace.WithClientTrace(dialCtx, trace)
 	}
 

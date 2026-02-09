@@ -418,6 +418,16 @@ fetch -v example.com
 fetch -vvv example.com
 ```
 
+### `-T, --timing`
+
+Display a timing waterfall chart after the response. Shows DNS, TCP, TLS, TTFB, and body download phases as a proportional bar chart. Works independently of verbosity. Phases that don't apply (e.g., TLS for HTTP, TCP for HTTP/3, DNS/TCP/TLS for reused connections) are omitted.
+
+```sh
+fetch --timing https://example.com
+fetch -T https://example.com
+fetch --timing -vvv https://example.com   # Both debug text and waterfall
+```
+
 ### `-s, --silent`
 
 Suppress verbose output. Only errors shown on stderr.

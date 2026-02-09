@@ -923,6 +923,21 @@ func (a *App) CLI() *CLI {
 				},
 			},
 			{
+				Short:       "T",
+				Long:        "timing",
+				Args:        "",
+				Description: "Display a timing waterfall chart",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Cfg.Timing != nil
+				},
+				Fn: func(value string) error {
+					v := true
+					a.Cfg.Timing = &v
+					return nil
+				},
+			},
+			{
 				Short:       "",
 				Long:        "tls",
 				Args:        "VERSION",
