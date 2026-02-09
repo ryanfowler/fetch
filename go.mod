@@ -5,7 +5,7 @@ go 1.25.7
 require (
 	github.com/coder/websocket v1.8.14
 	github.com/goccy/go-yaml v1.19.2
-	github.com/klauspost/compress v1.18.3
+	github.com/klauspost/compress v1.18.4
 	github.com/mattn/go-runewidth v0.0.19
 	github.com/quic-go/quic-go v0.59.0
 	github.com/tinylib/msgp v1.6.3
