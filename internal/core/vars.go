@@ -17,6 +17,7 @@ type TerminalSize struct {
 var packageManager string // set via ldflags to disable self-update (e.g. "Homebrew")
 
 var (
+	IsStdinTerm    bool
 	IsStderrTerm   bool
 	IsStdoutTerm   bool
 	NoSelfUpdate   bool
@@ -29,7 +30,8 @@ var (
 )
 
 func init() {
-	// Determine if stderr and stdout are TTYs.
+	// Determine if stdin, stderr and stdout are TTYs.
+	IsStdinTerm = isTerminal(int(os.Stdin.Fd()))
 	IsStderrTerm = isTerminal(int(os.Stderr.Fd()))
 	IsStdoutTerm = isTerminal(int(os.Stdout.Fd()))
 

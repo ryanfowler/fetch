@@ -13,13 +13,14 @@ import (
 
 // Config holds the configuration for a WebSocket session.
 type Config struct {
-	Conn       *websocket.Conn
-	Stdin      io.Reader
-	Stderr     *core.Printer
-	Stdout     *core.Printer
-	Format     core.Format
-	Verbosity  core.Verbosity
-	InitialMsg []byte
+	Conn          *websocket.Conn
+	Stdin         io.Reader
+	Stderr        *core.Printer
+	Stdout        *core.Printer
+	Format        core.Format
+	Verbosity     core.Verbosity
+	InitialMsg    []byte
+	IsInteractive bool
 }
 
 // Run starts the bidirectional WebSocket message loop.
@@ -30,6 +31,10 @@ type Config struct {
 // When stdin is provided (piped input), it sends lines concurrently while
 // reading responses.
 func Run(ctx context.Context, cfg Config) error {
+	if cfg.IsInteractive {
+		return runInteractive(ctx, cfg)
+	}
+
 	// Send initial message from -d / -j flag.
 	if len(cfg.InitialMsg) > 0 {
 		err := cfg.Conn.Write(ctx, websocket.MessageText, cfg.InitialMsg)
@@ -76,7 +81,7 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 		cancel()
 		return err
 	case <-stdinDone:
-		// Piped stdin EOF. Give the server a short window to send
+		// Piped stdin EOF. Give the server a brief window to send
 		// remaining messages (e.g. echo responses), then shut down.
 		drainCtx, drainCancel := context.WithTimeout(ctx, 2*time.Second)
 		defer drainCancel()

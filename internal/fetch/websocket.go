@@ -96,24 +96,30 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		}
 	}
 
+	// Detect interactive mode: all three FDs are terminals.
+	interactive := core.IsStdinTerm && core.IsStdoutTerm && core.IsStderrTerm
+
 	// Determine stdin: use it for the write loop only if it's a pipe or
 	// file. When stdin is a terminal or /dev/null, pass nil so we run in
-	// read-only mode.
+	// read-only mode (unless interactive).
 	var stdin io.Reader
-	if info, err := os.Stdin.Stat(); err == nil {
-		if info.Size() > 0 || info.Mode()&os.ModeNamedPipe != 0 {
-			stdin = os.Stdin
+	if !interactive {
+		if info, err := os.Stdin.Stat(); err == nil {
+			if info.Size() > 0 || info.Mode()&os.ModeNamedPipe != 0 {
+				stdin = os.Stdin
+			}
 		}
 	}
 
 	cfg := ws.Config{
-		Conn:       conn,
-		Stdin:      stdin,
-		Stderr:     r.PrinterHandle.Stderr(),
-		Stdout:     r.PrinterHandle.Stdout(),
-		Format:     r.Format,
-		Verbosity:  r.Verbosity,
-		InitialMsg: initialMsg,
+		Conn:          conn,
+		Stdin:         stdin,
+		Stderr:        r.PrinterHandle.Stderr(),
+		Stdout:        r.PrinterHandle.Stdout(),
+		Format:        r.Format,
+		Verbosity:     r.Verbosity,
+		InitialMsg:    initialMsg,
+		IsInteractive: interactive,
 	}
 
 	err = ws.Run(ctx, cfg)
