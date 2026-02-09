@@ -734,6 +734,23 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "request timed out after 100ns")
 	})
 
+	t.Run("connect timeout", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--connect-timeout", "5")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+	})
+
+	t.Run("connect timeout invalid", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "http://localhost", "--connect-timeout", "-1")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "connect-timeout")
+	})
+
 	t.Run("unix socket", func(t *testing.T) {
 		// Verify help output.
 		res := runFetch(t, fetchPath, "--help")

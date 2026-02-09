@@ -21,34 +21,35 @@ import (
 type Config struct {
 	isFile bool
 
-	AutoUpdate   *time.Duration
-	CACerts      []*x509.Certificate
-	CertData     []byte
-	CertPath     string
-	Color        core.Color
-	Copy         *bool
-	DNSServer    *url.URL
-	Format       core.Format
-	Headers      []core.KeyVal[string]
-	HTTP         core.HTTPVersion
-	IgnoreStatus *bool
-	Image        core.ImageSetting
-	Insecure     *bool
-	KeyData      []byte
-	KeyPath      string
-	NoEncode     *bool
-	NoPager      *bool
-	Proxy        *url.URL
-	QueryParams  []core.KeyVal[string]
-	Redirects    *int
-	Retry        *int
-	RetryDelay   *time.Duration
-	Session      *string
-	Silent       *bool
-	Timeout      *time.Duration
-	Timing       *bool
-	TLS          *uint16
-	Verbosity    *int
+	AutoUpdate     *time.Duration
+	CACerts        []*x509.Certificate
+	CertData       []byte
+	CertPath       string
+	Color          core.Color
+	ConnectTimeout *time.Duration
+	Copy           *bool
+	DNSServer      *url.URL
+	Format         core.Format
+	Headers        []core.KeyVal[string]
+	HTTP           core.HTTPVersion
+	IgnoreStatus   *bool
+	Image          core.ImageSetting
+	Insecure       *bool
+	KeyData        []byte
+	KeyPath        string
+	NoEncode       *bool
+	NoPager        *bool
+	Proxy          *url.URL
+	QueryParams    []core.KeyVal[string]
+	Redirects      *int
+	Retry          *int
+	RetryDelay     *time.Duration
+	Session        *string
+	Silent         *bool
+	Timeout        *time.Duration
+	Timing         *bool
+	TLS            *uint16
+	Verbosity      *int
 }
 
 // Merge merges the two Configs together, with "c" taking priority.
@@ -65,6 +66,9 @@ func (c *Config) Merge(c2 *Config) {
 	}
 	if c.Color == core.ColorUnknown {
 		c.Color = c2.Color
+	}
+	if c.ConnectTimeout == nil {
+		c.ConnectTimeout = c2.ConnectTimeout
 	}
 	if c.Copy == nil {
 		c.Copy = c2.Copy
@@ -147,6 +151,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseCert(val)
 	case "color", "colour":
 		err = c.ParseColor(val)
+	case "connect-timeout":
+		err = c.ParseConnectTimeout(val)
 	case "copy":
 		err = c.ParseCopy(val)
 	case "dns-server":
@@ -296,6 +302,15 @@ func (c *Config) ParseColor(value string) error {
 		const usage = "must be one of [auto, off, on]"
 		return core.NewValueError("color", value, usage, c.isFile)
 	}
+	return nil
+}
+
+func (c *Config) ParseConnectTimeout(value string) error {
+	secs, err := strconv.ParseFloat(value, 64)
+	if err != nil || secs < 0 {
+		return core.NewValueError("connect-timeout", value, "must be a non-negative number", c.isFile)
+	}
+	c.ConnectTimeout = core.PointerTo(time.Duration(float64(time.Second) * secs))
 	return nil
 }
 

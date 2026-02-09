@@ -52,15 +52,16 @@ func WithRedirectCallback(ctx context.Context, cb RedirectCallback) context.Cont
 
 // ClientConfig represents the optional configuration parameters for a Client.
 type ClientConfig struct {
-	CACerts    []*x509.Certificate
-	ClientCert *tls.Certificate
-	DNSServer  *url.URL
-	HTTP       core.HTTPVersion
-	Insecure   bool
-	Proxy      *url.URL
-	Redirects  *int
-	TLS        uint16
-	UnixSocket string
+	CACerts        []*x509.Certificate
+	ClientCert     *tls.Certificate
+	ConnectTimeout time.Duration
+	DNSServer      *url.URL
+	HTTP           core.HTTPVersion
+	Insecure       bool
+	Proxy          *url.URL
+	Redirects      *int
+	TLS            uint16
+	UnixSocket     string
 }
 
 // NewClient returns an initialized Client given the provided configuration.
@@ -96,9 +97,9 @@ func NewClient(cfg ClientConfig) *Client {
 	var transport http.RoundTripper
 	switch cfg.HTTP {
 	case core.HTTP2:
-		transport = getHTTP2Transport(baseDial, tlsConfig)
+		transport = getHTTP2Transport(baseDial, tlsConfig, cfg.ConnectTimeout)
 	case core.HTTP3:
-		transport = getHTTP3Transport(cfg.DNSServer, tlsConfig)
+		transport = getHTTP3Transport(cfg.DNSServer, tlsConfig, cfg.ConnectTimeout)
 	default:
 		rt := &http.Transport{
 			DialContext:        baseDial,
@@ -107,6 +108,10 @@ func NewClient(cfg ClientConfig) *Client {
 			Protocols:          &http.Protocols{},
 			Proxy:              proxy,
 			TLSClientConfig:    tlsConfig,
+		}
+		if cfg.ConnectTimeout > 0 {
+			rt.DialContext = wrapDialWithConnectTimeout(baseDial, cfg.ConnectTimeout)
+			rt.DialTLSContext = newDialTLSWithConnectTimeout(baseDial, tlsConfig, cfg.ConnectTimeout, cfg.HTTP != core.HTTP1)
 		}
 		rt.Protocols.SetHTTP1(true)
 		rt.Protocols.SetHTTP2(cfg.HTTP != core.HTTP1)
@@ -148,10 +153,73 @@ func NewClient(cfg ClientConfig) *Client {
 	return &Client{c: client}
 }
 
-func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config) http.RoundTripper {
+// wrapDialWithConnectTimeout wraps a dial function with a connect timeout sub-context.
+func wrapDialWithConnectTimeout(baseDial func(context.Context, string, string) (net.Conn, error), timeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		if baseDial != nil {
+			return baseDial(ctx, network, address)
+		}
+		var d net.Dialer
+		return d.DialContext(ctx, network, address)
+	}
+}
+
+// newDialTLSWithConnectTimeout returns a DialTLSContext function that performs
+// DNS + TCP + TLS under a single connect timeout context. It clones the provided
+// tlsConfig and sets NextProtos explicitly because http.Transport ignores
+// TLSClientConfig when DialTLSContext is set.
+func newDialTLSWithConnectTimeout(baseDial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config, timeout time.Duration, enableHTTP2 bool) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+
+		dial := baseDial
+		if dial == nil {
+			var d net.Dialer
+			dial = d.DialContext
+		}
+
+		conn, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+
+		cfg := tlsConfig.Clone()
+		if enableHTTP2 {
+			cfg.NextProtos = []string{"h2", "http/1.1"}
+		} else {
+			cfg.NextProtos = []string{"http/1.1"}
+		}
+
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			host = address
+		}
+		if cfg.ServerName == "" {
+			cfg.ServerName = host
+		}
+
+		tlsConn := tls.Client(conn, cfg)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		return tlsConn, nil
+	}
+}
+
+func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config, connectTimeout time.Duration) http.RoundTripper {
 	return &http2.Transport{
 		AllowHTTP: false, // Disable h2c, for now.
 		DialTLSContext: func(ctx context.Context, network string, addr string, cfg *tls.Config) (net.Conn, error) {
+			if connectTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, connectTimeout)
+				defer cancel()
+			}
+
 			dial := baseDial
 			if dial == nil {
 				var dialer net.Dialer
@@ -186,7 +254,7 @@ func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn,
 	}
 }
 
-func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config) http.RoundTripper {
+func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config, connectTimeout time.Duration) http.RoundTripper {
 	rt := &http3.Transport{
 		DisableCompression: true,
 		TLSClientConfig:    tlsConfig,
@@ -194,6 +262,12 @@ func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config) http.RoundTrip
 
 	// Always set custom Dial to ensure trace hooks work.
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
+		if connectTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, connectTimeout)
+			defer cancel()
+		}
+
 		host, portStr, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err

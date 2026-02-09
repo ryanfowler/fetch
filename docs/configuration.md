@@ -256,6 +256,21 @@ proxy = https://secure-proxy.example.com:8080
 proxy = socks5://localhost:1080
 ```
 
+#### `connect-timeout`
+
+**Type**: Number (seconds)
+**Default**: None (no connect timeout)
+
+Set a timeout for the connection phase (DNS resolution, TCP connect, TLS handshake). Independent of `timeout`, which covers the entire request. Accepts decimal values.
+
+```ini
+# 5 second connect timeout
+connect-timeout = 5
+
+# 2.5 second connect timeout
+connect-timeout = 2.5
+```
+
 #### `timeout`
 
 **Type**: Number (seconds)

@@ -352,11 +352,25 @@ The timeout covers:
 - TLS handshake
 - Request/response transfer
 
+### `--connect-timeout SECONDS`
+
+Set a timeout for just the connection phase (DNS resolution, TCP connect, TLS handshake):
+
+```sh
+fetch --connect-timeout 5 example.com
+fetch --connect-timeout 5 --timeout 30 example.com  # Both timeouts
+```
+
+This is useful for fast-failing on unreachable hosts while allowing large responses to transfer slowly. The connect timeout is independent of `--timeout` — both can be set simultaneously, and `--timeout` still caps the entire request.
+
 ### Configuration File
 
 ```ini
 # Global timeout
 timeout = 30
+
+# Connect timeout for fast-fail on unreachable hosts
+connect-timeout = 5
 
 # Longer timeout for slow API
 [slow-api.example.com]

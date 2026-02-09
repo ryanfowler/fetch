@@ -158,6 +158,7 @@ func main() {
 		CACerts:          app.Cfg.CACerts,
 		ClientCert:       clientCert,
 		Clobber:          app.Clobber,
+		ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
 		ContentType:      app.ContentType,
 		Copy:             getValue(app.Cfg.Copy),
 		Data:             app.Data,
