@@ -32,6 +32,7 @@ type App struct {
 	DryRun           bool
 	Edit             bool
 	Form             []core.KeyVal[string]
+	FromCurl         string
 	GRPC             bool
 	Help             bool
 	InspectTLS       bool
@@ -362,7 +363,7 @@ func (a *App) CLI() *CLI {
 					return a.dataSet
 				},
 				Fn: func(value string) error {
-					r, path, err := requestBody(value)
+					r, path, err := RequestBody(value)
 					if err != nil {
 						return err
 					}
@@ -455,6 +456,20 @@ func (a *App) CLI() *CLI {
 				},
 				Fn: func(value string) error {
 					return a.Cfg.ParseFormat(value)
+				},
+			},
+			{
+				Short:       "",
+				Long:        "from-curl",
+				Args:        "COMMAND",
+				Description: "Execute a curl command using fetch",
+				Default:     "",
+				IsSet: func() bool {
+					return a.FromCurl != ""
+				},
+				Fn: func(value string) error {
+					a.FromCurl = value
+					return nil
 				},
 			},
 			{
@@ -606,7 +621,7 @@ func (a *App) CLI() *CLI {
 					return a.jsonSet
 				},
 				Fn: func(value string) error {
-					r, _, err := requestBody(value)
+					r, _, err := RequestBody(value)
 					if err != nil {
 						return err
 					}
@@ -1068,7 +1083,7 @@ func (a *App) CLI() *CLI {
 					return a.xmlSet
 				},
 				Fn: func(value string) error {
-					r, _, err := requestBody(value)
+					r, _, err := RequestBody(value)
 					if err != nil {
 						return err
 					}
@@ -1082,7 +1097,7 @@ func (a *App) CLI() *CLI {
 	}
 }
 
-func requestBody(value string) (io.Reader, string, error) {
+func RequestBody(value string) (io.Reader, string, error) {
 	switch {
 	case len(value) == 0 || value[0] != '@':
 		return strings.NewReader(value), "", nil

@@ -2545,6 +2545,161 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "--timing is not supported for WebSocket")
 	})
+
+	t.Run("from-curl basic GET", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			io.WriteString(w, "hello from curl")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", "curl "+server.URL)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "hello from curl")
+	})
+
+	t.Run("from-curl without curl prefix", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			io.WriteString(w, "no prefix")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", server.URL)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "no prefix")
+	})
+
+	t.Run("from-curl POST with data", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != "POST" {
+				w.WriteHeader(400)
+				io.WriteString(w, "expected POST")
+				return
+			}
+			body, _ := io.ReadAll(r.Body)
+			w.WriteHeader(200)
+			w.Write(body)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl -X POST -d "hello=world" %s`, server.URL))
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "hello=world")
+	})
+
+	t.Run("from-curl with headers", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			val := r.Header.Get("X-Custom")
+			w.WriteHeader(200)
+			io.WriteString(w, val)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl -H "X-Custom: test-value" %s`, server.URL))
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "test-value")
+	})
+
+	t.Run("from-curl with basic auth", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				w.WriteHeader(401)
+				return
+			}
+			raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
+			if err != nil {
+				w.WriteHeader(400)
+				return
+			}
+			w.WriteHeader(200)
+			w.Write(raw)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl -u user:pass %s`, server.URL))
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "user:pass")
+	})
+
+	t.Run("from-curl with verbose", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Test-Header", "visible")
+			w.WriteHeader(200)
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl -v %s`, server.URL))
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+		assertBufContains(t, res.stderr, "x-test-header")
+	})
+
+	t.Run("from-curl with retry", func(t *testing.T) {
+		var count atomic.Int32
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if count.Add(1) < 2 {
+				w.WriteHeader(503)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl --retry 2 --retry-delay 0 %s`, server.URL))
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+	})
+
+	t.Run("from-curl exclusive with URL", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "--from-curl", "curl https://example.com", "https://other.com")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "cannot be used together")
+	})
+
+	t.Run("from-curl exclusive with method", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "--from-curl", "curl https://example.com", "-m", "POST")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "cannot be used together")
+	})
+
+	t.Run("from-curl missing URL", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "--from-curl", "curl -X POST")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "no URL provided")
+	})
+
+	t.Run("from-curl unknown flag", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "--from-curl", "curl --unknown-flag https://example.com")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "unsupported curl flag")
+	})
+
+	t.Run("from-curl with dry-run", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "--dry-run", "--from-curl", `curl -X PUT -H "Content-Type: application/json" -d '{"key":"value"}' https://example.com`)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "PUT")
+		assertBufContains(t, res.stderr, "example.com")
+	})
+
+	t.Run("from-curl proto restricts to https", func(t *testing.T) {
+		res := runFetch(t, fetchPath, "--from-curl", `curl --proto '=https' http://example.com`)
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "not allowed by --proto")
+	})
+
+	t.Run("from-curl proto allows https", func(t *testing.T) {
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl --proto '=http,https' %s`, server.URL))
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+	})
 }
 
 type runResult struct {
