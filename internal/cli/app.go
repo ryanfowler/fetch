@@ -326,6 +326,19 @@ func (a *App) CLI() *CLI {
 			},
 			{
 				Short:       "",
+				Long:        "connect-timeout",
+				Args:        "SECONDS",
+				Description: "Timeout for connection establishment",
+				Default:     "",
+				IsSet: func() bool {
+					return a.Cfg.ConnectTimeout != nil
+				},
+				Fn: func(value string) error {
+					return a.Cfg.ParseConnectTimeout(value)
+				},
+			},
+			{
+				Short:       "",
 				Long:        "copy",
 				Args:        "",
 				Description: "Copy the response body to clipboard",

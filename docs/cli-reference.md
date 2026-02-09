@@ -272,6 +272,15 @@ Can also be configured per-host in the [configuration file](configuration.md).
 
 ## Network Options
 
+### `--connect-timeout SECONDS`
+
+Timeout for the connection phase (DNS resolution, TCP connect, TLS handshake) in seconds. Accepts decimal values. Independent of `--timeout`, which covers the entire request.
+
+```sh
+fetch --connect-timeout 5 example.com
+fetch --connect-timeout 5 --timeout 30 example.com
+```
+
 ### `-t, --timeout SECONDS`
 
 Request timeout in seconds. Accepts decimal values.

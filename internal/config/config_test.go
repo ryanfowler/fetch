@@ -40,6 +40,42 @@ func TestParseRetry(t *testing.T) {
 	})
 }
 
+func TestParseConnectTimeout(t *testing.T) {
+	t.Run("negative value", func(t *testing.T) {
+		c := &Config{}
+		if err := c.ParseConnectTimeout("-1"); err == nil {
+			t.Error("expected error for negative connect-timeout value")
+		}
+	})
+
+	t.Run("valid value", func(t *testing.T) {
+		c := &Config{}
+		if err := c.ParseConnectTimeout("2.5"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.ConnectTimeout == nil {
+			t.Fatal("expected connect-timeout to be set")
+		}
+	})
+
+	t.Run("zero", func(t *testing.T) {
+		c := &Config{}
+		if err := c.ParseConnectTimeout("0"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.ConnectTimeout == nil {
+			t.Fatal("expected connect-timeout to be set")
+		}
+	})
+
+	t.Run("non-numeric", func(t *testing.T) {
+		c := &Config{}
+		if err := c.ParseConnectTimeout("abc"); err == nil {
+			t.Error("expected error for non-numeric connect-timeout value")
+		}
+	})
+}
+
 func TestParseRetryDelay(t *testing.T) {
 	t.Run("negative value", func(t *testing.T) {
 		c := &Config{}

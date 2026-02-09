@@ -58,6 +58,7 @@ type Request struct {
 	CACerts          []*x509.Certificate
 	ClientCert       *tls.Certificate
 	Clobber          bool
+	ConnectTimeout   time.Duration
 	ContentType      string
 	Copy             bool
 	Data             io.Reader
@@ -144,15 +145,16 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 
 	// 3. Create HTTP client and request.
 	c := client.NewClient(client.ClientConfig{
-		CACerts:    r.CACerts,
-		ClientCert: r.ClientCert,
-		DNSServer:  r.DNSServer,
-		HTTP:       r.HTTP,
-		Insecure:   r.Insecure,
-		Proxy:      r.Proxy,
-		Redirects:  r.Redirects,
-		TLS:        r.TLS,
-		UnixSocket: r.UnixSocket,
+		CACerts:        r.CACerts,
+		ClientCert:     r.ClientCert,
+		ConnectTimeout: r.ConnectTimeout,
+		DNSServer:      r.DNSServer,
+		HTTP:           r.HTTP,
+		Insecure:       r.Insecure,
+		Proxy:          r.Proxy,
+		Redirects:      r.Redirects,
+		TLS:            r.TLS,
+		UnixSocket:     r.UnixSocket,
 	})
 
 	// Load session and set cookie jar, if configured.
