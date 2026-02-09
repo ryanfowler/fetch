@@ -351,6 +351,15 @@ Minimum TLS version. Values: `1.0`, `1.1`, `1.2`, `1.3`.
 fetch --tls 1.3 example.com
 ```
 
+### `--inspect-tls`
+
+Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning.
+
+```sh
+fetch --inspect-tls example.com
+fetch --inspect-tls --insecure expired.badssl.com
+```
+
 ### `--insecure`
 
 Accept invalid TLS certificates. Use with caution.

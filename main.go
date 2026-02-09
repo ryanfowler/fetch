@@ -8,16 +8,19 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/cli"
+	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/complete"
 	"github.com/ryanfowler/fetch/internal/config"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/fetch"
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/multipart"
+	"github.com/ryanfowler/fetch/internal/tlsinspect"
 	"github.com/ryanfowler/fetch/internal/update"
 )
 
@@ -124,6 +127,11 @@ func main() {
 		p := handle.Stderr()
 		writeCLIErr(p, errors.New("cannot use a unix socket with HTTP/3.0"))
 		os.Exit(1)
+	}
+
+	// Handle --inspect-tls: perform TLS handshake only, no HTTP request.
+	if app.InspectTLS {
+		os.Exit(inspectTLS(ctx, app, handle))
 	}
 
 	// Respond with an error if WebSocket is used with HTTP/3.
@@ -326,6 +334,103 @@ func (err errSelfUpdateDisabled) PrintTo(p *core.Printer) {
 		p.WriteString("brew upgrade ryanfowler/tap/fetch")
 		p.Reset()
 	}
+}
+
+// inspectTLS performs a TLS-only handshake and renders the certificate chain.
+func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
+	p := handle.Stderr()
+
+	// Default scheme: non-loopback defaults to HTTPS, loopback is rejected.
+	if app.URL.Scheme == "" {
+		hostname := app.URL.Hostname()
+		if client.IsLoopback(hostname) {
+			writeCLIErr(p, errors.New("--inspect-tls requires an HTTPS URL"))
+			return 1
+		}
+		app.URL.Scheme = "https"
+	}
+	switch app.URL.Scheme {
+	case "https", "wss":
+		// OK: these schemes use TLS.
+	default:
+		writeCLIErr(p, errors.New("--inspect-tls requires an HTTPS URL"))
+		return 1
+	}
+
+	// Warn on incompatible flags.
+	var ignored []string
+	if app.Data != nil {
+		ignored = append(ignored, "--data/--json/--xml")
+	}
+	if len(app.Form) > 0 {
+		ignored = append(ignored, "--form")
+	}
+	if len(app.Multipart) > 0 {
+		ignored = append(ignored, "--multipart")
+	}
+	if app.GRPC {
+		ignored = append(ignored, "--grpc")
+	}
+	if app.Output != "" {
+		ignored = append(ignored, "--output")
+	}
+	if app.RemoteName {
+		ignored = append(ignored, "--remote-name")
+	}
+	if getValue(app.Cfg.Copy) {
+		ignored = append(ignored, "--copy")
+	}
+	if app.Method != "" {
+		ignored = append(ignored, "--method")
+	}
+	if len(app.Cfg.Headers) > 0 {
+		ignored = append(ignored, "--header")
+	}
+	if len(app.Cfg.QueryParams) > 0 {
+		ignored = append(ignored, "--query")
+	}
+	if app.Edit {
+		ignored = append(ignored, "--edit")
+	}
+	if getValue(app.Cfg.Session) != "" {
+		ignored = append(ignored, "--session")
+	}
+	if getValue(app.Cfg.Retry) > 0 {
+		ignored = append(ignored, "--retry")
+	}
+	if len(app.Range) > 0 {
+		ignored = append(ignored, "--range")
+	}
+	if getValue(app.Cfg.Timing) {
+		ignored = append(ignored, "--timing")
+	}
+	if app.Cfg.Proxy != nil {
+		ignored = append(ignored, "--proxy")
+	}
+	if app.UnixSocket != "" {
+		ignored = append(ignored, "--unix")
+	}
+	if len(ignored) > 0 {
+		msg := "--inspect-tls ignores: " + strings.Join(ignored, ", ") + "\n"
+		core.WriteWarningMsg(p, msg)
+	}
+
+	// Parse client certificate for mTLS.
+	clientCert, err := app.Cfg.ClientCert()
+	if err != nil {
+		writeCLIErr(p, err)
+		return 1
+	}
+
+	return tlsinspect.Inspect(ctx, p, &tlsinspect.Config{
+		CACerts:    app.Cfg.CACerts,
+		ClientCert: clientCert,
+		DNSServer:  app.Cfg.DNSServer,
+		Insecure:   getValue(app.Cfg.Insecure),
+		TLS:        getValue(app.Cfg.TLS),
+		Timeout:    getValue(app.Cfg.Timeout),
+		URL:        app.URL,
+	})
 }
 
 type errShellNotSupported string

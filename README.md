@@ -12,6 +12,7 @@ A modern HTTP(S) client for the command line.
 - **gRPC support** - Make gRPC calls with automatic JSON-to-protobuf conversion
 - **Authentication** - Built-in support for Basic Auth, Bearer Token, AWS Signature V4, and mTLS
 - **Compression** - Automatic gzip and zstd response body decompression
+- **TLS inspection** - Inspect TLS certificate chains, expiry, SANs, and OCSP status
 - **Timing waterfall** - Visualize request timing phases (DNS, TCP, TLS, TTFB, transfer) with a waterfall chart
 - **Configuration** - Global and per-host configuration file support
 

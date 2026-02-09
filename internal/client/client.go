@@ -65,18 +65,18 @@ type ClientConfig struct {
 
 // NewClient returns an initialized Client given the provided configuration.
 func NewClient(cfg ClientConfig) *Client {
-	var tlsConfig tls.Config
 	var proxy func(req *http.Request) (*url.URL, error)
-	var baseDial func(ctx context.Context, network, address string) (net.Conn, error)
 
-	// Set optional DNS server.
-	if cfg.DNSServer != nil {
-		if cfg.DNSServer.Scheme == "" {
-			baseDial = dialContextUDP(cfg.DNSServer.Host)
-		} else {
-			baseDial = dialContextDOH(cfg.DNSServer)
-		}
+	// Build TLS config and dial function from shared configuration.
+	tlsDialCfg := &TLSDialConfig{
+		CACerts:    cfg.CACerts,
+		ClientCert: cfg.ClientCert,
+		DNSServer:  cfg.DNSServer,
+		Insecure:   cfg.Insecure,
+		TLS:        cfg.TLS,
 	}
+	tlsConfig := tlsDialCfg.BuildTLSConfig()
+	baseDial := tlsDialCfg.BuildDialContext()
 
 	if cfg.UnixSocket != "" {
 		baseDial = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -85,45 +85,20 @@ func NewClient(cfg ClientConfig) *Client {
 		}
 	}
 
-	// Accept invalid certs if insecure.
-	if cfg.Insecure {
-		tlsConfig.InsecureSkipVerify = true
-	}
-
-	// Set the optinal proxy URL.
+	// Set the optional proxy URL.
 	if cfg.Proxy != nil {
 		proxy = func(r *http.Request) (*url.URL, error) {
 			return cfg.Proxy, nil
 		}
 	}
 
-	// Set the minimum TLS version.
-	if cfg.TLS == 0 {
-		cfg.TLS = tls.VersionTLS12
-	}
-	tlsConfig.MinVersion = cfg.TLS
-
-	// Set the RootCAs, if provided.
-	if len(cfg.CACerts) > 0 {
-		certPool := x509.NewCertPool()
-		for _, cert := range cfg.CACerts {
-			certPool.AddCert(cert)
-		}
-		tlsConfig.RootCAs = certPool
-	}
-
-	// Set the client certificate for mTLS, if provided.
-	if cfg.ClientCert != nil {
-		tlsConfig.Certificates = []tls.Certificate{*cfg.ClientCert}
-	}
-
 	// Create the http.RoundTripper based on the configured HTTP version.
 	var transport http.RoundTripper
 	switch cfg.HTTP {
 	case core.HTTP2:
-		transport = getHTTP2Transport(baseDial, &tlsConfig)
+		transport = getHTTP2Transport(baseDial, tlsConfig)
 	case core.HTTP3:
-		transport = getHTTP3Transport(cfg.DNSServer, &tlsConfig)
+		transport = getHTTP3Transport(cfg.DNSServer, tlsConfig)
 	default:
 		rt := &http.Transport{
 			DialContext:        baseDial,
@@ -131,7 +106,7 @@ func NewClient(cfg ClientConfig) *Client {
 			ForceAttemptHTTP2:  cfg.HTTP != core.HTTP1,
 			Protocols:          &http.Protocols{},
 			Proxy:              proxy,
-			TLSClientConfig:    &tlsConfig,
+			TLSClientConfig:    tlsConfig,
 		}
 		rt.Protocols.SetHTTP1(true)
 		rt.Protocols.SetHTTP2(cfg.HTTP != core.HTTP1)
@@ -363,7 +338,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	// If no scheme was provided, default to HTTPS except for loopback
 	// addresses (localhost, 127.x.x.x, ::1) which default to HTTP.
 	if cfg.URL.Scheme == "" {
-		if isLoopback(cfg.URL.Hostname()) {
+		if IsLoopback(cfg.URL.Hostname()) {
 			cfg.URL.Scheme = "http"
 		} else {
 			cfg.URL.Scheme = "https"
@@ -546,10 +521,10 @@ func (r *zstdReader) Close() error {
 	return r.c.Close()
 }
 
-// isLoopback returns true if the host is a loopback address.
+// IsLoopback returns true if the host is a loopback address.
 // This includes "localhost" and IP addresses in the loopback range
 // (127.0.0.0/8 for IPv4, ::1 for IPv6).
-func isLoopback(host string) bool {
+func IsLoopback(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
 	}
