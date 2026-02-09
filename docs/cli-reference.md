@@ -521,6 +521,55 @@ Specify configuration file path.
 fetch --config ~/.config/fetch/custom.conf example.com
 ```
 
+## Curl Compatibility
+
+### `--from-curl COMMAND`
+
+Execute a curl command using fetch. Parses a curl command string and translates its flags into the equivalent fetch options. The `curl` prefix is optional.
+
+Cannot be combined with other request-specifying flags (URL, `--method`, `--header`, `--data`, auth flags, etc.). Meta flags like `--dry-run`, `--color`, `--format`, `--no-pager`, and `--timing` can still be used.
+
+```sh
+# Basic GET
+fetch --from-curl 'curl https://example.com'
+
+# POST with JSON
+fetch --from-curl 'curl -X POST -H "Content-Type: application/json" -d {"key":"value"} https://example.com'
+
+# With authentication
+fetch --from-curl 'curl -u user:pass https://example.com'
+
+# Follow redirects with retry
+fetch --from-curl 'curl -L --max-redirs 5 --retry 3 https://example.com'
+
+# Preview without sending
+fetch --dry-run --from-curl 'curl -X PUT -d @data.json https://example.com'
+
+# Without the curl prefix
+fetch --from-curl 'https://example.com'
+```
+
+**Supported curl flags:**
+
+| Category | Curl Flags |
+|---|---|
+| Request | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G` |
+| Auth | `-u`, `--aws-sigv4`, `--oauth2-bearer` |
+| TLS | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x` |
+| Output | `-o`, `-O`, `-J` |
+| Network | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r` |
+| HTTP version | `-0`, `--http1.1`, `--http2`, `--http3` |
+| Headers | `-A`, `-e`, `-b` |
+| Verbosity | `-v`, `-s` |
+| Protocol | `--proto` (restricts allowed protocols; errors if URL scheme is not allowed) |
+| No-ops | `--compressed`, `-S`, `-N`, `--no-keepalive`, `-#`, `--no-progress-meter`, `-n`, `-f`, `--fail-with-body`, `--proto-default`, `--proto-redir` |
+
+**Notes:**
+- `-b`/`--cookie` only supports inline cookie strings (e.g., `-b 'name=value'`). Cookie jar files are not supported and will return an error.
+- `--data-urlencode` supports `@filename` and `name@filename` forms for reading and URL-encoding file contents.
+
+Unknown curl flags return an error.
+
 ## Utility Options
 
 ### `-h, --help`

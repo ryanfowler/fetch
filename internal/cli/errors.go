@@ -97,6 +97,39 @@ func (err argRequiredError) PrintTo(p *core.Printer) {
 	p.WriteString("'")
 }
 
+type fromCurlExclusiveError struct {
+	flag       string
+	positional bool
+}
+
+func (err fromCurlExclusiveError) Error() string {
+	if err.positional {
+		return fmt.Sprintf("'--from-curl' and a %s argument cannot be used together", err.flag)
+	}
+	return fmt.Sprintf("'--from-curl' and '--%s' cannot be used together", err.flag)
+}
+
+func (err fromCurlExclusiveError) PrintTo(p *core.Printer) {
+	p.WriteString("'")
+	p.Set(core.Bold)
+	p.WriteString("--from-curl")
+	p.Reset()
+	if err.positional {
+		p.WriteString("' and a ")
+		p.Set(core.Bold)
+		p.WriteString(err.flag)
+		p.Reset()
+		p.WriteString(" argument cannot be used together")
+	} else {
+		p.WriteString("' and '")
+		p.Set(core.Bold)
+		p.WriteString("--")
+		p.WriteString(err.flag)
+		p.Reset()
+		p.WriteString("' cannot be used together")
+	}
+}
+
 type requiredFlagError struct {
 	flag     string
 	required []string

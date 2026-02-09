@@ -49,6 +49,7 @@ prettier -w .
 - **internal/complete** - Shell completion implementation.
 - **internal/config** - INI-format config file parsing with host-specific overrides.
 - **internal/core** - Shared types (`Printer`, `Color`, `Format`, `HTTPVersion`) and utilities.
+- **internal/curl** - Curl command parser for `--from-curl` flag. Tokenizes and parses curl command strings into an intermediate `Result` struct.
 - **internal/fetch** - Core HTTP request execution. `fetch.go:Fetch()` is the main entry point that builds requests, handles gRPC framing, and routes to formatters.
 - **internal/format** - Response body formatters (JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, SSE, NDJSON). Each formatter writes colored output to a `Printer`.
 - **internal/grpc** - gRPC framing, headers, and status code handling.
