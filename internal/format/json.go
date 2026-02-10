@@ -15,7 +15,7 @@ import (
 func FormatJSON(buf []byte, p *core.Printer) error {
 	err := formatJSON(bytes.NewReader(buf), p)
 	if err != nil {
-		p.Reset()
+		p.Discard()
 	}
 	return err
 }

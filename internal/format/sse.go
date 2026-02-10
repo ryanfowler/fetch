@@ -18,6 +18,7 @@ func FormatEventStream(r io.Reader, p *core.Printer) error {
 	var written bool
 	for ev, err := range streamEvents(r) {
 		if err != nil {
+			p.Discard()
 			return err
 		}
 
@@ -55,7 +56,7 @@ func writeEventStreamData(d string, p *core.Printer) {
 		}
 	}
 
-	p.Reset()
+	p.Discard()
 	p.WriteString(d)
 	p.WriteString("\n")
 	p.Flush()

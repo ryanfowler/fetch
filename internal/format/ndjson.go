@@ -18,12 +18,12 @@ func FormatJSONLine(buf []byte, p *core.Printer) error {
 	dec.UseNumber()
 	err := formatNDJSONValue(dec, p)
 	if err != nil {
-		p.Reset()
+		p.Discard()
 		return err
 	}
 	tok, err := dec.Token()
 	if !errors.Is(err, io.EOF) {
-		p.Reset()
+		p.Discard()
 		return fmt.Errorf("unexpected token: %v", tok)
 	}
 	p.WriteString("\n")
@@ -41,6 +41,7 @@ func FormatNDJSON(r io.Reader, p *core.Printer) error {
 			return nil
 		}
 		if err != nil {
+			p.Discard()
 			return err
 		}
 
