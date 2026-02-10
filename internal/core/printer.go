@@ -103,6 +103,11 @@ func (p *Printer) Flush() error {
 	return err
 }
 
+// Discard clears the buffer without writing to the underlying file.
+func (p *Printer) Discard() {
+	p.buf.Reset()
+}
+
 // Bytes returns the current contents of the buffer.
 func (p *Printer) Bytes() []byte {
 	return p.buf.Bytes()
