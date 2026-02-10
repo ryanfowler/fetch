@@ -21,6 +21,7 @@ func FormatGRPCStream(r io.Reader, md protoreflect.MessageDescriptor, p *core.Pr
 			return nil
 		}
 		if err != nil {
+			p.Discard()
 			return err
 		}
 
@@ -37,7 +38,7 @@ func FormatGRPCStream(r io.Reader, md protoreflect.MessageDescriptor, p *core.Pr
 		}
 		if err != nil {
 			// If formatting fails, return the error.
-			p.Reset()
+			p.Discard()
 			return err
 		}
 

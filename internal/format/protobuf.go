@@ -20,7 +20,7 @@ import (
 func FormatProtobuf(buf []byte, p *core.Printer) error {
 	err := formatProtobuf(buf, p, 0)
 	if err != nil {
-		p.Reset()
+		p.Discard()
 	}
 	return err
 }

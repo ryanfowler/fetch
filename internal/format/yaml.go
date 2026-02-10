@@ -13,7 +13,7 @@ import (
 func FormatYAML(buf []byte, p *core.Printer) error {
 	err := formatYAML(buf, p)
 	if err != nil {
-		p.Reset()
+		p.Discard()
 	}
 	return err
 }

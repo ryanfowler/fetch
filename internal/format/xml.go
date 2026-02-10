@@ -21,6 +21,7 @@ func FormatXML(buf []byte, w *core.Printer) error {
 			return nil
 		}
 		if err != nil {
+			w.Discard()
 			return err
 		}
 

@@ -15,7 +15,7 @@ import (
 func FormatCSV(buf []byte, p *core.Printer) error {
 	err := formatCSV(buf, p)
 	if err != nil {
-		p.Reset()
+		p.Discard()
 	}
 	return err
 }
