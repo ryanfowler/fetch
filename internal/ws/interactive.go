@@ -20,6 +20,7 @@ const (
 	minRows      = 5
 	readBufSize  = 256
 	stdinChanBuf = 64
+	maxMessages  = 10000
 )
 
 var promptWidth = runewidth.StringWidth(promptStr)
@@ -387,6 +388,9 @@ func (im *interactiveMode) renderMessage(arrow string, data []byte) {
 	defer im.mu.Unlock()
 
 	im.messages = append(im.messages, messageEntry{arrow: arrow, data: data})
+	if len(im.messages) > maxMessages {
+		im.messages = im.messages[len(im.messages)-maxMessages:]
+	}
 	im.writeMessageLocked(arrow, data)
 	im.drawInputLineLocked()
 }
@@ -397,6 +401,9 @@ func (im *interactiveMode) renderBinaryIndicator(n int) {
 	defer im.mu.Unlock()
 
 	im.messages = append(im.messages, messageEntry{binN: n})
+	if len(im.messages) > maxMessages {
+		im.messages = im.messages[len(im.messages)-maxMessages:]
+	}
 	im.writeBinaryLocked(n)
 	im.drawInputLineLocked()
 }
