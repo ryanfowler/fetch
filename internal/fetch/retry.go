@@ -162,21 +162,19 @@ func isRetryableError(err error) bool {
 	// must be checked before the net.Error catch-all to avoid treating
 	// every *url.Error (e.g. "exceeded maximum number of redirects") as
 	// retryable. Instead, evaluate the inner error on its own merits.
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		return isRetryableError(urlErr.Err)
 	}
 
 	// Retry on per-attempt timeout (ErrRequestTimedOut is the custom
 	// cause set via context.WithTimeoutCause for --timeout).
-	var timedOut core.ErrRequestTimedOut
-	if errors.As(err, &timedOut) {
+	if _, ok := errors.AsType[core.ErrRequestTimedOut](err); ok {
 		return true
 	}
 
 	// Retry on net.Error (includes timeouts, DNS errors, and connection errors).
-	var netErr net.Error
-	return errors.As(err, &netErr)
+	_, ok := errors.AsType[net.Error](err)
+	return ok
 }
 
 // parseRetryAfter parses the Retry-After header value. It supports both

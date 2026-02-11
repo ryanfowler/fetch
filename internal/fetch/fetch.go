@@ -616,23 +616,23 @@ func addHeader(headers []core.KeyVal[string], h core.KeyVal[string]) []core.KeyV
 
 // isCertificateErr returns true if the error has to do with TLS cert validation.
 func isCertificateErr(err error) bool {
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		var certInvalidErr x509.CertificateInvalidError
-		if errors.As(urlErr.Err, &certInvalidErr) {
-			return true
-		}
-
-		var hostErr x509.HostnameError
-		if errors.As(urlErr.Err, &hostErr) {
-			return true
-		}
-
-		var unknownErr x509.UnknownAuthorityError
-		if errors.As(urlErr.Err, &unknownErr) {
-			return true
-		}
+	urlErr, ok := errors.AsType[*url.Error](err)
+	if !ok {
+		return false
 	}
+
+	if _, ok := errors.AsType[x509.CertificateInvalidError](urlErr.Err); ok {
+		return true
+	}
+
+	if _, ok := errors.AsType[x509.HostnameError](urlErr.Err); ok {
+		return true
+	}
+
+	if _, ok := errors.AsType[x509.UnknownAuthorityError](urlErr.Err); ok {
+		return true
+	}
+
 	return false
 }
 

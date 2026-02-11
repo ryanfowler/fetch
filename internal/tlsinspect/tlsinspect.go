@@ -104,10 +104,10 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 func writeTLSError(p *core.Printer, err error) {
 	core.WriteErrorMsgNoFlush(p, err)
 
-	var certInvalidErr x509.CertificateInvalidError
-	var hostErr x509.HostnameError
-	var unknownErr x509.UnknownAuthorityError
-	if errors.As(err, &certInvalidErr) || errors.As(err, &hostErr) || errors.As(err, &unknownErr) {
+	_, certInvalid := errors.AsType[x509.CertificateInvalidError](err)
+	_, hostErr := errors.AsType[x509.HostnameError](err)
+	_, unknownErr := errors.AsType[x509.UnknownAuthorityError](err)
+	if certInvalid || hostErr || unknownErr {
 		p.WriteString("\n")
 		p.WriteString("If you absolutely trust the server, try '")
 		p.Set(core.Bold)
