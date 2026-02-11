@@ -260,6 +260,8 @@ func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config, connectTimeout
 		TLSClientConfig:    tlsConfig,
 	}
 
+	wrapper := &http3TimingTransport{rt: rt}
+
 	// Always set custom Dial to ensure trace hooks work.
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
 		if connectTimeout > 0 {
@@ -326,18 +328,21 @@ func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config, connectTimeout
 				packetConn.Close()
 				continue
 			}
+			wrapper.packetConns = append(wrapper.packetConns, packetConn)
 			return conn, nil
 		}
 
 		return nil, err
 	}
 
-	return &http3TimingTransport{rt: rt}
+	return wrapper
 }
 
-// http3TimingTransport wraps http3.Transport to provide TTFB trace hooks.
+// http3TimingTransport wraps http3.Transport to provide TTFB trace hooks
+// and tracks PacketConns for cleanup.
 type http3TimingTransport struct {
-	rt *http3.Transport
+	rt          *http3.Transport
+	packetConns []net.PacketConn
 }
 
 func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -353,6 +358,22 @@ func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, err
 	}
 
 	return resp, err
+}
+
+func (t *http3TimingTransport) Close() error {
+	err := t.rt.Close()
+	for _, pc := range t.packetConns {
+		pc.Close()
+	}
+	return err
+}
+
+// Close closes the underlying transport, releasing any resources.
+func (c *Client) Close() error {
+	if closer, ok := c.c.Transport.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }
 
 // HTTPClient returns the underlying *http.Client.
