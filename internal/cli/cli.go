@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/curl"
 )
@@ -25,6 +24,14 @@ type CLI struct {
 	Flags          []Flag
 	ExclusiveFlags [][]string
 	RequiredFlags  []core.KeyVal[[]string]
+
+	// SchemeExclusiveFlags maps URL schemes (e.g. "ws", "wss") to flags
+	// that cannot be used with that scheme.
+	SchemeExclusiveFlags map[string][]string
+
+	// FromCurlExclusiveFlags lists flags that cannot be used alongside
+	// --from-curl.
+	FromCurlExclusiveFlags []string
 }
 
 type Arguments struct {
@@ -47,7 +54,9 @@ type Flag struct {
 	Fn          func(value string) error
 }
 
-func parse(cli *CLI, args []string) error {
+// parseWithFlags parses the CLI arguments and returns the long flag map for
+// use in post-parse validation.
+func parseWithFlags(cli *CLI, args []string) (map[string]Flag, error) {
 	short := make(map[string]Flag)
 	long := make(map[string]Flag)
 	for _, flag := range cli.Flags {
@@ -75,13 +84,6 @@ func parse(cli *CLI, args []string) error {
 		}
 	}
 
-	exclusives := make(map[string][][]string)
-	for _, fs := range cli.ExclusiveFlags {
-		for _, f := range fs {
-			exclusives[f] = append(exclusives[f], fs)
-		}
-	}
-
 	var err error
 	for len(args) > 0 {
 		arg := args[0]
@@ -91,7 +93,7 @@ func parse(cli *CLI, args []string) error {
 		if len(arg) <= 1 || arg[0] != '-' {
 			err = cli.ArgFn(arg)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			continue
 		}
@@ -100,7 +102,7 @@ func parse(cli *CLI, args []string) error {
 		if arg[1] != '-' {
 			args, err = parseShortFlag(arg, args, short)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			continue
 		}
@@ -109,7 +111,7 @@ func parse(cli *CLI, args []string) error {
 		if len(arg) > 2 {
 			args, err = parseLongFlag(arg, args, long)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			continue
 		}
@@ -117,12 +119,12 @@ func parse(cli *CLI, args []string) error {
 		// "--" means consider everything else arguments.
 		err = cli.ArgFn("--")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, arg := range args {
 			err = cli.ArgFn(arg)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 		break
@@ -132,7 +134,7 @@ func parse(cli *CLI, args []string) error {
 	for _, exc := range cli.ExclusiveFlags {
 		err = validateExclusives(exc, long)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -140,11 +142,11 @@ func parse(cli *CLI, args []string) error {
 	for _, req := range cli.RequiredFlags {
 		err = validateRequired(req, long)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	return long, nil
 }
 
 func parseShortFlag(arg string, args []string, short map[string]Flag) ([]string, error) {
@@ -261,13 +263,13 @@ func Parse(args []string) (*App, error) {
 	var app App
 
 	cli := app.CLI()
-	err := parse(cli, args)
+	long, err := parseWithFlags(cli, args)
 	if err != nil {
 		return &app, err
 	}
 
 	if app.FromCurl != "" {
-		if err := app.validateFromCurlExclusives(); err != nil {
+		if err := validateFromCurlExclusives(&app, cli, long); err != nil {
 			return &app, err
 		}
 		result, err := curl.Parse(app.FromCurl)
@@ -279,43 +281,31 @@ func Parse(args []string) (*App, error) {
 		}
 	}
 
-	if err := app.validateWSExclusives(); err != nil {
+	if err := validateSchemeExclusives(&app, cli, long); err != nil {
 		return &app, err
 	}
 
 	return &app, nil
 }
 
-// validateWSExclusives checks that ws:// / wss:// scheme is not combined
-// with incompatible flags.
-func (a *App) validateWSExclusives() error {
-	if !a.WS {
+// validateSchemeExclusives checks that scheme-specific exclusive flags
+// (e.g. ws:// / wss:// flags) are not combined with incompatible flags.
+func validateSchemeExclusives(app *App, cli *CLI, long map[string]Flag) error {
+	if !app.WS {
 		return nil
-	}
-
-	type flagCheck struct {
-		name  string
-		isSet bool
-	}
-	conflicts := []flagCheck{
-		{"discard", a.Discard},
-		{"grpc", a.GRPC},
-		{"form", len(a.Form) > 0},
-		{"multipart", len(a.Multipart) > 0},
-		{"xml", a.xmlSet},
-		{"edit", a.Edit},
 	}
 
 	// The URL scheme was rewritten from ws->http / wss->https during
 	// parsing, so reverse the mapping for the error message.
 	scheme := "ws"
-	if a.URL != nil && a.URL.Scheme == "https" {
+	if app.URL != nil && app.URL.Scheme == "https" {
 		scheme = "wss"
 	}
 
-	for _, c := range conflicts {
-		if c.isSet {
-			return schemeExclusiveError{scheme: scheme, flag: c.name}
+	exclusives := cli.SchemeExclusiveFlags[scheme]
+	for _, name := range exclusives {
+		if flag, ok := long[name]; ok && flag.IsSet() {
+			return schemeExclusiveError{scheme: scheme, flag: name}
 		}
 	}
 	return nil
@@ -462,51 +452,14 @@ func assertFlagNotExists(m map[string]Flag, value string) {
 
 // validateFromCurlExclusives checks that no request-specifying flags are used
 // alongside --from-curl.
-func (a *App) validateFromCurlExclusives() error {
-	type flagCheck struct {
-		name  string
-		isSet bool
-	}
-	conflicts := []flagCheck{
-		{"method", a.Method != ""},
-		{"header", len(a.Cfg.Headers) > 0},
-		{"data", a.dataSet},
-		{"json", a.jsonSet},
-		{"xml", a.xmlSet},
-		{"form", len(a.Form) > 0},
-		{"multipart", len(a.Multipart) > 0},
-		{"basic", a.Basic != nil},
-		{"bearer", a.Bearer != ""},
-		{"aws-sigv4", a.AWSSigv4 != nil},
-		{"output", a.Output != ""},
-		{"remote-name", a.RemoteName},
-		{"remote-header-name", a.RemoteHeaderName},
-		{"range", len(a.Range) > 0},
-		{"unix", a.UnixSocket != ""},
-		{"timeout", a.Cfg.Timeout != nil},
-		{"connect-timeout", a.Cfg.ConnectTimeout != nil},
-		{"redirects", a.Cfg.Redirects != nil},
-		{"proxy", a.Cfg.Proxy != nil},
-		{"insecure", a.Cfg.Insecure != nil},
-		{"tls", a.Cfg.TLS != nil},
-		{"http", a.Cfg.HTTP != core.HTTPDefault},
-		{"cert", a.Cfg.CertPath != ""},
-		{"key", a.Cfg.KeyPath != ""},
-		{"ca-cert", len(a.Cfg.CACerts) > 0},
-		{"dns-server", a.Cfg.DNSServer != nil},
-		{"retry", a.Cfg.Retry != nil},
-		{"retry-delay", a.Cfg.RetryDelay != nil},
-		{"grpc", a.GRPC},
-		{"query", len(a.Cfg.QueryParams) > 0},
-	}
-
-	if a.URL != nil {
+func validateFromCurlExclusives(app *App, cli *CLI, long map[string]Flag) error {
+	if app.URL != nil {
 		return fromCurlExclusiveError{flag: "URL", positional: true}
 	}
 
-	for _, c := range conflicts {
-		if c.isSet {
-			return fromCurlExclusiveError{flag: c.name}
+	for _, name := range cli.FromCurlExclusiveFlags {
+		if flag, ok := long[name]; ok && flag.IsSet() {
+			return fromCurlExclusiveError{flag: name}
 		}
 	}
 	return nil
@@ -514,30 +467,15 @@ func (a *App) validateFromCurlExclusives() error {
 
 // applyFromCurl maps a parsed curl Result onto the App fields.
 func (a *App) applyFromCurl(r *curl.Result) error {
-	// Parse the URL using the same normalization logic as ArgFn.
-	rawURL := r.URL
-	if rawURL == "" {
+	// Parse the URL using the shared normalization logic.
+	if r.URL == "" {
 		return fmt.Errorf("no URL provided")
 	}
-	if !strings.Contains(rawURL, "://") && rawURL[0] != '/' {
-		rawURL = "//" + rawURL
-	}
-	u, err := url.Parse(rawURL)
+	u, isWS, err := parseURL(r.URL)
 	if err != nil {
-		return fmt.Errorf("invalid url: %w", err)
+		return err
 	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	switch u.Scheme {
-	case "", "http", "https":
-	case "ws":
-		u.Scheme = "http"
-		a.WS = true
-	case "wss":
-		u.Scheme = "https"
-		a.WS = true
-	default:
-		return fmt.Errorf("unsupported url scheme: %s", u.Scheme)
-	}
+	a.WS = a.WS || isWS
 
 	// Apply --proto restrictions.
 	if r.AllowedProto != "" {
@@ -667,20 +605,11 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		if err != nil {
 			return err
 		}
-		accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-		if accessKey == "" {
-			return missingEnvVarErr("AWS_ACCESS_KEY_ID", "aws-sigv4")
+		cfg, err := buildAWSConfig(region, service)
+		if err != nil {
+			return err
 		}
-		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-		if secretKey == "" {
-			return missingEnvVarErr("AWS_SECRET_ACCESS_KEY", "aws-sigv4")
-		}
-		a.AWSSigv4 = &aws.Config{
-			Region:    region,
-			Service:   service,
-			AccessKey: accessKey,
-			SecretKey: secretKey,
-		}
+		a.AWSSigv4 = cfg
 	}
 
 	// Output.

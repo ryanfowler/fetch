@@ -1,5 +1,7 @@
 package core
 
+import "strings"
+
 // Color represents the options for enabling or disabling color output.
 type Color int
 
@@ -74,4 +76,11 @@ type KeyVal[T any] struct {
 // PointerTo returns a pointer to the value provided.
 func PointerTo[T any](t T) *T {
 	return &t
+}
+
+// CutTrimmed splits s around the first instance of sep, returning the
+// trimmed text before and after sep.
+func CutTrimmed(s, sep string) (string, string, bool) {
+	key, val, ok := strings.Cut(s, sep)
+	return strings.TrimSpace(key), strings.TrimSpace(val), ok
 }
