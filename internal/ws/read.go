@@ -70,8 +70,7 @@ func handleReadErr(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
-	var closeErr websocket.CloseError
-	if errors.As(err, &closeErr) {
+	if closeErr, ok := errors.AsType[websocket.CloseError](err); ok {
 		if closeErr.Code == websocket.StatusNormalClosure {
 			return nil
 		}

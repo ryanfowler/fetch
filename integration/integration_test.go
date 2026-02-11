@@ -2794,8 +2794,7 @@ func runFetchStdin(t *testing.T, input, path string, args ...string) runResult {
 	cmd.Stderr = stderr
 	cmd.Stdout = stdout
 	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](err); !ok {
 			t.Fatalf("unexpected error running the fetch command: %s", err.Error())
 		}
 	}
