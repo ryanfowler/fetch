@@ -157,6 +157,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		TLS:            r.TLS,
 		UnixSocket:     r.UnixSocket,
 	})
+	defer c.Close()
 
 	// Load session and set cookie jar, if configured.
 	var sess *session.Session
