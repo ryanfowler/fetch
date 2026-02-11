@@ -359,7 +359,7 @@ func (c *Config) ParseFormat(value string) error {
 }
 
 func (c *Config) ParseHeader(value string) error {
-	key, val, _ := cut(value, ":")
+	key, val, _ := core.CutTrimmed(value, ":")
 	c.Headers = append(c.Headers, core.KeyVal[string]{Key: key, Val: val})
 	return nil
 
@@ -471,7 +471,7 @@ func (c *Config) ParseProxy(value string) error {
 }
 
 func (c *Config) ParseQuery(value string) error {
-	key, val, _ := cut(value, "=")
+	key, val, _ := core.CutTrimmed(value, "=")
 	c.QueryParams = append(c.QueryParams, core.KeyVal[string]{Key: key, Val: val})
 	return nil
 }
@@ -593,12 +593,6 @@ func (c *Config) ClientCert() (*tls.Certificate, error) {
 
 	// Key wasn't provided and cert file doesn't have embedded key
 	return nil, missingClientKeyError{certPath: c.CertPath, err: err}
-}
-
-func cut(s, sep string) (string, string, bool) {
-	key, val, ok := strings.Cut(s, sep)
-	key, val = strings.TrimSpace(key), strings.TrimSpace(val)
-	return key, val, ok
 }
 
 type invalidOptionError string

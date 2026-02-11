@@ -130,6 +130,53 @@ func (err fromCurlExclusiveError) PrintTo(p *core.Printer) {
 	}
 }
 
+type fileIsDirError string
+
+func (err fileIsDirError) Error() string {
+	return fmt.Sprintf("file '%s' is a directory", string(err))
+}
+
+func (err fileIsDirError) PrintTo(p *core.Printer) {
+	p.WriteString("file '")
+	p.Set(core.Dim)
+	p.WriteString(string(err))
+	p.Reset()
+	p.WriteString("' is a directory")
+}
+
+// MissingEnvVarError is returned when a required environment variable is not
+// set for a given flag.
+type MissingEnvVarError struct {
+	EnvVar string
+	Flag   string
+}
+
+func missingEnvVarErr(envVar, flag string) *MissingEnvVarError {
+	return &MissingEnvVarError{
+		EnvVar: envVar,
+		Flag:   flag,
+	}
+}
+
+func (err *MissingEnvVarError) Error() string {
+	return fmt.Sprintf("missing environment variable '%s' required for option '--%s'", err.EnvVar, err.Flag)
+}
+
+func (err *MissingEnvVarError) PrintTo(p *core.Printer) {
+	p.WriteString("missing environment variable '")
+	p.Set(core.Yellow)
+	p.WriteString(err.EnvVar)
+	p.Reset()
+
+	p.WriteString("' required for option '")
+	p.Set(core.Bold)
+	p.WriteString("--")
+	p.WriteString(err.Flag)
+	p.Reset()
+
+	p.WriteString("'")
+}
+
 type requiredFlagError struct {
 	flag     string
 	required []string
