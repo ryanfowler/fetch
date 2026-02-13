@@ -1,10 +1,99 @@
-package fetch
+package format
 
 import (
 	"bytes"
+	"mime"
 	"net/http"
 	"strings"
 )
+
+// ContentType represents a recognized response content type.
+type ContentType int
+
+const (
+	TypeUnknown ContentType = iota
+	TypeCSS
+	TypeCSV
+	TypeGRPC
+	TypeHTML
+	TypeImage
+	TypeJSON
+	TypeMsgPack
+	TypeNDJSON
+	TypeProtobuf
+	TypeSSE
+	TypeXML
+	TypeYAML
+)
+
+// GetContentType parses the Content-Type header and returns the detected
+// ContentType and charset. Returns TypeUnknown if the type is not recognized.
+func GetContentType(headers http.Header) (ContentType, string) {
+	contentType := headers.Get("Content-Type")
+	if contentType == "" {
+		return TypeUnknown, ""
+	}
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return TypeUnknown, ""
+	}
+	charset := params["charset"]
+
+	if typ, subtype, ok := strings.Cut(mediaType, "/"); ok {
+		switch typ {
+		case "image":
+			return TypeImage, charset
+		case "application":
+			switch subtype {
+			case "csv":
+				return TypeCSV, charset
+			case "grpc", "grpc+proto":
+				return TypeGRPC, charset
+			case "json":
+				return TypeJSON, charset
+			case "msgpack", "x-msgpack", "vnd.msgpack":
+				return TypeMsgPack, charset
+			case "x-ndjson", "ndjson", "x-jsonl", "jsonl", "x-jsonlines":
+				return TypeNDJSON, charset
+			case "protobuf", "x-protobuf", "x-google-protobuf", "vnd.google.protobuf":
+				return TypeProtobuf, charset
+			case "xml":
+				return TypeXML, charset
+			case "yaml", "x-yaml":
+				return TypeYAML, charset
+			}
+			if strings.HasSuffix(subtype, "+json") || strings.HasSuffix(subtype, "-json") {
+				return TypeJSON, charset
+			}
+			if strings.HasSuffix(subtype, "+proto") {
+				return TypeProtobuf, charset
+			}
+			if strings.HasSuffix(subtype, "+xml") {
+				return TypeXML, charset
+			}
+			if strings.HasSuffix(subtype, "+yaml") {
+				return TypeYAML, charset
+			}
+		case "text":
+			switch subtype {
+			case "css":
+				return TypeCSS, charset
+			case "csv":
+				return TypeCSV, charset
+			case "html":
+				return TypeHTML, charset
+			case "event-stream":
+				return TypeSSE, charset
+			case "xml":
+				return TypeXML, charset
+			case "yaml", "x-yaml":
+				return TypeYAML, charset
+			}
+		}
+	}
+
+	return TypeUnknown, charset
+}
 
 var (
 	prefixXMLDecl = []byte("?xml")
@@ -27,10 +116,10 @@ var (
 	}
 )
 
-// sniffContentType attempts to detect the content type of the provided bytes
+// SniffContentType attempts to detect the content type of the provided bytes
 // by examining the leading bytes of the body. It is used as a fallback when
 // no Content-Type header is present in the HTTP response.
-func sniffContentType(buf []byte) ContentType {
+func SniffContentType(buf []byte) ContentType {
 	b := trimBOMAndSpace(buf)
 	if len(b) == 0 {
 		return TypeUnknown
