@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"sync"
 )
 
 // Sequence represents an ANSI escape sequence.
@@ -61,7 +62,7 @@ func (h *Handle) Stdout() *Printer {
 // Printer allows for writing data with optional ANSI escape sequences based on
 // the color settings for a target.
 type Printer struct {
-	file     *os.File
+	file     io.Writer
 	buf      bytes.Buffer
 	useColor bool
 }
@@ -79,6 +80,25 @@ func newPrinter(file *os.File, isTerm bool, c Color) *Printer {
 		useColor = isTerm
 	}
 	return &Printer{file: file, useColor: useColor}
+}
+
+// TestPrinter returns a Printer suitable for testing. All output, including
+// flushed data, is captured and accessible via Bytes.
+func TestPrinter(useColor bool) *Printer {
+	return &Printer{file: &lockedBuffer{}, useColor: useColor}
+}
+
+// lockedBuffer is a goroutine-safe bytes.Buffer used as the flush target in
+// test printers so that Bytes can return the combined buffered + flushed data.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (lb *lockedBuffer) Write(p []byte) (int, error) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	return lb.buf.Write(p)
 }
 
 // Set writes the provided Sequence.
@@ -108,8 +128,17 @@ func (p *Printer) Discard() {
 	p.buf.Reset()
 }
 
-// Bytes returns the current contents of the buffer.
+// Bytes returns the current contents of the buffer. For test printers created
+// with TestPrinter, this also includes previously flushed data.
 func (p *Printer) Bytes() []byte {
+	if lb, ok := p.file.(*lockedBuffer); ok {
+		lb.mu.Lock()
+		flushed := lb.buf.Bytes()
+		lb.mu.Unlock()
+		if len(flushed) > 0 {
+			return append(flushed, p.buf.Bytes()...)
+		}
+	}
 	return p.buf.Bytes()
 }
 

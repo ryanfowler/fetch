@@ -23,6 +23,7 @@ func init() {
 		TypeCSV:      FormatCSV,
 		TypeHTML:     FormatHTML,
 		TypeJSON:     FormatJSON,
+		TypeMarkdown: FormatMarkdown,
 		TypeMsgPack:  FormatMsgPack,
 		TypeProtobuf: FormatProtobuf,
 		TypeXML:      FormatXML,

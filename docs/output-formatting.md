@@ -137,6 +137,20 @@ Features:
 fetch example.com/styles.css
 ```
 
+### Markdown
+
+**Content-Types**: `text/markdown`, `text/x-markdown`
+
+Features:
+
+- Syntax highlighting for headings, bold, italic, code spans, links, images
+- Fenced code block delegation to JSON, YAML, XML, HTML, CSS formatters
+- Blockquote and list marker highlighting
+
+```sh
+fetch example.com/README.md
+```
+
 ### CSV
 
 **Content-Types**: `text/csv`, `application/csv`
