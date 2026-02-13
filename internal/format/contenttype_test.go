@@ -1,6 +1,7 @@
-package fetch
+package format
 
 import (
+	"net/http"
 	"testing"
 )
 
@@ -66,9 +67,9 @@ func TestSniffContentType(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sniffContentType(tt.input)
+			got := SniffContentType(tt.input)
 			if got != tt.want {
-				t.Errorf("sniffContentType(%q) = %d, want %d", tt.input, got, tt.want)
+				t.Errorf("SniffContentType(%q) = %d, want %d", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -122,6 +123,67 @@ func TestIsLetter(t *testing.T) {
 			got := isLetter(tt.c)
 			if got != tt.want {
 				t.Errorf("isLetter(%q) = %v, want %v", tt.c, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetContentType(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		wantType    ContentType
+		wantCharset string
+	}{
+		{
+			name:        "json with charset",
+			contentType: "application/json; charset=utf-8",
+			wantType:    TypeJSON,
+			wantCharset: "utf-8",
+		},
+		{
+			name:        "html with charset",
+			contentType: "text/html; charset=iso-8859-1",
+			wantType:    TypeHTML,
+			wantCharset: "iso-8859-1",
+		},
+		{
+			name:        "json without charset",
+			contentType: "application/json",
+			wantType:    TypeJSON,
+			wantCharset: "",
+		},
+		{
+			name:        "empty content type",
+			contentType: "",
+			wantType:    TypeUnknown,
+			wantCharset: "",
+		},
+		{
+			name:        "xml with charset",
+			contentType: "text/xml; charset=windows-1252",
+			wantType:    TypeXML,
+			wantCharset: "windows-1252",
+		},
+		{
+			name:        "csv with charset",
+			contentType: "text/csv; charset=shift_jis",
+			wantType:    TypeCSV,
+			wantCharset: "shift_jis",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{}
+			if tt.contentType != "" {
+				headers.Set("Content-Type", tt.contentType)
+			}
+			gotType, gotCharset := GetContentType(headers)
+			if gotType != tt.wantType {
+				t.Errorf("GetContentType() type = %v, want %v", gotType, tt.wantType)
+			}
+			if gotCharset != tt.wantCharset {
+				t.Errorf("GetContentType() charset = %q, want %q", gotCharset, tt.wantCharset)
 			}
 		})
 	}

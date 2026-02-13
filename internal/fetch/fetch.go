@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,24 +31,6 @@ import (
 // maxBodyBytes is the maximum number of bytes read into memory for
 // formatting a response body or copying it to the clipboard.
 const maxBodyBytes = 1 << 20 // 1MiB
-
-type ContentType int
-
-const (
-	TypeUnknown ContentType = iota
-	TypeCSS
-	TypeCSV
-	TypeGRPC
-	TypeHTML
-	TypeImage
-	TypeJSON
-	TypeMsgPack
-	TypeNDJSON
-	TypeProtobuf
-	TypeSSE
-	TypeXML
-	TypeYAML
-)
 
 type Request struct {
 	AWSSigv4         *aws.Config
@@ -390,21 +371,20 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	}
 
 	p := r.PrinterHandle.Stdout()
-	contentType, charset := getContentType(resp.Header)
-	switch contentType {
-	case TypeGRPC:
-		// NOTE: This bypasses the isPrintable check for binary data.
+	contentType, charset := format.GetContentType(resp.Header)
+
+	// gRPC streaming needs the response descriptor — handle inline.
+	if contentType == format.TypeGRPC {
 		return nil, format.FormatGRPCStream(resp.Body, r.responseDescriptor, p)
-	case TypeNDJSON:
-		// NOTE: This bypasses the isPrintable check for binary data.
-		return nil, format.FormatNDJSON(transcodeReader(resp.Body, charset), p)
-	case TypeSSE:
-		// NOTE: This bypasses the isPrintable check for binary data.
-		return nil, format.FormatEventStream(transcodeReader(resp.Body, charset), p)
+	}
+
+	// Dispatch registered streaming formatters (NDJSON, SSE).
+	if fn := format.GetStreaming(contentType); fn != nil {
+		return nil, fn(transcodeReader(resp.Body, charset), p)
 	}
 
 	// If image rendering is disabled, return the reader immediately.
-	if contentType == TypeImage && r.Image == core.ImageOff {
+	if contentType == format.TypeImage && r.Image == core.ImageOff {
 		return resp.Body, nil
 	}
 
@@ -418,134 +398,42 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	}
 
 	// If the Content-Type is unknown, attempt to sniff the body.
-	if contentType == TypeUnknown {
-		contentType = sniffContentType(buf)
-		if contentType == TypeUnknown {
+	if contentType == format.TypeUnknown {
+		contentType = format.SniffContentType(buf)
+		if contentType == format.TypeUnknown {
 			return bytes.NewReader(buf), nil
 		}
-		if contentType == TypeImage && r.Image == core.ImageOff {
+		if contentType == format.TypeImage && r.Image == core.ImageOff {
 			return bytes.NewReader(buf), nil
 		}
 	}
 
 	// Transcode non-UTF-8 text to UTF-8, skipping binary formats.
 	switch contentType {
-	case TypeImage, TypeMsgPack, TypeProtobuf:
+	case format.TypeImage, format.TypeMsgPack, format.TypeProtobuf:
 	default:
 		buf = transcodeBytes(buf, charset)
 	}
 
-	switch contentType {
-	case TypeCSS:
-		if format.FormatCSS(buf, p) == nil {
-			buf = p.Bytes()
-		}
-	case TypeCSV:
-		if format.FormatCSV(buf, p) == nil {
-			buf = p.Bytes()
-		}
-	case TypeHTML:
-		if format.FormatHTML(buf, p) == nil {
-			buf = p.Bytes()
-		}
-	case TypeImage:
+	// Special cases that need extra context beyond ([]byte, *Printer).
+	if contentType == format.TypeImage {
 		return nil, image.Render(ctx, buf, r.Image == core.ImageNative)
-	case TypeJSON:
-		if format.FormatJSON(buf, p) == nil {
+	}
+	if contentType == format.TypeProtobuf && r.responseDescriptor != nil {
+		if format.FormatProtobufWithDescriptor(buf, r.responseDescriptor, p) == nil {
 			buf = p.Bytes()
 		}
-	case TypeMsgPack:
-		if format.FormatMsgPack(buf, p) == nil {
-			buf = p.Bytes()
-		}
-	case TypeProtobuf:
-		var err error
-		if r.responseDescriptor != nil {
-			err = format.FormatProtobufWithDescriptor(buf, r.responseDescriptor, p)
-		} else {
-			err = format.FormatProtobuf(buf, p)
-		}
-		if err == nil {
-			buf = p.Bytes()
-		}
-	case TypeXML:
-		if format.FormatXML(buf, p) == nil {
-			buf = p.Bytes()
-		}
-	case TypeYAML:
-		if format.FormatYAML(buf, p) == nil {
+		return bytes.NewReader(buf), nil
+	}
+
+	// Dispatch registered buffered formatters.
+	if fn := format.GetBuffered(contentType); fn != nil {
+		if fn(buf, p) == nil {
 			buf = p.Bytes()
 		}
 	}
 
 	return bytes.NewReader(buf), nil
-}
-
-func getContentType(headers http.Header) (ContentType, string) {
-	contentType := headers.Get("Content-Type")
-	if contentType == "" {
-		return TypeUnknown, ""
-	}
-	mediaType, params, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return TypeUnknown, ""
-	}
-	charset := params["charset"]
-
-	if typ, subtype, ok := strings.Cut(mediaType, "/"); ok {
-		switch typ {
-		case "image":
-			return TypeImage, charset
-		case "application":
-			switch subtype {
-			case "csv":
-				return TypeCSV, charset
-			case "grpc", "grpc+proto":
-				return TypeGRPC, charset
-			case "json":
-				return TypeJSON, charset
-			case "msgpack", "x-msgpack", "vnd.msgpack":
-				return TypeMsgPack, charset
-			case "x-ndjson", "ndjson", "x-jsonl", "jsonl", "x-jsonlines":
-				return TypeNDJSON, charset
-			case "protobuf", "x-protobuf", "x-google-protobuf", "vnd.google.protobuf":
-				return TypeProtobuf, charset
-			case "xml":
-				return TypeXML, charset
-			case "yaml", "x-yaml":
-				return TypeYAML, charset
-			}
-			if strings.HasSuffix(subtype, "+json") || strings.HasSuffix(subtype, "-json") {
-				return TypeJSON, charset
-			}
-			if strings.HasSuffix(subtype, "+proto") {
-				return TypeProtobuf, charset
-			}
-			if strings.HasSuffix(subtype, "+xml") {
-				return TypeXML, charset
-			}
-			if strings.HasSuffix(subtype, "+yaml") {
-				return TypeYAML, charset
-			}
-		case "text":
-			switch subtype {
-			case "css":
-				return TypeCSS, charset
-			case "csv":
-				return TypeCSV, charset
-			case "html":
-				return TypeHTML, charset
-			case "event-stream":
-				return TypeSSE, charset
-			case "xml":
-				return TypeXML, charset
-			case "yaml", "x-yaml":
-				return TypeYAML, charset
-			}
-		}
-	}
-
-	return TypeUnknown, charset
 }
 
 func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager bool) error {
