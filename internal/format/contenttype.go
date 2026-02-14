@@ -18,6 +18,7 @@ const (
 	TypeHTML
 	TypeImage
 	TypeJSON
+	TypeMarkdown
 	TypeMsgPack
 	TypeNDJSON
 	TypeProtobuf
@@ -82,6 +83,8 @@ func GetContentType(headers http.Header) (ContentType, string) {
 				return TypeCSV, charset
 			case "html":
 				return TypeHTML, charset
+			case "markdown", "x-markdown":
+				return TypeMarkdown, charset
 			case "event-stream":
 				return TypeSSE, charset
 			case "xml":
