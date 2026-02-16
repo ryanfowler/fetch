@@ -105,6 +105,8 @@ fetch httpbin.org/json | jq '.slideshow.title'
 - **XML / HTML** - Indented and highlighted
 - **CSS** - Formatted and highlighted
 - **CSV** - Column-aligned table output
+- **Markdown** - Rendered with terminal formatting
+- **YAML** - Syntax highlighted
 - **Images** - Rendered directly in supported terminals
 - **Protobuf / msgpack** - Decoded and displayed as JSON
 - **SSE / NDJSON** - Streamed line-by-line
