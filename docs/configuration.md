@@ -274,7 +274,7 @@ connect-timeout = 2.5
 #### `timeout`
 
 **Type**: Number (seconds)
-**Default**: System default
+**Default**: None (no timeout)
 
 Set a timeout for HTTP requests. Accepts decimal values.
 
@@ -289,7 +289,7 @@ timeout = 2.5
 #### `redirects`
 
 **Type**: Integer
-**Default**: System default
+**Default**: `10`
 
 Set the maximum number of automatic redirects to follow.
 
@@ -350,7 +350,7 @@ http = 2
 
 **Type**: String
 **Values**: `1.0`, `1.1`, `1.2`, `1.3`
-**Default**: System default
+**Default**: `1.2`
 
 Specify the minimum TLS version to use.
 

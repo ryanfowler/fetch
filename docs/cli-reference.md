@@ -304,7 +304,7 @@ fetch --timeout 2.5 example.com
 
 ### `--redirects NUM`
 
-Maximum automatic redirects. Use `0` to disable.
+Maximum automatic redirects. Default: `10`. Use `0` to disable.
 
 ```sh
 fetch --redirects 0 example.com   # Don't follow redirects
@@ -563,20 +563,21 @@ fetch --from-curl 'https://example.com'
 
 **Supported curl flags:**
 
-| Category | Curl Flags |
-|---|---|
-| Request | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G` |
-| Auth | `-u`, `--aws-sigv4`, `--oauth2-bearer` |
-| TLS | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x` |
-| Output | `-o`, `-O`, `-J` |
-| Network | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r` |
-| HTTP version | `-0`, `--http1.1`, `--http2`, `--http3` |
-| Headers | `-A`, `-e`, `-b` |
-| Verbosity | `-v`, `-s` |
-| Protocol | `--proto` (restricts allowed protocols; errors if URL scheme is not allowed) |
-| No-ops | `--compressed`, `-S`, `-N`, `--no-keepalive`, `-#`, `--no-progress-meter`, `-n`, `-f`, `--fail-with-body`, `--proto-default`, `--proto-redir` |
+| Category     | Curl Flags                                                                                                                                    |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Request      | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G`                                         |
+| Auth         | `-u`, `--aws-sigv4`, `--oauth2-bearer`                                                                                                        |
+| TLS          | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`                                                                                         |
+| Output       | `-o`, `-O`, `-J`                                                                                                                              |
+| Network      | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r`            |
+| HTTP version | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                                       |
+| Headers      | `-A`, `-e`, `-b`                                                                                                                              |
+| Verbosity    | `-v`, `-s`                                                                                                                                    |
+| Protocol     | `--proto` (restricts allowed protocols; errors if URL scheme is not allowed)                                                                  |
+| No-ops       | `--compressed`, `-S`, `-N`, `--no-keepalive`, `-#`, `--no-progress-meter`, `-n`, `-f`, `--fail-with-body`, `--proto-default`, `--proto-redir` |
 
 **Notes:**
+
 - `-b`/`--cookie` only supports inline cookie strings (e.g., `-b 'name=value'`). Cookie jar files are not supported and will return an error.
 - `--data-urlencode` supports `@filename` and `name@filename` forms for reading and URL-encoding file contents.
 
