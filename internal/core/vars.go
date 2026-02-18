@@ -72,8 +72,8 @@ func GetBuildInfo() []byte {
 	type BuildInfo struct {
 		Fetch    string            `json:"fetch"`
 		Go       string            `json:"go,omitzero"`
-		Deps     map[string]string `json:"deps,omitzero"`
 		Settings map[string]string `json:"settings,omitzero"`
+		Deps     map[string]string `json:"deps,omitzero"`
 	}
 
 	bi := BuildInfo{Fetch: Version}
