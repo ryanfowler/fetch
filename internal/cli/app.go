@@ -536,7 +536,7 @@ func (a *App) parseRangeFlag(value string) error {
 
 func (a *App) parseVerboseFlag(string) error {
 	if a.Cfg.Verbosity == nil {
-		a.Cfg.Verbosity = core.PointerTo(1)
+		a.Cfg.Verbosity = new(1)
 	} else {
 		(*a.Cfg.Verbosity)++
 	}

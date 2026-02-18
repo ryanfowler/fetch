@@ -34,8 +34,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanfowler/fetch/internal/core"
-
 	"github.com/coder/websocket"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
@@ -750,7 +748,7 @@ func TestMain(t *testing.T) {
 	t.Run("range request", func(t *testing.T) {
 		t.Parallel()
 		var expectedRange atomic.Pointer[string]
-		expectedRange.Store(core.PointerTo(""))
+		expectedRange.Store(new(""))
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			exp := expectedRange.Load()
 			if r.Header.Get("Range") != *exp {
@@ -769,22 +767,22 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 
 		// Range header with no start.
-		expectedRange.Store(core.PointerTo("bytes=-1023"))
+		expectedRange.Store(new("bytes=-1023"))
 		res = runFetch(t, fetchPath, server.URL, "--range", "-1023")
 		assertExitCode(t, 0, res)
 
 		// Range header with no end.
-		expectedRange.Store(core.PointerTo("bytes=1023-"))
+		expectedRange.Store(new("bytes=1023-"))
 		res = runFetch(t, fetchPath, server.URL, "--range", "1023-")
 		assertExitCode(t, 0, res)
 
 		// Range header with start and end.
-		expectedRange.Store(core.PointerTo("bytes=0-1023"))
+		expectedRange.Store(new("bytes=0-1023"))
 		res = runFetch(t, fetchPath, server.URL, "--range", "0-1023")
 		assertExitCode(t, 0, res)
 
 		// Multiple ranges.
-		expectedRange.Store(core.PointerTo("bytes=0-1023, 2047-3070"))
+		expectedRange.Store(new("bytes=0-1023, 2047-3070"))
 		res = runFetch(t, fetchPath, server.URL, "-r", "0-1023", "-r", "2047-3070")
 		assertExitCode(t, 0, res)
 	})
@@ -1092,26 +1090,26 @@ func TestMain(t *testing.T) {
 		fds := &descriptorpb.FileDescriptorSet{
 			File: []*descriptorpb.FileDescriptorProto{
 				{
-					Name:    strPtr("stream.proto"),
-					Package: strPtr("streampkg"),
-					Syntax:  strPtr("proto3"),
+					Name:    new("stream.proto"),
+					Package: new("streampkg"),
+					Syntax:  new("proto3"),
 					MessageType: []*descriptorpb.DescriptorProto{
 						{
-							Name: strPtr("StreamRequest"),
+							Name: new("StreamRequest"),
 							Field: []*descriptorpb.FieldDescriptorProto{
 								{
-									Name:   strPtr("value"),
-									Number: int32Ptr(1),
+									Name:   new("value"),
+									Number: new(int32(1)),
 									Type:   &strType,
 								},
 							},
 						},
 						{
-							Name: strPtr("StreamResponse"),
+							Name: new("StreamResponse"),
 							Field: []*descriptorpb.FieldDescriptorProto{
 								{
-									Name:   strPtr("count"),
-									Number: int32Ptr(1),
+									Name:   new("count"),
+									Number: new(int32(1)),
 									Type:   &int64Type,
 								},
 							},
@@ -1119,12 +1117,12 @@ func TestMain(t *testing.T) {
 					},
 					Service: []*descriptorpb.ServiceDescriptorProto{
 						{
-							Name: strPtr("StreamService"),
+							Name: new("StreamService"),
 							Method: []*descriptorpb.MethodDescriptorProto{
 								{
-									Name:            strPtr("ClientStream"),
-									InputType:       strPtr(".streampkg.StreamRequest"),
-									OutputType:      strPtr(".streampkg.StreamResponse"),
+									Name:            new("ClientStream"),
+									InputType:       new(".streampkg.StreamRequest"),
+									OutputType:      new(".streampkg.StreamResponse"),
 									ClientStreaming: &boolTrue,
 								},
 							},
@@ -3196,6 +3194,3 @@ func startMTLSServer(t *testing.T, certPath, keyPath, caCertPath string) *httpte
 	server.StartTLS()
 	return server
 }
-
-func strPtr(s string) *string { return &s }
-func int32Ptr(i int32) *int32 { return &i }

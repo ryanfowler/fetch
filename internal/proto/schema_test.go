@@ -27,34 +27,34 @@ func TestLoadFromDescriptorSet(t *testing.T) {
 	fds := &descriptorpb.FileDescriptorSet{
 		File: []*descriptorpb.FileDescriptorProto{
 			{
-				Name:    strPtr("test.proto"),
-				Package: strPtr("testpkg"),
+				Name:    new("test.proto"),
+				Package: new("testpkg"),
 				MessageType: []*descriptorpb.DescriptorProto{
 					{
-						Name: strPtr("TestMessage"),
+						Name: new("TestMessage"),
 						Field: []*descriptorpb.FieldDescriptorProto{
 							{
-								Name:   strPtr("id"),
-								Number: int32Ptr(1),
-								Type:   typePtr(descriptorpb.FieldDescriptorProto_TYPE_INT64),
+								Name:   new("id"),
+								Number: new(int32(1)),
+								Type:   new(descriptorpb.FieldDescriptorProto_TYPE_INT64),
 							},
 							{
-								Name:   strPtr("name"),
-								Number: int32Ptr(2),
-								Type:   typePtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
+								Name:   new("name"),
+								Number: new(int32(2)),
+								Type:   new(descriptorpb.FieldDescriptorProto_TYPE_STRING),
 							},
 						},
 					},
 					{
-						Name: strPtr("NestedOuter"),
+						Name: new("NestedOuter"),
 						NestedType: []*descriptorpb.DescriptorProto{
 							{
-								Name: strPtr("NestedInner"),
+								Name: new("NestedInner"),
 								Field: []*descriptorpb.FieldDescriptorProto{
 									{
-										Name:   strPtr("value"),
-										Number: int32Ptr(1),
-										Type:   typePtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
+										Name:   new("value"),
+										Number: new(int32(1)),
+										Type:   new(descriptorpb.FieldDescriptorProto_TYPE_STRING),
 									},
 								},
 							},
@@ -63,17 +63,17 @@ func TestLoadFromDescriptorSet(t *testing.T) {
 				},
 				Service: []*descriptorpb.ServiceDescriptorProto{
 					{
-						Name: strPtr("TestService"),
+						Name: new("TestService"),
 						Method: []*descriptorpb.MethodDescriptorProto{
 							{
-								Name:       strPtr("GetTest"),
-								InputType:  strPtr(".testpkg.TestMessage"),
-								OutputType: strPtr(".testpkg.TestMessage"),
+								Name:       new("GetTest"),
+								InputType:  new(".testpkg.TestMessage"),
+								OutputType: new(".testpkg.TestMessage"),
 							},
 							{
-								Name:       strPtr("CreateTest"),
-								InputType:  strPtr(".testpkg.TestMessage"),
-								OutputType: strPtr(".testpkg.TestMessage"),
+								Name:       new("CreateTest"),
+								InputType:  new(".testpkg.TestMessage"),
+								OutputType: new(".testpkg.TestMessage"),
 							},
 						},
 					},
@@ -317,34 +317,34 @@ func createTestDescriptorSet() *descriptorpb.FileDescriptorSet {
 	return &descriptorpb.FileDescriptorSet{
 		File: []*descriptorpb.FileDescriptorProto{
 			{
-				Name:    strPtr("test.proto"),
-				Package: strPtr("testpkg"),
+				Name:    new("test.proto"),
+				Package: new("testpkg"),
 				MessageType: []*descriptorpb.DescriptorProto{
 					{
-						Name: strPtr("TestMessage"),
+						Name: new("TestMessage"),
 						Field: []*descriptorpb.FieldDescriptorProto{
 							{
-								Name:   strPtr("id"),
-								Number: int32Ptr(1),
-								Type:   typePtr(descriptorpb.FieldDescriptorProto_TYPE_INT64),
+								Name:   new("id"),
+								Number: new(int32(1)),
+								Type:   new(descriptorpb.FieldDescriptorProto_TYPE_INT64),
 							},
 							{
-								Name:   strPtr("name"),
-								Number: int32Ptr(2),
-								Type:   typePtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
+								Name:   new("name"),
+								Number: new(int32(2)),
+								Type:   new(descriptorpb.FieldDescriptorProto_TYPE_STRING),
 							},
 						},
 					},
 					{
-						Name: strPtr("NestedOuter"),
+						Name: new("NestedOuter"),
 						NestedType: []*descriptorpb.DescriptorProto{
 							{
-								Name: strPtr("NestedInner"),
+								Name: new("NestedInner"),
 								Field: []*descriptorpb.FieldDescriptorProto{
 									{
-										Name:   strPtr("value"),
-										Number: int32Ptr(1),
-										Type:   typePtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
+										Name:   new("value"),
+										Number: new(int32(1)),
+										Type:   new(descriptorpb.FieldDescriptorProto_TYPE_STRING),
 									},
 								},
 							},
@@ -353,17 +353,17 @@ func createTestDescriptorSet() *descriptorpb.FileDescriptorSet {
 				},
 				Service: []*descriptorpb.ServiceDescriptorProto{
 					{
-						Name: strPtr("TestService"),
+						Name: new("TestService"),
 						Method: []*descriptorpb.MethodDescriptorProto{
 							{
-								Name:       strPtr("GetTest"),
-								InputType:  strPtr(".testpkg.TestMessage"),
-								OutputType: strPtr(".testpkg.TestMessage"),
+								Name:       new("GetTest"),
+								InputType:  new(".testpkg.TestMessage"),
+								OutputType: new(".testpkg.TestMessage"),
 							},
 							{
-								Name:       strPtr("CreateTest"),
-								InputType:  strPtr(".testpkg.TestMessage"),
-								OutputType: strPtr(".testpkg.TestMessage"),
+								Name:       new("CreateTest"),
+								InputType:  new(".testpkg.TestMessage"),
+								OutputType: new(".testpkg.TestMessage"),
 							},
 						},
 					},
@@ -371,16 +371,4 @@ func createTestDescriptorSet() *descriptorpb.FileDescriptorSet {
 			},
 		},
 	}
-}
-
-func strPtr(s string) *string {
-	return &s
-}
-
-func int32Ptr(i int32) *int32 {
-	return &i
-}
-
-func typePtr(t descriptorpb.FieldDescriptorProto_Type) *descriptorpb.FieldDescriptorProto_Type {
-	return &t
 }

@@ -26,7 +26,7 @@ func TestParseFile(t *testing.T) {
 				Hosts: map[string]*Config{
 					"*.example.com": {
 						isFile:   true,
-						Insecure: core.PointerTo(true),
+						Insecure: new(true),
 					},
 				},
 				Path: "test/config",
@@ -60,8 +60,8 @@ func TestParseFile(t *testing.T) {
 			expFile: &File{
 				Global: &Config{
 					isFile:  true,
-					Timeout: core.PointerTo(10 * time.Second),
-					TLS:     core.PointerTo(uint16(tls.VersionTLS13)),
+					Timeout: new(10 * time.Second),
+					TLS:     new(uint16(tls.VersionTLS13)),
 				},
 				Path: "test/config",
 			},
@@ -82,16 +82,16 @@ func TestParseFile(t *testing.T) {
 				Global: &Config{
 					isFile:  true,
 					Color:   core.ColorOff,
-					NoPager: core.PointerTo(true),
+					NoPager: new(true),
 				},
 				Hosts: map[string]*Config{
 					"example.com": {
 						isFile:   true,
-						Insecure: core.PointerTo(true),
+						Insecure: new(true),
 					},
 					"anotherhost.com": {
 						isFile:       true,
-						IgnoreStatus: core.PointerTo(true),
+						IgnoreStatus: new(true),
 					},
 				},
 				Path: "test/config",
@@ -127,9 +127,9 @@ func TestParseFile(t *testing.T) {
 }
 
 func TestFileHostConfig(t *testing.T) {
-	exactCfg := &Config{isFile: true, Insecure: core.PointerTo(true)}
-	wildcardCfg := &Config{isFile: true, Insecure: core.PointerTo(false)}
-	specificWildcardCfg := &Config{isFile: true, NoPager: core.PointerTo(true)}
+	exactCfg := &Config{isFile: true, Insecure: new(true)}
+	wildcardCfg := &Config{isFile: true, Insecure: new(false)}
+	specificWildcardCfg := &Config{isFile: true, NoPager: new(true)}
 
 	f := &File{
 		Global: &Config{isFile: true},

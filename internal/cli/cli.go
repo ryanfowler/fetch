@@ -680,7 +680,7 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		a.Cfg.Retry = &r.Retry
 	}
 	if r.RetryDelay > 0 {
-		a.Cfg.RetryDelay = core.PointerTo(time.Duration(float64(time.Second) * r.RetryDelay))
+		a.Cfg.RetryDelay = new(time.Duration(float64(time.Second) * r.RetryDelay))
 	}
 
 	// Ranges.
