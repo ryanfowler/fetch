@@ -73,11 +73,6 @@ type KeyVal[T any] struct {
 	Val T
 }
 
-// PointerTo returns a pointer to the value provided.
-func PointerTo[T any](t T) *T {
-	return &t
-}
-
 // CutTrimmed splits s around the first instance of sep, returning the
 // trimmed text before and after sep.
 func CutTrimmed(s, sep string) (string, string, bool) {

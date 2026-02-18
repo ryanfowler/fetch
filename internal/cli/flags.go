@@ -28,7 +28,7 @@ func ptrBoolFlag(target **bool, long, short, desc string) Flag {
 			return *target != nil
 		},
 		Fn: func(string) error {
-			*target = core.PointerTo(true)
+			*target = new(true)
 			return nil
 		},
 	}

@@ -218,7 +218,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			// Indented code block — render as cyan, skip children.
 			content := r.nodeText(v)
 			content = strings.TrimRight(content, "\n")
-			for _, line := range strings.Split(content, "\n") {
+			for line := range strings.SplitSeq(content, "\n") {
 				r.writeBqPrefix()
 				r.printer.Set(core.Cyan)
 				r.printer.WriteString(line)
@@ -289,7 +289,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if entering {
 			content := r.nodeText(v)
 			content = strings.TrimRight(content, "\n")
-			for _, line := range strings.Split(content, "\n") {
+			for line := range strings.SplitSeq(content, "\n") {
 				r.writeBqPrefix()
 				r.printer.Set(core.Dim)
 				r.printer.WriteString(line)

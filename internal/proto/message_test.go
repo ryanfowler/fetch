@@ -305,32 +305,32 @@ func TestJSONToProtobufWithNestedMessage(t *testing.T) {
 	fds := &descriptorpb.FileDescriptorSet{
 		File: []*descriptorpb.FileDescriptorProto{
 			{
-				Name:    strPtr("nested.proto"),
-				Package: strPtr("nested"),
+				Name:    new("nested.proto"),
+				Package: new("nested"),
 				MessageType: []*descriptorpb.DescriptorProto{
 					{
-						Name: strPtr("Inner"),
+						Name: new("Inner"),
 						Field: []*descriptorpb.FieldDescriptorProto{
 							{
-								Name:   strPtr("value"),
-								Number: int32Ptr(1),
-								Type:   typePtr(descriptorpb.FieldDescriptorProto_TYPE_STRING),
+								Name:   new("value"),
+								Number: new(int32(1)),
+								Type:   new(descriptorpb.FieldDescriptorProto_TYPE_STRING),
 							},
 						},
 					},
 					{
-						Name: strPtr("Outer"),
+						Name: new("Outer"),
 						Field: []*descriptorpb.FieldDescriptorProto{
 							{
-								Name:     strPtr("inner"),
-								Number:   int32Ptr(1),
-								Type:     typePtr(descriptorpb.FieldDescriptorProto_TYPE_MESSAGE),
-								TypeName: strPtr(".nested.Inner"),
+								Name:     new("inner"),
+								Number:   new(int32(1)),
+								Type:     new(descriptorpb.FieldDescriptorProto_TYPE_MESSAGE),
+								TypeName: new(".nested.Inner"),
 							},
 							{
-								Name:   strPtr("count"),
-								Number: int32Ptr(2),
-								Type:   typePtr(descriptorpb.FieldDescriptorProto_TYPE_INT32),
+								Name:   new("count"),
+								Number: new(int32(2)),
+								Type:   new(descriptorpb.FieldDescriptorProto_TYPE_INT32),
 							},
 						},
 					},

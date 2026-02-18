@@ -207,9 +207,9 @@ func (c *Config) ParseAutoUpdate(value string) error {
 	v, err := strconv.ParseBool(value)
 	if err == nil {
 		if v {
-			c.AutoUpdate = core.PointerTo(24 * time.Hour)
+			c.AutoUpdate = new(24 * time.Hour)
 		} else {
-			c.AutoUpdate = core.PointerTo(time.Duration(-1))
+			c.AutoUpdate = new(time.Duration(-1))
 		}
 		return nil
 	}
@@ -310,7 +310,7 @@ func (c *Config) ParseConnectTimeout(value string) error {
 	if err != nil || secs < 0 {
 		return core.NewValueError("connect-timeout", value, "must be a non-negative number", c.isFile)
 	}
-	c.ConnectTimeout = core.PointerTo(time.Duration(float64(time.Second) * secs))
+	c.ConnectTimeout = new(time.Duration(float64(time.Second) * secs))
 	return nil
 }
 
@@ -501,7 +501,7 @@ func (c *Config) ParseRetryDelay(value string) error {
 	if err != nil || secs < 0 {
 		return core.NewValueError("retry-delay", value, "must be a non-negative number", c.isFile)
 	}
-	c.RetryDelay = core.PointerTo(time.Duration(float64(time.Second) * secs))
+	c.RetryDelay = new(time.Duration(float64(time.Second) * secs))
 	return nil
 }
 
@@ -528,7 +528,7 @@ func (c *Config) ParseTimeout(value string) error {
 	if err != nil {
 		return core.NewValueError("timeout", value, "must be a valid number", c.isFile)
 	}
-	c.Timeout = core.PointerTo(time.Duration(float64(time.Second) * secs))
+	c.Timeout = new(time.Duration(float64(time.Second) * secs))
 	return nil
 }
 

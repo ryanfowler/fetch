@@ -261,10 +261,7 @@ func (im *interactiveMode) replayMessagesLocked() {
 	// Each message occupies ~2 rows (content + spacing).
 	scrollEnd := im.rows - 3
 	capacity := (scrollEnd + 1) / 2
-	start := len(im.messages) - capacity
-	if start < 0 {
-		start = 0
-	}
+	start := max(len(im.messages)-capacity, 0)
 
 	for _, msg := range im.messages[start:] {
 		if msg.data != nil {

@@ -96,21 +96,21 @@ func testMessageDescriptor(t *testing.T) protoreflect.MessageDescriptor {
 	fds := &descriptorpb.FileDescriptorSet{
 		File: []*descriptorpb.FileDescriptorProto{
 			{
-				Name:    strp("test.proto"),
-				Package: strp("testpkg"),
-				Syntax:  strp("proto3"),
+				Name:    new("test.proto"),
+				Package: new("testpkg"),
+				Syntax:  new("proto3"),
 				MessageType: []*descriptorpb.DescriptorProto{
 					{
-						Name: strp("TestMessage"),
+						Name: new("TestMessage"),
 						Field: []*descriptorpb.FieldDescriptorProto{
 							{
-								Name:   strp("id"),
-								Number: int32p(1),
+								Name:   new("id"),
+								Number: new(int32(1)),
 								Type:   &int64Type,
 							},
 							{
-								Name:   strp("name"),
-								Number: int32p(2),
+								Name:   new("name"),
+								Number: new(int32(2)),
 								Type:   &strType,
 							},
 						},
@@ -154,6 +154,3 @@ func readAllFrames(t *testing.T, r io.Reader) [][]byte {
 	}
 	return frames
 }
-
-func strp(s string) *string { return &s }
-func int32p(i int32) *int32 { return &i }

@@ -278,10 +278,10 @@ func TestVerticalOutputHeaderAlignment(t *testing.T) {
 	}
 
 	output := string(p.Bytes())
-	lines := strings.Split(output, "\n")
+	lines := strings.SplitSeq(output, "\n")
 
 	// Find the line with "a:" - it should have padding before it
-	for _, line := range lines {
+	for line := range lines {
 		if strings.Contains(line, "a:") {
 			// "a" should be right-aligned to match "longer_header" (13 chars)
 			// So there should be 12 spaces before "a:"

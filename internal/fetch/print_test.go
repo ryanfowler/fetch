@@ -56,8 +56,8 @@ func TestPrintRequestMetadataPrefixes(t *testing.T) {
 		printRequestMetadata(p, req, core.HTTPDefault, core.VDebug)
 		out := string(p.Bytes())
 
-		lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-		for _, line := range lines {
+		lines := strings.SplitSeq(strings.TrimRight(out, "\n"), "\n")
+		for line := range lines {
 			if !strings.HasPrefix(line, "> ") {
 				t.Errorf("expected '> ' prefix on line %q", line)
 			}
@@ -111,8 +111,8 @@ func TestPrintResponseMetadataPrefixes(t *testing.T) {
 		printResponseMetadata(p, core.VDebug, resp)
 		out := string(p.Bytes())
 
-		lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-		for _, line := range lines {
+		lines := strings.SplitSeq(strings.TrimRight(out, "\n"), "\n")
+		for line := range lines {
 			if !strings.HasPrefix(line, "< ") {
 				t.Errorf("expected '< ' prefix on line %q", line)
 			}
@@ -157,8 +157,8 @@ func TestPrintResponseHeadersPrefix(t *testing.T) {
 		printResponseHeaders(p, resp, true)
 		out := string(p.Bytes())
 
-		lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-		for _, line := range lines {
+		lines := strings.SplitSeq(strings.TrimRight(out, "\n"), "\n")
+		for line := range lines {
 			if !strings.HasPrefix(line, "< ") {
 				t.Errorf("expected '< ' prefix on line %q", line)
 			}
