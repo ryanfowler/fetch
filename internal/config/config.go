@@ -479,7 +479,7 @@ func (c *Config) ParseQuery(value string) error {
 func (c *Config) ParseRedirects(value string) error {
 	n, err := strconv.Atoi(value)
 	if err != nil || n < 0 {
-		const usage = "must be a positive integer"
+		const usage = "must be a non-negative integer"
 		return core.NewValueError("redirects", value, usage, c.isFile)
 	}
 	c.Redirects = &n
@@ -525,8 +525,8 @@ func (c *Config) ParseSilent(value string) error {
 
 func (c *Config) ParseTimeout(value string) error {
 	secs, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return core.NewValueError("timeout", value, "must be a valid number", c.isFile)
+	if err != nil || secs < 0 {
+		return core.NewValueError("timeout", value, "must be a non-negative number", c.isFile)
 	}
 	c.Timeout = new(time.Duration(float64(time.Second) * secs))
 	return nil
