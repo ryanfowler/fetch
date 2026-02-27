@@ -12,7 +12,7 @@ require (
 	github.com/yuin/goldmark v1.7.16
 	golang.org/x/crypto v0.48.0
 	golang.org/x/image v0.36.0
-	golang.org/x/net v0.50.0
+	golang.org/x/net v0.51.0
 	golang.org/x/sys v0.41.0
 	golang.org/x/term v0.40.0
 	golang.org/x/text v0.34.0
