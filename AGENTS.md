@@ -6,6 +6,8 @@ This file provides guidance to AI agents when working with code in this reposito
 
 `fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support with JSON-to-protobuf conversion, and authentication (Basic, Bearer, AWS SigV4).
 
+The repository currently targets Go 1.26.1 in `go.mod` and GitHub Actions.
+
 ## Common Commands
 
 ```bash
