@@ -4,6 +4,7 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -33,9 +34,9 @@ func FormatSize(bytes int64) string {
 type Bar struct {
 	r          io.Reader
 	printer    *core.Printer
-	bytesRead  int64
+	bytesRead  atomic.Int64
 	totalBytes int64
-	chRead     chan int64
+	done       chan struct{}
 	start      time.Time
 	wg         sync.WaitGroup
 	onRender   func(percentage int64)
@@ -49,7 +50,7 @@ func NewBar(r io.Reader, p *core.Printer, totalBytes int64, onRender func(percen
 		r:          r,
 		printer:    p,
 		totalBytes: totalBytes,
-		chRead:     make(chan int64, 1),
+		done:       make(chan struct{}),
 		start:      time.Now(),
 		onRender:   onRender,
 	}
@@ -61,7 +62,7 @@ func NewBar(r io.Reader, p *core.Printer, totalBytes int64, onRender func(percen
 func (b *Bar) Read(p []byte) (int, error) {
 	n, err := b.r.Read(p)
 	if n > 0 {
-		b.chRead <- int64(n)
+		b.bytesRead.Add(int64(n))
 	}
 	return n, err
 }
@@ -69,47 +70,31 @@ func (b *Bar) Read(p []byte) (int, error) {
 // Stop signals the render loop to exit and waits for it to finish. It returns
 // the total bytes read and the elapsed duration.
 func (b *Bar) Stop() (bytesRead int64, elapsed time.Duration) {
-	close(b.chRead)
+	close(b.done)
 	b.wg.Wait()
-	return b.bytesRead, time.Since(b.start)
+	return b.bytesRead.Load(), time.Since(b.start)
 }
 
 func (b *Bar) renderLoop() {
 	defer b.wg.Done()
 
-	lastRenderTime := b.start
-	var chTimeout <-chan time.Time
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		select {
-		case <-chTimeout:
-			chTimeout = nil
-		case n, ok := <-b.chRead:
-			if !ok {
-				b.render()
-				return
-			}
-			b.bytesRead += n
-
-			if chTimeout != nil {
-				continue
-			}
-
-			now := time.Now()
-			dur := lastRenderTime.Add(100 * time.Millisecond).Sub(now)
-			if dur > 0 {
-				chTimeout = time.After(dur)
-				continue
-			}
-			lastRenderTime = now
+		case <-ticker.C:
+			b.render()
+		case <-b.done:
+			b.render()
+			return
 		}
-
-		b.render()
 	}
 }
 
 func (b *Bar) render() {
 	const barWidth = 30
-	percentage := b.bytesRead * 100 / b.totalBytes
+	bytesRead := b.bytesRead.Load()
+	percentage := bytesRead * 100 / b.totalBytes
 	completedWidth := min(barWidth*percentage/100, barWidth)
 
 	if b.onRender != nil {
@@ -142,7 +127,7 @@ func (b *Bar) render() {
 	p.Reset()
 
 	p.WriteString(" (")
-	size := FormatSize(b.bytesRead)
+	size := FormatSize(bytesRead)
 	for range 7 - len(size) {
 		p.WriteString(" ")
 	}
@@ -158,8 +143,8 @@ func (b *Bar) render() {
 type Spinner struct {
 	r         io.Reader
 	printer   *core.Printer
-	bytesRead int64
-	chRead    chan int64
+	bytesRead atomic.Int64
+	done      chan struct{}
 	position  int64
 	start     time.Time
 	wg        sync.WaitGroup
@@ -173,7 +158,7 @@ func NewSpinner(r io.Reader, p *core.Printer, onStart func()) *Spinner {
 	s := &Spinner{
 		r:       r,
 		printer: p,
-		chRead:  make(chan int64, 1),
+		done:    make(chan struct{}),
 		start:   time.Now(),
 		onStart: onStart,
 	}
@@ -185,7 +170,7 @@ func NewSpinner(r io.Reader, p *core.Printer, onStart func()) *Spinner {
 func (s *Spinner) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
 	if n > 0 {
-		s.chRead <- int64(n)
+		s.bytesRead.Add(int64(n))
 	}
 	return n, err
 }
@@ -193,9 +178,9 @@ func (s *Spinner) Read(p []byte) (int, error) {
 // Stop signals the render loop to exit and waits for it to finish. It returns
 // the total bytes read and the elapsed duration.
 func (s *Spinner) Stop() (bytesRead int64, elapsed time.Duration) {
-	close(s.chRead)
+	close(s.done)
 	s.wg.Wait()
-	return s.bytesRead, time.Since(s.start)
+	return s.bytesRead.Load(), time.Since(s.start)
 }
 
 func (s *Spinner) renderLoop() {
@@ -212,12 +197,9 @@ func (s *Spinner) renderLoop() {
 		case <-ticker.C:
 			s.render()
 			s.position++
-		case n, ok := <-s.chRead:
-			if !ok {
-				s.render()
-				return
-			}
-			s.bytesRead += n
+		case <-s.done:
+			s.render()
+			return
 		}
 	}
 }
@@ -254,7 +236,7 @@ func (s *Spinner) render() {
 	p.Reset()
 
 	p.WriteString(" ")
-	size := FormatSize(s.bytesRead)
+	size := FormatSize(s.bytesRead.Load())
 	for range 7 - len(size) {
 		p.WriteString(" ")
 	}
