@@ -1,7 +1,12 @@
 package fetch
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 func TestSanitizeFilename(t *testing.T) {
@@ -90,5 +95,28 @@ func TestSanitizeFilename(t *testing.T) {
 				t.Errorf("sanitizeFilename(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestWriteOutputToFile_OverwritesExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "download.txt")
+
+	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	printer := core.TestPrinter(false)
+	err := writeOutputToFile(path, bytes.NewReader([]byte("new")), int64(len("new")), printer, core.VSilent)
+	if err != nil {
+		t.Fatalf("writeOutputToFile returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output file: %v", err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("output file = %q, want %q", data, "new")
 	}
 }

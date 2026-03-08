@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"time"
+
+	"github.com/ryanfowler/fetch/internal/fileutil"
 )
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -112,7 +114,7 @@ func (s *Session) Save() error {
 		return err
 	}
 
-	return os.Rename(tmpPath, s.path)
+	return fileutil.AtomicReplaceFile(tmpPath, s.path)
 }
 
 // Jar returns an http.CookieJar that persists cookies to this session.
