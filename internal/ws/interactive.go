@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/format"
@@ -52,8 +53,6 @@ func runInteractive(ctx context.Context, cfg Config) error {
 		cancel: cancel,
 	}
 
-	im.setupScreen(rows, cols)
-
 	// Channel for raw stdin bytes.
 	inputCh := make(chan []byte, stdinChanBuf)
 	// Channel for server messages.
@@ -87,6 +86,9 @@ func runInteractive(ctx context.Context, cfg Config) error {
 		}
 	}()
 
+	initialRow, pending := detectCursorRow(inputCh)
+	im.setupScreen(rows, cols, initialRow)
+
 	// Read server messages.
 	go func() {
 		for {
@@ -115,9 +117,6 @@ func runInteractive(ctx context.Context, cfg Config) error {
 		im.renderSentMessage(cfg.InitialMsg)
 	}
 
-	// Pending buffer for partial UTF-8 / escape sequences.
-	var pending []byte
-
 	for {
 		select {
 		case raw, ok := <-inputCh:
@@ -144,12 +143,43 @@ func runInteractive(ctx context.Context, cfg Config) error {
 		case <-resizeCh:
 			rows, cols := t.size()
 			if rows >= minRows {
-				im.setupScreen(rows, cols)
+				im.setupScreen(rows, cols, 0)
 			}
 
 		case <-ctx.Done():
 			im.teardownScreen()
 			return nil
+		}
+	}
+}
+
+func detectCursorRow(inputCh <-chan []byte) (int, []byte) {
+	return detectCursorRowWithTimeout(inputCh, time.Second)
+}
+
+func detectCursorRowWithTimeout(inputCh <-chan []byte, timeoutDur time.Duration) (int, []byte) {
+	fmt.Fprint(os.Stdout, "\x1b[6n")
+
+	timeout := time.NewTimer(timeoutDur)
+	defer timeout.Stop()
+
+	var captured []byte
+	for {
+		if row, remaining, ok := extractCursorRow(captured); ok {
+			if row <= 0 {
+				row = 1
+			}
+			return row, remaining
+		}
+
+		select {
+		case raw, ok := <-inputCh:
+			if !ok {
+				return 1, captured
+			}
+			captured = append(captured, raw...)
+		case <-timeout.C:
+			return 1, captured
 		}
 	}
 }
@@ -177,7 +207,7 @@ type interactiveMode struct {
 
 // setupScreen configures the scroll region and draws the separators and input line.
 // Layout: scroll region (1..N-3), separator (N-2), input (N-1), separator (N).
-func (im *interactiveMode) setupScreen(rows, cols int) {
+func (im *interactiveMode) setupScreen(rows, cols, initialCursorRow int) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 
@@ -213,7 +243,10 @@ func (im *interactiveMode) setupScreen(rows, cols int) {
 		// Keep existing content (command/response info) visible at the
 		// top of the screen. Query the current cursor row so new
 		// messages start right after the existing output.
-		curRow := im.term.cursorRow()
+		curRow := initialCursorRow
+		if curRow <= 0 {
+			curRow = 1
+		}
 
 		if curRow >= scrollEnd {
 			// Cursor is at or past the scroll region boundary (common
