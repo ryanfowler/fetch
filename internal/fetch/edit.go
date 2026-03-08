@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // editRequestBody opens an editor and allows the user to modify the request
@@ -60,7 +61,8 @@ func editRequestBody(req *http.Request) error {
 	}
 
 	// Start the editor and block until completed.
-	cmd := exec.Command(editor, path)
+	argv := append(editor, path)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
@@ -92,20 +94,70 @@ func editRequestBody(req *http.Request) error {
 	return nil
 }
 
-func findEditor() (string, bool) {
-	if visual := os.Getenv("VISUAL"); visual != "" {
-		return visual, true
-	}
-
-	if editor := os.Getenv("EDITOR"); editor != "" {
-		return editor, true
+func findEditor() ([]string, bool) {
+	for _, env := range [...]string{"VISUAL", "EDITOR"} {
+		if val := os.Getenv(env); val != "" {
+			args := parseEditorArgs(val)
+			if len(args) > 0 {
+				return args, true
+			}
+		}
 	}
 
 	for _, v := range [...]string{"vim", "vi", "nano", "notepad.exe"} {
 		path, err := exec.LookPath(v)
 		if err == nil {
-			return path, true
+			return []string{path}, true
 		}
 	}
-	return "", false
+	return nil, false
+}
+
+func parseEditorArgs(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+
+	if _, err := exec.LookPath(s); err == nil {
+		return []string{s}
+	}
+
+	return splitArgs(s)
+}
+
+// splitArgs splits a string into arguments, respecting single and double
+// quotes. This is used to parse $EDITOR/$VISUAL values like "code --wait".
+func splitArgs(s string) []string {
+	var args []string
+	var cur []byte
+	i := 0
+	for i < len(s) {
+		ch := s[i]
+		switch {
+		case ch == ' ' || ch == '\t':
+			if len(cur) > 0 {
+				args = append(args, string(cur))
+				cur = cur[:0]
+			}
+			i++
+		case ch == '\'' || ch == '"':
+			quote := ch
+			i++
+			for i < len(s) && s[i] != quote {
+				cur = append(cur, s[i])
+				i++
+			}
+			if i < len(s) {
+				i++ // skip closing quote
+			}
+		default:
+			cur = append(cur, ch)
+			i++
+		}
+	}
+	if len(cur) > 0 {
+		args = append(args, string(cur))
+	}
+	return args
 }
