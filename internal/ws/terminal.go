@@ -2,11 +2,9 @@ package ws
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
 
@@ -62,48 +60,6 @@ func (t *terminal) size() (rows, cols int) {
 	return
 }
 
-// cursorRow queries the terminal for the current cursor row using the
-// Device Status Report (DSR) escape sequence. Must be called in raw mode
-// and before any goroutine is reading stdin. Returns 1 on failure.
-func (t *terminal) cursorRow() int {
-	// Request cursor position: response is ESC [ row ; col R
-	fmt.Fprint(os.Stdout, "\x1b[6n")
-
-	type readResult struct {
-		resp []byte
-		err  error
-	}
-	ch := make(chan readResult, 1)
-	go func() {
-		var resp []byte
-		var buf [32]byte
-		for {
-			n, err := os.Stdin.Read(buf[:])
-			if n > 0 {
-				resp = append(resp, buf[:n]...)
-				if bytes.ContainsRune(resp, 'R') {
-					ch <- readResult{resp: resp}
-					return
-				}
-			}
-			if err != nil {
-				ch <- readResult{err: err}
-				return
-			}
-		}
-	}()
-
-	select {
-	case res := <-ch:
-		if res.err != nil {
-			return 1
-		}
-		return parseCursorRow(res.resp)
-	case <-time.After(time.Second):
-		return 1
-	}
-}
-
 func parseCursorRow(resp []byte) int {
 	start := bytes.IndexByte(resp, '[')
 	semi := bytes.IndexByte(resp, ';')
@@ -115,4 +71,35 @@ func parseCursorRow(resp []byte) int {
 		return 1
 	}
 	return row
+}
+
+func extractCursorRow(buf []byte) (row int, remaining []byte, ok bool) {
+	for i := 0; i < len(buf); i++ {
+		if buf[i] != 0x1b || i+1 >= len(buf) || buf[i+1] != '[' {
+			continue
+		}
+
+		j := i + 2
+		for j < len(buf) && buf[j] >= '0' && buf[j] <= '9' {
+			j++
+		}
+		if j == i+2 || j >= len(buf) || buf[j] != ';' {
+			continue
+		}
+		j++
+
+		colStart := j
+		for j < len(buf) && buf[j] >= '0' && buf[j] <= '9' {
+			j++
+		}
+		if j == colStart || j >= len(buf) || buf[j] != 'R' {
+			continue
+		}
+
+		row = parseCursorRow(buf[i : j+1])
+		remaining = append(append([]byte{}, buf[:i]...), buf[j+1:]...)
+		return row, remaining, true
+	}
+
+	return 0, append([]byte{}, buf...), false
 }
