@@ -103,6 +103,34 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveOverwritesExistingSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	sess.Cookies = []SessionCookie{{Name: "token", Value: "old", Domain: "example.com", Path: "/"}}
+	if err := sess.Save(); err != nil {
+		t.Fatalf("first save failed: %v", err)
+	}
+
+	sess.Cookies = []SessionCookie{{Name: "token", Value: "new", Domain: "example.com", Path: "/"}}
+	if err := sess.Save(); err != nil {
+		t.Fatalf("second save failed: %v", err)
+	}
+
+	reloaded, err := Load("test")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if len(reloaded.Cookies) != 1 || reloaded.Cookies[0].Value != "new" {
+		t.Fatalf("reloaded cookies = %+v, want updated value", reloaded.Cookies)
+	}
+}
+
 func TestExpiredCookiesFiltered(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)

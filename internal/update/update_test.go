@@ -1,6 +1,11 @@
 package update
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestIsVersionTag(t *testing.T) {
 	tests := []struct {
@@ -31,5 +36,27 @@ func TestIsVersionTag(t *testing.T) {
 				t.Errorf("isVersionTag(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestUpdateLastAttemptTime_OverwritesExistingMetadata(t *testing.T) {
+	dir := t.TempDir()
+
+	first := time.Unix(100, 0)
+	if err := updateLastAttemptTime(dir, first); err != nil {
+		t.Fatalf("first updateLastAttemptTime failed: %v", err)
+	}
+
+	second := time.Unix(200, 0)
+	if err := updateLastAttemptTime(dir, second); err != nil {
+		t.Fatalf("second updateLastAttemptTime failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "metadata.json"))
+	if err != nil {
+		t.Fatalf("reading metadata file: %v", err)
+	}
+	if string(data) != `{"last_attempt_at":"1970-01-01T00:03:20Z"}` {
+		t.Fatalf("metadata.json = %q", data)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/fileutil"
 )
 
 func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Printer, v core.Verbosity) error {
@@ -53,7 +54,7 @@ func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Prin
 		return err
 	}
 
-	err = os.Rename(f.Name(), filename)
+	err = fileutil.AtomicReplaceFile(f.Name(), filename)
 	return err
 
 }

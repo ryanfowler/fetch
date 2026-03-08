@@ -17,6 +17,7 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/fileutil"
 )
 
 // Update checks the API for the latest fetch version and upgrades the current
@@ -502,7 +503,7 @@ func updateLastAttemptTime(dir string, now time.Time) error {
 		return err
 	}
 
-	err = os.Rename(tempPath, path)
+	err = fileutil.AtomicReplaceFile(tempPath, path)
 	return err
 }
 
