@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // editRequestBody opens an editor and allows the user to modify the request
@@ -96,7 +97,7 @@ func editRequestBody(req *http.Request) error {
 func findEditor() ([]string, bool) {
 	for _, env := range [...]string{"VISUAL", "EDITOR"} {
 		if val := os.Getenv(env); val != "" {
-			args := splitArgs(val)
+			args := parseEditorArgs(val)
 			if len(args) > 0 {
 				return args, true
 			}
@@ -110,6 +111,19 @@ func findEditor() ([]string, bool) {
 		}
 	}
 	return nil, false
+}
+
+func parseEditorArgs(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+
+	if _, err := exec.LookPath(s); err == nil {
+		return []string{s}
+	}
+
+	return splitArgs(s)
 }
 
 // splitArgs splits a string into arguments, respecting single and double

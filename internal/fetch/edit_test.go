@@ -1,7 +1,10 @@
 package fetch
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -125,6 +128,35 @@ func TestFindEditor(t *testing.T) {
 			t.Fatal("findEditor() returned false")
 		}
 		want := []string{"/usr/local/my app/bin/edit", "--wait"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("findEditor() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("EDITOR with unquoted path containing spaces", func(t *testing.T) {
+		t.Setenv("VISUAL", "")
+
+		dir := filepath.Join(t.TempDir(), "editor path")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatalf("os.Mkdir() error = %v", err)
+		}
+
+		name := "edit-tool"
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		editor := filepath.Join(dir, name)
+		if err := os.WriteFile(editor, nil, 0o755); err != nil {
+			t.Fatalf("os.WriteFile() error = %v", err)
+		}
+
+		t.Setenv("EDITOR", editor)
+
+		got, ok := findEditor()
+		if !ok {
+			t.Fatal("findEditor() returned false")
+		}
+		want := []string{editor}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("findEditor() = %v, want %v", got, want)
 		}
