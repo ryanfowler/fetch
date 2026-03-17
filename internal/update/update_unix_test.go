@@ -66,6 +66,22 @@ func TestUnpackArtifact_PathTraversal(t *testing.T) {
 	}
 }
 
+func TestCanReplaceFile_ReadOnlyFileWritableDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fetch")
+
+	if err := os.WriteFile(path, []byte("binary"), 0755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.Chmod(path, 0555); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+
+	if !canReplaceFile(path) {
+		t.Fatalf("canReplaceFile(%q) = false, want true", path)
+	}
+}
+
 func createTarGz(t *testing.T, filename string, content []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
