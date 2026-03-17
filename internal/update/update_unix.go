@@ -112,6 +112,23 @@ func unlockFile(f *os.File) error {
 
 // canReplaceFile returns true if this process can replace the file at the
 // provided location.
+//
+// On Unix, rename(2) replacement is governed by the containing directory
+// rather than the target file mode, so validate replacement by creating a
+// temporary file in that directory.
 func canReplaceFile(path string) bool {
-	return unix.Access(path, unix.W_OK) == nil
+	dir := filepath.Dir(path)
+
+	f, err := os.CreateTemp(dir, ".fetch-update-*")
+	if err != nil {
+		return false
+	}
+
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return false
+	}
+
+	return os.Remove(name) == nil
 }
