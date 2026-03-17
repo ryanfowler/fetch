@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/fileutil"
@@ -169,6 +170,7 @@ func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	j.jar.SetCookies(u, cookies)
 
 	// Record cookies into the session.
+	now := time.Now()
 	for _, c := range cookies {
 		sc := SessionCookie{
 			Name:     c.Name,
@@ -193,11 +195,18 @@ func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 		case http.SameSiteNoneMode:
 			sc.SameSite = "none"
 		}
+		sc.Domain = normalizeCookieDomain(sc.Domain)
+		sc.Path = normalizeCookiePath(sc.Path)
+
+		if isDeletionCookie(c, now) {
+			j.session.removeCookie(sc.Name, sc.Domain, sc.Path)
+			continue
+		}
 
 		// Update existing cookie or append new one.
 		found := false
 		for i, existing := range j.session.Cookies {
-			if existing.Name == sc.Name && existing.Domain == sc.Domain && existing.Path == sc.Path {
+			if cookieKeyMatches(existing, sc.Name, sc.Domain, sc.Path) {
 				j.session.Cookies[i] = sc
 				found = true
 				break
@@ -211,6 +220,38 @@ func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 
 func (j *sessionJar) Cookies(u *url.URL) []*http.Cookie {
 	return j.jar.Cookies(u)
+}
+
+func (s *Session) removeCookie(name, domain, path string) {
+	filtered := s.Cookies[:0]
+	for _, existing := range s.Cookies {
+		if cookieKeyMatches(existing, name, domain, path) {
+			continue
+		}
+		filtered = append(filtered, existing)
+	}
+	s.Cookies = filtered
+}
+
+func cookieKeyMatches(c SessionCookie, name, domain, path string) bool {
+	return c.Name == name &&
+		normalizeCookieDomain(c.Domain) == domain &&
+		normalizeCookiePath(c.Path) == path
+}
+
+func normalizeCookieDomain(domain string) string {
+	return strings.TrimPrefix(strings.ToLower(domain), ".")
+}
+
+func normalizeCookiePath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	return path
+}
+
+func isDeletionCookie(c *http.Cookie, now time.Time) bool {
+	return c.MaxAge < 0 || (!c.Expires.IsZero() && !c.Expires.After(now))
 }
 
 func getSessionsDir() (string, error) {
