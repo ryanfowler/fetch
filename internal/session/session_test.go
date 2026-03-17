@@ -256,6 +256,53 @@ func TestSessionJarUpdatesExisting(t *testing.T) {
 	}
 }
 
+func TestSessionJarDeletedCookieNotPersisted(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("delete-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jar := sess.Jar()
+	u, _ := url.Parse("https://example.com/")
+
+	jar.SetCookies(u, []*http.Cookie{
+		{Name: "token", Value: "live"},
+	})
+	if err := sess.Save(); err != nil {
+		t.Fatalf("initial save failed: %v", err)
+	}
+
+	sess, err = Load("delete-test")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if len(sess.Cookies) != 1 {
+		t.Fatalf("expected 1 cookie after reload, got %d", len(sess.Cookies))
+	}
+
+	jar = sess.Jar()
+	jar.SetCookies(u, []*http.Cookie{
+		{Name: "token", MaxAge: -1},
+	})
+	if len(sess.Cookies) != 0 {
+		t.Fatalf("expected deleted cookie to be removed from session, got %+v", sess.Cookies)
+	}
+	if err := sess.Save(); err != nil {
+		t.Fatalf("save after deletion failed: %v", err)
+	}
+
+	sess, err = Load("delete-test")
+	if err != nil {
+		t.Fatalf("reload after deletion failed: %v", err)
+	}
+	if len(sess.Cookies) != 0 {
+		t.Fatalf("expected deleted cookie to stay removed after reload, got %+v", sess.Cookies)
+	}
+}
+
 func TestCorruptedSessionFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
