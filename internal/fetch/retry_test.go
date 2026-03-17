@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -288,15 +289,19 @@ func TestSleepWithContext(t *testing.T) {
 }
 
 func TestReplayableBody(t *testing.T) {
-	t.Run("seekable body", func(t *testing.T) {
-		body := &readSeekCloser{Reader: bytes.NewReader([]byte("hello"))}
-		req := &http.Request{Body: body}
+	t.Run("getbody body", func(t *testing.T) {
+		req := &http.Request{
+			Body: io.NopCloser(bytes.NewReader([]byte("hello"))),
+			GetBody: func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader([]byte("hello"))), nil
+			},
+		}
 		rb, err := newReplayableBody(req)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if rb.seeker == nil {
-			t.Fatal("expected seeker path to be used for ReadSeeker body")
+		if rb.tempPath != "" {
+			t.Fatal("expected GetBody path to avoid temp spool")
 		}
 
 		for range 3 {
@@ -311,20 +316,33 @@ func TestReplayableBody(t *testing.T) {
 			if string(data) != "hello" {
 				t.Errorf("expected 'hello', got '%s'", data)
 			}
+			rc.Close()
 		}
 	})
 
-	t.Run("buffered body", func(t *testing.T) {
-		body := bytes.NewReader([]byte("hello"))
-		req := &http.Request{Body: io.NopCloser(body)}
-		// bytes.Reader wrapped in NopCloser is not a ReadSeeker,
-		// so it will be read into memory.
+	t.Run("closable seekable body", func(t *testing.T) {
+		f, err := os.CreateTemp(t.TempDir(), "body-*")
+		if err != nil {
+			t.Fatalf("create temp file: %v", err)
+		}
+		if _, err := f.WriteString("hello"); err != nil {
+			t.Fatalf("write temp file: %v", err)
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			t.Fatalf("seek temp file: %v", err)
+		}
+
+		req := &http.Request{Body: f}
 		rb, err := newReplayableBody(req)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if rb.seeker != nil {
-			t.Fatal("expected buffered path to be used for non-ReadSeeker body")
+		defer rb.close()
+		if rb.tempPath != "" {
+			t.Fatal("expected file-backed body to replay without temp spool")
+		}
+		if _, err := f.Read(make([]byte, 1)); !isClosedFileErr(err) {
+			t.Fatalf("expected original file to be closed, got %v", err)
 		}
 
 		for range 3 {
@@ -339,15 +357,30 @@ func TestReplayableBody(t *testing.T) {
 			if string(data) != "hello" {
 				t.Errorf("expected 'hello', got '%s'", data)
 			}
+			if err := rc.Close(); err != nil {
+				t.Fatalf("close error: %v", err)
+			}
 		}
 	})
 
-	t.Run("non-seekable body", func(t *testing.T) {
-		body := io.NopCloser(strings.NewReader("world"))
+	t.Run("large streamed body", func(t *testing.T) {
+		const size = 8 << 20
+		body := &streamingReadCloser{remaining: size, fill: 'x'}
 		req := &http.Request{Body: body}
 		rb, err := newReplayableBody(req)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
+		}
+		defer rb.close()
+		if rb.tempPath == "" {
+			t.Fatal("expected temp spool for streamed body")
+		}
+		info, err := os.Stat(rb.tempPath)
+		if err != nil {
+			t.Fatalf("stat temp spool: %v", err)
+		}
+		if info.Size() != size {
+			t.Fatalf("expected temp spool size %d, got %d", size, info.Size())
 		}
 
 		for range 3 {
@@ -355,12 +388,15 @@ func TestReplayableBody(t *testing.T) {
 			if err != nil {
 				t.Fatalf("reset error: %v", err)
 			}
-			data, err := io.ReadAll(rc)
+			n, err := io.Copy(io.Discard, rc)
 			if err != nil {
 				t.Fatalf("read error: %v", err)
 			}
-			if string(data) != "world" {
-				t.Errorf("expected 'world', got '%s'", data)
+			if n != size {
+				t.Fatalf("expected %d bytes, got %d", size, n)
+			}
+			if err := rc.Close(); err != nil {
+				t.Fatalf("close error: %v", err)
 			}
 		}
 	})
@@ -388,9 +424,34 @@ func TestReplayableBody(t *testing.T) {
 	})
 }
 
-// readSeekCloser wraps a bytes.Reader to implement io.ReadSeeker and io.ReadCloser.
-type readSeekCloser struct {
-	*bytes.Reader
+func isClosedFileErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "file already closed")
 }
 
-func (r *readSeekCloser) Close() error { return nil }
+type streamingReadCloser struct {
+	remaining int64
+	fill      byte
+	closed    bool
+}
+
+func (r *streamingReadCloser) Read(p []byte) (int, error) {
+	if r.closed {
+		return 0, os.ErrClosed
+	}
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	for i := range p {
+		p[i] = r.fill
+	}
+	r.remaining -= int64(len(p))
+	return len(p), nil
+}
+
+func (r *streamingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}

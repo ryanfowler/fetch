@@ -32,6 +32,14 @@ import (
 // formatting a response body or copying it to the clipboard.
 const maxBodyBytes = 1 << 20 // 1MiB
 
+func setReplayableBody(req *http.Request, data []byte) {
+	req.Body = io.NopCloser(bytes.NewReader(data))
+	req.ContentLength = int64(len(data))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
+}
+
 type Request struct {
 	AWSSigv4         *aws.Config
 	Basic            *core.KeyVal[string]
@@ -213,13 +221,13 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 				if err != nil {
 					return 0, err
 				}
-				req.Body = io.NopCloser(converted)
+				setReplayableBody(req, converted)
 			}
 			framed, err := frameGRPCRequest(req.Body)
 			if err != nil {
 				return 0, err
 			}
-			req.Body = io.NopCloser(framed)
+			setReplayableBody(req, framed)
 		}
 	}
 
