@@ -1,7 +1,6 @@
 package fetch
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -107,7 +106,7 @@ func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor
 }
 
 // convertJSONToProtobuf converts JSON body to protobuf.
-func convertJSONToProtobuf(data io.Reader, desc protoreflect.MessageDescriptor) (io.Reader, error) {
+func convertJSONToProtobuf(data io.Reader, desc protoreflect.MessageDescriptor) ([]byte, error) {
 	// Read all the JSON data.
 	jsonData, err := io.ReadAll(data)
 	if err != nil {
@@ -120,12 +119,12 @@ func convertJSONToProtobuf(data io.Reader, desc protoreflect.MessageDescriptor) 
 		return nil, fmt.Errorf("failed to convert JSON to protobuf: %w", err)
 	}
 
-	return bytes.NewReader(protoData), nil
+	return protoData, nil
 }
 
 // frameGRPCRequest wraps data in gRPC framing.
 // Handles nil/empty body by sending an empty framed message.
-func frameGRPCRequest(data io.Reader) (io.Reader, error) {
+func frameGRPCRequest(data io.Reader) ([]byte, error) {
 	var rawData []byte
 	if data != nil && data != http.NoBody {
 		var err error
@@ -137,7 +136,7 @@ func frameGRPCRequest(data io.Reader) (io.Reader, error) {
 
 	// Frame with gRPC format (works for empty data too).
 	framedData := fetchgrpc.Frame(rawData, false)
-	return bytes.NewReader(framedData), nil
+	return framedData, nil
 }
 
 // streamGRPCRequest reads JSON objects from data, converts each to protobuf,

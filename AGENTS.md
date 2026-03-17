@@ -72,6 +72,8 @@ prettier -w .
 5. HTTP client executes request
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 
+Retryable requests replay bodies by calling `req.GetBody` when available, reopening file-backed bodies directly when possible, and only spooling the original body to a temp file as a final fallback for one-shot streams. This avoids holding large uploads in memory and keeps retries working for closable bodies like `*os.File`.
+
 ### Content Type Detection
 
 `internal/fetch/fetch.go:getContentType()` maps MIME types to formatters. Supported types include JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, gRPC, SSE, NDJSON, and images.

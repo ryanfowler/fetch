@@ -1,7 +1,6 @@
 package fetch
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 
@@ -30,6 +30,9 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 		replayer, err = newReplayableBody(req)
 		if err != nil {
 			return 0, err
+		}
+		if replayer != nil {
+			defer replayer.close()
 		}
 	}
 
@@ -246,10 +249,11 @@ func sleepWithContext(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// replayableBody allows a request body to be replayed across retry attempts.
+// replayableBody reopens a request body for each retry attempt.
 type replayableBody struct {
-	seeker io.ReadSeeker
-	data   []byte
+	open     func() (io.ReadCloser, error)
+	cleanup  func() error
+	tempPath string
 }
 
 // newReplayableBody creates a replayableBody from the request's current body.
@@ -259,30 +263,112 @@ func newReplayableBody(req *http.Request) (*replayableBody, error) {
 		return nil, nil
 	}
 
-	// If the body supports seeking, use it directly.
-	if rs, ok := req.Body.(io.ReadSeeker); ok {
-		return &replayableBody{seeker: rs}, nil
+	if req.GetBody != nil {
+		if err := req.Body.Close(); err != nil {
+			return nil, err
+		}
+		return &replayableBody{open: req.GetBody}, nil
 	}
 
-	// Otherwise, read the entire body into memory.
-	data, err := io.ReadAll(req.Body)
+	if f, ok := req.Body.(*os.File); ok && f != os.Stdin {
+		offset, err := f.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, err
+		}
+		path := f.Name()
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		return &replayableBody{
+			open: func() (io.ReadCloser, error) {
+				reopened, err := os.Open(path)
+				if err != nil {
+					return nil, err
+				}
+				if offset != 0 {
+					if _, err := reopened.Seek(offset, io.SeekStart); err != nil {
+						reopened.Close()
+						return nil, err
+					}
+				}
+				return reopened, nil
+			},
+		}, nil
+	}
+
+	if rs, ok := req.Body.(io.ReadSeeker); ok && req.Body != os.Stdin {
+		var cleanup func() error
+		if closer, ok := req.Body.(io.Closer); ok {
+			cleanup = closer.Close
+		}
+		return &replayableBody{
+			open: func() (io.ReadCloser, error) {
+				if _, err := rs.Seek(0, io.SeekStart); err != nil {
+					return nil, err
+				}
+				return nopReadCloser{Reader: rs}, nil
+			},
+			cleanup: cleanup,
+		}, nil
+	}
+
+	tmp, err := os.CreateTemp("", "fetch-retry-body-*")
 	if err != nil {
 		return nil, err
 	}
-	req.Body.Close()
-	return &replayableBody{data: data}, nil
+	tmpPath := tmp.Name()
+	cleanup := func() error {
+		return os.Remove(tmpPath)
+	}
+
+	_, copyErr := io.Copy(tmp, req.Body)
+	closeErr := req.Body.Close()
+	if copyErr != nil {
+		tmp.Close()
+		cleanup()
+		return nil, copyErr
+	}
+	if closeErr != nil {
+		tmp.Close()
+		cleanup()
+		return nil, closeErr
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return nil, err
+	}
+
+	return &replayableBody{
+		open: func() (io.ReadCloser, error) {
+			return os.Open(tmpPath)
+		},
+		cleanup:  cleanup,
+		tempPath: tmpPath,
+	}, nil
 }
 
 // reset returns a fresh io.ReadCloser for the next attempt.
 func (rb *replayableBody) reset() (io.ReadCloser, error) {
-	if rb.seeker != nil {
-		if _, err := rb.seeker.Seek(0, io.SeekStart); err != nil {
-			return nil, err
-		}
-		return io.NopCloser(rb.seeker), nil
+	if rb == nil {
+		return nil, nil
 	}
-	return io.NopCloser(bytes.NewReader(rb.data)), nil
+	return rb.open()
 }
+
+func (rb *replayableBody) close() error {
+	if rb == nil || rb.cleanup == nil {
+		return nil
+	}
+	err := rb.cleanup()
+	rb.cleanup = nil
+	return err
+}
+
+type nopReadCloser struct {
+	io.Reader
+}
+
+func (nopReadCloser) Close() error { return nil }
 
 // retryReason returns a human-readable reason for the retry.
 func retryReason(resp *http.Response, err error) string {
