@@ -37,6 +37,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/encoding/protowire"
 	protoMarshal "google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
@@ -1248,6 +1250,98 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, "http://example.com/svc/Method", "--grpc", "--proto-desc", "/nonexistent/file.pb")
 		assertExitCode(t, 1, res)
 		assertBufContains(t, res.stderr, "does not exist")
+	})
+
+	t.Run("grpc reflection discovery and calls", func(t *testing.T) {
+		t.Parallel()
+
+		t.Run("tls reflection supports list describe and json call", func(t *testing.T) {
+			t.Parallel()
+			server := startReflectionGRPCServer(t, true, true)
+			t.Cleanup(server.cleanup)
+
+			res := runFetch(t, fetchPath, "--grpc-list", "--ca-cert", server.caCertPath, server.url)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, "grpc.health.v1.Health")
+
+			res = runFetch(t, fetchPath, "--grpc-describe", "grpc.health.v1.Health/Check", "--ca-cert", server.caCertPath, server.url)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, "method grpc.health.v1.Health/Check")
+			assertBufContains(t, res.stdout, "rpc: unary")
+			assertBufContains(t, res.stdout, "request: grpc.health.v1.HealthCheckRequest")
+
+			res = runFetch(t, fetchPath,
+				server.url+"/grpc.health.v1.Health/Check",
+				"--grpc", "--ca-cert", server.caCertPath,
+				"-j", `{"service":""}`,
+				"--format", "on",
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, `"status": "SERVING"`)
+		})
+
+		t.Run("plaintext h2c reflection works for local servers", func(t *testing.T) {
+			t.Parallel()
+			server := startReflectionGRPCServer(t, false, true)
+			t.Cleanup(server.cleanup)
+
+			res := runFetch(t, fetchPath, "--grpc-list", server.url)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, "grpc.health.v1.Health")
+
+			res = runFetch(t, fetchPath,
+				server.url+"/grpc.health.v1.Health/Check",
+				"--grpc",
+				"-j", `{"service":""}`,
+				"--format", "on",
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, `"status": "SERVING"`)
+		})
+
+		t.Run("reflection unavailable errors are actionable", func(t *testing.T) {
+			t.Parallel()
+			server := startReflectionGRPCServer(t, false, false)
+			t.Cleanup(server.cleanup)
+
+			res := runFetch(t, fetchPath, "--grpc-list", server.url)
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "gRPC reflection is unavailable")
+			assertBufContains(t, res.stderr, "--proto-file")
+
+			res = runFetch(t, fetchPath,
+				server.url+"/grpc.health.v1.Health/Check",
+				"--grpc",
+				"-j", `{"service":""}`,
+			)
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "gRPC reflection is unavailable")
+			assertBufContains(t, res.stderr, "--proto-desc")
+
+			res = runFetch(t, fetchPath,
+				server.url+"/grpc.health.v1.Health/Check",
+				"--grpc", "--format", "on",
+			)
+			assertExitCode(t, 0, res)
+			assertBufNotEmpty(t, res.stdout)
+		})
+
+		t.Run("local schema discovery runs offline and wins over reflection", func(t *testing.T) {
+			t.Parallel()
+			descFile := writeHealthDescriptorSet(t)
+
+			res := runFetch(t, fetchPath, "--grpc-list", "--proto-desc", descFile)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, "grpc.health.v1.Health")
+
+			res = runFetch(t, fetchPath,
+				"--grpc-describe", "grpc.health.v1.Health",
+				"--proto-desc", descFile,
+				"http://127.0.0.1:1",
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, "service grpc.health.v1.Health")
+		})
 	})
 
 	t.Run("update", func(t *testing.T) {
@@ -2965,6 +3059,265 @@ func startServer(h http.HandlerFunc) *httptest.Server {
 	return httptest.NewServer(h)
 }
 
+type reflectionGRPCServer struct {
+	url        string
+	caCertPath string
+	cleanup    func()
+}
+
+func startReflectionGRPCServer(t *testing.T, useTLS, enableReflection bool) reflectionGRPCServer {
+	t.Helper()
+
+	handler := newReflectionGRPCHandler(t, enableReflection)
+	server := httptest.NewUnstartedServer(handler)
+
+	var caCertPath string
+	var scheme string
+	if useTLS {
+		dir := t.TempDir()
+		caCert, caKey := generateCACert(t)
+		serverCert, serverKey := generateCert(t, caCert, caKey, "grpc-reflection")
+		caCertPath = writeTempPEM(t, dir, "grpc-reflection-ca.crt", "CERTIFICATE", caCert.Raw)
+		serverCertPath := writeTempPEM(t, dir, "grpc-reflection-server.crt", "CERTIFICATE", serverCert.Raw)
+		serverKeyPath := writeTempPEM(t, dir, "grpc-reflection-server.key", "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(serverKey))
+		tlsCert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
+		if err != nil {
+			t.Fatalf("LoadX509KeyPair: %v", err)
+		}
+		server.EnableHTTP2 = true
+		server.TLS = &tls.Config{Certificates: []tls.Certificate{tlsCert}}
+		server.StartTLS()
+		scheme = "https"
+	} else {
+		server.Config.Handler = h2c.NewHandler(handler, &http2.Server{})
+		server.Start()
+		scheme = "http"
+	}
+
+	return reflectionGRPCServer{
+		url:        scheme + "://" + server.Listener.Addr().String(),
+		caCertPath: caCertPath,
+		cleanup: func() {
+			server.Close()
+		},
+	}
+}
+
+func writeHealthDescriptorSet(t *testing.T) string {
+	t.Helper()
+
+	fds := buildHealthDescriptorSet()
+	data, err := protoMarshal.Marshal(fds)
+	if err != nil {
+		t.Fatalf("marshal descriptor set: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "grpc-health.pb")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write descriptor set: %v", err)
+	}
+	return path
+}
+
+func newReflectionGRPCHandler(t *testing.T, enableReflection bool) http.Handler {
+	t.Helper()
+
+	descriptorSet := buildHealthDescriptorSet()
+	descriptorData, err := protoMarshal.Marshal(descriptorSet.File[0])
+	if err != nil {
+		t.Fatalf("marshal descriptor: %v", err)
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/grpc+proto")
+
+		switch r.URL.Path {
+		case "/grpc.health.v1.Health/Check":
+			writeGRPCFrameResponse(w, buildHealthCheckResponse())
+		case "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo", "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo":
+			if !enableReflection {
+				writeGRPCErrorResponse(w, "12", "reflection disabled")
+				return
+			}
+			payload, ok := readSingleGRPCFrame(t, r.Body)
+			if !ok {
+				writeGRPCErrorResponse(w, "3", "invalid reflection request")
+				return
+			}
+			resp, err := buildReflectionResponse(payload, descriptorData)
+			if err != nil {
+				writeGRPCErrorResponse(w, "5", err.Error())
+				return
+			}
+			writeGRPCFrameResponse(w, resp)
+		default:
+			writeGRPCErrorResponse(w, "12", "unimplemented")
+		}
+	})
+}
+
+func buildHealthDescriptorSet() *descriptorpb.FileDescriptorSet {
+	strType := descriptorpb.FieldDescriptorProto_TYPE_STRING
+	enumType := descriptorpb.FieldDescriptorProto_TYPE_ENUM
+	return &descriptorpb.FileDescriptorSet{
+		File: []*descriptorpb.FileDescriptorProto{
+			{
+				Name:    ptr("grpc/health/v1/health.proto"),
+				Package: ptr("grpc.health.v1"),
+				Syntax:  ptr("proto3"),
+				MessageType: []*descriptorpb.DescriptorProto{
+					{
+						Name: ptr("HealthCheckRequest"),
+						Field: []*descriptorpb.FieldDescriptorProto{
+							{
+								Name:   ptr("service"),
+								Number: ptr(int32(1)),
+								Type:   &strType,
+							},
+						},
+					},
+					{
+						Name: ptr("HealthCheckResponse"),
+						Field: []*descriptorpb.FieldDescriptorProto{
+							{
+								Name:     ptr("status"),
+								Number:   ptr(int32(1)),
+								Type:     &enumType,
+								TypeName: ptr(".grpc.health.v1.HealthCheckResponse.ServingStatus"),
+							},
+						},
+						EnumType: []*descriptorpb.EnumDescriptorProto{
+							{
+								Name: ptr("ServingStatus"),
+								Value: []*descriptorpb.EnumValueDescriptorProto{
+									{Name: ptr("UNKNOWN"), Number: ptr(int32(0))},
+									{Name: ptr("SERVING"), Number: ptr(int32(1))},
+									{Name: ptr("NOT_SERVING"), Number: ptr(int32(2))},
+									{Name: ptr("SERVICE_UNKNOWN"), Number: ptr(int32(3))},
+								},
+							},
+						},
+					},
+				},
+				Service: []*descriptorpb.ServiceDescriptorProto{
+					{
+						Name: ptr("Health"),
+						Method: []*descriptorpb.MethodDescriptorProto{
+							{
+								Name:       ptr("Check"),
+								InputType:  ptr(".grpc.health.v1.HealthCheckRequest"),
+								OutputType: ptr(".grpc.health.v1.HealthCheckResponse"),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func readSingleGRPCFrame(t *testing.T, body io.Reader) ([]byte, bool) {
+	t.Helper()
+
+	var header [5]byte
+	if _, err := io.ReadFull(body, header[:]); err != nil {
+		return nil, false
+	}
+	length := binary.BigEndian.Uint32(header[1:5])
+	payload := make([]byte, length)
+	if _, err := io.ReadFull(body, payload); err != nil {
+		return nil, false
+	}
+	return payload, true
+}
+
+func buildHealthCheckResponse() []byte {
+	var data []byte
+	data = protowire.AppendTag(data, 1, protowire.VarintType)
+	data = protowire.AppendVarint(data, 1)
+	return data
+}
+
+func buildReflectionResponse(req []byte, descriptor []byte) ([]byte, error) {
+	for len(req) > 0 {
+		num, typ, n := protowire.ConsumeTag(req)
+		if n < 0 {
+			return nil, protowire.ParseError(n)
+		}
+		req = req[n:]
+		switch {
+		case num == 7 && typ == protowire.BytesType:
+			_, m := protowire.ConsumeString(req)
+			if m < 0 {
+				return nil, protowire.ParseError(m)
+			}
+			return buildReflectionListResponse("grpc.health.v1.Health"), nil
+		case num == 4 && typ == protowire.BytesType:
+			symbol, m := protowire.ConsumeString(req)
+			if m < 0 {
+				return nil, protowire.ParseError(m)
+			}
+			switch symbol {
+			case "grpc.health.v1.Health",
+				"grpc.health.v1.Health.Check",
+				"grpc.health.v1.HealthCheckRequest",
+				"grpc.health.v1.HealthCheckResponse":
+				return buildReflectionDescriptorResponse(descriptor), nil
+			default:
+				return nil, fmt.Errorf("symbol not found: %s", symbol)
+			}
+		default:
+			m := protowire.ConsumeFieldValue(num, typ, req)
+			if m < 0 {
+				return nil, protowire.ParseError(m)
+			}
+			req = req[m:]
+		}
+	}
+	return nil, errors.New("unsupported reflection request")
+}
+
+func buildReflectionListResponse(names ...string) []byte {
+	var list []byte
+	for _, name := range names {
+		var service []byte
+		service = protowire.AppendTag(service, 1, protowire.BytesType)
+		service = protowire.AppendString(service, name)
+		list = protowire.AppendTag(list, 1, protowire.BytesType)
+		list = protowire.AppendBytes(list, service)
+	}
+
+	var resp []byte
+	resp = protowire.AppendTag(resp, 6, protowire.BytesType)
+	resp = protowire.AppendBytes(resp, list)
+	return resp
+}
+
+func buildReflectionDescriptorResponse(descriptor []byte) []byte {
+	var fdResp []byte
+	fdResp = protowire.AppendTag(fdResp, 1, protowire.BytesType)
+	fdResp = protowire.AppendBytes(fdResp, descriptor)
+
+	var resp []byte
+	resp = protowire.AppendTag(resp, 4, protowire.BytesType)
+	resp = protowire.AppendBytes(resp, fdResp)
+	return resp
+}
+
+func writeGRPCFrameResponse(w http.ResponseWriter, payload []byte) {
+	frame := make([]byte, 5+len(payload))
+	binary.BigEndian.PutUint32(frame[1:5], uint32(len(payload)))
+	copy(frame[5:], payload)
+	w.WriteHeader(http.StatusOK)
+	w.Write(frame)
+}
+
+func writeGRPCErrorResponse(w http.ResponseWriter, status, message string) {
+	w.Header().Set("Grpc-Status", status)
+	w.Header().Set("Grpc-Message", message)
+	w.WriteHeader(http.StatusOK)
+}
+
 func startUnixServer(path string, h http.HandlerFunc) (*httptest.Server, error) {
 	server := httptest.NewUnstartedServer(h)
 	l, err := net.Listen("unix", path)
@@ -3013,6 +3366,10 @@ func getOptionalModTime(t *testing.T, path string) *time.Time {
 	}
 	mt := info.ModTime()
 	return &mt
+}
+
+func ptr[T any](v T) *T {
+	return &v
 }
 
 func assertExitCode(t *testing.T, exp int, res runResult) {

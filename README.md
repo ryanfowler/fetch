@@ -9,7 +9,7 @@ A modern HTTP(S) client for the command line.
 - **Response formatting** - Automatic formatting and syntax highlighting for JSON, XML, YAML, HTML, CSS, CSV, Markdown, MessagePack, Protocol Buffers, and more
 - **Image rendering** - Display images directly in your terminal
 - **WebSocket support** - Bidirectional WebSocket connections with automatic JSON formatting
-- **gRPC support** - Make gRPC calls with automatic JSON-to-protobuf conversion
+- **gRPC support** - Make gRPC calls with automatic reflection, discovery, and JSON-to-protobuf conversion
 - **Authentication** - Built-in support for Basic Auth, Bearer Token, AWS Signature V4, and mTLS
 - **Compression** - Automatic gzip and zstd response body decompression
 - **TLS inspection** - Inspect TLS certificate chains, expiry, SANs, and OCSP status

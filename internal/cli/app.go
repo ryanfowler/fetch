@@ -35,6 +35,8 @@ type App struct {
 	Form             []core.KeyVal[string]
 	FromCurl         string
 	GRPC             bool
+	GRPCDescribe     string
+	GRPCList         bool
 	Help             bool
 	InspectTLS       bool
 	WS               bool // set when URL scheme is ws:// or wss://
@@ -58,6 +60,18 @@ type App struct {
 
 func (a *App) PrintHelp(p *core.Printer) {
 	printHelp(a.CLI(), p)
+}
+
+func (a *App) HasGRPCDiscovery() bool {
+	return a.GRPCList || a.GRPCDescribe != ""
+}
+
+func (a *App) HasGRPCMode() bool {
+	return a.GRPC || a.HasGRPCDiscovery()
+}
+
+func (a *App) HasProtoSchema() bool {
+	return len(a.ProtoFiles) > 0 || a.ProtoDesc != ""
 }
 
 func (a *App) CLI() *CLI {
@@ -101,14 +115,12 @@ func (a *App) CLI() *CLI {
 		},
 		RequiredFlags: []core.KeyVal[[]string]{
 			{Key: "key", Val: []string{"cert"}},
-			{Key: "proto-desc", Val: []string{"grpc"}},
-			{Key: "proto-file", Val: []string{"grpc"}},
 			{Key: "proto-import", Val: []string{"proto-file"}},
 			{Key: "remote-header-name", Val: []string{"remote-name"}},
 		},
 		SchemeExclusiveFlags: map[string][]string{
-			"ws":  {"discard", "grpc", "form", "multipart", "xml", "edit"},
-			"wss": {"discard", "grpc", "form", "multipart", "xml", "edit"},
+			"ws":  {"discard", "grpc", "grpc-describe", "grpc-list", "form", "multipart", "xml", "edit"},
+			"wss": {"discard", "grpc", "grpc-describe", "grpc-list", "form", "multipart", "xml", "edit"},
 		},
 		FromCurlExclusiveFlags: []string{
 			"method", "header", "data", "json", "xml",
@@ -117,7 +129,7 @@ func (a *App) CLI() *CLI {
 			"range", "unix", "timeout", "connect-timeout",
 			"redirects", "proxy", "insecure", "tls", "http",
 			"cert", "key", "ca-cert", "dns-server",
-			"retry", "retry-delay", "grpc", "query",
+			"retry", "retry-delay", "grpc", "grpc-describe", "grpc-list", "query",
 		},
 		Flags: []Flag{
 			// cfgFlag: delegates to config parser
@@ -222,6 +234,8 @@ func (a *App) CLI() *CLI {
 
 			stringFlag(&a.FromCurl, "from-curl", "", "COMMAND", "Execute a curl command using fetch"),
 			boolFlag(&a.GRPC, "grpc", "", "Enable gRPC mode"),
+			stringFlag(&a.GRPCDescribe, "grpc-describe", "", "NAME", "Describe a gRPC service, method, or message"),
+			boolFlag(&a.GRPCList, "grpc-list", "", "List available gRPC services"),
 
 			cfgFlag("header", "H", "NAME:VALUE", "Set headers for the request",
 				func() bool { return len(a.Cfg.Headers) > 0 }, a.Cfg.ParseHeader),

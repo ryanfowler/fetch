@@ -133,3 +133,59 @@ func TestCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestGRPCDiscoveryFlags(t *testing.T) {
+	t.Run("grpc list parses", func(t *testing.T) {
+		app, err := Parse([]string{"--grpc-list", "localhost:50051"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if !app.GRPCList {
+			t.Fatal("expected GRPCList to be set")
+		}
+		if app.URL == nil {
+			t.Fatal("expected URL to be parsed")
+		}
+	})
+
+	t.Run("proto desc accepts grpc describe without url", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "service.pb")
+		os.WriteFile(path, []byte("placeholder"), 0o644)
+
+		app, err := Parse([]string{"--grpc-describe", "pkg.Service", "--proto-desc", path})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if app.GRPCDescribe != "pkg.Service" {
+			t.Fatalf("GRPCDescribe = %q, want %q", app.GRPCDescribe, "pkg.Service")
+		}
+		if app.URL != nil {
+			t.Fatal("expected URL to be optional for offline discovery")
+		}
+	})
+
+	t.Run("proto desc requires grpc mode", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "service.pb")
+		os.WriteFile(path, []byte("placeholder"), 0o644)
+
+		_, err := Parse([]string{"--proto-desc", path})
+		if err == nil {
+			t.Fatal("expected error for proto-desc without grpc mode")
+		}
+		if !strings.Contains(err.Error(), "requires one of '--grpc', '--grpc-list', '--grpc-describe'") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("grpc discovery rejects request body flags", func(t *testing.T) {
+		_, err := Parse([]string{"--grpc-list", "--data", "hello", "localhost:50051"})
+		if err == nil {
+			t.Fatal("expected error for grpc-list with data")
+		}
+		if !strings.Contains(err.Error(), "cannot be used together") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}

@@ -489,15 +489,33 @@ See [WebSocket documentation](websocket.md) for details.
 
 ### `--grpc`
 
-Enable gRPC mode. Automatically sets HTTP/2, POST method, and gRPC headers.
+Enable gRPC mode. Automatically sets HTTP/2, POST method, and gRPC headers. When no local proto schema is provided, `fetch` automatically tries gRPC reflection before falling back to generic protobuf handling.
 
 ```sh
 fetch --grpc https://localhost:50051/package.Service/Method
 ```
 
+### `--grpc-list`
+
+List available gRPC services. Uses reflection when a URL is provided, or runs offline when `--proto-file` / `--proto-desc` is provided.
+
+```sh
+fetch --grpc-list https://localhost:50051
+fetch --grpc-list --proto-desc service.pb
+```
+
+### `--grpc-describe NAME`
+
+Describe a gRPC service, method, or message. Accepts `package.Service`, `package.Service/Method`, `package.Service.Method`, and full message names.
+
+```sh
+fetch --grpc-describe grpc.health.v1.Health https://localhost:50051
+fetch --grpc-describe grpc.health.v1.Health/Check --proto-desc service.pb
+```
+
 ### `--proto-file PATH`
 
-Compile `.proto` file(s) for JSON-to-protobuf conversion. Requires `protoc`. Can specify multiple comma-separated paths.
+Compile `.proto` file(s) for gRPC requests or offline discovery. Requires `protoc`. Can specify multiple comma-separated paths.
 
 ```sh
 fetch --grpc --proto-file service.proto -j '{"field": "value"}' localhost:50051/pkg.Svc/Method
@@ -505,7 +523,7 @@ fetch --grpc --proto-file service.proto -j '{"field": "value"}' localhost:50051/
 
 ### `--proto-desc PATH`
 
-Use pre-compiled descriptor set file instead of `--proto-file`.
+Use a pre-compiled descriptor set file instead of `--proto-file`.
 
 ```sh
 # Generate descriptor:
@@ -522,6 +540,8 @@ Add import paths for proto compilation. Use with `--proto-file`.
 ```sh
 fetch --grpc --proto-file service.proto --proto-import ./proto localhost:50051/pkg.Svc/Method
 ```
+
+Plaintext local gRPC servers are supported via `h2c`, so loopback URLs like `http://127.0.0.1:50051` work for both `--grpc` and reflection-based discovery.
 
 ## Configuration
 
