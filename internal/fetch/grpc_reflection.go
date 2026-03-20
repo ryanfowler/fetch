@@ -404,15 +404,15 @@ func (rc *reflectionClient) invokeHTTP(ctx context.Context, path string, payload
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected HTTP status: %s", resp.Status)
+	}
 	frames, err := readGRPCFrames(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 	if status := grpcStatusFromResponse(resp); status != nil {
 		return nil, status
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected HTTP status: %s", resp.Status)
 	}
 	return frames, nil
 }
