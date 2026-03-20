@@ -478,7 +478,7 @@ func loadDiscoverySchema(ctx context.Context, r *Request) (*iproto.Schema, bool,
 	}
 
 	applyGRPCDefaults(r)
-	c := newGRPCClient(r)
+	c := newClient(r)
 	if r.GRPCDescribe == "" {
 		return nil, false, c, nil
 	}
@@ -539,7 +539,7 @@ func grpcHeaders(headers []core.KeyVal[string]) []core.KeyVal[string] {
 	return out
 }
 
-func newGRPCClient(r *Request) *client.Client {
+func newClient(r *Request) *client.Client {
 	return client.NewClient(client.ClientConfig{
 		CACerts:        r.CACerts,
 		ClientCert:     r.ClientCert,
@@ -556,14 +556,10 @@ func newGRPCClient(r *Request) *client.Client {
 }
 
 func shouldUseH2C(r *Request) bool {
-	if r.URL == nil {
+	if r.URL == nil || !r.HasGRPCMode() {
 		return false
 	}
-	httpVersion := r.HTTP
-	if httpVersion == core.HTTPDefault {
-		httpVersion = core.HTTP2
-	}
-	if httpVersion != core.HTTP2 {
+	if r.HTTP != core.HTTP2 {
 		return false
 	}
 	return effectiveScheme(r.URL) == "http"

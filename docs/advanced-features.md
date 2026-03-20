@@ -151,7 +151,7 @@ fetch --http 2 example.com
 - Multiplexed streams
 - Header compression (HPACK)
 - Required for gRPC
-- Automatically uses h2c (HTTP/2 over cleartext) for `http://` URLs, enabling plaintext HTTP/2 connections to local development servers without TLS
+- Automatically uses h2c (HTTP/2 over cleartext) for gRPC requests with `http://` URLs, enabling plaintext HTTP/2 connections to local development servers without TLS
 
 ### HTTP/3 (QUIC)
 

@@ -131,7 +131,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	}
 
 	// 1. Create the HTTP client.
-	c := newGRPCClient(r)
+	c := newClient(r)
 	defer c.Close()
 
 	// 2. Resolve any proto schema and configure gRPC descriptors.
