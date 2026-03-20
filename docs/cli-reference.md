@@ -407,9 +407,12 @@ Force specific HTTP version. Values: `1`, `2`, `3`.
 - `2` - HTTP/2 (default preference)
 - `3` - HTTP/3 (QUIC)
 
+When `--http 2` is used with an `http://` URL, `fetch` automatically uses h2c (HTTP/2 over cleartext) to connect without TLS. This applies to both gRPC and regular HTTP requests.
+
 ```sh
 fetch --http 1 example.com
 fetch --http 3 example.com
+fetch --http 2 http://localhost:8080  # uses h2c
 ```
 
 ## Compression
@@ -541,7 +544,7 @@ Add import paths for proto compilation. Use with `--proto-file`.
 fetch --grpc --proto-file service.proto --proto-import ./proto localhost:50051/pkg.Svc/Method
 ```
 
-Plaintext local gRPC servers are supported via `h2c`, so loopback URLs like `http://127.0.0.1:50051` work for both `--grpc` and reflection-based discovery.
+Plaintext servers are supported via `h2c` (HTTP/2 over cleartext) when using an `http://` URL with HTTP/2. This works for `--grpc`, reflection-based discovery, and regular HTTP/2 requests alike.
 
 ## Configuration
 
