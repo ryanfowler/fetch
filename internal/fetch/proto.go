@@ -68,7 +68,6 @@ func parseGRPCPath(urlPath string) (serviceName, methodName string, err error) {
 func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor, protoreflect.MessageDescriptor, bool, error) {
 	var requestDesc, responseDesc protoreflect.MessageDescriptor
 	var isClientStreaming bool
-	applyGRPCDefaults(r)
 	if schema != nil && r.URL != nil {
 		serviceName, methodName, err := parseGRPCPath(r.URL.Path)
 		if err != nil {
