@@ -457,15 +457,7 @@ func discoverGRPC(ctx context.Context, r *Request) (int, error) {
 		return 0, p.Flush()
 	}
 
-	target := normalizeReflectionSymbol(r.GRPCDescribe)
 	desc, err := lookupDescribeSymbol(schema, r.GRPCDescribe)
-	if err != nil && !offline {
-		schema, err = newReflectionClient(r, c).SchemaForSymbol(ctx, target)
-		if err != nil {
-			return 0, err
-		}
-		desc, err = lookupDescribeSymbol(schema, r.GRPCDescribe)
-	}
 	if err != nil {
 		return 0, err
 	}
