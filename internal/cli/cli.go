@@ -284,6 +284,9 @@ func Parse(args []string) (*App, error) {
 	if err := validateSchemeExclusives(&app, cli, long); err != nil {
 		return &app, err
 	}
+	if err := validateGRPCModes(&app, long); err != nil {
+		return &app, err
+	}
 
 	return &app, nil
 }
@@ -308,6 +311,49 @@ func validateSchemeExclusives(app *App, cli *CLI, long map[string]Flag) error {
 			return schemeExclusiveError{scheme: scheme, flag: name}
 		}
 	}
+	return nil
+}
+
+func validateGRPCModes(app *App, long map[string]Flag) error {
+	if !app.HasProtoSchema() && !app.HasGRPCMode() {
+		return nil
+	}
+
+	if !app.HasGRPCMode() {
+		name := "proto-file"
+		if app.ProtoDesc != "" {
+			name = "proto-desc"
+		}
+		return newRequiredFlagError(name, []string{"grpc", "grpc-list", "grpc-describe"})
+	}
+
+	if app.GRPC && app.GRPCDescribe != "" {
+		return newExclusiveFlagsError("grpc", "grpc-describe")
+	}
+	if app.GRPC && app.GRPCList {
+		return newExclusiveFlagsError("grpc", "grpc-list")
+	}
+	if app.GRPCDescribe != "" && app.GRPCList {
+		return newExclusiveFlagsError("grpc-describe", "grpc-list")
+	}
+
+	if !app.HasGRPCDiscovery() {
+		return nil
+	}
+
+	for _, name := range []string{
+		"data", "json", "xml", "form", "multipart",
+		"edit", "output", "remote-name", "remote-header-name",
+		"discard", "method",
+	} {
+		if flag, ok := long[name]; ok && flag.IsSet() {
+			if app.GRPCDescribe != "" {
+				return newExclusiveFlagsError("grpc-describe", name)
+			}
+			return newExclusiveFlagsError("grpc-list", name)
+		}
+	}
+
 	return nil
 }
 

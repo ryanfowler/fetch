@@ -56,6 +56,7 @@ type ClientConfig struct {
 	ClientCert     *tls.Certificate
 	ConnectTimeout time.Duration
 	DNSServer      *url.URL
+	H2C            bool
 	HTTP           core.HTTPVersion
 	Insecure       bool
 	Proxy          *url.URL
@@ -97,7 +98,11 @@ func NewClient(cfg ClientConfig) *Client {
 	var transport http.RoundTripper
 	switch cfg.HTTP {
 	case core.HTTP2:
-		transport = getHTTP2Transport(baseDial, tlsConfig, cfg.ConnectTimeout)
+		if cfg.H2C {
+			transport = getH2CTransport(baseDial, cfg.ConnectTimeout)
+		} else {
+			transport = getHTTP2Transport(baseDial, tlsConfig, cfg.ConnectTimeout)
+		}
 	case core.HTTP3:
 		transport = getHTTP3Transport(cfg.DNSServer, tlsConfig, cfg.ConnectTimeout)
 	default:
@@ -212,7 +217,7 @@ func newDialTLSWithConnectTimeout(baseDial func(context.Context, string, string)
 
 func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config, connectTimeout time.Duration) http.RoundTripper {
 	return &http2.Transport{
-		AllowHTTP: false, // Disable h2c, for now.
+		AllowHTTP: false,
 		DialTLSContext: func(ctx context.Context, network string, addr string, cfg *tls.Config) (net.Conn, error) {
 			if connectTimeout > 0 {
 				var cancel context.CancelFunc
@@ -251,6 +256,27 @@ func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn,
 		},
 		DisableCompression: true,
 		TLSClientConfig:    tlsConfig,
+	}
+}
+
+func getH2CTransport(baseDial func(context.Context, string, string) (net.Conn, error), connectTimeout time.Duration) http.RoundTripper {
+	return &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			if connectTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, connectTimeout)
+				defer cancel()
+			}
+
+			dial := baseDial
+			if dial == nil {
+				var dialer net.Dialer
+				dial = dialer.DialContext
+			}
+			return dial(ctx, network, addr)
+		},
+		DisableCompression: true,
 	}
 }
 

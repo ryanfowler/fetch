@@ -22,7 +22,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/image"
 	"github.com/ryanfowler/fetch/internal/multipart"
-	"github.com/ryanfowler/fetch/internal/proto"
+	iproto "github.com/ryanfowler/fetch/internal/proto"
 	"github.com/ryanfowler/fetch/internal/session"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -58,6 +58,8 @@ type Request struct {
 	Form             []core.KeyVal[string]
 	Format           core.Format
 	GRPC             bool
+	GRPCDescribe     string
+	GRPCList         bool
 	Headers          []core.KeyVal[string]
 	HTTP             core.HTTPVersion
 	IgnoreStatus     bool
@@ -93,6 +95,18 @@ type Request struct {
 	responseDescriptor protoreflect.MessageDescriptor
 }
 
+func (r *Request) HasGRPCDiscovery() bool {
+	return r.GRPCList || r.GRPCDescribe != ""
+}
+
+func (r *Request) HasGRPCMode() bool {
+	return r.GRPC || r.HasGRPCDiscovery()
+}
+
+func (r *Request) HasLocalProtoSchema() bool {
+	return len(r.ProtoFiles) > 0 || r.ProtoDesc != ""
+}
+
 func Fetch(ctx context.Context, r *Request) int {
 	code, err := fetch(ctx, r)
 	if err == nil {
@@ -112,43 +126,31 @@ func Fetch(ctx context.Context, r *Request) int {
 }
 
 func fetch(ctx context.Context, r *Request) (int, error) {
-	// 1. Load proto schema if configured.
-	var schema *proto.Schema
-	if len(r.ProtoFiles) > 0 || r.ProtoDesc != "" {
-		var err error
-		schema, err = loadProtoSchema(r)
-		if err != nil {
-			return 0, err
-		}
+	if r.GRPC {
+		applyGRPCDefaults(r)
 	}
 
-	// 2. Setup gRPC (adds headers, sets HTTP version, finds descriptors).
+	// 1. Create the HTTP client.
+	c := newClient(r)
+	defer c.Close()
+
+	// 2. Resolve any proto schema and configure gRPC descriptors.
+	var schema *iproto.Schema
 	var requestDesc protoreflect.MessageDescriptor
 	var isClientStreaming bool
 	if r.GRPC {
 		var err error
+		schema, err = resolveCallSchema(ctx, r, c)
+		if err != nil {
+			return 0, err
+		}
 		requestDesc, r.responseDescriptor, isClientStreaming, err = setupGRPC(r, schema)
 		if err != nil {
 			return 0, err
 		}
 	}
 
-	// 3. Create HTTP client and request.
-	c := client.NewClient(client.ClientConfig{
-		CACerts:        r.CACerts,
-		ClientCert:     r.ClientCert,
-		ConnectTimeout: r.ConnectTimeout,
-		DNSServer:      r.DNSServer,
-		HTTP:           r.HTTP,
-		Insecure:       r.Insecure,
-		Proxy:          r.Proxy,
-		Redirects:      r.Redirects,
-		TLS:            r.TLS,
-		UnixSocket:     r.UnixSocket,
-	})
-	defer c.Close()
-
-	// Load session and set cookie jar, if configured.
+	// 3. Load session and set cookie jar, if configured.
 	var sess *session.Session
 	if r.Session != "" {
 		var loadErr error
@@ -165,6 +167,10 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		c.SetJar(sess.Jar())
 	}
 
+	headers := r.Headers
+	if r.GRPC {
+		headers = grpcHeaders(r.Headers)
+	}
 	req, err := c.NewRequest(ctx, client.RequestConfig{
 		AWSSigV4:    r.AWSSigv4,
 		Basic:       r.Basic,
@@ -172,7 +178,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		ContentType: r.ContentType,
 		Data:        r.Data,
 		Form:        r.Form,
-		Headers:     r.Headers,
+		Headers:     headers,
 		HTTP:        r.HTTP,
 		Method:      r.Method,
 		Multipart:   r.Multipart,

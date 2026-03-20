@@ -18,20 +18,11 @@ import (
 // trailers-only responses) and prints an error to stderr if the status
 // is non-OK. Returns the updated exit code.
 func checkGRPCStatus(r *Request, resp *http.Response, exitCode int) int {
-	grpcStatus := resp.Trailer.Get("Grpc-Status")
-	grpcMessage := resp.Trailer.Get("Grpc-Message")
-
-	// Fall back to headers for trailers-only error responses.
-	if grpcStatus == "" {
-		grpcStatus = resp.Header.Get("Grpc-Status")
-		grpcMessage = resp.Header.Get("Grpc-Message")
-	}
-
-	if grpcStatus == "" || grpcStatus == "0" {
+	status := grpcStatusFromResponse(resp)
+	if status == nil {
 		return exitCode
 	}
 
-	status := fetchgrpc.ParseStatus(grpcStatus, grpcMessage)
 	p := r.PrinterHandle.Stderr()
 	core.WriteErrorMsg(p, status)
 
@@ -92,15 +83,6 @@ func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor
 		responseDesc = method.Output()
 		isClientStreaming = method.IsStreamingClient()
 	}
-
-	if r.HTTP == core.HTTPDefault {
-		r.HTTP = core.HTTP2
-	}
-	if r.Method == "" {
-		r.Method = "POST"
-	}
-	r.Headers = append(r.Headers, fetchgrpc.Headers()...)
-	r.Headers = append(r.Headers, fetchgrpc.AcceptHeader())
 
 	return requestDesc, responseDesc, isClientStreaming, nil
 }

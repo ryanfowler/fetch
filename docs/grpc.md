@@ -1,6 +1,6 @@
 # gRPC Support
 
-`fetch` supports making gRPC calls with automatic protocol handling, JSON-to-protobuf conversion, and formatted responses.
+`fetch` supports making gRPC calls with automatic protocol handling, reflection-backed schema discovery, JSON-to-protobuf conversion, and formatted responses.
 
 ## Overview
 
@@ -22,6 +22,41 @@ Enable gRPC mode. This flag:
 fetch --grpc https://localhost:50051/package.Service/Method
 ```
 
+When `--proto-file` or `--proto-desc` is not provided, `fetch` automatically tries gRPC reflection for schema-aware request conversion and response formatting.
+
+## Reflection and Discovery
+
+### `--grpc-list`
+
+List available services from a reflection-enabled server:
+
+```sh
+fetch --grpc-list https://localhost:50051
+```
+
+Or run the same lookup offline with a local descriptor set:
+
+```sh
+fetch --grpc-list --proto-desc service.pb
+```
+
+### `--grpc-describe NAME`
+
+Describe a service, method, or message:
+
+```sh
+fetch --grpc-describe grpc.health.v1.Health https://localhost:50051
+fetch --grpc-describe grpc.health.v1.Health/Check https://localhost:50051
+fetch --grpc-describe grpc.health.v1.HealthCheckRequest --proto-desc service.pb
+```
+
+`NAME` accepts:
+
+- `package.Service`
+- `package.Service/Method`
+- `package.Service.Method`
+- full message names
+
 ### URL Format
 
 The service and method are specified in the URL path:
@@ -39,7 +74,7 @@ fetch --grpc https://localhost:50051/echo.EchoService/Echo
 
 ## Proto Schema Options
 
-To enable JSON-to-protobuf conversion and rich response formatting, provide a proto schema.
+To enable offline discovery, guaranteed JSON-to-protobuf conversion, or to bypass reflection entirely, provide a local proto schema.
 
 ### `--proto-file PATH`
 
@@ -106,11 +141,14 @@ fetch --grpc \
 
 ### Without Proto Schema
 
-When no schema is provided:
+When no local schema is provided:
 
-- Request bodies must be raw protobuf (not JSON)
-- Responses are formatted using generic protobuf parsing
-- Field numbers are shown instead of names
+- `fetch` first tries gRPC reflection
+- If reflection is available, request/response descriptors are resolved automatically
+- If reflection is unavailable, schema-less requests still work for raw/empty protobuf bodies and responses fall back to generic protobuf formatting
+- JSON request bodies fail with an actionable error because descriptors are required for conversion
+
+If reflection is unavailable and you need schema-aware behavior, pass `--proto-file` or `--proto-desc`.
 
 ## Request Bodies
 
@@ -215,6 +253,15 @@ fetch --grpc --insecure \
   --proto-file service.proto \
   -j '{"request": "data"}' \
   https://localhost:50051/pkg.Service/Method
+```
+
+### Plaintext Local Servers (`h2c`)
+
+For local development servers that use plaintext HTTP/2, use an `http://` URL:
+
+```sh
+fetch --grpc -j '{"service":""}' http://127.0.0.1:50051/grpc.health.v1.Health/Check
+fetch --grpc-list http://127.0.0.1:50051
 ```
 
 ### Custom CA Certificate

@@ -108,8 +108,15 @@ func main() {
 		os.Exit(status)
 	}
 
+	// gRPC discovery can run offline when a local schema is provided.
+	if app.URL == nil && app.HasGRPCDiscovery() && !app.HasProtoSchema() {
+		p := handle.Stderr()
+		writeCLIErr(p, errors.New("<URL> must be provided unless --proto-file or --proto-desc is set"))
+		os.Exit(1)
+	}
+
 	// Otherwise, a URL must be provided.
-	if app.URL == nil {
+	if app.URL == nil && !app.HasGRPCDiscovery() {
 		p := handle.Stderr()
 		writeCLIErr(p, errors.New("<URL> must be provided"))
 		os.Exit(1)
@@ -169,6 +176,8 @@ func main() {
 		Form:             app.Form,
 		Format:           app.Cfg.Format,
 		GRPC:             app.GRPC,
+		GRPCDescribe:     app.GRPCDescribe,
+		GRPCList:         app.GRPCList,
 		Headers:          app.Cfg.Headers,
 		HTTP:             app.Cfg.HTTP,
 		IgnoreStatus:     getValue(app.Cfg.IgnoreStatus),
@@ -199,6 +208,10 @@ func main() {
 		URL:              app.URL,
 		Verbosity:        verbosity,
 		WS:               app.WS,
+	}
+	if app.HasGRPCDiscovery() {
+		status := fetch.DiscoverGRPC(ctx, &req)
+		os.Exit(status)
 	}
 	status := fetch.Fetch(ctx, &req)
 	os.Exit(status)
@@ -372,6 +385,12 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 	}
 	if app.GRPC {
 		ignored = append(ignored, "--grpc")
+	}
+	if app.GRPCDescribe != "" {
+		ignored = append(ignored, "--grpc-describe")
+	}
+	if app.GRPCList {
+		ignored = append(ignored, "--grpc-list")
 	}
 	if app.Output != "" {
 		ignored = append(ignored, "--output")

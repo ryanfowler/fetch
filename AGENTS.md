@@ -4,7 +4,7 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## Project Overview
 
-`fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support with JSON-to-protobuf conversion, and authentication (Basic, Bearer, AWS SigV4).
+`fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support with reflection/discovery and JSON-to-protobuf conversion, and authentication (Basic, Bearer, AWS SigV4).
 
 The repository currently targets Go 1.26.1 in `go.mod` and GitHub Actions.
 
@@ -52,7 +52,7 @@ prettier -w .
 - **internal/config** - INI-format config file parsing with host-specific overrides.
 - **internal/core** - Shared types (`Printer`, `Color`, `Format`, `HTTPVersion`) and utilities.
 - **internal/curl** - Curl command parser for `--from-curl` flag. Tokenizes and parses curl command strings into an intermediate `Result` struct.
-- **internal/fetch** - Core HTTP request execution. `fetch.go:Fetch()` is the main entry point that builds requests, handles gRPC framing, and routes to formatters.
+- **internal/fetch** - Core HTTP request execution. `fetch.go:Fetch()` is the main entry point that builds requests, handles gRPC framing/reflection/discovery, and routes to formatters.
 - **internal/fileutil** - Shared file helpers, including cross-platform atomic replacement for temp-file write flows.
 - **internal/format** - Response body formatters (JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, SSE, NDJSON). Each formatter writes colored output to a `Printer`.
 - **internal/grpc** - gRPC framing, headers, and status code handling.
@@ -68,7 +68,13 @@ prettier -w .
 1. CLI args parsed (`cli.Parse`) → `App` struct
 2. Config file merged (`config.GetFile`)
 3. `fetch.Request` built from merged config
-4. If gRPC: load proto schema, setup descriptors, convert JSON→protobuf, frame message
+4. If gRPC: load local proto schema or resolve it via reflection, setup descriptors, convert JSON→protobuf, frame message
+
+## Recent Notes
+
+- `--grpc-list` and `--grpc-describe` provide grpcurl-style discovery using reflection or local descriptor files.
+- `--grpc` now automatically tries gRPC reflection when no local schema is supplied.
+- Plaintext loopback gRPC servers are supported via `h2c` for both calls and discovery.
 5. HTTP client executes request
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 
