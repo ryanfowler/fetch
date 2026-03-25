@@ -9,7 +9,7 @@ require (
 	github.com/mattn/go-runewidth v0.0.21
 	github.com/quic-go/quic-go v0.59.0
 	github.com/tinylib/msgp v1.6.3
-	github.com/yuin/goldmark v1.8.1
+	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.49.0
 	golang.org/x/image v0.38.0
 	golang.org/x/net v0.52.0
