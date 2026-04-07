@@ -599,10 +599,10 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 				if err != nil {
 					return err
 				}
-				if c, ok := reader.(io.Closer); ok {
-					defer c.Close()
-				}
 				b, err := io.ReadAll(reader)
+				if c, ok := reader.(io.Closer); ok {
+					c.Close()
+				}
 				if err != nil {
 					return err
 				}
