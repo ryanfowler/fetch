@@ -32,7 +32,10 @@ func (c *TLSDialConfig) BuildTLSConfig() *tls.Config {
 		tlsConfig.InsecureSkipVerify = true
 	}
 	if len(c.CACerts) > 0 {
-		certPool := x509.NewCertPool()
+		certPool, err := x509.SystemCertPool()
+		if err != nil {
+			certPool = x509.NewCertPool()
+		}
 		for _, cert := range c.CACerts {
 			certPool.AddCert(cert)
 		}
