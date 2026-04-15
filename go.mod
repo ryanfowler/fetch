@@ -8,7 +8,7 @@ require (
 	github.com/klauspost/compress v1.18.5
 	github.com/mattn/go-runewidth v0.0.23
 	github.com/quic-go/quic-go v0.59.0
-	github.com/tinylib/msgp v1.6.3
+	github.com/tinylib/msgp v1.6.4
 	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.50.0
 	golang.org/x/image v0.39.0
