@@ -54,8 +54,11 @@ func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Prin
 		return err
 	}
 
-	err = fileutil.AtomicReplaceFile(f.Name(), filename)
-	return err
+	if err = fileutil.AtomicReplaceFile(f.Name(), filename); err != nil {
+		os.Remove(f.Name())
+		return err
+	}
+	return nil
 
 }
 
