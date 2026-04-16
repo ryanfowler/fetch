@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestIsLoopback(t *testing.T) {
@@ -89,6 +92,107 @@ func TestDoClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
 	}
 }
 
+func TestDoDecodesStackedContentEncodingInReverseOrder(t *testing.T) {
+	const data = "this is stacked encoded data"
+	body := zstdEncode(t, gzipEncode(t, []byte(data)))
+	c := &Client{
+		c: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header: http.Header{
+						"Content-Encoding": []string{"gzip, zstd"},
+					},
+					Body:    io.NopCloser(bytes.NewReader(body)),
+					Request: req,
+				}, nil
+			}),
+		},
+	}
+	req := newEncodingRequestedRequest(t)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != data {
+		t.Fatalf("body = %q, want %q", got, data)
+	}
+}
+
+func TestDoDecodesMultipleContentEncodingHeaderValues(t *testing.T) {
+	const data = "this is multiply header encoded data"
+	body := zstdEncode(t, gzipEncode(t, []byte(data)))
+	c := &Client{
+		c: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header: http.Header{
+						"Content-Encoding": []string{"gzip", "zstd"},
+					},
+					Body:    io.NopCloser(bytes.NewReader(body)),
+					Request: req,
+				}, nil
+			}),
+		},
+	}
+	req := newEncodingRequestedRequest(t)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != data {
+		t.Fatalf("body = %q, want %q", got, data)
+	}
+}
+
+func TestDoLeavesUnsupportedStackedContentEncodingUntouched(t *testing.T) {
+	body := []byte("not decoded")
+	c := &Client{
+		c: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header: http.Header{
+						"Content-Encoding": []string{"br, gzip"},
+					},
+					Body:    io.NopCloser(bytes.NewReader(body)),
+					Request: req,
+				}, nil
+			}),
+		},
+	}
+	req := newEncodingRequestedRequest(t)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("body = %q, want %q", got, body)
+	}
+}
+
 func TestDecodeResponseBodyClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
 	decoderErr := errors.New("bad header")
 	tests := []struct {
@@ -141,4 +245,50 @@ type trackingReadCloser struct {
 func (r *trackingReadCloser) Close() error {
 	r.closed = true
 	return nil
+}
+
+func newEncodingRequestedRequest(t *testing.T) *http.Request {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(
+		context.WithValue(context.Background(), ctxEncodingRequestedKey, true),
+		http.MethodGet,
+		"https://example.com",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+func gzipEncode(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func zstdEncode(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	zw, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }
