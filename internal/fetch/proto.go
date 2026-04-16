@@ -88,7 +88,9 @@ func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor
 }
 
 // convertJSONToProtobuf converts JSON body to protobuf.
-func convertJSONToProtobuf(data io.Reader, desc protoreflect.MessageDescriptor) ([]byte, error) {
+func convertJSONToProtobuf(data io.ReadCloser, desc protoreflect.MessageDescriptor) ([]byte, error) {
+	defer data.Close()
+
 	// Read all the JSON data.
 	jsonData, err := io.ReadAll(data)
 	if err != nil {
@@ -106,9 +108,11 @@ func convertJSONToProtobuf(data io.Reader, desc protoreflect.MessageDescriptor) 
 
 // frameGRPCRequest wraps data in gRPC framing.
 // Handles nil/empty body by sending an empty framed message.
-func frameGRPCRequest(data io.Reader) ([]byte, error) {
+func frameGRPCRequest(data io.ReadCloser) ([]byte, error) {
 	var rawData []byte
 	if data != nil && data != http.NoBody {
+		defer data.Close()
+
 		var err error
 		rawData, err = io.ReadAll(data)
 		if err != nil {
@@ -124,10 +128,12 @@ func frameGRPCRequest(data io.Reader) ([]byte, error) {
 // streamGRPCRequest reads JSON objects from data, converts each to protobuf,
 // frames each as a gRPC message, and streams them through an io.Pipe.
 // Returns an io.ReadCloser to use as the request body.
-func streamGRPCRequest(data io.Reader, desc protoreflect.MessageDescriptor) io.ReadCloser {
+func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) io.ReadCloser {
 	pr, pw := io.Pipe()
 	go func() {
 		defer pw.Close()
+		defer data.Close()
+
 		decoder := json.NewDecoder(data)
 		for {
 			var raw json.RawMessage

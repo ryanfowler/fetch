@@ -18,7 +18,7 @@ func TestStreamGRPCRequest(t *testing.T) {
 
 	t.Run("single message", func(t *testing.T) {
 		input := `{"name":"hello"}`
-		rc := streamGRPCRequest(strings.NewReader(input), desc)
+		rc := streamGRPCRequest(io.NopCloser(strings.NewReader(input)), desc)
 		defer rc.Close()
 
 		frames := readAllFrames(t, rc)
@@ -29,7 +29,7 @@ func TestStreamGRPCRequest(t *testing.T) {
 
 	t.Run("multiple messages", func(t *testing.T) {
 		input := `{"name":"one"}{"name":"two"}{"name":"three"}`
-		rc := streamGRPCRequest(strings.NewReader(input), desc)
+		rc := streamGRPCRequest(io.NopCloser(strings.NewReader(input)), desc)
 		defer rc.Close()
 
 		frames := readAllFrames(t, rc)
@@ -40,7 +40,7 @@ func TestStreamGRPCRequest(t *testing.T) {
 
 	t.Run("ndjson style", func(t *testing.T) {
 		input := "{\"name\":\"one\"}\n{\"name\":\"two\"}\n{\"name\":\"three\"}\n"
-		rc := streamGRPCRequest(strings.NewReader(input), desc)
+		rc := streamGRPCRequest(io.NopCloser(strings.NewReader(input)), desc)
 		defer rc.Close()
 
 		frames := readAllFrames(t, rc)
@@ -50,7 +50,7 @@ func TestStreamGRPCRequest(t *testing.T) {
 	})
 
 	t.Run("empty input", func(t *testing.T) {
-		rc := streamGRPCRequest(strings.NewReader(""), desc)
+		rc := streamGRPCRequest(io.NopCloser(strings.NewReader("")), desc)
 		defer rc.Close()
 
 		data, err := io.ReadAll(rc)
@@ -63,7 +63,7 @@ func TestStreamGRPCRequest(t *testing.T) {
 	})
 
 	t.Run("invalid json", func(t *testing.T) {
-		rc := streamGRPCRequest(strings.NewReader("{invalid"), desc)
+		rc := streamGRPCRequest(io.NopCloser(strings.NewReader("{invalid")), desc)
 		defer rc.Close()
 
 		_, err := io.ReadAll(rc)
@@ -77,7 +77,7 @@ func TestStreamGRPCRequest(t *testing.T) {
 
 	t.Run("whitespace between objects", func(t *testing.T) {
 		input := "  {\"name\":\"one\"}  \n\n  {\"name\":\"two\"}  "
-		rc := streamGRPCRequest(strings.NewReader(input), desc)
+		rc := streamGRPCRequest(io.NopCloser(strings.NewReader(input)), desc)
 		defer rc.Close()
 
 		frames := readAllFrames(t, rc)
@@ -85,6 +85,51 @@ func TestStreamGRPCRequest(t *testing.T) {
 			t.Fatalf("expected 2 frames, got %d", len(frames))
 		}
 	})
+}
+
+func TestConvertJSONToProtobufClosesBody(t *testing.T) {
+	desc := testMessageDescriptor(t)
+	body := &trackingReadCloser{Reader: strings.NewReader(`{"name":"hello"}`)}
+
+	if _, err := convertJSONToProtobuf(body, desc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !body.closed {
+		t.Fatal("expected convertJSONToProtobuf to close body")
+	}
+}
+
+func TestFrameGRPCRequestClosesBody(t *testing.T) {
+	body := &trackingReadCloser{Reader: strings.NewReader("hello")}
+
+	if _, err := frameGRPCRequest(body); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !body.closed {
+		t.Fatal("expected frameGRPCRequest to close body")
+	}
+}
+
+func TestStreamGRPCRequestClosesBody(t *testing.T) {
+	desc := testMessageDescriptor(t)
+	body := &trackingReadCloser{Reader: strings.NewReader(`{"name":"hello"}`)}
+	rc := streamGRPCRequest(body, desc)
+	defer rc.Close()
+
+	_ = readAllFrames(t, rc)
+	if !body.closed {
+		t.Fatal("expected streamGRPCRequest to close body")
+	}
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
 }
 
 // testMessageDescriptor builds a simple protobuf message descriptor for testing.
