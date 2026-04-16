@@ -107,3 +107,29 @@ func TestSign(t *testing.T) {
 		})
 	}
 }
+
+func TestGetSignedHeadersCanonicalizesHeaderValues(t *testing.T) {
+	req, _ := http.NewRequest("GET", "https://example.com", nil)
+	req.Header["X-Foo"] = []string{"  a  ", "  b  "}
+	req.Header.Set("X-Bar", "  a\t \n b  ")
+
+	headers := getSignedHeaders(req)
+
+	tests := map[string]string{
+		"x-bar": "a b",
+		"x-foo": "a,b",
+	}
+	for key, want := range tests {
+		t.Run(key, func(t *testing.T) {
+			for _, header := range headers {
+				if header.Key == key {
+					if header.Val != want {
+						t.Fatalf("unexpected value: got %q, want %q", header.Val, want)
+					}
+					return
+				}
+			}
+			t.Fatalf("signed header %q not found", key)
+		})
+	}
+}

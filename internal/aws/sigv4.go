@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -145,7 +146,7 @@ func getSignedHeaders(req *http.Request) []core.KeyVal[string] {
 			continue
 		}
 		key = strings.ToLower(strings.TrimSpace(key))
-		val := strings.TrimSpace(strings.Join(vals, ","))
+		val := canonicalHeaderValue(vals)
 		out = append(out, core.KeyVal[string]{Key: key, Val: val})
 	}
 	// Headers should be ordered by key.
@@ -153,6 +154,62 @@ func getSignedHeaders(req *http.Request) []core.KeyVal[string] {
 		return strings.Compare(a.Key, b.Key)
 	})
 	return out
+}
+
+func canonicalHeaderValue(vals []string) string {
+	if len(vals) == 0 {
+		return ""
+	}
+	if len(vals) == 1 && isCanonicalHeaderValue(vals[0]) {
+		return vals[0]
+	}
+
+	var buf strings.Builder
+	buf.Grow(len(vals) - 1)
+	for _, v := range vals {
+		buf.Grow(len(v))
+	}
+	for i, v := range vals {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		writeCanonicalHeaderValue(&buf, v)
+	}
+	return buf.String()
+}
+
+func isCanonicalHeaderValue(val string) bool {
+	inWhitespace := false
+	wroteValue := false
+	for _, r := range val {
+		if !unicode.IsSpace(r) {
+			inWhitespace = false
+			wroteValue = true
+			continue
+		}
+		if r != ' ' || inWhitespace || !wroteValue {
+			return false
+		}
+		inWhitespace = true
+	}
+	return !inWhitespace
+}
+
+func writeCanonicalHeaderValue(buf *strings.Builder, val string) {
+	inWhitespace := true
+	wroteValue := false
+	for _, r := range val {
+		if unicode.IsSpace(r) {
+			inWhitespace = true
+			continue
+		}
+		if inWhitespace && wroteValue {
+			buf.WriteByte(' ')
+		}
+		buf.WriteRune(r)
+		inWhitespace = false
+		wroteValue = true
+	}
 }
 
 func buildCanonicalRequest(req *http.Request, headers []core.KeyVal[string], payload string) []byte {
