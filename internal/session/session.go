@@ -115,7 +115,11 @@ func (s *Session) Save() error {
 		return err
 	}
 
-	return fileutil.AtomicReplaceFile(tmpPath, s.path)
+	if err := fileutil.AtomicReplaceFile(tmpPath, s.path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }
 
 // Jar returns an http.CookieJar that persists cookies to this session.
