@@ -535,7 +535,7 @@ func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool) (
 			core.WriteWarningMsg(p, "waiting on lock to begin updating\n")
 		}
 
-		mult := time.Duration(min(i, 10))
+		mult := time.Duration(min(i+1, 10))
 		select {
 		case <-ctx.Done():
 			f.Close()
