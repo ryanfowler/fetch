@@ -534,20 +534,14 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
-	// Automatically decode the gzipped response body if we requested it.
-	ce := getContentEncoding(resp.Header)
+	// Automatically decode the response body if we requested it.
 	if encodingRequested(req) && resp.Body != nil {
-		if strings.EqualFold(ce, "gzip") {
-			err := decodeResponseBody(resp, "gzip", func(rc io.ReadCloser) (io.ReadCloser, error) {
-				return newGZIPReader(rc)
-			})
-			if err != nil {
-				return nil, err
-			}
-		} else if strings.EqualFold(ce, "zstd") {
-			err := decodeResponseBody(resp, "zstd", func(rc io.ReadCloser) (io.ReadCloser, error) {
-				return newZSTDReader(rc)
-			})
+		decoders, ok := contentEncodingDecoders(resp.Header)
+		if !ok {
+			return resp, nil
+		}
+		for _, d := range decoders {
+			err := decodeResponseBody(resp, d.name, d.decoder)
 			if err != nil {
 				return nil, err
 			}
@@ -558,6 +552,11 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 }
 
 type responseBodyDecoder func(io.ReadCloser) (io.ReadCloser, error)
+
+type namedResponseBodyDecoder struct {
+	name    string
+	decoder responseBodyDecoder
+}
 
 func decodeResponseBody(resp *http.Response, name string, decoder responseBodyDecoder) error {
 	body, err := decoder(resp.Body)
@@ -570,16 +569,45 @@ func decodeResponseBody(resp *http.Response, name string, decoder responseBodyDe
 	return nil
 }
 
-func getContentEncoding(h http.Header) string {
-	v := h.Get("Content-Encoding")
-	if v == "" {
-		return ""
+func contentEncodingDecoders(h http.Header) ([]namedResponseBodyDecoder, bool) {
+	encodings := contentEncodings(h)
+	decoders := make([]namedResponseBodyDecoder, 0, len(encodings))
+	for i := len(encodings) - 1; i >= 0; i-- {
+		switch strings.ToLower(encodings[i]) {
+		case "gzip":
+			decoders = append(decoders, namedResponseBodyDecoder{
+				name: "gzip",
+				decoder: func(rc io.ReadCloser) (io.ReadCloser, error) {
+					return newGZIPReader(rc)
+				},
+			})
+		case "zstd":
+			decoders = append(decoders, namedResponseBodyDecoder{
+				name: "zstd",
+				decoder: func(rc io.ReadCloser) (io.ReadCloser, error) {
+					return newZSTDReader(rc)
+				},
+			})
+		case "aws-chunked":
+		default:
+			return nil, false
+		}
 	}
-	idx := strings.LastIndex(v, ",")
-	if idx >= 0 {
-		v = v[idx+1:]
+	return decoders, true
+}
+
+func contentEncodings(h http.Header) []string {
+	values := h.Values("Content-Encoding")
+	var encodings []string
+	for _, v := range values {
+		for encoding := range strings.SplitSeq(v, ",") {
+			encoding = strings.TrimSpace(encoding)
+			if encoding != "" {
+				encodings = append(encodings, encoding)
+			}
+		}
 	}
-	return strings.TrimSpace(v)
+	return encodings
 }
 
 // setFileContentLength sets the content-length of a request if the body is an
@@ -599,13 +627,13 @@ func setFileContentLength(req *http.Request) {
 	}
 }
 
-// ctxEncodingRequestedKeyType represents the type for storing whether gzip
+// ctxEncodingRequestedKeyType represents the type for storing whether response
 // encoding was requested.
 type ctxEncodingRequestedKeyType int
 
 const ctxEncodingRequestedKey ctxEncodingRequestedKeyType = 0
 
-// encodingRequested returns true if gzip encoding was requested for the
+// encodingRequested returns true if response encoding was requested for the
 // provided request.
 func encodingRequested(r *http.Request) bool {
 	v, ok := r.Context().Value(ctxEncodingRequestedKey).(bool)
