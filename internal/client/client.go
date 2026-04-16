@@ -538,23 +538,36 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	ce := getContentEncoding(resp.Header)
 	if encodingRequested(req) && resp.Body != nil {
 		if strings.EqualFold(ce, "gzip") {
-			gz, err := newGZIPReader(resp.Body)
+			err := decodeResponseBody(resp, "gzip", func(rc io.ReadCloser) (io.ReadCloser, error) {
+				return newGZIPReader(rc)
+			})
 			if err != nil {
-				return nil, fmt.Errorf("gzip: %w", err)
+				return nil, err
 			}
-			resp.Body = gz
-			resp.ContentLength = -1
 		} else if strings.EqualFold(ce, "zstd") {
-			zs, err := newZSTDReader(resp.Body)
+			err := decodeResponseBody(resp, "zstd", func(rc io.ReadCloser) (io.ReadCloser, error) {
+				return newZSTDReader(rc)
+			})
 			if err != nil {
-				return nil, fmt.Errorf("zstd: %w", err)
+				return nil, err
 			}
-			resp.Body = zs
-			resp.ContentLength = -1
 		}
 	}
 
 	return resp, nil
+}
+
+type responseBodyDecoder func(io.ReadCloser) (io.ReadCloser, error)
+
+func decodeResponseBody(resp *http.Response, name string, decoder responseBodyDecoder) error {
+	body, err := decoder(resp.Body)
+	if err != nil {
+		resp.Body.Close()
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	resp.Body = body
+	resp.ContentLength = -1
+	return nil
 }
 
 func getContentEncoding(h http.Header) string {
