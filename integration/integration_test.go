@@ -583,6 +583,47 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("direct output file exists error", func(t *testing.T) {
+		t.Parallel()
+		const data = "new content"
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		dir := t.TempDir()
+
+		existingPath := filepath.Join(dir, "existing.txt")
+		if err := os.WriteFile(existingPath, []byte("old content"), 0644); err != nil {
+			t.Fatalf("unable to create existing file: %s", err.Error())
+		}
+
+		res := runFetch(t, fetchPath, server.URL, "-o", existingPath)
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "already exists")
+		assertBufContains(t, res.stderr, "--clobber")
+
+		raw, err := os.ReadFile(existingPath)
+		if err != nil {
+			t.Fatalf("unable to read from existing file: %s", err.Error())
+		}
+		if string(raw) != "old content" {
+			t.Fatalf("existing file was modified: %s", raw)
+		}
+
+		res = runFetch(t, fetchPath, server.URL, "-o", existingPath, "--clobber")
+		assertExitCode(t, 0, res)
+
+		raw, err = os.ReadFile(existingPath)
+		if err != nil {
+			t.Fatalf("unable to read from existing file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("existing file was not overwritten: %s", raw)
+		}
+	})
+
 	t.Run("clobber overwrites existing file", func(t *testing.T) {
 		t.Parallel()
 		const data = "new content"

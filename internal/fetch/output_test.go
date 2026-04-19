@@ -98,6 +98,62 @@ func TestSanitizeFilename(t *testing.T) {
 	}
 }
 
+func TestGetOutputValue_DirectOutputRequiresClobber(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.txt")
+
+	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	name, err := getOutputValue(&Request{Output: path}, nil)
+	if err == nil {
+		t.Fatal("getOutputValue succeeded for an existing output file without clobber")
+	}
+	if name != "" {
+		t.Fatalf("getOutputValue filename = %q, want empty string", name)
+	}
+	if _, ok := err.(errFileExists); !ok {
+		t.Fatalf("getOutputValue error = %T, want errFileExists", err)
+	}
+
+	name, err = getOutputValue(&Request{Output: path, Clobber: true}, nil)
+	if err != nil {
+		t.Fatalf("getOutputValue with clobber returned error: %v", err)
+	}
+	if name != path {
+		t.Fatalf("getOutputValue filename = %q, want %q", name, path)
+	}
+}
+
+func TestGetOutputValue_DirectStdoutSkipsFileCheck(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldwd); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	})
+
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("-", []byte("existing stdout sentinel"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	name, err := getOutputValue(&Request{Output: "-"}, nil)
+	if err != nil {
+		t.Fatalf("getOutputValue returned error: %v", err)
+	}
+	if name != "-" {
+		t.Fatalf("getOutputValue filename = %q, want %q", name, "-")
+	}
+}
+
 func TestWriteOutputToFile_OverwritesExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "download.txt")

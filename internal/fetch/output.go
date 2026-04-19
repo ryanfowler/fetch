@@ -65,6 +65,11 @@ func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Prin
 func getOutputValue(r *Request, resp *http.Response) (string, error) {
 	if r.Output != "" {
 		// Output was provided directly via -o, return it without sanitization.
+		if r.Output != "-" {
+			if err := checkOutputFile(r.Output, r.Clobber); err != nil {
+				return "", err
+			}
+		}
 		return r.Output, nil
 	}
 	if !r.RemoteName {
@@ -113,17 +118,26 @@ func getOutputValue(r *Request, resp *http.Response) (string, error) {
 	}
 
 	// Check if file exists (unless --clobber is set).
-	if !r.Clobber {
-		_, err := os.Stat(filename)
-		if err == nil {
-			return "", errFileExists{path: filename}
-		}
-		if !os.IsNotExist(err) {
-			return "", errFileCheck{path: filename, err: err}
-		}
+	if err := checkOutputFile(filename, r.Clobber); err != nil {
+		return "", err
 	}
 
 	return filename, nil
+}
+
+func checkOutputFile(filename string, clobber bool) error {
+	if clobber {
+		return nil
+	}
+
+	_, err := os.Stat(filename)
+	if err == nil {
+		return errFileExists{path: filename}
+	}
+	if !os.IsNotExist(err) {
+		return errFileCheck{path: filename, err: err}
+	}
+	return nil
 }
 
 func sanitizeFilename(filename string) (string, error) {
