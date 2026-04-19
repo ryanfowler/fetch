@@ -256,6 +256,80 @@ func TestSessionJarUpdatesExisting(t *testing.T) {
 	}
 }
 
+func TestSessionJarPersistsMaxAgeAsExpiry(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("max-age-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jar := sess.Jar()
+	u, _ := url.Parse("http://example.com/")
+
+	before := time.Now()
+	jar.SetCookies(u, []*http.Cookie{
+		{Name: "short", Value: "lived", MaxAge: 60},
+	})
+	after := time.Now()
+
+	if len(sess.Cookies) != 1 {
+		t.Fatalf("expected 1 cookie, got %d", len(sess.Cookies))
+	}
+	expires := sess.Cookies[0].Expires
+	if expires.IsZero() {
+		t.Fatal("expected Max-Age cookie to persist with an absolute expiry")
+	}
+	if expires.Before(before.Add(60*time.Second)) || expires.After(after.Add(60*time.Second)) {
+		t.Fatalf("expires = %s, want about 60s after SetCookies", expires)
+	}
+
+	if err := sess.Save(); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	reloaded, err := Load("max-age-test")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if len(reloaded.Cookies) != 1 {
+		t.Fatalf("expected 1 cookie after reload, got %d", len(reloaded.Cookies))
+	}
+	if reloaded.Cookies[0].Expires.IsZero() {
+		t.Fatal("expected reloaded Max-Age cookie to keep its expiry")
+	}
+}
+
+func TestSessionJarMaxAgeOverridesExpires(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("max-age-expires-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jar := sess.Jar()
+	u, _ := url.Parse("http://example.com/")
+
+	jar.SetCookies(u, []*http.Cookie{
+		{
+			Name:    "token",
+			Value:   "live",
+			MaxAge:  60,
+			Expires: time.Now().Add(-time.Hour),
+		},
+	})
+
+	if len(sess.Cookies) != 1 {
+		t.Fatalf("expected Max-Age to override expired Expires, got %+v", sess.Cookies)
+	}
+	if sess.Cookies[0].Expires.IsZero() || !sess.Cookies[0].Expires.After(time.Now()) {
+		t.Fatalf("expected future expiry from Max-Age, got %s", sess.Cookies[0].Expires)
+	}
+}
+
 func TestSessionJarDeletedCookieNotPersisted(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)

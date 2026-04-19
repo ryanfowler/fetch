@@ -181,7 +181,7 @@ func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 			Value:    c.Value,
 			Domain:   c.Domain,
 			Path:     c.Path,
-			Expires:  c.Expires,
+			Expires:  cookieExpires(c, now),
 			Secure:   c.Secure,
 			HttpOnly: c.HttpOnly,
 		}
@@ -255,7 +255,17 @@ func normalizeCookiePath(path string) string {
 }
 
 func isDeletionCookie(c *http.Cookie, now time.Time) bool {
-	return c.MaxAge < 0 || (!c.Expires.IsZero() && !c.Expires.After(now))
+	if c.MaxAge != 0 {
+		return c.MaxAge < 0
+	}
+	return !c.Expires.IsZero() && !c.Expires.After(now)
+}
+
+func cookieExpires(c *http.Cookie, now time.Time) time.Time {
+	if c.MaxAge > 0 {
+		return now.Add(time.Duration(c.MaxAge) * time.Second)
+	}
+	return c.Expires
 }
 
 func getSessionsDir() (string, error) {
