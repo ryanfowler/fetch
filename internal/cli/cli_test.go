@@ -134,6 +134,43 @@ func TestCLI(t *testing.T) {
 	}
 }
 
+func TestLongFlagExplicitEmptyValue(t *testing.T) {
+	t.Run("does not consume following URL", func(t *testing.T) {
+		app, err := Parse([]string{"--output=", "example.com"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if app.Output != "" {
+			t.Fatalf("Output = %q, want empty string", app.Output)
+		}
+		if app.URL == nil {
+			t.Fatal("expected URL to be parsed")
+		}
+		if app.URL.Host != "example.com" {
+			t.Fatalf("URL host = %q, want %q", app.URL.Host, "example.com")
+		}
+	})
+
+	t.Run("passes empty value to flag", func(t *testing.T) {
+		app, err := Parse([]string{"--form=", "example.com"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if len(app.Form) != 1 {
+			t.Fatalf("len(Form) = %d, want 1", len(app.Form))
+		}
+		if app.Form[0].Key != "" || app.Form[0].Val != "" {
+			t.Fatalf("Form[0] = %#v, want empty key/value", app.Form[0])
+		}
+		if app.URL == nil {
+			t.Fatal("expected URL to be parsed")
+		}
+		if app.URL.Host != "example.com" {
+			t.Fatalf("URL host = %q, want %q", app.URL.Host, "example.com")
+		}
+	})
+}
+
 func TestGRPCDiscoveryFlags(t *testing.T) {
 	t.Run("grpc list parses", func(t *testing.T) {
 		app, err := Parse([]string{"--grpc-list", "localhost:50051"})
