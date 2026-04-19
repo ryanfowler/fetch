@@ -171,6 +171,80 @@ func TestLongFlagExplicitEmptyValue(t *testing.T) {
 	})
 }
 
+func TestRangeFlag(t *testing.T) {
+	t.Run("accepts unsigned byte ranges", func(t *testing.T) {
+		tests := []struct {
+			name string
+			arg  string
+			want []string
+		}{
+			{name: "suffix", arg: "-1023", want: []string{"-1023"}},
+			{name: "open ended", arg: "1023-", want: []string{"1023-"}},
+			{name: "bounded", arg: "0-1023", want: []string{"0-1023"}},
+			{name: "trimmed", arg: " 5 - 10 ", want: []string{"5-10"}},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				app, err := Parse([]string{"--range", tt.arg})
+				if err != nil {
+					t.Fatalf("Parse() error = %v", err)
+				}
+				if len(app.Range) != len(tt.want) {
+					t.Fatalf("Range = %v, want %v", app.Range, tt.want)
+				}
+				for i := range tt.want {
+					if app.Range[i] != tt.want[i] {
+						t.Fatalf("Range = %v, want %v", app.Range, tt.want)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("rejects signed or malformed byte ranges", func(t *testing.T) {
+		tests := []string{
+			"bad",
+			"-",
+			"5--1",
+			"+5-10",
+			"5-+10",
+			"--1",
+			"-+1",
+		}
+
+		for _, arg := range tests {
+			t.Run(arg, func(t *testing.T) {
+				_, err := Parse([]string{"--range", arg})
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), "invalid") {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("validates ranges from curl commands", func(t *testing.T) {
+		app, err := Parse([]string{"--from-curl", "curl -r 0-1023 https://example.com/file"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if len(app.Range) != 1 || app.Range[0] != "0-1023" {
+			t.Fatalf("Range = %v, want [0-1023]", app.Range)
+		}
+
+		_, err = Parse([]string{"--from-curl", "curl -r 5--1 https://example.com/file"})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "invalid range end") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestGRPCDiscoveryFlags(t *testing.T) {
 	t.Run("grpc list parses", func(t *testing.T) {
 		app, err := Parse([]string{"--grpc-list", "localhost:50051"})
