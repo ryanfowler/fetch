@@ -203,7 +203,7 @@ func parseLongFlag(arg string, args []string, long map[string]Flag) ([]string, e
 		return nil, flagNoArgsError("--" + name)
 	}
 
-	if flag.Args != "" && value == "" {
+	if flag.Args != "" && !ok {
 		if len(args) == 0 {
 			return nil, argRequiredError("--" + name)
 		}
