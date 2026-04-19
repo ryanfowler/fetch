@@ -730,7 +730,11 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 	}
 
 	// Ranges.
-	a.Range = r.Ranges
+	for _, rng := range r.Ranges {
+		if err := a.parseRangeFlag(rng); err != nil {
+			return err
+		}
+	}
 
 	// HTTP version.
 	switch r.HTTPVersion {

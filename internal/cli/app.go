@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/ryanfowler/fetch/internal/aws"
@@ -674,6 +673,10 @@ func isValidRangeValue(value string) bool {
 	if value == "" {
 		return true
 	}
-	_, err := strconv.Atoi(value)
-	return err == nil
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
