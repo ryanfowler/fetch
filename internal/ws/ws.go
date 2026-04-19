@@ -60,10 +60,9 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 	defer cancel()
 
 	// Write stdin lines in a background goroutine.
-	stdinDone := make(chan struct{})
+	stdinDone := make(chan error, 1)
 	go func() {
-		defer close(stdinDone)
-		writeLoop(ctx, cfg)
+		stdinDone <- writeLoop(ctx, cfg)
 	}()
 
 	// Read server messages in a separate goroutine. This allows us to
@@ -80,7 +79,12 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 		// reading from stdin and cannot be interrupted.
 		cancel()
 		return err
-	case <-stdinDone:
+	case err := <-stdinDone:
+		if err != nil {
+			cancel()
+			return err
+		}
+
 		// Piped stdin EOF. Give the server a brief window to send
 		// remaining messages (e.g. echo responses), then shut down.
 		drainCtx, drainCancel := context.WithTimeout(ctx, 2*time.Second)
