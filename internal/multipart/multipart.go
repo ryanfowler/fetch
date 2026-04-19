@@ -5,6 +5,7 @@ import (
 	"mime/multipart"
 	"net/textproto"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -75,7 +76,7 @@ func writeFilePart(mpw *multipart.Writer, key, filename string) error {
 	}
 
 	headers := textproto.MIMEHeader{}
-	headers.Set("Content-Disposition", multipart.FileContentDisposition(key, filename))
+	headers.Set("Content-Disposition", multipart.FileContentDisposition(key, filepath.Base(filename)))
 	headers.Set("Content-Type", ct)
 
 	w, err := mpw.CreatePart(headers)

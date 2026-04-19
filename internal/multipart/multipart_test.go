@@ -5,6 +5,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -36,6 +37,9 @@ func TestMultipart(t *testing.T) {
 				t.Helper()
 
 				header := f.File["key1"][0]
+				if header.Filename != filepath.Base(header.Filename) {
+					t.Fatalf("multipart filename includes path: %q", header.Filename)
+				}
 				if ct := header.Header.Get("Content-Type"); ct != "application/json" {
 					t.Fatalf("unexpected content-type: %q", ct)
 				}
@@ -50,6 +54,34 @@ func TestMultipart(t *testing.T) {
 				buf.ReadFrom(file)
 				if buf.String() != `{"key":"val"}` {
 					t.Fatalf("unexpected file content: %q", buf.String())
+				}
+			},
+		},
+		{
+			name: "file uses base name in content disposition",
+			fnPre: func(t *testing.T) ([]core.KeyVal[string], func()) {
+				t.Helper()
+
+				dir := t.TempDir()
+				name := filepath.Join(dir, "secret", "report.pdf")
+				if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+					t.Fatalf("unable to create temp dir: %s", err.Error())
+				}
+				if err := os.WriteFile(name, []byte("%PDF-1.7"), 0o644); err != nil {
+					t.Fatalf("unable to create temp file: %s", err.Error())
+				}
+
+				return []core.KeyVal[string]{{Key: "file", Val: "@" + name}}, nil
+			},
+			fnPost: func(t *testing.T, f *multipart.Form) {
+				t.Helper()
+
+				header := f.File["file"][0]
+				if header.Filename != "report.pdf" {
+					t.Fatalf("unexpected multipart filename: %q", header.Filename)
+				}
+				if ct := header.Header.Get("Content-Type"); ct != "application/pdf" {
+					t.Fatalf("unexpected content-type: %q", ct)
 				}
 			},
 		},

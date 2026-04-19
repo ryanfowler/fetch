@@ -176,6 +176,8 @@ fetch -F file=@document.pdf -m POST example.com/upload
 fetch -F avatar=@photo.jpg -F name=John -m POST example.com/profile
 ```
 
+When uploading a file by path, only the file's base name is sent in the multipart `filename` parameter.
+
 ### Multiple Files
 
 ```sh
