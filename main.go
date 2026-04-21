@@ -169,6 +169,7 @@ func main() {
 		ContentType:      app.ContentType,
 		Copy:             getValue(app.Cfg.Copy),
 		Data:             app.Data,
+		Digest:           app.Digest,
 		Discard:          app.Discard,
 		DNSServer:        app.Cfg.DNSServer,
 		DryRun:           app.DryRun,

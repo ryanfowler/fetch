@@ -639,7 +639,11 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		if !ok {
 			return fmt.Errorf("invalid basic auth format, expected USER:PASS")
 		}
-		a.Basic = &core.KeyVal[string]{Key: user, Val: pass}
+		if r.DigestAuth {
+			a.Digest = &core.KeyVal[string]{Key: user, Val: pass}
+		} else {
+			a.Basic = &core.KeyVal[string]{Key: user, Val: pass}
+		}
 	}
 	if r.Bearer != "" {
 		a.Bearer = r.Bearer

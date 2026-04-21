@@ -424,6 +424,79 @@ func TestReplayableBody(t *testing.T) {
 	})
 }
 
+func TestFindDigestChallenge(t *testing.T) {
+	tests := []struct {
+		name   string
+		header http.Header
+		want   string
+	}{
+		{
+			name:   "single digest header",
+			header: http.Header{"Www-Authenticate": []string{`Digest realm="test", nonce="abc123"`}},
+			want:   `Digest realm="test", nonce="abc123"`,
+		},
+		{
+			name:   "single basic header",
+			header: http.Header{"Www-Authenticate": []string{`Basic realm="test"`}},
+			want:   "",
+		},
+		{
+			name:   "combined digest second",
+			header: http.Header{"Www-Authenticate": []string{`Basic realm="x", Digest realm="y", nonce="abc123"`}},
+			want:   `Digest realm="y", nonce="abc123"`,
+		},
+		{
+			name:   "combined digest second no space after comma",
+			header: http.Header{"Www-Authenticate": []string{`Basic realm="x",Digest realm="y",nonce="abc123"`}},
+			want:   `Digest realm="y",nonce="abc123"`,
+		},
+		{
+			name:   "combined digest first",
+			header: http.Header{"Www-Authenticate": []string{`Digest realm="y", nonce="abc123", Basic realm="x"`}},
+			want:   `Digest realm="y", nonce="abc123"`,
+		},
+		{
+			name:   "combined multiple trailing",
+			header: http.Header{"Www-Authenticate": []string{`Basic realm="x", Digest realm="y", nonce="abc123", Bearer token="z"`}},
+			want:   `Digest realm="y", nonce="abc123"`,
+		},
+		{
+			name:   "multiple headers",
+			header: http.Header{"Www-Authenticate": []string{`Basic realm="x"`, `Digest realm="y", nonce="abc123"`}},
+			want:   `Digest realm="y", nonce="abc123"`,
+		},
+		{
+			name:   "digest inside quoted string",
+			header: http.Header{"Www-Authenticate": []string{`Basic realm="My Digest", Digest realm="y", nonce="abc123"`}},
+			want:   `Digest realm="y", nonce="abc123"`,
+		},
+		{
+			name:   "escaped quotes",
+			header: http.Header{"Www-Authenticate": []string{`Basic realm="My \"Digest\"", Digest realm="y", nonce="abc123"`}},
+			want:   `Digest realm="y", nonce="abc123"`,
+		},
+		{
+			name:   "space separated no comma",
+			header: http.Header{"Www-Authenticate": []string{`Basic realm="x" Digest realm="y" nonce="abc123"`}},
+			want:   `Digest realm="y" nonce="abc123"`,
+		},
+		{
+			name:   "no digest",
+			header: http.Header{"Www-Authenticate": []string{`Basic realm="x", Bearer token="z"`}},
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := findDigestChallenge(tt.header)
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func isClosedFileErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "file already closed")
 }

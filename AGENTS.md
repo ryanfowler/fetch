@@ -4,7 +4,7 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## Project Overview
 
-`fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support with reflection/discovery and JSON-to-protobuf conversion, and authentication (Basic, Bearer, AWS SigV4).
+`fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support with reflection/discovery and JSON-to-protobuf conversion, and authentication (Basic, Digest, Bearer, AWS SigV4).
 
 The repository currently targets Go 1.26.1 in `go.mod` and GitHub Actions.
 
@@ -52,6 +52,7 @@ prettier -w .
 - **internal/config** - INI-format config file parsing with host-specific overrides.
 - **internal/core** - Shared types (`Printer`, `Color`, `Format`, `HTTPVersion`) and utilities.
 - **internal/curl** - Curl command parser for `--from-curl` flag. Tokenizes and parses curl command strings into an intermediate `Result` struct.
+- **internal/digest** - HTTP Digest Authentication challenge parsing and response computation (RFC 7616).
 - **internal/fetch** - Core HTTP request execution. `fetch.go:Fetch()` is the main entry point that builds requests, handles gRPC framing/reflection/discovery, and routes to formatters.
 - **internal/fileutil** - Shared file helpers, including cross-platform atomic replacement for temp-file write flows.
 - **internal/format** - Response body formatters (JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, SSE, NDJSON). Each formatter writes colored output to a `Printer`.

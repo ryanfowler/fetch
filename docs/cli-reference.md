@@ -118,6 +118,14 @@ HTTP Basic Authentication.
 fetch --basic username:password example.com
 ```
 
+### `--digest USER:PASS`
+
+HTTP Digest Authentication. Uses a challenge-response handshake to avoid sending credentials in plain text.
+
+```sh
+fetch --digest username:password example.com
+```
+
 ### `--bearer TOKEN`
 
 HTTP Bearer Token Authentication.
@@ -589,7 +597,7 @@ fetch --from-curl 'https://example.com'
 | Category     | Curl Flags                                                                                                                                    |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Request      | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G`                                         |
-| Auth         | `-u`, `--aws-sigv4`, `--oauth2-bearer`                                                                                                        |
+| Auth         | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                            |
 | TLS          | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`                                                                                         |
 | Output       | `-o`, `-O`, `-J`                                                                                                                              |
 | Network      | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r`            |

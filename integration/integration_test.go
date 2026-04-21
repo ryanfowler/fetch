@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -11,6 +12,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -228,6 +230,143 @@ func TestMain(t *testing.T) {
 
 		res := runFetch(t, fetchPath, server.URL, "--bearer", "token")
 		assertExitCode(t, 0, res)
+	})
+
+	t.Run("digest auth", func(t *testing.T) {
+		t.Parallel()
+		var challenged bool
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				challenged = true
+				return
+			}
+			if !strings.HasPrefix(auth, "Digest ") {
+				w.WriteHeader(400)
+				return
+			}
+			// Parse the response from the client.
+			params := parseDigestAuthParams(auth[len("Digest "):])
+			if params["username"] != "user" || params["realm"] != "test" {
+				w.WriteHeader(400)
+				return
+			}
+			// Verify the response hash.
+			ha1 := hashMD5("user:test:pass")
+			ha2 := hashMD5(r.Method + ":" + params["uri"])
+			var expected string
+			if params["qop"] == "auth" {
+				expected = hashMD5(ha1 + ":abc123:" + params["nc"] + ":" + params["cnonce"] + ":auth:" + ha2)
+			} else {
+				expected = hashMD5(ha1 + ":abc123:" + ha2)
+			}
+			if params["response"] != expected {
+				w.WriteHeader(400)
+				return
+			}
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--digest", "user:pass")
+		assertExitCode(t, 0, res)
+		if !challenged {
+			t.Fatal("server did not send digest challenge")
+		}
+	})
+
+	t.Run("digest auth with body", func(t *testing.T) {
+		t.Parallel()
+		var challenged bool
+		var body string
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				challenged = true
+				return
+			}
+			if !strings.HasPrefix(auth, "Digest ") {
+				w.WriteHeader(400)
+				return
+			}
+			// Parse the response from the client.
+			params := parseDigestAuthParams(auth[len("Digest "):])
+			if params["username"] != "user" || params["realm"] != "test" {
+				w.WriteHeader(400)
+				return
+			}
+			// Verify the response hash.
+			ha1 := hashMD5("user:test:pass")
+			ha2 := hashMD5(r.Method + ":" + params["uri"])
+			var expected string
+			if params["qop"] == "auth" {
+				expected = hashMD5(ha1 + ":abc123:" + params["nc"] + ":" + params["cnonce"] + ":auth:" + ha2)
+			} else {
+				expected = hashMD5(ha1 + ":abc123:" + ha2)
+			}
+			if params["response"] != expected {
+				w.WriteHeader(400)
+				return
+			}
+			var buf bytes.Buffer
+			buf.ReadFrom(r.Body)
+			body = buf.String()
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--digest", "user:pass", "--data", "hello=world")
+		assertExitCode(t, 0, res)
+		if !challenged {
+			t.Fatal("server did not send digest challenge")
+		}
+		if body != "hello=world" {
+			t.Fatalf("unexpected body: %q", body)
+		}
+	})
+
+	t.Run("digest auth from curl", func(t *testing.T) {
+		t.Parallel()
+		var challenged bool
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				challenged = true
+				return
+			}
+			if !strings.HasPrefix(auth, "Digest ") {
+				w.WriteHeader(400)
+				return
+			}
+			params := parseDigestAuthParams(auth[len("Digest "):])
+			if params["username"] != "user" || params["realm"] != "test" {
+				w.WriteHeader(400)
+				return
+			}
+			ha1 := hashMD5("user:test:pass")
+			ha2 := hashMD5(r.Method + ":" + params["uri"])
+			var expected string
+			if params["qop"] == "auth" {
+				expected = hashMD5(ha1 + ":abc123:" + params["nc"] + ":" + params["cnonce"] + ":auth:" + ha2)
+			} else {
+				expected = hashMD5(ha1 + ":abc123:" + ha2)
+			}
+			if params["response"] != expected {
+				w.WriteHeader(400)
+				return
+			}
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf("curl --digest -u user:pass %s", server.URL))
+		assertExitCode(t, 0, res)
+		if !challenged {
+			t.Fatal("server did not send digest challenge")
+		}
 	})
 
 	t.Run("data", func(t *testing.T) {
@@ -3591,4 +3730,64 @@ func startMTLSServer(t *testing.T, certPath, keyPath, caCertPath string) *httpte
 
 	server.StartTLS()
 	return server
+}
+
+// parseDigestAuthParams parses the parameters from a Digest Authorization header.
+func parseDigestAuthParams(s string) map[string]string {
+	params := make(map[string]string)
+	for len(s) > 0 {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			break
+		}
+		key, rest, ok := strings.Cut(s, "=")
+		if !ok {
+			break
+		}
+		key = strings.TrimSpace(key)
+		rest = strings.TrimSpace(rest)
+
+		var value string
+		if len(rest) > 0 && rest[0] == '"' {
+			value, rest = parseDigestQuotedString(rest)
+		} else {
+			var val string
+			val, rest, _ = strings.Cut(rest, ",")
+			value = strings.TrimSpace(val)
+		}
+		params[strings.ToLower(key)] = value
+		if len(rest) > 0 && rest[0] == ',' {
+			rest = rest[1:]
+		}
+		s = rest
+	}
+	return params
+}
+
+func parseDigestQuotedString(s string) (string, string) {
+	if len(s) == 0 || s[0] != '"' {
+		return "", s
+	}
+	var b strings.Builder
+	i := 1
+	for i < len(s) {
+		c := s[i]
+		if c == '"' {
+			i++
+			break
+		}
+		if c == '\\' && i+1 < len(s) {
+			b.WriteByte(s[i+1])
+			i += 2
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String(), s[i:]
+}
+
+func hashMD5(s string) string {
+	h := md5.Sum([]byte(s))
+	return hex.EncodeToString(h[:])
 }

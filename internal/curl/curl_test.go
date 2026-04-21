@@ -366,6 +366,22 @@ func TestParseAuth(t *testing.T) {
 			},
 		},
 		{
+			name:  "digest auth",
+			input: "curl --digest -u user:pass https://example.com",
+			check: func(t *testing.T, r *Result) {
+				assertEqual(t, "BasicAuth", r.BasicAuth, "user:pass")
+				assertTrue(t, "DigestAuth", r.DigestAuth)
+			},
+		},
+		{
+			name:  "digest auth long flag",
+			input: "curl --user user:pass --digest https://example.com",
+			check: func(t *testing.T, r *Result) {
+				assertEqual(t, "BasicAuth", r.BasicAuth, "user:pass")
+				assertTrue(t, "DigestAuth", r.DigestAuth)
+			},
+		},
+		{
 			name:  "aws-sigv4",
 			input: `curl --aws-sigv4 "aws:amz:us-east-1:s3" https://example.com`,
 			check: func(t *testing.T, r *Result) {

@@ -20,6 +20,35 @@ The `--basic` flag sets the `Authorization` header:
 Authorization: Basic base64(username:password)
 ```
 
+## HTTP Digest Authentication
+
+Digest Authentication uses a challenge-response mechanism that is more secure than Basic Authentication because credentials are never sent in plain text.
+
+### Command Line
+
+```sh
+fetch --digest username:password example.com
+```
+
+### How It Works
+
+The `--digest` flag performs a two-step handshake:
+
+1. **Challenge**: The server responds with `401 Unauthorized` and a `WWW-Authenticate: Digest ...` header containing a nonce and realm.
+2. **Response**: `fetch` computes an MD5 hash of the credentials, nonce, and request details, then resends the request with an `Authorization` header:
+
+```
+Authorization: Digest username="...", realm="...", nonce="...", uri="...", response="..."
+```
+
+### Compatibility with curl
+
+`fetch` supports curl's `--digest` flag when using `--from-curl`:
+
+```sh
+fetch --from-curl 'curl --digest -u username:password example.com'
+```
+
 ## Bearer Token Authentication
 
 Bearer tokens are commonly used with OAuth 2.0 and JWT-based authentication.
@@ -188,6 +217,7 @@ header = X-Client-ID: client123
 Authentication options are mutually exclusive. You cannot combine:
 
 - `--basic`
+- `--digest`
 - `--bearer`
 - `--aws-sigv4`
 
