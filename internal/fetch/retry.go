@@ -12,10 +12,12 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/digest"
 )
 
 // retryableRequest executes an HTTP request with optional retry logic and
@@ -23,9 +25,9 @@ import (
 func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {
 	maxAttempts := max(r.Retry+1, 1)
 
-	// Buffer the request body so it can be replayed on retries.
+	// Buffer the request body so it can be replayed on retries or digest auth.
 	var replayer *replayableBody
-	if maxAttempts > 1 {
+	if maxAttempts > 1 || r.Digest != nil {
 		var err error
 		replayer, err = newReplayableBody(req)
 		if err != nil {
@@ -87,7 +89,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 			}))
 		}
 
-		resp, doErr := c.Do(attemptReq)
+		resp, doErr := doOnce(r, c, attemptReq, replayer)
 
 		retryable, retryAfter := shouldRetry(resp, doErr)
 		isLastAttempt := attempt == maxAttempts-1
@@ -123,6 +125,155 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 
 	// Unreachable, but the compiler needs it.
 	return 0, nil
+}
+
+// doOnce performs a single request, handling digest auth challenge-response
+// if configured. If the server responds with 401 and a Digest WWW-Authenticate
+// header, the request body is replayed and the request is retried with the
+// computed digest Authorization header.
+func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayableBody) (*http.Response, error) {
+	resp, err := c.Do(req)
+	if err != nil || r.Digest == nil || resp.StatusCode != http.StatusUnauthorized {
+		return resp, err
+	}
+
+	wwwAuth := findDigestChallenge(resp.Header)
+	if wwwAuth == "" {
+		return resp, nil
+	}
+
+	chal, err := digest.ParseChallenge(wwwAuth)
+	if err != nil {
+		return resp, nil
+	}
+
+	auth, err := digest.Response(req, chal, r.Digest.Key, r.Digest.Val)
+	if err != nil {
+		return resp, nil
+	}
+
+	// Replay the request body.
+	var body io.ReadCloser
+	if req.Body != nil && req.Body != http.NoBody {
+		if replayer != nil {
+			body, err = replayer.reset()
+			if err != nil {
+				return resp, nil
+			}
+		} else if req.GetBody != nil {
+			body, err = req.GetBody()
+			if err != nil {
+				return resp, nil
+			}
+		} else {
+			// Cannot replay body, return the original 401.
+			return resp, nil
+		}
+	}
+
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	req2 := req.Clone(req.Context())
+	req2.Body = body
+	req2.Header.Set("Authorization", auth)
+
+	return c.Do(req2)
+}
+
+// findDigestChallenge searches the WWW-Authenticate headers for a Digest
+// challenge and returns it if found.
+func findDigestChallenge(h http.Header) string {
+	for _, v := range h.Values("WWW-Authenticate") {
+		if chal := extractDigestChallenge(v); chal != "" {
+			return chal
+		}
+	}
+	return ""
+}
+
+// extractDigestChallenge searches a single WWW-Authenticate header value for a
+// Digest challenge and returns just that challenge if found.
+func extractDigestChallenge(v string) string {
+	upper := strings.ToUpper(v)
+	if strings.HasPrefix(upper, "DIGEST ") {
+		return extractDigestFrom(v, 0)
+	}
+
+	inQuotes := false
+	escaped := false
+	for i := 0; i < len(upper); i++ {
+		c := v[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if inQuotes {
+			continue
+		}
+		if strings.HasPrefix(upper[i:], "DIGEST ") {
+			if i > 0 {
+				prev := v[i-1]
+				if prev != ' ' && prev != ',' {
+					continue
+				}
+			}
+			return extractDigestFrom(v, i)
+		}
+	}
+	return ""
+}
+
+func extractDigestFrom(v string, start int) string {
+	end := len(v)
+	inQuotes := false
+	escaped := false
+	for j := start + 6; j < len(v); j++ {
+		c := v[j]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			inQuotes = !inQuotes
+			continue
+		}
+		if !inQuotes && (c == ',' || c == ' ') {
+			rest := strings.TrimSpace(v[j+1:])
+			if isKnownScheme(rest) {
+				end = j
+				break
+			}
+		}
+	}
+	return strings.TrimSpace(v[start:end])
+}
+
+// isKnownScheme reports whether s starts with a known HTTP authentication
+// scheme name followed by a space.
+func isKnownScheme(s string) bool {
+	upper := strings.ToUpper(s)
+	for _, scheme := range []string{
+		"BASIC ", "BEARER ", "DIGEST ", "NEGOTIATE ", "NTLM ", "HOBA ",
+		"MUTUAL ", "SCRAM-SHA-1 ", "SCRAM-SHA-256 ", "AWS4-HMAC-SHA256 ",
+	} {
+		if strings.HasPrefix(upper, scheme) {
+			return true
+		}
+	}
+	return false
 }
 
 // shouldRetry determines if a request should be retried based on the response

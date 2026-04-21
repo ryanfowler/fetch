@@ -51,6 +51,7 @@ type Request struct {
 	ContentType      string
 	Copy             bool
 	Data             io.Reader
+	Digest           *core.KeyVal[string]
 	Discard          bool
 	DNSServer        *url.URL
 	DryRun           bool

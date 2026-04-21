@@ -398,7 +398,7 @@ func (rc *reflectionClient) invokeHTTP(ctx context.Context, path string, payload
 		}
 	}()
 
-	resp, err := rc.client.Do(req)
+	resp, err := doOnce(rc.request, rc.client, req, nil)
 	if err != nil {
 		return nil, err
 	}

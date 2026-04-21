@@ -511,6 +511,14 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	// Set the content-length header if the body is a file.
 	setFileContentLength(req)
 
+	// Set GetBody for file bodies so the request can be replayed.
+	if f, ok := body.(*os.File); ok && f != os.Stdin {
+		path := f.Name()
+		req.GetBody = func() (io.ReadCloser, error) {
+			return os.Open(path)
+		}
+	}
+
 	// Optionally set the authorization header.
 	switch {
 	case cfg.AWSSigV4 != nil:

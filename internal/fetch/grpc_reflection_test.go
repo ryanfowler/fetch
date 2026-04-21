@@ -2,9 +2,14 @@ package fetch
 
 import (
 	"context"
+	"encoding/binary"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	fetchgrpc "github.com/ryanfowler/fetch/internal/grpc"
 	iproto "github.com/ryanfowler/fetch/internal/proto"
@@ -133,6 +138,57 @@ func createDescribeTestDescriptorSet() *descriptorpb.FileDescriptorSet {
 				},
 			},
 		},
+	}
+}
+
+func TestReflectionClientDigestAuth(t *testing.T) {
+	var challengeResponded bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth == "" {
+			w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if !strings.HasPrefix(auth, "Digest ") {
+			t.Errorf("expected Digest auth, got: %s", auth)
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		challengeResponded = true
+
+		payload := buildListResponse("test.Service")
+		frame := make([]byte, 5+len(payload))
+		binary.BigEndian.PutUint32(frame[1:5], uint32(len(payload)))
+		copy(frame[5:], payload)
+		w.Header().Set("Content-Type", "application/grpc+proto")
+		w.WriteHeader(http.StatusOK)
+		w.Write(frame)
+	}))
+	defer server.Close()
+
+	u, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse URL: %v", err)
+	}
+
+	req := &Request{
+		URL:    u,
+		Digest: &core.KeyVal[string]{Key: "user", Val: "pass"},
+		HTTP:   core.HTTP1,
+	}
+	c := client.NewClient(client.ClientConfig{HTTP: core.HTTP1})
+	rc := newReflectionClient(req, c)
+
+	names, err := rc.ListServices(context.Background())
+	if err != nil {
+		t.Fatalf("ListServices() error = %v", err)
+	}
+	if !challengeResponded {
+		t.Fatal("server did not receive digest challenge response")
+	}
+	if got, want := strings.Join(names, ","), "test.Service"; got != want {
+		t.Fatalf("ListServices() = %q, want %q", got, want)
 	}
 }
 

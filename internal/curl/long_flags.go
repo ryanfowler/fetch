@@ -136,6 +136,9 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		}
 		r.Bearer = v
 		return n, nil
+	case "digest":
+		r.DigestAuth = true
+		return 0, nil
 
 	// TLS / Security.
 	case "insecure":

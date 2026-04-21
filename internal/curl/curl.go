@@ -30,6 +30,7 @@ type Result struct {
 	Headers          []header
 	DataValues       []DataValue
 	BasicAuth        string
+	DigestAuth       bool
 	AWSSigv4         string
 	Bearer           string
 	FormFields       []formField

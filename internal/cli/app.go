@@ -22,6 +22,7 @@ type App struct {
 	AWSSigv4         *aws.Config
 	Basic            *core.KeyVal[string]
 	Bearer           string
+	Digest           *core.KeyVal[string]
 	BuildInfo        bool
 	Clobber          bool
 	Complete         string
@@ -104,7 +105,7 @@ func (a *App) CLI() *CLI {
 			return nil
 		},
 		ExclusiveFlags: [][]string{
-			{"aws-sigv4", "basic", "bearer"},
+			{"aws-sigv4", "basic", "bearer", "digest"},
 			{"data", "form", "json", "multipart", "xml"},
 			{"discard", "copy"},
 			{"discard", "output"},
@@ -123,7 +124,7 @@ func (a *App) CLI() *CLI {
 		},
 		FromCurlExclusiveFlags: []string{
 			"method", "header", "data", "json", "xml",
-			"form", "multipart", "basic", "bearer", "aws-sigv4",
+			"form", "multipart", "basic", "bearer", "digest", "aws-sigv4",
 			"output", "remote-name", "remote-header-name",
 			"range", "unix", "timeout", "connect-timeout",
 			"redirects", "proxy", "insecure", "tls", "http",
@@ -203,6 +204,15 @@ func (a *App) CLI() *CLI {
 				Description: "Send a request body",
 				IsSet:       func() bool { return a.dataSet },
 				Fn:          a.parseDataFlag,
+			},
+
+			// Custom: digest auth parsing
+			{
+				Long:        "digest",
+				Args:        "USER:PASS",
+				Description: "Enable HTTP digest authentication",
+				IsSet:       func() bool { return a.Digest != nil },
+				Fn:          a.parseDigestFlag,
 			},
 
 			boolFlag(&a.Discard, "discard", "", "Discard the response body"),
@@ -422,6 +432,16 @@ func (a *App) parseBasicFlag(value string) error {
 		return core.NewValueError("basic", value, usage, false)
 	}
 	a.Basic = &core.KeyVal[string]{Key: user, Val: pass}
+	return nil
+}
+
+func (a *App) parseDigestFlag(value string) error {
+	user, pass, ok := core.CutTrimmed(value, ":")
+	if !ok {
+		const usage = "format must be <USERNAME:PASSWORD>"
+		return core.NewValueError("digest", value, usage, false)
+	}
+	a.Digest = &core.KeyVal[string]{Key: user, Val: pass}
 	return nil
 }
 
