@@ -125,7 +125,7 @@ func NewClient(cfg ClientConfig) *Client {
 
 	// Set up the redirect handler.
 	client := &http.Client{Transport: transport}
-	maxRedirects := -1
+	maxRedirects := 10
 	if cfg.Redirects != nil {
 		maxRedirects = *cfg.Redirects
 	}
