@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -190,6 +191,31 @@ func TestDoLeavesUnsupportedStackedContentEncodingUntouched(t *testing.T) {
 	}
 	if !bytes.Equal(got, body) {
 		t.Fatalf("body = %q, want %q", got, body)
+	}
+}
+
+func TestNewClientUsesDefaultRedirectLimit(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Redirect(w, r, "/", http.StatusFound)
+	}))
+	defer server.Close()
+
+	c := NewClient(ClientConfig{})
+
+	resp, err := c.HTTPClient().Get(server.URL)
+	if resp != nil {
+		resp.Body.Close()
+	}
+	if err == nil {
+		t.Fatal("expected redirect limit error")
+	}
+	if !strings.Contains(err.Error(), "exceeded maximum number of redirects: 10") {
+		t.Fatalf("error = %q, want default redirect limit", err)
+	}
+	if requests != 11 {
+		t.Fatalf("requests = %d, want 11", requests)
 	}
 }
 
