@@ -38,11 +38,11 @@ func editRequestBody(req *http.Request) error {
 		return err
 	}
 	defer f.Close()
+	defer func() { os.Remove(f.Name()) }()
 	path, err := filepath.Abs(f.Name())
 	if err != nil {
 		return err
 	}
-	defer func() { os.Remove(path) }()
 
 	// Copy any existing body to the temporary file before editing.
 	input := req.Body
