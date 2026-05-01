@@ -92,24 +92,10 @@ func Parse(command string) (*Result, error) {
 }
 
 func postProcess(r *Result) error {
-	// -G flag: move data to query string.
-	if r.GetFlag && len(r.DataValues) > 0 {
-		parts := make([]string, len(r.DataValues))
-		for i, dv := range r.DataValues {
-			parts[i] = dv.Value
-		}
-		data := strings.Join(parts, "&")
-		if r.URL != "" {
-			sep := "?"
-			if strings.Contains(r.URL, "?") {
-				sep = "&"
-			}
-			r.URL = r.URL + sep + data
-		}
-		r.DataValues = nil
-		if r.Method == "" {
-			r.Method = "GET"
-		}
+	// -G flag: data values are moved to the query string after
+	// applyFromCurl expands @file and --data-urlencode file forms.
+	if r.GetFlag && r.Method == "" {
+		r.Method = "GET"
 	}
 
 	// Reject conflicting body sources.

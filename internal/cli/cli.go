@@ -609,12 +609,17 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 				parts = append(parts, string(b))
 			}
 		}
-		a.Data = strings.NewReader(strings.Join(parts, "&"))
-		a.dataSet = true
+		data := strings.Join(parts, "&")
+		if r.GetFlag {
+			appendRawQuery(a.URL, data)
+		} else {
+			a.Data = strings.NewReader(data)
+			a.dataSet = true
 
-		// Set default content type for -d data if not explicitly set.
-		if !r.HasContentType {
-			a.ContentType = "application/x-www-form-urlencoded"
+			// Set default content type for -d data if not explicitly set.
+			if !r.HasContentType {
+				a.ContentType = "application/x-www-form-urlencoded"
+			}
 		}
 	}
 
@@ -826,4 +831,15 @@ func readFileForURLEncode(path string) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+func appendRawQuery(u *url.URL, query string) {
+	if query == "" {
+		return
+	}
+	if u.RawQuery == "" {
+		u.RawQuery = query
+		return
+	}
+	u.RawQuery += "&" + query
 }
