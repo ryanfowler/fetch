@@ -635,7 +635,9 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 
 	// Multipart form fields.
 	for _, f := range r.FormFields {
-		a.Multipart = append(a.Multipart, core.KeyVal[string]{Key: f.Name, Val: f.Value})
+		if err := a.parseMultipartFlag(f.Name + "=" + f.Value); err != nil {
+			return err
+		}
 	}
 
 	// Authentication.
