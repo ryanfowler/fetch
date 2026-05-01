@@ -160,6 +160,58 @@ func TestFromCurlCookieFileRejected(t *testing.T) {
 	}
 }
 
+func TestFromCurlMultipartFileValidation(t *testing.T) {
+	t.Run("accepts existing file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "payload.txt")
+		if err := os.WriteFile(path, []byte("file content"), 0o644); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+
+		app, err := Parse([]string{
+			"--from-curl",
+			`curl -F 'file=@` + path + `' https://example.com`,
+		})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if len(app.Multipart) != 1 {
+			t.Fatalf("len(Multipart) = %d, want 1", len(app.Multipart))
+		}
+		if app.Multipart[0].Key != "file" || app.Multipart[0].Val != "@"+path {
+			t.Fatalf("Multipart[0] = %#v, want file=@%s", app.Multipart[0], path)
+		}
+	})
+
+	t.Run("rejects missing file during parse", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing.txt")
+		_, err := Parse([]string{
+			"--from-curl",
+			`curl -F 'file=@` + path + `' https://example.com`,
+		})
+		if err == nil {
+			t.Fatal("expected missing file error, got nil")
+		}
+		if !strings.Contains(err.Error(), "file does not exist: '"+path+"'") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("rejects directory during parse", func(t *testing.T) {
+		path := t.TempDir()
+		_, err := Parse([]string{
+			"--from-curl",
+			`curl -F 'file=@` + path + `' https://example.com`,
+		})
+		if err == nil {
+			t.Fatal("expected directory error, got nil")
+		}
+		if !strings.Contains(err.Error(), "file is a directory: '"+path+"'") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
 func TestCLI(t *testing.T) {
 	app, err := Parse(nil)
 	if err != nil {
