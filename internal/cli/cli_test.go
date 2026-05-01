@@ -84,6 +84,49 @@ func TestFromCurlDataUrlencode(t *testing.T) {
 	})
 }
 
+func TestFromCurlGetData(t *testing.T) {
+	t.Run("-d @file expands contents into query", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "payload.txt")
+		os.WriteFile(path, []byte("q=search&limit=10"), 0o644)
+
+		app, err := Parse([]string{
+			"--from-curl",
+			`curl -G -d '@` + path + `' https://example.com`,
+		})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if app.Data != nil {
+			t.Fatal("expected no request body for curl -G")
+		}
+		if app.URL.RawQuery != "q=search&limit=10" {
+			t.Fatalf("RawQuery = %q, want %q", app.URL.RawQuery, "q=search&limit=10")
+		}
+	})
+
+	t.Run("--data-urlencode name@file expands and encodes contents into query", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "data.txt")
+		os.WriteFile(path, []byte("value with spaces&x=1"), 0o644)
+
+		app, err := Parse([]string{
+			"--from-curl",
+			`curl -G --data-urlencode 'field@` + path + `' https://example.com?existing=1`,
+		})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if app.Data != nil {
+			t.Fatal("expected no request body for curl -G")
+		}
+		want := "existing=1&field=value+with+spaces%26x%3D1"
+		if app.URL.RawQuery != want {
+			t.Fatalf("RawQuery = %q, want %q", app.URL.RawQuery, want)
+		}
+	})
+}
+
 func TestFromCurlDataFileClose(t *testing.T) {
 	// Verify that file descriptors are properly closed after reading.
 	dir := t.TempDir()

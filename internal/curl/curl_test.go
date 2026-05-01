@@ -225,17 +225,16 @@ func TestParseSimple(t *testing.T) {
 			input: `curl -G -d "q=search" https://example.com`,
 			check: func(t *testing.T, r *Result) {
 				assertEqual(t, "Method", r.Method, "GET")
-				assertEqual(t, "URL", r.URL, "https://example.com?q=search")
-				if len(r.DataValues) != 0 {
-					t.Fatalf("expected DataValues to be cleared, got %v", r.DataValues)
-				}
+				assertEqual(t, "URL", r.URL, "https://example.com")
+				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "q=search"}})
 			},
 		},
 		{
 			name:  "GET flag with data and existing query",
 			input: `curl -G -d "b=2" "https://example.com?a=1"`,
 			check: func(t *testing.T, r *Result) {
-				assertEqual(t, "URL", r.URL, "https://example.com?a=1&b=2")
+				assertEqual(t, "URL", r.URL, "https://example.com?a=1")
+				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "b=2"}})
 			},
 		},
 		{
