@@ -47,6 +47,7 @@ type Result struct {
 	Proxy            string
 	DoHURL           string
 	HTTPVersion      string
+	TLSMaxVersion    string
 	TLSVersion       string
 	CACert           string
 	Cert             string

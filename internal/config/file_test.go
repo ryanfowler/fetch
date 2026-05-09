@@ -56,12 +56,14 @@ func TestParseFile(t *testing.T) {
 			name: "successful parse",
 			config: `
 				timeout = 10
-				tls = 1.3`,
+				tls = 1.2
+				max-tls = 1.3`,
 			expFile: &File{
 				Global: &Config{
 					isFile:  true,
 					Timeout: new(10 * time.Second),
-					TLS:     new(uint16(tls.VersionTLS13)),
+					TLSMax:  new(uint16(tls.VersionTLS13)),
+					TLSMin:  new(uint16(tls.VersionTLS12)),
 				},
 				Path: "test/config",
 			},

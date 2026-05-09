@@ -62,7 +62,8 @@ type ClientConfig struct {
 	Insecure       bool
 	Proxy          *url.URL
 	Redirects      *int
-	TLS            uint16
+	TLSMax         uint16
+	TLSMin         uint16
 	UnixSocket     string
 }
 
@@ -75,7 +76,8 @@ func NewClient(cfg ClientConfig) *Client {
 		CACerts:    cfg.CACerts,
 		ClientCert: cfg.ClientCert,
 		Insecure:   cfg.Insecure,
-		TLS:        cfg.TLS,
+		TLSMax:     cfg.TLSMax,
+		TLSMin:     cfg.TLSMin,
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
 	res := resolver.New(resolver.Config{Server: cfg.DNSServer})

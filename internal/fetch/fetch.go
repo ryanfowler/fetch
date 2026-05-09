@@ -86,7 +86,8 @@ type Request struct {
 	Session          string
 	Timeout          time.Duration
 	Timing           bool
-	TLS              uint16
+	TLSMax           uint16
+	TLSMin           uint16
 	UnixSocket       string
 	URL              *url.URL
 	Verbosity        core.Verbosity

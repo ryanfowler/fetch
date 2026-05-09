@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/tls"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,41 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
+
+func TestTLSFlags(t *testing.T) {
+	t.Run("tls remains minimum version alias", func(t *testing.T) {
+		app, err := Parse([]string{"--tls", "1.2", "https://example.com"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if app.Cfg.TLSMin == nil || *app.Cfg.TLSMin != tls.VersionTLS12 {
+			t.Fatalf("TLSMin = %v, want TLS 1.2", app.Cfg.TLSMin)
+		}
+	})
+
+	t.Run("min and max tls", func(t *testing.T) {
+		app, err := Parse([]string{"--min-tls", "1.2", "--max-tls", "1.3", "https://example.com"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if app.Cfg.TLSMin == nil || *app.Cfg.TLSMin != tls.VersionTLS12 {
+			t.Fatalf("TLSMin = %v, want TLS 1.2", app.Cfg.TLSMin)
+		}
+		if app.Cfg.TLSMax == nil || *app.Cfg.TLSMax != tls.VersionTLS13 {
+			t.Fatalf("TLSMax = %v, want TLS 1.3", app.Cfg.TLSMax)
+		}
+	})
+
+	t.Run("rejects invalid tls range", func(t *testing.T) {
+		_, err := Parse([]string{"--min-tls", "1.3", "--max-tls", "1.2", "https://example.com"})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "max-tls") {
+			t.Fatalf("error = %q, want max-tls", err.Error())
+		}
+	})
+}
 
 func TestFlagsAlphabeticalOrder(t *testing.T) {
 	app, err := Parse(nil)

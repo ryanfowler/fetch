@@ -62,6 +62,11 @@ func main() {
 		core.WriteErrorMsg(p, err)
 		os.Exit(1)
 	}
+	if err := app.Cfg.Validate(); err != nil {
+		p := handle.Stderr()
+		core.WriteErrorMsg(p, err)
+		os.Exit(1)
+	}
 
 	// Start async update, if necessary.
 	if !app.Update && !core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
@@ -210,7 +215,8 @@ func main() {
 		Session:          getValue(app.Cfg.Session),
 		Timeout:          getValue(app.Cfg.Timeout),
 		Timing:           getValue(app.Cfg.Timing),
-		TLS:              getValue(app.Cfg.TLS),
+		TLSMax:           getValue(app.Cfg.TLSMax),
+		TLSMin:           getValue(app.Cfg.TLSMin),
 		UnixSocket:       app.UnixSocket,
 		URL:              app.URL,
 		Verbosity:        verbosity,
@@ -430,8 +436,11 @@ func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 	if app.Cfg.KeyPath != "" {
 		ignored = append(ignored, "--key")
 	}
-	if app.Cfg.TLS != nil {
+	if app.Cfg.TLSMin != nil {
 		ignored = append(ignored, "--tls")
+	}
+	if app.Cfg.TLSMax != nil {
+		ignored = append(ignored, "--max-tls")
 	}
 	if getValue(app.Cfg.Insecure) {
 		ignored = append(ignored, "--insecure")
@@ -574,7 +583,8 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		ClientCert: clientCert,
 		DNSServer:  app.Cfg.DNSServer,
 		Insecure:   getValue(app.Cfg.Insecure),
-		TLS:        getValue(app.Cfg.TLS),
+		TLSMax:     getValue(app.Cfg.TLSMax),
+		TLSMin:     getValue(app.Cfg.TLSMin),
 		Timeout:    getValue(app.Cfg.Timeout),
 		URL:        app.URL,
 	})

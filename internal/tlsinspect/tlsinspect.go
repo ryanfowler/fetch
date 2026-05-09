@@ -27,7 +27,8 @@ type Config struct {
 	ClientCert *tls.Certificate
 	DNSServer  *url.URL
 	Insecure   bool
-	TLS        uint16
+	TLSMax     uint16
+	TLSMin     uint16
 	Timeout    time.Duration
 	URL        *url.URL
 }
@@ -39,7 +40,8 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		CACerts:    cfg.CACerts,
 		ClientCert: cfg.ClientCert,
 		Insecure:   cfg.Insecure,
-		TLS:        cfg.TLS,
+		TLSMax:     cfg.TLSMax,
+		TLSMin:     cfg.TLSMin,
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
 	res := resolver.New(resolver.Config{Server: cfg.DNSServer})

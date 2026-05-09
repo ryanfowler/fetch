@@ -78,6 +78,7 @@ prettier -w .
 - `--grpc` now automatically tries gRPC reflection when no local schema is supplied.
 - Plaintext loopback gRPC servers are supported via `h2c` for both calls and discovery.
 - `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP or DoH responses.
+- `--tls` remains a compatibility alias for setting the minimum TLS version; prefer `--min-tls` in new docs/examples, and use `--max-tls` to cap negotiation or combine min/max for an exact TLS version.
 5. HTTP client executes request
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 

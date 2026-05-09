@@ -128,7 +128,7 @@ func (a *App) CLI() *CLI {
 			"form", "multipart", "basic", "bearer", "digest", "aws-sigv4",
 			"output", "remote-name", "remote-header-name",
 			"range", "unix", "timeout", "connect-timeout",
-			"redirects", "proxy", "insecure", "tls", "http",
+			"redirects", "proxy", "insecure", "max-tls", "min-tls", "tls", "http",
 			"cert", "key", "ca-cert", "dns-server",
 			"retry", "retry-delay", "grpc", "grpc-describe", "grpc-list", "query",
 		},
@@ -293,9 +293,17 @@ func (a *App) CLI() *CLI {
 				Fn:          a.parseKeyFlag,
 			},
 
+			cfgFlag("max-tls", "", "VERSION", "Maximum TLS version",
+				func() bool { return a.Cfg.TLSMax != nil }, a.Cfg.ParseMaxTLS).
+				WithValues(tlsValues()),
+
 			stringFlag(&a.Method, "method", "m", "METHOD", "HTTP method to use").
 				WithAliases("X").
 				WithDefault("GET"),
+
+			cfgFlag("min-tls", "", "VERSION", "Minimum TLS version",
+				func() bool { return a.Cfg.TLSMin != nil }, a.Cfg.ParseMinTLS).
+				WithValues(tlsValues()),
 
 			// Custom: multipart with file validation
 			{
@@ -375,13 +383,9 @@ func (a *App) CLI() *CLI {
 			ptrBoolFlag(&a.Cfg.Timing, "timing", "T", "Display a timing waterfall chart"),
 
 			cfgFlag("tls", "", "VERSION", "Minimum TLS version",
-				func() bool { return a.Cfg.TLS != nil }, a.Cfg.ParseTLS).
-				WithValues([]core.KeyVal[string]{
-					{Key: "1.0", Val: "TLS v1.0"},
-					{Key: "1.1", Val: "TLS v1.1"},
-					{Key: "1.2", Val: "TLS v1.2"},
-					{Key: "1.3", Val: "TLS v1.3"},
-				}),
+				func() bool { return a.Cfg.TLSMin != nil }, a.Cfg.ParseTLS).
+				WithValues(tlsValues()).
+				WithHidden(true),
 
 			stringFlag(&a.UnixSocket, "unix", "", "PATH", "Make the request over a unix socket").
 				WithOS(unixOS),
@@ -410,6 +414,15 @@ func (a *App) CLI() *CLI {
 				Fn:          a.parseXMLFlag,
 			},
 		},
+	}
+}
+
+func tlsValues() []core.KeyVal[string] {
+	return []core.KeyVal[string]{
+		{Key: "1.0", Val: "TLS v1.0"},
+		{Key: "1.1", Val: "TLS v1.1"},
+		{Key: "1.2", Val: "TLS v1.2"},
+		{Key: "1.3", Val: "TLS v1.3"},
 	}
 }
 

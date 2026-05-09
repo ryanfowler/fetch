@@ -11,18 +11,20 @@ type TLSDialConfig struct {
 	CACerts    []*x509.Certificate
 	ClientCert *tls.Certificate
 	Insecure   bool
-	TLS        uint16
+	TLSMax     uint16
+	TLSMin     uint16
 }
 
 // BuildTLSConfig returns a *tls.Config from the common configuration fields.
 func (c *TLSDialConfig) BuildTLSConfig() *tls.Config {
 	tlsConfig := &tls.Config{}
 
-	tlsVersion := c.TLS
-	if tlsVersion == 0 {
-		tlsVersion = tls.VersionTLS12
+	tlsMin := c.TLSMin
+	if tlsMin == 0 {
+		tlsMin = tls.VersionTLS12
 	}
-	tlsConfig.MinVersion = tlsVersion
+	tlsConfig.MinVersion = tlsMin
+	tlsConfig.MaxVersion = c.TLSMax
 
 	if c.Insecure {
 		tlsConfig.InsecureSkipVerify = true
