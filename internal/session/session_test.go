@@ -224,6 +224,63 @@ func TestSessionJar(t *testing.T) {
 	}
 }
 
+func TestSessionJarReloadPreservesHostOnlyCookies(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("host-only-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	origin, _ := url.Parse("https://example.com/")
+	subdomain, _ := url.Parse("https://api.example.com/")
+	jar := sess.Jar()
+	jar.SetCookies(origin, []*http.Cookie{
+		{Name: "host", Value: "only"},
+		{Name: "domain", Value: "wide", Domain: "example.com"},
+	})
+
+	if len(sess.Cookies) != 2 {
+		t.Fatalf("expected 2 session cookies, got %d", len(sess.Cookies))
+	}
+	for _, c := range sess.Cookies {
+		switch c.Name {
+		case "host":
+			if !c.HostOnly {
+				t.Fatalf("host-only cookie was not marked host-only: %+v", c)
+			}
+		case "domain":
+			if c.HostOnly {
+				t.Fatalf("domain cookie was marked host-only: %+v", c)
+			}
+		}
+	}
+
+	if err := sess.Save(); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	reloaded, err := Load("host-only-test")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	jar = reloaded.Jar()
+
+	originCookies := cookieNames(jar.Cookies(origin))
+	if !originCookies["host"] || !originCookies["domain"] {
+		t.Fatalf("origin cookies = %v, want host and domain cookies", originCookies)
+	}
+
+	subdomainCookies := cookieNames(jar.Cookies(subdomain))
+	if subdomainCookies["host"] {
+		t.Fatalf("subdomain received host-only cookie after reload: %v", subdomainCookies)
+	}
+	if !subdomainCookies["domain"] {
+		t.Fatalf("subdomain cookies = %v, want domain cookie", subdomainCookies)
+	}
+}
+
 func TestSessionJarUpdatesExisting(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
@@ -254,6 +311,14 @@ func TestSessionJarUpdatesExisting(t *testing.T) {
 	if sess.Cookies[0].Value != "new" {
 		t.Fatalf("expected updated value, got %s", sess.Cookies[0].Value)
 	}
+}
+
+func cookieNames(cookies []*http.Cookie) map[string]bool {
+	names := make(map[string]bool, len(cookies))
+	for _, c := range cookies {
+		names[c.Name] = true
+	}
+	return names
 }
 
 func TestSessionJarPersistsMaxAgeAsExpiry(t *testing.T) {

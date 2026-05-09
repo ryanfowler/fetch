@@ -28,6 +28,7 @@ type SessionCookie struct {
 	Name     string    `json:"name"`
 	Value    string    `json:"value"`
 	Domain   string    `json:"domain"`
+	HostOnly bool      `json:"host_only,omitzero"`
 	Path     string    `json:"path,omitzero"`
 	Expires  time.Time `json:"expires,omitzero"`
 	Secure   bool      `json:"secure,omitzero"`
@@ -137,11 +138,13 @@ func (s *Session) Jar() http.CookieJar {
 		hc := &http.Cookie{
 			Name:     c.Name,
 			Value:    c.Value,
-			Domain:   c.Domain,
 			Path:     c.Path,
 			Expires:  c.Expires,
 			Secure:   c.Secure,
 			HttpOnly: c.HttpOnly,
+		}
+		if !c.HostOnly {
+			hc.Domain = c.Domain
 		}
 		switch c.SameSite {
 		case "lax":
@@ -180,6 +183,7 @@ func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 			Name:     c.Name,
 			Value:    c.Value,
 			Domain:   c.Domain,
+			HostOnly: c.Domain == "",
 			Path:     c.Path,
 			Expires:  cookieExpires(c, now),
 			Secure:   c.Secure,
