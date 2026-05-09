@@ -19,12 +19,16 @@ const (
 )
 
 func lookupDOH(ctx context.Context, serverURL *url.URL, host string) ([]net.IPAddr, error) {
-	a, aErr := lookupDOHType(ctx, serverURL, host, "A", dnsTypeA)
-	aaaa, aaaaErr := lookupDOHType(ctx, serverURL, host, "AAAA", dnsTypeAAAA)
+	a, aErr := LookupDOHType(ctx, serverURL, host, "A", dnsTypeA)
+	aaaa, aaaaErr := LookupDOHType(ctx, serverURL, host, "AAAA", dnsTypeAAAA)
 
 	addrs := make([]net.IPAddr, 0, len(a)+len(aaaa))
-	addrs = append(addrs, a...)
-	addrs = append(addrs, aaaa...)
+	for _, record := range a {
+		addrs = append(addrs, net.IPAddr{IP: record.IP})
+	}
+	for _, record := range aaaa {
+		addrs = append(addrs, net.IPAddr{IP: record.IP})
+	}
 	if len(addrs) > 0 {
 		return addrs, nil
 	}
@@ -37,10 +41,18 @@ func lookupDOH(ctx context.Context, serverURL *url.URL, host string) ([]net.IPAd
 	return nil, errors.New("no such host")
 }
 
-func lookupDOHType(ctx context.Context, serverURL *url.URL, host, dnsType string, answerType int) ([]net.IPAddr, error) {
+// DNSRecord is a resolved DNS answer with optional TTL metadata.
+type DNSRecord struct {
+	IP  net.IP
+	TTL int
+}
+
+// LookupDOHType resolves one DNS record family through a DNS-over-HTTPS JSON endpoint.
+func LookupDOHType(ctx context.Context, serverURL *url.URL, host, dnsType string, answerType int) ([]DNSRecord, error) {
 	type answer struct {
 		Type int    `json:"type"`
 		Data string `json:"data"`
+		TTL  int    `json:"TTL"`
 	}
 	type response struct {
 		Status int      `json:"Status"`
@@ -96,18 +108,18 @@ func lookupDOHType(ctx context.Context, serverURL *url.URL, host, dnsType string
 		return nil, fmt.Errorf("no such host: %s", name)
 	}
 
-	addrs := make([]net.IPAddr, 0, len(res.Answer))
+	records := make([]DNSRecord, 0, len(res.Answer))
 	for _, answer := range res.Answer {
 		if answer.Type != answerType {
 			continue
 		}
 		ip := net.ParseIP(answer.Data)
 		if ip != nil {
-			addrs = append(addrs, net.IPAddr{IP: ip})
+			records = append(records, DNSRecord{IP: ip, TTL: answer.TTL})
 		}
 	}
-	if len(addrs) == 0 {
+	if len(records) == 0 {
 		return nil, errors.New("no such host")
 	}
-	return addrs, nil
+	return records, nil
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/complete"
 	"github.com/ryanfowler/fetch/internal/config"
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/dnsinspect"
 	"github.com/ryanfowler/fetch/internal/fetch"
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/multipart"
@@ -134,6 +135,11 @@ func main() {
 		p := handle.Stderr()
 		writeCLIErr(p, errors.New("cannot use a unix socket with HTTP/3.0"))
 		os.Exit(1)
+	}
+
+	// Handle --inspect-dns: resolve the URL hostname only, no HTTP request.
+	if app.InspectDNS {
+		os.Exit(inspectDNS(ctx, app, handle))
 	}
 
 	// Handle --inspect-tls: perform TLS handshake only, no HTTP request.
@@ -330,6 +336,122 @@ func writeCLIErr(p *core.Printer, err error) {
 
 	p.WriteString("'.\n")
 	p.Flush()
+}
+
+// inspectDNS performs DNS resolution only and renders the resolved records.
+func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
+	p := handle.Stderr()
+
+	var ignored []string
+	if app.Data != nil {
+		ignored = append(ignored, "--data/--json/--xml")
+	}
+	if len(app.Form) > 0 {
+		ignored = append(ignored, "--form")
+	}
+	if len(app.Multipart) > 0 {
+		ignored = append(ignored, "--multipart")
+	}
+	if app.GRPC {
+		ignored = append(ignored, "--grpc")
+	}
+	if app.GRPCDescribe != "" {
+		ignored = append(ignored, "--grpc-describe")
+	}
+	if app.GRPCList {
+		ignored = append(ignored, "--grpc-list")
+	}
+	if app.Output != "" {
+		ignored = append(ignored, "--output")
+	}
+	if app.RemoteName {
+		ignored = append(ignored, "--remote-name")
+	}
+	if app.RemoteHeaderName {
+		ignored = append(ignored, "--remote-header-name")
+	}
+	if getValue(app.Cfg.Copy) {
+		ignored = append(ignored, "--copy")
+	}
+	if app.Method != "" {
+		ignored = append(ignored, "--method")
+	}
+	if len(app.Cfg.Headers) > 0 {
+		ignored = append(ignored, "--header")
+	}
+	if len(app.Cfg.QueryParams) > 0 {
+		ignored = append(ignored, "--query")
+	}
+	if app.Edit {
+		ignored = append(ignored, "--edit")
+	}
+	if getValue(app.Cfg.Session) != "" {
+		ignored = append(ignored, "--session")
+	}
+	if getValue(app.Cfg.Retry) > 0 {
+		ignored = append(ignored, "--retry")
+	}
+	if len(app.Range) > 0 {
+		ignored = append(ignored, "--range")
+	}
+	if getValue(app.Cfg.Timing) {
+		ignored = append(ignored, "--timing")
+	}
+	if app.Cfg.Proxy != nil {
+		ignored = append(ignored, "--proxy")
+	}
+	if app.Discard {
+		ignored = append(ignored, "--discard")
+	}
+	if app.UnixSocket != "" {
+		ignored = append(ignored, "--unix")
+	}
+	if app.InspectTLS {
+		ignored = append(ignored, "--inspect-tls")
+	}
+	if app.Bearer != "" {
+		ignored = append(ignored, "--bearer")
+	}
+	if app.Basic != nil {
+		ignored = append(ignored, "--basic")
+	}
+	if app.Digest != nil {
+		ignored = append(ignored, "--digest")
+	}
+	if app.AWSSigv4 != nil {
+		ignored = append(ignored, "--aws-sigv4")
+	}
+	if len(app.Cfg.CACerts) > 0 {
+		ignored = append(ignored, "--ca-cert")
+	}
+	if app.Cfg.CertPath != "" {
+		ignored = append(ignored, "--cert")
+	}
+	if app.Cfg.KeyPath != "" {
+		ignored = append(ignored, "--key")
+	}
+	if app.Cfg.TLS != nil {
+		ignored = append(ignored, "--tls")
+	}
+	if getValue(app.Cfg.Insecure) {
+		ignored = append(ignored, "--insecure")
+	}
+	if app.Cfg.Format != core.FormatUnknown {
+		ignored = append(ignored, "--format")
+	}
+	if app.DryRun {
+		ignored = append(ignored, "--dry-run")
+	}
+	if len(ignored) > 0 {
+		msg := "--inspect-dns ignores: " + strings.Join(ignored, ", ") + "\n"
+		core.WriteWarningMsg(p, msg)
+	}
+
+	return dnsinspect.Inspect(ctx, p, &dnsinspect.Config{
+		DNSServer: app.Cfg.DNSServer,
+		Timeout:   getValue(app.Cfg.Timeout),
+		URL:       app.URL,
+	})
 }
 
 type errSelfUpdateDisabled string

@@ -38,6 +38,7 @@ type App struct {
 	GRPCDescribe     string
 	GRPCList         bool
 	Help             bool
+	InspectDNS       bool
 	InspectTLS       bool
 	WS               bool // set when URL scheme is ws:// or wss://
 	Method           string
@@ -270,6 +271,7 @@ func (a *App) CLI() *CLI {
 				}),
 
 			ptrBoolFlag(&a.Cfg.Insecure, "insecure", "", "Accept invalid TLS certs (!)"),
+			boolFlag(&a.InspectDNS, "inspect-dns", "", "Inspect DNS resolution"),
 			boolFlag(&a.InspectTLS, "inspect-tls", "", "Inspect the TLS certificate chain"),
 
 			// Custom: JSON body

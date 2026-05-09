@@ -38,6 +38,17 @@ fetch --dns-server https://dns.google/dns-query example.com
 fetch --dns-server https://dns.quad9.net/dns-query example.com
 ```
 
+### DNS Inspection
+
+`--inspect-dns` resolves the URL hostname and exits without making an HTTP request:
+
+```sh
+fetch --inspect-dns example.com
+fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
+```
+
+The output shows the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, address count, record count, lookup duration, and per-record TTLs.
+
 ### Configuration File
 
 ```ini

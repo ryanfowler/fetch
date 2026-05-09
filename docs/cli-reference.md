@@ -353,6 +353,15 @@ fetch --dns-server 1.1.1.1:53 example.com
 fetch --dns-server https://1.1.1.1/dns-query example.com
 ```
 
+### `--inspect-dns`
+
+Inspect DNS resolution for the URL hostname only (no HTTP request is made). Displays the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, along with per-record TTLs, address count, record count, and lookup duration.
+
+```sh
+fetch --inspect-dns example.com
+fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
+```
+
 ### `--proxy PROXY`
 
 Route request through a proxy.
