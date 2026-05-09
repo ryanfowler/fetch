@@ -47,7 +47,7 @@ prettier -w .
 
 - **internal/aws** - AWS Signature V4 request signing.
 - **internal/cli** - Command-line argument parsing. `App` struct holds all parsed options.
-- **internal/client** - HTTP client wrapper with custom DNS resolver support.
+- **internal/client** - HTTP client wrapper and HTTP version-specific transport setup.
 - **internal/complete** - Shell completion implementation.
 - **internal/config** - INI-format config file parsing with host-specific overrides.
 - **internal/core** - Shared types (`Printer`, `Color`, `Format`, `HTTPVersion`) and utilities.
@@ -60,6 +60,7 @@ prettier -w .
 - **internal/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
 - **internal/image** - Multipart form implementation.
 - **internal/proto** - Protocol buffer compilation and message handling for gRPC support.
+- **internal/resolver** - Shared DNS resolution and dialing for system DNS, UDP DNS, and DNS-over-HTTPS across HTTP, HTTP/3, gRPC, and TLS inspection.
 - **internal/session** - Named cookie sessions with persistent storage across invocations.
 - **internal/update** - Check for updates, download from Github, and self-update.
 - **internal/ws** - WebSocket message loop (read, write, bidirectional coordination).

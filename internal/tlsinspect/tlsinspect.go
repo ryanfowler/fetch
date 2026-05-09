@@ -13,6 +13,7 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/resolver"
 
 	"golang.org/x/crypto/ocsp"
 )
@@ -37,11 +38,11 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	tlsDialCfg := &client.TLSDialConfig{
 		CACerts:    cfg.CACerts,
 		ClientCert: cfg.ClientCert,
-		DNSServer:  cfg.DNSServer,
 		Insecure:   cfg.Insecure,
 		TLS:        cfg.TLS,
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
+	res := resolver.New(resolver.Config{Server: cfg.DNSServer})
 
 	// Resolve host:port.
 	host := cfg.URL.Hostname()
@@ -60,40 +61,18 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	}
 
 	// Dial and handshake using context for cancellation support.
-	dialCtx := tlsDialCfg.BuildDialContext()
-	if dialCtx != nil {
-		// Use custom dial context (e.g. DoH) to establish the TCP connection,
-		// then perform the TLS handshake manually.
-		rawConn, dialErr := dialCtx(ctx, "tcp", addr)
-		if dialErr != nil {
-			writeTLSError(p, dialErr)
-			return 1
-		}
-		tlsConn := tls.Client(rawConn, tlsConfig)
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			rawConn.Close()
-			writeTLSError(p, err)
-			return 1
-		}
-		cs := tlsConn.ConnectionState()
-		render(p, &cs)
-		p.Flush()
-		tlsConn.Close()
-		return 0
-	}
-
-	dialer := &tls.Dialer{
-		NetDialer: tlsDialCfg.BuildDialer(),
-		Config:    tlsConfig,
-	}
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	rawConn, err := res.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		writeTLSError(p, err)
 		return 1
 	}
-	defer conn.Close()
+	defer rawConn.Close()
 
-	tlsConn := conn.(*tls.Conn)
+	tlsConn := tls.Client(rawConn, tlsConfig)
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		writeTLSError(p, err)
+		return 1
+	}
 	cs := tlsConn.ConnectionState()
 	render(p, &cs)
 	p.Flush()
