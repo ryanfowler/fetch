@@ -58,6 +58,27 @@ func TestLookupIPAddrDOHNXDomain(t *testing.T) {
 	}
 }
 
+func TestLookupDOHTypeReturnsTTL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1","TTL":123}]}`)
+	}))
+	defer server.Close()
+
+	records, err := LookupDOHType(context.Background(), mustURL(t, server.URL), "example.com", "A", dnsTypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %v, want 1 record", records)
+	}
+	if got, want := records[0].IP.String(), "127.0.0.1"; got != want {
+		t.Fatalf("IP = %q, want %q", got, want)
+	}
+	if got, want := records[0].TTL, 123; got != want {
+		t.Fatalf("TTL = %d, want %d", got, want)
+	}
+}
+
 func TestLookupIPAddrDoesNotTraceIPLiteral(t *testing.T) {
 	var started bool
 	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{

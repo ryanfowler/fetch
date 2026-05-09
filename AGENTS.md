@@ -77,6 +77,7 @@ prettier -w .
 - `--grpc-list` and `--grpc-describe` provide grpcurl-style discovery using reflection or local descriptor files.
 - `--grpc` now automatically tries gRPC reflection when no local schema is supplied.
 - Plaintext loopback gRPC servers are supported via `h2c` for both calls and discovery.
+- `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP or DoH responses.
 5. HTTP client executes request
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 
