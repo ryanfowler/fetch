@@ -17,6 +17,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/multipart"
+	"github.com/ryanfowler/fetch/internal/resolver"
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
@@ -73,12 +74,12 @@ func NewClient(cfg ClientConfig) *Client {
 	tlsDialCfg := &TLSDialConfig{
 		CACerts:    cfg.CACerts,
 		ClientCert: cfg.ClientCert,
-		DNSServer:  cfg.DNSServer,
 		Insecure:   cfg.Insecure,
 		TLS:        cfg.TLS,
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
-	baseDial := tlsDialCfg.BuildDialContext()
+	res := resolver.New(resolver.Config{Server: cfg.DNSServer})
+	baseDial := res.DialContext
 
 	if cfg.UnixSocket != "" {
 		baseDial = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -104,7 +105,7 @@ func NewClient(cfg ClientConfig) *Client {
 			transport = getHTTP2Transport(baseDial, tlsConfig, cfg.ConnectTimeout)
 		}
 	case core.HTTP3:
-		transport = getHTTP3Transport(cfg.DNSServer, tlsConfig, cfg.ConnectTimeout)
+		transport = getHTTP3Transport(res, tlsConfig, cfg.ConnectTimeout)
 	default:
 		rt := &http.Transport{
 			DialContext:        baseDial,
@@ -280,7 +281,7 @@ func getH2CTransport(baseDial func(context.Context, string, string) (net.Conn, e
 	}
 }
 
-func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config, connectTimeout time.Duration) http.RoundTripper {
+func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTimeout time.Duration) http.RoundTripper {
 	rt := &http3.Transport{
 		DisableCompression: true,
 		TLSClientConfig:    tlsConfig,
@@ -296,39 +297,19 @@ func getHTTP3Transport(dnsServer *url.URL, tlsConfig *tls.Config, connectTimeout
 			defer cancel()
 		}
 
-		host, portStr, err := net.SplitHostPort(addr)
+		endpoint, err := res.ResolveAddress(ctx, "udp", addr)
 		if err != nil {
 			return nil, err
 		}
 
-		// Resolve DNS with trace hooks.
-		var ips []net.IPAddr
-		if dnsServer != nil {
-			if dnsServer.Scheme == "" {
-				resolver := udpResolver(dnsServer.Host)
-				ips, err = resolver.LookupIPAddr(ctx, host)
-			} else {
-				ips, portStr, err = resolveDOH(ctx, dnsServer, addr)
-			}
-		} else {
-			// Use system resolver with trace hooks.
-			ips, err = resolveWithTrace(ctx, host)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("lookup %s: no addresses found", addr)
-		}
-
-		port, err := net.LookupPort("udp", portStr)
+		port, err := net.LookupPort("udp", endpoint.Port)
 		if err != nil {
 			return nil, err
 		}
 
 		// Establish quic connection.
 		trace := httptrace.ContextClientTrace(ctx)
-		for _, ip := range ips {
+		for _, ip := range endpoint.Addrs {
 			udpAddr := &net.UDPAddr{IP: ip.IP, Port: port}
 			var lc net.ListenConfig
 			var packetConn net.PacketConn
