@@ -19,7 +19,7 @@ func TestParseFile(t *testing.T) {
 	}{
 		{
 			name: "valid wildcard section",
-			config: `[*.example.com]
+			config: `[*.Example.com]
 				insecure = true`,
 			expFile: &File{
 				Global: &Config{isFile: true},
@@ -73,7 +73,7 @@ func TestParseFile(t *testing.T) {
 				color = off
 				no-pager = true
 				
-				[example.com]
+				[Example.com]
 				insecure = true
 
 				[anotherhost.com]
@@ -151,8 +151,18 @@ func TestFileHostConfig(t *testing.T) {
 			expected: exactCfg,
 		},
 		{
+			name:     "case-insensitive exact match",
+			hostname: "API.Example.com",
+			expected: exactCfg,
+		},
+		{
 			name:     "wildcard match",
 			hostname: "www.example.com",
+			expected: wildcardCfg,
+		},
+		{
+			name:     "case-insensitive wildcard match",
+			hostname: "WWW.Example.com",
 			expected: wildcardCfg,
 		},
 		{
@@ -168,6 +178,11 @@ func TestFileHostConfig(t *testing.T) {
 		{
 			name:     "most specific wildcard wins",
 			hostname: "v1.api.example.com",
+			expected: specificWildcardCfg,
+		},
+		{
+			name:     "case-insensitive most specific wildcard wins",
+			hostname: "V1.API.Example.com",
 			expected: specificWildcardCfg,
 		},
 		{
