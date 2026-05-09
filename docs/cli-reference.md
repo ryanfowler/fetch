@@ -383,10 +383,26 @@ fetch --unix /var/run/docker.sock http://unix/containers/json
 
 ### `--tls VERSION`
 
-Minimum TLS version. Values: `1.0`, `1.1`, `1.2`, `1.3`.
+Minimum TLS version. This is an alias for `--min-tls`. Values: `1.0`, `1.1`, `1.2`, `1.3`.
 
 ```sh
 fetch --tls 1.3 example.com
+```
+
+### `--min-tls VERSION`
+
+Minimum TLS version. Values: `1.0`, `1.1`, `1.2`, `1.3`.
+
+```sh
+fetch --min-tls 1.2 example.com
+```
+
+### `--max-tls VERSION`
+
+Maximum TLS version. Values: `1.0`, `1.1`, `1.2`, `1.3`. Combine with `--min-tls` to allow a bounded range or require an exact TLS version.
+
+```sh
+fetch --min-tls 1.2 --max-tls 1.2 example.com
 ```
 
 ### `--inspect-tls`
@@ -607,7 +623,7 @@ fetch --from-curl 'https://example.com'
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Request      | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G`                                         |
 | Auth         | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                            |
-| TLS          | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`                                                                                         |
+| TLS          | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`                                                                             |
 | Output       | `-o`, `-O`, `-J`                                                                                                                              |
 | Network      | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r`            |
 | HTTP version | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                                       |

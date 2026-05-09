@@ -684,6 +684,11 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 			return err
 		}
 	}
+	if r.TLSMaxVersion != "" {
+		if err := a.Cfg.ParseMaxTLS(r.TLSMaxVersion); err != nil {
+			return err
+		}
+	}
 	if r.CACert != "" {
 		if err := a.Cfg.ParseCACerts(r.CACert); err != nil {
 			return err

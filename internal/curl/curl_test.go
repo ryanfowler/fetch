@@ -476,6 +476,13 @@ func TestParseTLS(t *testing.T) {
 				assertEqual(t, "TLSVersion", r.TLSVersion, "1.0")
 			},
 		},
+		{
+			name:  "tls max",
+			input: "curl --tls-max 1.2 https://example.com",
+			check: func(t *testing.T, r *Result) {
+				assertEqual(t, "TLSMaxVersion", r.TLSMaxVersion, "1.2")
+			},
+		},
 	}
 
 	for _, tt := range tests {

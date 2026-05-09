@@ -180,6 +180,13 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 	case "tlsv1.3":
 		r.TLSVersion = "1.3"
 		return 0, nil
+	case "tls-max":
+		v, n, err := consumeArg()
+		if err != nil {
+			return 0, fmt.Errorf("--tls-max requires an argument")
+		}
+		r.TLSMaxVersion = v
+		return n, nil
 
 	// Output.
 	case "output":

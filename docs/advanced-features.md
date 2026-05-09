@@ -184,13 +184,20 @@ By default, `fetch` negotiates the best available version:
 
 ## TLS Configuration
 
-### Minimum TLS Version
+### TLS Version Bounds
 
-`--tls VERSION` sets the minimum acceptable TLS version:
+`--min-tls VERSION` sets the minimum acceptable TLS version. `--tls VERSION` is kept as an alias for `--min-tls`:
 
 ```sh
-fetch --tls 1.2 example.com  # Require TLS 1.2+
-fetch --tls 1.3 example.com  # Require TLS 1.3
+fetch --min-tls 1.2 example.com  # Require TLS 1.2+
+fetch --tls 1.3 example.com      # Require TLS 1.3+
+```
+
+`--max-tls VERSION` sets the maximum acceptable TLS version:
+
+```sh
+fetch --min-tls 1.2 --max-tls 1.3 example.com  # Allow TLS 1.2 through 1.3
+fetch --min-tls 1.2 --max-tls 1.2 example.com  # Require exactly TLS 1.2
 ```
 
 | Value | Protocol                      |
@@ -256,7 +263,7 @@ fetch --inspect-tls --insecure expired.badssl.com
 
 ```ini
 # Require TLS 1.2 minimum
-tls = 1.2
+min-tls = 1.2
 
 # Internal server with private CA
 [internal.company.com]
@@ -397,7 +404,7 @@ Complex requests often combine multiple advanced options:
 fetch \
   --dns-server https://1.1.1.1/dns-query \
   --proxy socks5://localhost:9050 \
-  --tls 1.3 \
+  --min-tls 1.3 \
   --timeout 60 \
   --http 2 \
   -v \
@@ -409,7 +416,7 @@ fetch \
 ```ini
 # Global settings
 timeout = 30
-tls = 1.2
+min-tls = 1.2
 dns-server = 8.8.8.8
 
 # Internal services
@@ -425,7 +432,7 @@ timeout = 5
 
 # High-security API
 [secure-api.example.com]
-tls = 1.3
+min-tls = 1.3
 timeout = 60
 ```
 
@@ -529,7 +536,7 @@ fetch --dns-server 8.8.8.8 -v example.com
 fetch --http 1 -v example.com
 
 # Test TLS configuration
-fetch --tls 1.3 -vvv example.com
+fetch --min-tls 1.3 -vvv example.com
 ```
 
 ## See Also

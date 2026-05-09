@@ -550,7 +550,8 @@ func newClient(r *Request) *client.Client {
 		Insecure:       r.Insecure,
 		Proxy:          r.Proxy,
 		Redirects:      r.Redirects,
-		TLS:            r.TLS,
+		TLSMax:         r.TLSMax,
+		TLSMin:         r.TLSMin,
 		UnixSocket:     r.UnixSocket,
 	})
 }

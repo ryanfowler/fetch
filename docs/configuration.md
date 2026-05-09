@@ -352,14 +352,40 @@ http = 2
 **Values**: `1.0`, `1.1`, `1.2`, `1.3`
 **Default**: `1.2`
 
-Specify the minimum TLS version to use.
+Specify the minimum TLS version to use. This is an alias for `min-tls`.
 
 ```ini
 # Require TLS 1.2 or higher
 tls = 1.2
 
-# Require TLS 1.3
+# Require TLS 1.3 or higher
 tls = 1.3
+```
+
+#### `min-tls`
+
+**Type**: String
+**Values**: `1.0`, `1.1`, `1.2`, `1.3`
+**Default**: `1.2`
+
+Specify the minimum TLS version to use.
+
+```ini
+min-tls = 1.2
+```
+
+#### `max-tls`
+
+**Type**: String
+**Values**: `1.0`, `1.1`, `1.2`, `1.3`
+**Default**: No maximum
+
+Specify the maximum TLS version to use. Set `min-tls` and `max-tls` to the same value to require an exact TLS version.
+
+```ini
+# Require exactly TLS 1.2
+min-tls = 1.2
+max-tls = 1.2
 ```
 
 #### `insecure`
@@ -628,7 +654,7 @@ insecure = true
 
 # External APIs (strict security)
 [external-api.vendor.com]
-tls = 1.2
+min-tls = 1.2
 timeout = 60
 header = X-Company-ID: company-identifier
 ```

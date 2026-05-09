@@ -48,7 +48,8 @@ type Config struct {
 	Silent         *bool
 	Timeout        *time.Duration
 	Timing         *bool
-	TLS            *uint16
+	TLSMax         *uint16
+	TLSMin         *uint16
 	Verbosity      *int
 }
 
@@ -131,12 +132,24 @@ func (c *Config) Merge(c2 *Config) {
 	if c.Timing == nil {
 		c.Timing = c2.Timing
 	}
-	if c.TLS == nil {
-		c.TLS = c2.TLS
+	if c.TLSMax == nil {
+		c.TLSMax = c2.TLSMax
+	}
+	if c.TLSMin == nil {
+		c.TLSMin = c2.TLSMin
 	}
 	if c.Verbosity == nil {
 		c.Verbosity = c2.Verbosity
 	}
+}
+
+// Validate checks cross-option constraints that can only be evaluated after
+// CLI, global, and host-specific configuration have been merged.
+func (c *Config) Validate() error {
+	if c.TLSMin != nil && c.TLSMax != nil && *c.TLSMin > *c.TLSMax {
+		return fmt.Errorf("min-tls must be less than or equal to max-tls")
+	}
+	return nil
 }
 
 // Set sets the provided key and value pair, returning any error encountered.
@@ -193,6 +206,10 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseTimeout(val)
 	case "timing":
 		err = c.ParseTiming(val)
+	case "max-tls":
+		err = c.ParseMaxTLS(val)
+	case "min-tls":
+		err = c.ParseMinTLS(val)
 	case "tls":
 		err = c.ParseTLS(val)
 	case "verbosity":
@@ -541,24 +558,52 @@ func (c *Config) ParseTiming(value string) error {
 	return nil
 }
 
-func (c *Config) ParseTLS(value string) error {
-	var version uint16
+func parseTLSVersion(flag, value string, isFile bool) (uint16, error) {
 	switch value {
 	case "1.0":
-		version = tls.VersionTLS10
+		return tls.VersionTLS10, nil
 	case "1.1":
-		version = tls.VersionTLS11
+		return tls.VersionTLS11, nil
 	case "1.2":
-		version = tls.VersionTLS12
+		return tls.VersionTLS12, nil
 	case "1.3":
-		version = tls.VersionTLS13
+		return tls.VersionTLS13, nil
 	default:
 		const usage = "must be one of [1.0, 1.1, 1.2, 1.3]"
-		return core.NewValueError("tls", value, usage, c.isFile)
+		return 0, core.NewValueError(flag, value, usage, isFile)
 	}
-	c.TLS = &version
-	return nil
+}
 
+func (c *Config) ParseTLS(value string) error {
+	return c.parseMinTLS("tls", value)
+}
+
+func (c *Config) ParseMinTLS(value string) error {
+	return c.parseMinTLS("min-tls", value)
+}
+
+func (c *Config) parseMinTLS(flag, value string) error {
+	version, err := parseTLSVersion(flag, value, c.isFile)
+	if err != nil {
+		return err
+	}
+	if c.TLSMax != nil && version > *c.TLSMax {
+		return core.NewValueError(flag, value, "must be less than or equal to max-tls", c.isFile)
+	}
+	c.TLSMin = &version
+	return nil
+}
+
+func (c *Config) ParseMaxTLS(value string) error {
+	version, err := parseTLSVersion("max-tls", value, c.isFile)
+	if err != nil {
+		return err
+	}
+	if c.TLSMin != nil && version < *c.TLSMin {
+		return core.NewValueError("max-tls", value, "must be greater than or equal to min-tls", c.isFile)
+	}
+	c.TLSMax = &version
+	return nil
 }
 
 func (c *Config) ParseVerbosity(value string) error {
