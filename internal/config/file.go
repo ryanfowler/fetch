@@ -103,7 +103,7 @@ func parseFile(path, s string) (*File, error) {
 
 		// Parse out a hostname.
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			hostStr := strings.TrimSpace(line[1 : len(line)-1])
+			hostStr := strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
 			if hostStr == "" {
 				return nil, newFileError(path, num, errors.New("hostname cannot be empty"))
 			}
@@ -188,6 +188,7 @@ func (f *File) HostConfig(hostname string) *Config {
 	if hostname == "" {
 		return nil
 	}
+	hostname = strings.ToLower(hostname)
 
 	// Exact match first.
 	if cfg, ok := f.Hosts[hostname]; ok {
