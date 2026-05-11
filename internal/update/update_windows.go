@@ -143,24 +143,28 @@ func init() {
 // newExePath, returning any error encountered.
 func selfReplace(exePath, newExePath string) error {
 	dir := filepath.Dir(exePath)
-	oldExePath := createTempFilePath(dir, relocatedSuffix)
-	err := os.Rename(exePath, oldExePath)
-	if err != nil {
-		return err
-	}
-
-	err = scheduleSelfDeletionOnShutdown(oldExePath)
-	if err != nil {
-		return err
-	}
-
 	tempExePath := createTempFilePath(dir, tempSuffix)
-	err = copyFile(tempExePath, newExePath)
+	err := copyFile(tempExePath, newExePath)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tempExePath)
+
+	oldExePath := createTempFilePath(dir, relocatedSuffix)
+	err = os.Rename(exePath, oldExePath)
 	if err != nil {
 		return err
 	}
 
-	return os.Rename(tempExePath, exePath)
+	err = os.Rename(tempExePath, exePath)
+	if err != nil {
+		if rollbackErr := os.Rename(oldExePath, exePath); rollbackErr != nil {
+			return errors.Join(err, rollbackErr)
+		}
+		return err
+	}
+
+	return scheduleSelfDeletionOnShutdown(oldExePath)
 }
 
 // scheduleSelfDeletionOnShutdown arranges for the given executable to be
