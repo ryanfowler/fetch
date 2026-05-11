@@ -158,3 +158,20 @@ func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) 
 	}()
 	return pr
 }
+
+func setStreamingGRPCBody(req *http.Request, desc protoreflect.MessageDescriptor) {
+	getBody := req.GetBody
+	req.Body = streamGRPCRequest(req.Body, desc)
+	req.ContentLength = -1
+	if getBody == nil {
+		req.GetBody = nil
+		return
+	}
+	req.GetBody = func() (io.ReadCloser, error) {
+		body, err := getBody()
+		if err != nil {
+			return nil, err
+		}
+		return streamGRPCRequest(body, desc), nil
+	}
+}

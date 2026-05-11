@@ -217,11 +217,11 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		if isClientStreaming && requestDesc != nil {
 			// Client/bidi streaming: stream multiple JSON objects as gRPC frames.
 			if req.Body != nil && req.Body != http.NoBody {
-				req.Body = streamGRPCRequest(req.Body, requestDesc)
-				req.ContentLength = -1 // Unknown length; use chunked encoding.
+				setStreamingGRPCBody(req, requestDesc)
 			} else {
 				// Empty client stream: no frames, just close immediately.
 				req.Body = http.NoBody
+				req.GetBody = nil
 			}
 		} else {
 			// Unary / server-streaming: existing single-message path.
