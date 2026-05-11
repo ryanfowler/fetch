@@ -12,7 +12,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/fileutil"
 )
 
-func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Printer, v core.Verbosity) error {
+func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Printer, v core.Verbosity, clobber bool) error {
 	name, err := filepath.Abs(filename)
 	if err != nil {
 		return err
@@ -54,7 +54,12 @@ func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Prin
 		return err
 	}
 
-	if err = fileutil.AtomicReplaceFile(f.Name(), filename); err != nil {
+	if clobber {
+		err = fileutil.AtomicReplaceFile(f.Name(), filename)
+	} else {
+		err = fileutil.AtomicWriteNewFile(f.Name(), filename)
+	}
+	if err != nil {
 		os.Remove(f.Name())
 		return err
 	}
