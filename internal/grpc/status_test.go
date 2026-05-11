@@ -120,6 +120,20 @@ func TestParseStatus(t *testing.T) {
 			wantCode:    Unauthenticated,
 			wantMessage: "invalid token",
 		},
+		{
+			name:        "percent-encoded message",
+			grpcStatus:  "13",
+			grpcMessage: "bad%20thing%3A%20no%20tokens",
+			wantCode:    Internal,
+			wantMessage: "bad thing: no tokens",
+		},
+		{
+			name:        "invalid percent-encoded message",
+			grpcStatus:  "13",
+			grpcMessage: "bad%zzmessage",
+			wantCode:    Internal,
+			wantMessage: "bad%zzmessage",
+		},
 	}
 
 	for _, tt := range tests {
