@@ -22,6 +22,7 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	if req.Method != "GET" {
 		p := r.PrinterHandle.Stderr()
 		core.WriteWarningMsg(p, "WebSocket requires GET; ignoring method "+req.Method)
+		req.Method = "GET"
 	}
 
 	// Timing waterfall is not supported for persistent WebSocket connections.

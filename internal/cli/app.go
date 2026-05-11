@@ -120,8 +120,14 @@ func (a *App) CLI() *CLI {
 			{Key: "remote-header-name", Val: []string{"remote-name"}},
 		},
 		SchemeExclusiveFlags: map[string][]string{
-			"ws":  {"discard", "grpc", "grpc-describe", "grpc-list", "form", "multipart", "xml", "edit"},
-			"wss": {"discard", "grpc", "grpc-describe", "grpc-list", "form", "multipart", "xml", "edit"},
+			"ws": {
+				"clobber", "copy", "discard", "edit", "form", "grpc", "grpc-describe", "grpc-list",
+				"multipart", "output", "remote-header-name", "remote-name", "retry", "retry-delay", "xml",
+			},
+			"wss": {
+				"clobber", "copy", "discard", "edit", "form", "grpc", "grpc-describe", "grpc-list",
+				"multipart", "output", "remote-header-name", "remote-name", "retry", "retry-delay", "xml",
+			},
 		},
 		FromCurlExclusiveFlags: []string{
 			"method", "header", "data", "json", "xml",
