@@ -133,3 +133,20 @@ func TestGetSignedHeadersCanonicalizesHeaderValues(t *testing.T) {
 		})
 	}
 }
+
+func TestGetSignedHeadersUsesRequestHost(t *testing.T) {
+	req, _ := http.NewRequest("GET", "https://127.0.0.1", nil)
+	req.Host = "vhost.example"
+
+	headers := getSignedHeaders(req)
+
+	for _, header := range headers {
+		if header.Key == "host" {
+			if header.Val != "vhost.example" {
+				t.Fatalf("unexpected host: got %q, want %q", header.Val, "vhost.example")
+			}
+			return
+		}
+	}
+	t.Fatal("signed host header not found")
+}

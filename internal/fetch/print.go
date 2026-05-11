@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -59,13 +60,19 @@ func printRequestMetadata(p *core.Printer, req *http.Request, httpVersion core.H
 
 	p.WriteString("\n")
 
-	headers := getHeaders(req.Header)
+	headers := slices.DeleteFunc(getHeaders(req.Header), func(kv core.KeyVal[string]) bool {
+		return strings.EqualFold(kv.Key, "Host")
+	})
 	if req.Body != nil && req.ContentLength > 0 {
 		val := strconv.FormatInt(req.ContentLength, 10)
 		headers = addHeader(headers, core.KeyVal[string]{Key: "content-length", Val: val})
 	}
-	if req.Header.Get("Host") == "" {
-		headers = addHeader(headers, core.KeyVal[string]{Key: "host", Val: req.URL.Host})
+	host := req.URL.Host
+	if req.Host != "" {
+		host = req.Host
+	}
+	if host != "" {
+		headers = addHeader(headers, core.KeyVal[string]{Key: "host", Val: host})
 	}
 
 	for _, h := range headers {

@@ -65,6 +65,27 @@ func TestPrintRequestMetadataPrefixes(t *testing.T) {
 	})
 }
 
+func TestPrintRequestMetadataUsesRequestHost(t *testing.T) {
+	req := &http.Request{
+		Method: "GET",
+		URL:    mustParseURL("https://127.0.0.1/path"),
+		Host:   "vhost.example",
+		Header: http.Header{"Accept": {"*/*"}},
+		Proto:  "HTTP/1.1",
+	}
+
+	p := newTestPrinter()
+	printRequestMetadata(p, req, core.HTTPDefault, core.VVerbose)
+	out := string(p.Bytes())
+
+	if !strings.Contains(out, "host: vhost.example") {
+		t.Fatalf("expected overridden host in request metadata, got:\n%s", out)
+	}
+	if strings.Contains(out, "host: 127.0.0.1") {
+		t.Fatalf("expected URL host to be omitted when Request.Host is set, got:\n%s", out)
+	}
+}
+
 func TestPrintResponseMetadataPrefixes(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: 200,

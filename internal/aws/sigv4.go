@@ -135,13 +135,19 @@ func getSignedHeaders(req *http.Request) []core.KeyVal[string] {
 	out := make([]core.KeyVal[string], 0, len(req.Header)+1)
 
 	// Host header is required to be signed.
-	if _, ok := req.Header["Host"]; !ok {
-		out = append(out, core.KeyVal[string]{Key: "host", Val: req.URL.Host})
+	host := req.URL.Host
+	if req.Host != "" {
+		host = req.Host
+	}
+	if host != "" {
+		out = append(out, core.KeyVal[string]{Key: "host", Val: host})
 	}
 
 	for key, vals := range req.Header {
-		switch key {
-		case "Accept-Encoding", "Authorization", "Content-Length", "User-Agent":
+		switch {
+		case strings.EqualFold(key, "Host"):
+			continue
+		case key == "Accept-Encoding", key == "Authorization", key == "Content-Length", key == "User-Agent":
 			// Avoid signing these headers.
 			continue
 		}

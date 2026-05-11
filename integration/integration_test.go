@@ -431,6 +431,21 @@ func TestMain(t *testing.T) {
 
 	})
 
+	t.Run("host header", func(t *testing.T) {
+		t.Parallel()
+		chHost := make(chan string, 1)
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			chHost <- r.Host
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "-H", "Host: vhost.example", server.URL)
+		assertExitCode(t, 0, res)
+		if host := <-chHost; host != "vhost.example" {
+			t.Fatalf("unexpected host: got %q, want %q", host, "vhost.example")
+		}
+	})
+
 	t.Run("dns over https", func(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
