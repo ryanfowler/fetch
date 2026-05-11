@@ -8,12 +8,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
@@ -286,6 +288,104 @@ func TestSleepWithContext(t *testing.T) {
 			t.Error("expected error from cancelled context")
 		}
 	})
+}
+
+func TestDoOnceDigestAfterRedirectUsesChallengedRequest(t *testing.T) {
+	var startHits, protectedHits int
+	var protectedMethod, protectedBody, digestURI string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			startHits++
+			http.Redirect(w, r, server.URL+"/protected?token=1", http.StatusSeeOther)
+		case "/protected":
+			protectedHits++
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			protectedMethod = r.Method
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read protected body: %v", err)
+			}
+			protectedBody = string(body)
+			digestURI = digestAuthParam(auth, "uri")
+			if digestURI != "/protected?token=1" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/start", strings.NewReader("payload"))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader("payload")), nil
+	}
+	replayer, err := newReplayableBody(req)
+	if err != nil {
+		t.Fatalf("new replayable body: %v", err)
+	}
+	body, err := replayer.reset()
+	if err != nil {
+		t.Fatalf("reset body: %v", err)
+	}
+	req.Body = body
+
+	resp, err := doOnce(
+		&Request{Digest: &core.KeyVal[string]{Key: "user", Val: "pass"}},
+		client.NewClient(client.ClientConfig{}),
+		req,
+		replayer,
+	)
+	if err != nil {
+		t.Fatalf("doOnce: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if startHits != 1 {
+		t.Fatalf("start hits = %d, want 1", startHits)
+	}
+	if protectedHits != 2 {
+		t.Fatalf("protected hits = %d, want 2", protectedHits)
+	}
+	if protectedMethod != http.MethodGet {
+		t.Fatalf("protected retry method = %s, want GET", protectedMethod)
+	}
+	if protectedBody != "" {
+		t.Fatalf("protected retry body = %q, want empty", protectedBody)
+	}
+	if digestURI != "/protected?token=1" {
+		t.Fatalf("digest uri = %q, want /protected?token=1", digestURI)
+	}
+}
+
+func digestAuthParam(auth, key string) string {
+	auth, ok := strings.CutPrefix(auth, "Digest ")
+	if !ok {
+		return ""
+	}
+	for part := range strings.SplitSeq(auth, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || k != key {
+			continue
+		}
+		return strings.Trim(v, `"`)
+	}
+	return ""
 }
 
 func TestReplayableBody(t *testing.T) {

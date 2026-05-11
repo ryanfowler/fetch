@@ -152,21 +152,26 @@ func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayabl
 		return resp, nil
 	}
 
-	auth, err := digest.Response(req, chal, r.Digest.Key, r.Digest.Val)
+	challengedReq := resp.Request
+	if challengedReq == nil {
+		challengedReq = req
+	}
+
+	auth, err := digest.Response(challengedReq, chal, r.Digest.Key, r.Digest.Val)
 	if err != nil {
 		return resp, nil
 	}
 
-	// Replay the request body.
+	// Replay the request body only if the challenged request still has one.
 	var body io.ReadCloser
-	if req.Body != nil && req.Body != http.NoBody {
+	if challengedReq.Body != nil && challengedReq.Body != http.NoBody {
 		if replayer != nil {
 			body, err = replayer.reset()
 			if err != nil {
 				return resp, nil
 			}
-		} else if req.GetBody != nil {
-			body, err = req.GetBody()
+		} else if challengedReq.GetBody != nil {
+			body, err = challengedReq.GetBody()
 			if err != nil {
 				return resp, nil
 			}
@@ -179,7 +184,7 @@ func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayabl
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	req2 := req.Clone(req.Context())
+	req2 := challengedReq.Clone(challengedReq.Context())
 	req2.Body = body
 	req2.Header.Set("Authorization", auth)
 
