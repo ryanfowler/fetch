@@ -62,6 +62,31 @@ func TestFlagsAlphabeticalOrder(t *testing.T) {
 	}
 }
 
+func TestWebSocketSchemeExclusives(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{name: "copy", args: []string{"ws://example.com", "--copy"}, flag: "copy"},
+		{name: "output", args: []string{"ws://example.com", "--output", "out.txt"}, flag: "output"},
+		{name: "remote name", args: []string{"ws://example.com", "--remote-name"}, flag: "remote-name"},
+		{name: "retry", args: []string{"ws://example.com", "--retry", "1"}, flag: "retry"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse(tt.args)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), "--"+tt.flag) {
+				t.Fatalf("error = %q, want --%s", err.Error(), tt.flag)
+			}
+		})
+	}
+}
+
 func TestFromCurlDataUrlencode(t *testing.T) {
 	t.Run("@file reads and encodes contents", func(t *testing.T) {
 		dir := t.TempDir()

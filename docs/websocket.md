@@ -31,7 +31,7 @@ echo "hello" | fetch ws://echo.websocket.events
 printf "msg1\nmsg2\n" | fetch ws://echo.websocket.events
 ```
 
-When stdin is not piped (i.e. running from a terminal), `fetch` operates in read-only mode — it listens for server messages until the connection closes or Ctrl+C is pressed.
+When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Use Ctrl+C or Ctrl+D to exit.
 
 ## Output
 
@@ -88,6 +88,6 @@ fetch --timeout 5 ws://api.example.com/ws
 ## Limitations
 
 - WebSocket requires HTTP/1.1 for the upgrade handshake. Using `--http 3` with WebSocket is not supported.
-- WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`, `--form`, `--multipart`, `--xml`, or `--edit`.
+- WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`, `--form`, `--multipart`, `--xml`, `--edit`, output-file/clipboard flags, or retry flags.
 - Binary message content is not displayed; only a size indicator is shown.
 - The pager is disabled for WebSocket output.

@@ -2738,6 +2738,15 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "/chat")
 	})
 
+	t.Run("websocket dry-run non-GET shows effective GET", func(t *testing.T) {
+		t.Parallel()
+		res := runFetch(t, fetchPath, "--dry-run", "-X", "POST", "ws://localhost:1234/chat")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "ignoring method POST")
+		assertBufContains(t, res.stderr, "GET /chat")
+		assertBufNotContains(t, res.stderr, "POST /chat")
+	})
+
 	t.Run("websocket ctrl-c exits", func(t *testing.T) {
 		t.Parallel()
 		if runtime.GOOS == "windows" {
