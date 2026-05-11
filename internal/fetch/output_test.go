@@ -154,7 +154,7 @@ func TestGetOutputValue_DirectStdoutSkipsFileCheck(t *testing.T) {
 	}
 }
 
-func TestWriteOutputToFile_OverwritesExistingFile(t *testing.T) {
+func TestWriteOutputToFile_OverwritesExistingFileWithClobber(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "download.txt")
 
@@ -163,7 +163,7 @@ func TestWriteOutputToFile_OverwritesExistingFile(t *testing.T) {
 	}
 
 	printer := core.TestPrinter(false)
-	err := writeOutputToFile(path, bytes.NewReader([]byte("new")), int64(len("new")), printer, core.VSilent)
+	err := writeOutputToFile(path, bytes.NewReader([]byte("new")), int64(len("new")), printer, core.VSilent, true)
 	if err != nil {
 		t.Fatalf("writeOutputToFile returned error: %v", err)
 	}
@@ -174,5 +174,28 @@ func TestWriteOutputToFile_OverwritesExistingFile(t *testing.T) {
 	}
 	if string(data) != "new" {
 		t.Fatalf("output file = %q, want %q", data, "new")
+	}
+}
+
+func TestWriteOutputToFile_DoesNotOverwriteExistingFileWithoutClobber(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "download.txt")
+
+	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	printer := core.TestPrinter(false)
+	err := writeOutputToFile(path, bytes.NewReader([]byte("new")), int64(len("new")), printer, core.VSilent, false)
+	if err == nil {
+		t.Fatal("writeOutputToFile succeeded for an existing output file without clobber")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading output file: %v", err)
+	}
+	if string(data) != "old" {
+		t.Fatalf("output file = %q, want %q", data, "old")
 	}
 }

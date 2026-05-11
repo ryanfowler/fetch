@@ -380,7 +380,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	if output != "" && r.Output != "-" {
 		size := resp.ContentLength
 		p := r.PrinterHandle.Stderr()
-		return nil, writeOutputToFile(output, resp.Body, size, p, r.Verbosity)
+		return nil, writeOutputToFile(output, resp.Body, size, p, r.Verbosity, r.Clobber)
 	}
 
 	if r.Format == core.FormatOff || (!core.IsStdoutTerm && r.Format != core.FormatOn) {
