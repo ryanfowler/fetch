@@ -22,6 +22,15 @@ const (
 	FormatOn
 )
 
+// WSInteractiveMode represents WebSocket terminal prompt behavior.
+type WSInteractiveMode int
+
+const (
+	WSInteractiveAuto WSInteractiveMode = iota
+	WSInteractiveOn
+	WSInteractiveOff
+)
+
 // HTTPVersion represents the options for the maximum allowed HTTP version.
 type HTTPVersion int
 

@@ -53,6 +53,7 @@ type App struct {
 	UnixSocket       string
 	Update           bool
 	Version          bool
+	WSInteractive    core.WSInteractiveMode
 
 	dataSet bool
 	jsonSet bool
@@ -410,6 +411,18 @@ func (a *App) CLI() *CLI {
 
 			boolFlag(&a.Version, "version", "V", "Print version"),
 
+			Flag{
+				Long:        "ws-interactive",
+				Args:        "MODE",
+				Description: "WebSocket prompt mode",
+				IsSet:       func() bool { return a.WSInteractive != core.WSInteractiveAuto },
+				Fn:          a.parseWSInteractiveFlag,
+			}.WithValues([]core.KeyVal[string]{
+				{Key: "auto", Val: "Use interactive prompt when attached to a terminal"},
+				{Key: "on", Val: "Require interactive prompt"},
+				{Key: "off", Val: "Disable interactive prompt"},
+			}),
+
 			// Custom: XML body
 			{
 				Short:       "x",
@@ -605,6 +618,20 @@ func (a *App) parseXMLFlag(value string) error {
 	a.Data = r
 	a.ContentType = "application/xml"
 	a.xmlSet = true
+	return nil
+}
+
+func (a *App) parseWSInteractiveFlag(value string) error {
+	switch value {
+	case "auto":
+		a.WSInteractive = core.WSInteractiveAuto
+	case "on":
+		a.WSInteractive = core.WSInteractiveOn
+	case "off":
+		a.WSInteractive = core.WSInteractiveOff
+	default:
+		return core.NewValueError("ws-interactive", value, "must be one of [auto, on, off]", false)
+	}
 	return nil
 }
 

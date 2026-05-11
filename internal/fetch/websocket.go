@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptrace"
@@ -97,8 +98,16 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		}
 	}
 
-	// Detect interactive mode: all three FDs are terminals.
+	// Detect interactive mode: default to TUI only when all three FDs are terminals.
 	interactive := core.IsStdinTerm && core.IsStdoutTerm && core.IsStderrTerm
+	switch r.WSInteractive {
+	case core.WSInteractiveOn:
+		if !interactive {
+			return 1, errors.New("--ws-interactive on requires stdin, stdout, and stderr to be terminals")
+		}
+	case core.WSInteractiveOff:
+		interactive = false
+	}
 
 	// Determine stdin: use it for the write loop only if it's a pipe or
 	// file. When stdin is a terminal or /dev/null, pass nil so we run in

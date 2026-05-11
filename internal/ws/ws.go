@@ -36,11 +36,8 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// Send initial message from -d / -j flag.
-	if len(cfg.InitialMsg) > 0 {
-		err := cfg.Conn.Write(ctx, websocket.MessageText, cfg.InitialMsg)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			return err
-		}
+	if err := sendInitialMessage(ctx, cfg); err != nil {
+		return err
 	}
 
 	if cfg.Stdin != nil {
@@ -50,6 +47,17 @@ func Run(ctx context.Context, cfg Config) error {
 	// No stdin: just read messages from the server until it closes or
 	// the context is cancelled (Ctrl+C).
 	return readLoop(ctx, cfg)
+}
+
+func sendInitialMessage(ctx context.Context, cfg Config) error {
+	if len(cfg.InitialMsg) == 0 {
+		return nil
+	}
+	err := cfg.Conn.Write(ctx, websocket.MessageText, cfg.InitialMsg)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
 }
 
 // runBidirectional handles the case where we have both stdin and server

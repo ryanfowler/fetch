@@ -33,6 +33,19 @@ printf "msg1\nmsg2\n" | fetch ws://echo.websocket.events
 
 When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Use Ctrl+C or Ctrl+D to exit.
 
+Control this behavior with `--ws-interactive`:
+
+```sh
+# Automatically use the prompt when attached to a terminal
+fetch ws://api.example.com/stream --ws-interactive auto
+
+# Require the prompt, failing if stdio is not a terminal
+fetch ws://api.example.com/stream --ws-interactive on
+
+# Disable the prompt and stream server messages to stdout
+fetch ws://api.example.com/stream --ws-interactive off
+```
+
 ## Output
 
 - **Text messages**: Written to stdout. JSON messages are automatically formatted when connected to a terminal.
