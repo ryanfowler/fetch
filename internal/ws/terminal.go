@@ -38,6 +38,7 @@ func (t *terminal) enterRaw() error {
 func (t *terminal) restore() {
 	if t.saved != nil {
 		term.Restore(t.fd, t.saved)
+		t.saved = nil
 	}
 }
 

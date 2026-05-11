@@ -221,6 +221,7 @@ func main() {
 		URL:              app.URL,
 		Verbosity:        verbosity,
 		WS:               app.WS,
+		WSInteractive:    app.WSInteractive,
 	}
 	if app.HasGRPCDiscovery() {
 		status := fetch.DiscoverGRPC(ctx, &req)

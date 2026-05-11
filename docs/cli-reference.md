@@ -519,6 +519,8 @@ fetch ws://echo.websocket.events
 fetch wss://echo.websocket.events -d "hello"
 ```
 
+Use `--ws-interactive auto|on|off` to control the terminal prompt.
+
 See [WebSocket documentation](websocket.md) for details.
 
 ## gRPC Options

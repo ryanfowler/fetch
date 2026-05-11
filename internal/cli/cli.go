@@ -284,6 +284,9 @@ func Parse(args []string) (*App, error) {
 	if err := validateSchemeExclusives(&app, cli, long); err != nil {
 		return &app, err
 	}
+	if app.URL != nil && !app.WS && app.WSInteractive != core.WSInteractiveAuto {
+		return &app, fmt.Errorf("'--ws-interactive' requires a ws:// or wss:// URL")
+	}
 	if err := validateGRPCModes(&app, long); err != nil {
 		return &app, err
 	}

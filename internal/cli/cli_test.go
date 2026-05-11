@@ -87,6 +87,38 @@ func TestWebSocketSchemeExclusives(t *testing.T) {
 	}
 }
 
+func TestWebSocketInteractiveFlag(t *testing.T) {
+	t.Run("parses off", func(t *testing.T) {
+		app, err := Parse([]string{"ws://example.com", "--ws-interactive", "off"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if app.WSInteractive != core.WSInteractiveOff {
+			t.Fatalf("WSInteractive = %v, want off", app.WSInteractive)
+		}
+	})
+
+	t.Run("rejects invalid value", func(t *testing.T) {
+		_, err := Parse([]string{"ws://example.com", "--ws-interactive", "maybe"})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "ws-interactive") {
+			t.Fatalf("error = %q, want ws-interactive", err.Error())
+		}
+	})
+
+	t.Run("requires websocket url", func(t *testing.T) {
+		_, err := Parse([]string{"https://example.com", "--ws-interactive", "off"})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "ws://") {
+			t.Fatalf("error = %q, want ws://", err.Error())
+		}
+	})
+}
+
 func TestFromCurlDataUrlencode(t *testing.T) {
 	t.Run("@file reads and encodes contents", func(t *testing.T) {
 		dir := t.TempDir()

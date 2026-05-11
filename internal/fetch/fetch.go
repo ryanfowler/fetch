@@ -92,6 +92,7 @@ type Request struct {
 	URL              *url.URL
 	Verbosity        core.Verbosity
 	WS               bool
+	WSInteractive    core.WSInteractiveMode
 
 	// responseDescriptor is set internally after proto setup for response formatting.
 	responseDescriptor protoreflect.MessageDescriptor

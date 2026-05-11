@@ -3,13 +3,16 @@ package ws
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
+	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/format"
 
 	"github.com/coder/websocket"
@@ -40,6 +43,9 @@ func runInteractive(ctx context.Context, cfg Config) error {
 	if rows < minRows {
 		// Terminal too small; fall back to read-only.
 		t.restore()
+		if err := sendInitialMessage(ctx, cfg); err != nil {
+			return err
+		}
 		return readLoop(ctx, cfg)
 	}
 
@@ -51,6 +57,7 @@ func runInteractive(ctx context.Context, cfg Config) error {
 		term:   t,
 		editor: &lineEditor{},
 		cancel: cancel,
+		status: "connected",
 	}
 
 	// Channel for raw stdin bytes.
@@ -108,12 +115,11 @@ func runInteractive(ctx context.Context, cfg Config) error {
 	go t.watchResize(ctx, resizeCh)
 
 	// Send initial message from -d / -j flag.
+	if err := sendInitialMessage(ctx, cfg); err != nil {
+		im.teardownScreen()
+		return err
+	}
 	if len(cfg.InitialMsg) > 0 {
-		err := cfg.Conn.Write(ctx, websocket.MessageText, cfg.InitialMsg)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			im.teardownScreen()
-			return err
-		}
 		im.renderSentMessage(cfg.InitialMsg)
 	}
 
@@ -144,6 +150,10 @@ func runInteractive(ctx context.Context, cfg Config) error {
 			rows, cols := t.size()
 			if rows >= minRows {
 				im.setupScreen(rows, cols, 0)
+			} else {
+				im.teardownScreen()
+				cancel()
+				return nil
 			}
 
 		case <-ctx.Done():
@@ -202,11 +212,12 @@ type interactiveMode struct {
 	rows     int
 	cols     int
 	nextRow  int // next row to write a message in the scroll region (1-indexed)
+	status   string
 	messages []messageEntry
 }
 
 // setupScreen configures the scroll region and draws the separators and input line.
-// Layout: scroll region (1..N-3), separator (N-2), input (N-1), separator (N).
+// Layout: scroll region (1..N-3), status (N-2), input (N-1), separator (N).
 func (im *interactiveMode) setupScreen(rows, cols, initialCursorRow int) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
@@ -273,7 +284,7 @@ func (im *interactiveMode) setupScreen(rows, cols, initialCursorRow int) {
 	// Set scroll region to top N-3 rows.
 	fmt.Fprintf(os.Stdout, "\x1b[1;%dr", scrollEnd)
 
-	im.drawSeparatorLocked(rows - 2)
+	im.drawStatusLocked()
 	im.drawSeparatorLocked(rows)
 
 	if !firstSetup {
@@ -291,10 +302,17 @@ func (im *interactiveMode) replayMessagesLocked() {
 		return
 	}
 
-	// Each message occupies ~2 rows (content + spacing).
 	scrollEnd := im.rows - 3
-	capacity := (scrollEnd + 1) / 2
-	start := max(len(im.messages)-capacity, 0)
+	start := len(im.messages)
+	used := 0
+	for i := len(im.messages) - 1; i >= 0; i-- {
+		rows := im.messageRowCount(im.messages[i])
+		if used+rows > scrollEnd && start != len(im.messages) {
+			break
+		}
+		used += rows
+		start = i
+	}
 
 	for _, msg := range im.messages[start:] {
 		if msg.data != nil {
@@ -332,6 +350,13 @@ func (im *interactiveMode) drawSeparatorLocked(row int) {
 		os.Stdout.WriteString("─")
 	}
 	fmt.Fprint(os.Stdout, "\x1b[0m")
+}
+
+func (im *interactiveMode) drawStatusLocked() {
+	row := im.rows - 2
+	status := strings.ReplaceAll(sanitizeMessageText(im.status), "\n", " ")
+	msg := fitDisplayWidth(status, im.cols)
+	fmt.Fprintf(os.Stdout, "\x1b[%d;1H\x1b[2K\x1b[90m%s\x1b[0m", row, msg)
 }
 
 func (im *interactiveMode) drawInputLineLocked() {
@@ -382,24 +407,23 @@ func (im *interactiveMode) drawInputLineLocked() {
 	fmt.Fprintf(os.Stdout, "\x1b[%d;%dH", inputRow, cursorCol+1)
 }
 
-// writeMessageLine positions the cursor for a new message line. If the scroll
-// region is not yet full, the message is placed at nextRow (with a blank line
-// after it for spacing). Once full, the region scrolls naturally.
-func (im *interactiveMode) writeMessageLine() {
+// writePhysicalLine positions the cursor for one rendered message row. Once
+// the scroll region is full, the region scrolls naturally.
+func (im *interactiveMode) writePhysicalLine() {
 	scrollEnd := im.rows - 3
 
 	if im.nextRow <= scrollEnd {
-		// Space remaining — place the message directly.
 		fmt.Fprintf(os.Stdout, "\x1b[%d;1H\x1b[2K", im.nextRow)
-		// Reserve a blank line for spacing (if room allows).
-		if im.nextRow+1 <= scrollEnd {
-			im.nextRow += 2
-		} else {
-			im.nextRow++
-		}
+		im.nextRow++
 	} else {
 		// Scroll region is full — scroll by writing at the bottom.
 		fmt.Fprintf(os.Stdout, "\x1b[%d;1H\n\x1b[2K", scrollEnd)
+	}
+}
+
+func (im *interactiveMode) writeMessageSpacer() {
+	if im.nextRow <= im.rows-3 {
+		im.writePhysicalLine()
 	}
 }
 
@@ -439,27 +463,128 @@ func (im *interactiveMode) renderBinaryIndicator(n int) {
 }
 
 func (im *interactiveMode) writeMessageLocked(arrow string, data []byte) {
-	im.writeMessageLine()
-	fmt.Fprintf(os.Stdout, "\x1b[2m%s \x1b[0m", arrow)
-	im.writeFormattedMessage(data)
+	prefix := arrow + " "
+	continuation := "  "
+	width := max(im.cols-runewidth.StringWidth(prefix), 1)
+	lines := wrapDisplayLines(im.formatMessage(data), width)
+	for i, line := range lines {
+		im.writePhysicalLine()
+		if i == 0 {
+			fmt.Fprintf(os.Stdout, "\x1b[2m%s\x1b[0m", prefix)
+		} else {
+			fmt.Fprint(os.Stdout, continuation)
+		}
+		fmt.Fprint(os.Stdout, line)
+	}
+	im.writeMessageSpacer()
 }
 
 func (im *interactiveMode) writeBinaryLocked(n int) {
-	im.writeMessageLine()
+	im.writePhysicalLine()
 	fmt.Fprintf(os.Stdout, "\x1b[2m← [binary %d bytes]\x1b[0m", n)
+	im.writeMessageSpacer()
 }
 
-func (im *interactiveMode) writeFormattedMessage(data []byte) {
+func (im *interactiveMode) formatMessage(data []byte) string {
 	if shouldFormat(im.cfg.Format) && json.Valid(data) {
-		p := im.cfg.Stdout
+		p := core.TestPrinter(false)
 		if format.FormatJSONLine(data, p) == nil {
-			p.Flush()
-			return
+			_ = p.Flush()
+			return sanitizeMessageText(strings.TrimSuffix(string(p.Bytes()), "\n"))
 		}
-		p.Discard()
 	}
-	os.Stdout.Write(data)
-	os.Stdout.WriteString("\n")
+	return sanitizeMessageText(string(data))
+}
+
+func (im *interactiveMode) messageRowCount(msg messageEntry) int {
+	if msg.data == nil {
+		return 2
+	}
+	prefixWidth := runewidth.StringWidth(msg.arrow + " ")
+	width := max(im.cols-prefixWidth, 1)
+	return len(wrapDisplayLines(im.formatMessage(msg.data), width)) + 1
+}
+
+func sanitizeMessageText(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(s, "\uFFFD") {
+		switch {
+		case r == '\n':
+			b.WriteRune(r)
+		case r == '\t':
+			b.WriteString("    ")
+		case r == 0x1b:
+			b.WriteString(`\x1b`)
+		case unicode.IsControl(r):
+			if r <= 0xff {
+				fmt.Fprintf(&b, `\x%02x`, r)
+			} else {
+				b.WriteString(strconv.QuoteRuneToASCII(r))
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func wrapDisplayLines(s string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+
+	parts := strings.Split(s, "\n")
+	lines := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			lines = append(lines, "")
+			continue
+		}
+
+		var line strings.Builder
+		lineWidth := 0
+		for _, r := range part {
+			rw := runewidth.RuneWidth(r)
+			if rw < 1 {
+				rw = 1
+			}
+			if lineWidth > 0 && lineWidth+rw > width {
+				lines = append(lines, line.String())
+				line.Reset()
+				lineWidth = 0
+			}
+			line.WriteRune(r)
+			lineWidth += rw
+		}
+		lines = append(lines, line.String())
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+func fitDisplayWidth(s string, width int) string {
+	if width < 1 {
+		return ""
+	}
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if rw < 1 {
+			rw = 1
+		}
+		if used+rw > width {
+			break
+		}
+		b.WriteRune(r)
+		used += rw
+	}
+	return b.String()
 }
 
 // handleInput processes accumulated raw bytes, returning any unconsumed bytes.
@@ -627,10 +752,16 @@ func (im *interactiveMode) sendMessage(ctx context.Context) {
 	if err != nil {
 		// Restore the text so the user doesn't lose their input.
 		im.mu.Lock()
+		im.status = "send failed: " + err.Error()
 		im.editor.setText(text)
+		im.drawStatusLocked()
 		im.drawInputLineLocked()
 		im.mu.Unlock()
 		return
 	}
+	im.mu.Lock()
+	im.status = fmt.Sprintf("sent %d bytes", len(data))
+	im.drawStatusLocked()
+	im.mu.Unlock()
 	im.renderSentMessage(data)
 }
