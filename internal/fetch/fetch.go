@@ -175,7 +175,6 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		headers = grpcHeaders(r.Headers)
 	}
 	req, err := c.NewRequest(ctx, client.RequestConfig{
-		AWSSigV4:    r.AWSSigv4,
 		Basic:       r.Basic,
 		Bearer:      r.Bearer,
 		ContentType: r.ContentType,
@@ -240,6 +239,10 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}
 
+	if err := signAWSRequest(r, req); err != nil {
+		return 0, err
+	}
+
 	// 7. Print request metadata / dry-run.
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
@@ -287,6 +290,13 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	}
 
 	return code, err
+}
+
+func signAWSRequest(r *Request, req *http.Request) error {
+	if r.AWSSigv4 == nil {
+		return nil
+	}
+	return aws.Sign(req, *r.AWSSigv4, time.Now().UTC())
 }
 
 func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRedirects, hadRetries bool, metrics *connectionMetrics) (int, error) {

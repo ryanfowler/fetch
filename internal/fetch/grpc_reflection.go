@@ -378,7 +378,6 @@ func (rc *reflectionClient) invokeHTTP(ctx context.Context, path string, payload
 	}
 	headers := grpcHeaders(rc.request.Headers)
 	req, err := rc.client.NewRequest(ctx, client.RequestConfig{
-		AWSSigV4:    rc.request.AWSSigv4,
 		Basic:       rc.request.Basic,
 		Bearer:      rc.request.Bearer,
 		ContentType: fetchgrpc.ContentType,
@@ -397,6 +396,10 @@ func (rc *reflectionClient) invokeHTTP(ctx context.Context, path string, payload
 			req.Body.Close()
 		}
 	}()
+
+	if err := signAWSRequest(rc.request, req); err != nil {
+		return nil, err
+	}
 
 	resp, err := doOnce(rc.request, rc.client, req, nil)
 	if err != nil {

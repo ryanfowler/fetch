@@ -89,6 +89,11 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 			}))
 		}
 
+		if err := signAWSRequest(r, attemptReq); err != nil {
+			cancelAttempt()
+			return 0, err
+		}
+
 		resp, doErr := doOnce(r, c, attemptReq, replayer)
 
 		retryable, retryAfter := shouldRetry(resp, doErr)
