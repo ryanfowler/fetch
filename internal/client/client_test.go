@@ -7,12 +7,26 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 )
+
+const (
+	testEnvProxyHost = "proxy.example:8080"
+	testEnvProxyURL  = "http://" + testEnvProxyHost
+)
+
+func TestMain(m *testing.M) {
+	os.Setenv("HTTP_PROXY", testEnvProxyURL)
+	os.Setenv("NO_PROXY", "bypass.example")
+	os.Unsetenv("REQUEST_METHOD")
+	os.Exit(m.Run())
+}
 
 func TestIsLoopback(t *testing.T) {
 	tests := []struct {
@@ -219,6 +233,57 @@ func TestNewClientUsesDefaultRedirectLimit(t *testing.T) {
 	}
 }
 
+func TestNewClientUsesProxyFromEnvironment(t *testing.T) {
+	c := NewClient(ClientConfig{})
+	rt, ok := c.HTTPClient().Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", c.HTTPClient().Transport)
+	}
+	if rt.Proxy == nil {
+		t.Fatal("Proxy is nil, want http.ProxyFromEnvironment")
+	}
+
+	proxiedReq := newProxyTestRequest(t, "http://service.example/")
+	got, err := rt.Proxy(proxiedReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := testEnvProxyURL
+	if got == nil || got.String() != want {
+		t.Fatalf("Proxy(%q) = %v, want %q", proxiedReq.URL, got, want)
+	}
+
+	bypassedReq := newProxyTestRequest(t, "http://bypass.example/")
+	got, err = rt.Proxy(bypassedReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("Proxy(%q) = %v, want nil", bypassedReq.URL, got)
+	}
+}
+
+func TestNewClientExplicitProxyOverridesEnvironment(t *testing.T) {
+	explicitProxy, err := url.Parse("http://explicit-proxy.example:8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(ClientConfig{Proxy: explicitProxy})
+	rt, ok := c.HTTPClient().Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", c.HTTPClient().Transport)
+	}
+
+	req := newProxyTestRequest(t, "http://service.example/")
+	got, err := rt.Proxy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.String() != explicitProxy.String() {
+		t.Fatalf("Proxy(%q) = %v, want %q", req.URL, got, explicitProxy)
+	}
+}
+
 func TestDecodeResponseBodyClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
 	decoderErr := errors.New("bad header")
 	tests := []struct {
@@ -255,6 +320,16 @@ func TestDecodeResponseBodyClosesResponseBodyWhenDecoderConstructionFails(t *tes
 			}
 		})
 	}
+}
+
+func newProxyTestRequest(t *testing.T, rawURL string) *http.Request {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

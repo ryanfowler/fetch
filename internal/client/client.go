@@ -68,7 +68,7 @@ type ClientConfig struct {
 
 // NewClient returns an initialized Client given the provided configuration.
 func NewClient(cfg ClientConfig) *Client {
-	var proxy func(req *http.Request) (*url.URL, error)
+	proxy := http.ProxyFromEnvironment
 
 	// Build TLS config and dial function from shared configuration.
 	tlsDialCfg := &TLSDialConfig{
