@@ -481,6 +481,10 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 
 	// Set any provided headers.
 	for _, kv := range cfg.Headers {
+		if strings.EqualFold(kv.Key, "Host") {
+			req.Host = kv.Val
+			continue
+		}
 		req.Header.Set(kv.Key, kv.Val)
 	}
 
