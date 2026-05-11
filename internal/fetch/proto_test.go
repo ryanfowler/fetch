@@ -3,6 +3,7 @@ package fetch
 import (
 	"bytes"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -119,6 +120,57 @@ func TestStreamGRPCRequestClosesBody(t *testing.T) {
 	_ = readAllFrames(t, rc)
 	if !body.closed {
 		t.Fatal("expected streamGRPCRequest to close body")
+	}
+}
+
+func TestSetStreamingGRPCBodyWrapsGetBody(t *testing.T) {
+	desc := testMessageDescriptor(t)
+	req := &http.Request{
+		Body: io.NopCloser(strings.NewReader(`{"name":"first"}`)),
+		GetBody: func() (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader(`{"name":"replay"}`)), nil
+		},
+		ContentLength: int64(len(`{"name":"first"}`)),
+	}
+
+	setStreamingGRPCBody(req, desc)
+	if req.ContentLength != -1 {
+		t.Fatalf("expected unknown content length, got %d", req.ContentLength)
+	}
+
+	frames := readAllFrames(t, req.Body)
+	if len(frames) != 1 {
+		t.Fatalf("expected current body to contain 1 framed message, got %d", len(frames))
+	}
+
+	replay, err := req.GetBody()
+	if err != nil {
+		t.Fatalf("unexpected GetBody error: %v", err)
+	}
+	defer replay.Close()
+	frames = readAllFrames(t, replay)
+	if len(frames) != 1 {
+		t.Fatalf("expected replay body to contain 1 framed message, got %d", len(frames))
+	}
+}
+
+func TestSetStreamingGRPCBodyClearsMissingGetBody(t *testing.T) {
+	desc := testMessageDescriptor(t)
+	req := &http.Request{
+		Body:          io.NopCloser(strings.NewReader(`{"name":"first"}`)),
+		ContentLength: int64(len(`{"name":"first"}`)),
+	}
+
+	setStreamingGRPCBody(req, desc)
+	if req.GetBody != nil {
+		t.Fatal("expected GetBody to remain nil")
+	}
+	if req.ContentLength != -1 {
+		t.Fatalf("expected unknown content length, got %d", req.ContentLength)
+	}
+	frames := readAllFrames(t, req.Body)
+	if len(frames) != 1 {
+		t.Fatalf("expected current body to contain 1 framed message, got %d", len(frames))
 	}
 }
 
