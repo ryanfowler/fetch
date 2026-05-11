@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
 )
 
@@ -81,6 +82,11 @@ func ParseStatus(grpcStatus, grpcMessage string) *Status {
 	if grpcStatus != "" {
 		if n, err := strconv.Atoi(grpcStatus); err == nil {
 			code = Code(n)
+		}
+	}
+	if grpcMessage != "" {
+		if decoded, err := url.PathUnescape(grpcMessage); err == nil {
+			grpcMessage = decoded
 		}
 	}
 	return &Status{Code: code, Message: grpcMessage}
