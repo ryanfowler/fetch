@@ -224,6 +224,50 @@ func TestSessionJar(t *testing.T) {
 	}
 }
 
+func TestSessionJarReloadUsesRFCDefaultPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("default-path-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	login, _ := url.Parse("https://example.com/app/login")
+	jar := sess.Jar()
+	jar.SetCookies(login, []*http.Cookie{
+		{Name: "token", Value: "secret"},
+	})
+
+	if len(sess.Cookies) != 1 {
+		t.Fatalf("expected 1 session cookie, got %d", len(sess.Cookies))
+	}
+	if sess.Cookies[0].Path != "/app" {
+		t.Fatalf("persisted path = %q, want /app", sess.Cookies[0].Path)
+	}
+	if err := sess.Save(); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	reloaded, err := Load("default-path-test")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	jar = reloaded.Jar()
+
+	appPage, _ := url.Parse("https://example.com/app/page")
+	appCookies := cookieNames(jar.Cookies(appPage))
+	if !appCookies["token"] {
+		t.Fatalf("/app/page cookies = %v, want token", appCookies)
+	}
+
+	other, _ := url.Parse("https://example.com/other")
+	otherCookies := cookieNames(jar.Cookies(other))
+	if otherCookies["token"] {
+		t.Fatalf("/other received default-path cookie after reload: %v", otherCookies)
+	}
+}
+
 func TestSessionJarReloadPreservesHostOnlyCookies(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
@@ -439,6 +483,41 @@ func TestSessionJarDeletedCookieNotPersisted(t *testing.T) {
 	}
 	if len(sess.Cookies) != 0 {
 		t.Fatalf("expected deleted cookie to stay removed after reload, got %+v", sess.Cookies)
+	}
+}
+
+func TestSessionJarDeletionUsesRFCDefaultPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("default-path-delete-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	jar := sess.Jar()
+	login, _ := url.Parse("https://example.com/app/login")
+	jar.SetCookies(login, []*http.Cookie{
+		{Name: "token", Value: "live"},
+	})
+	if err := sess.Save(); err != nil {
+		t.Fatalf("initial save failed: %v", err)
+	}
+
+	sess, err = Load("default-path-delete-test")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if len(sess.Cookies) != 1 || sess.Cookies[0].Path != "/app" {
+		t.Fatalf("expected /app cookie after reload, got %+v", sess.Cookies)
+	}
+
+	jar = sess.Jar()
+	jar.SetCookies(login, []*http.Cookie{
+		{Name: "token", MaxAge: -1},
+	})
+	if len(sess.Cookies) != 0 {
+		t.Fatalf("expected deleted cookie to be removed from session, got %+v", sess.Cookies)
 	}
 }
 

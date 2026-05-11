@@ -193,7 +193,7 @@ func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 			sc.Domain = u.Hostname()
 		}
 		if sc.Path == "" {
-			sc.Path = "/"
+			sc.Path = defaultCookiePath(u.Path)
 		}
 		switch c.SameSite {
 		case http.SameSiteLaxMode:
@@ -256,6 +256,17 @@ func normalizeCookiePath(path string) string {
 		return "/"
 	}
 	return path
+}
+
+func defaultCookiePath(path string) string {
+	if path == "" || path[0] != '/' {
+		return "/"
+	}
+	i := strings.LastIndex(path, "/")
+	if i == 0 {
+		return "/"
+	}
+	return path[:i]
 }
 
 func isDeletionCookie(c *http.Cookie, now time.Time) bool {
