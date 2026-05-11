@@ -94,6 +94,7 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	opts := &websocket.DialOptions{
 		HTTPClient:   c.HTTPClient(),
 		HTTPHeader:   req.Header,
+		Host:         req.Host,
 		Subprotocols: subprotocols,
 	}
 
