@@ -32,6 +32,25 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		core.WriteWarningMsg(p, "--timing is not supported for WebSocket connections")
 	}
 
+	// Prepare the initial message from -d or -j flags. It is sent after the
+	// handshake and is not part of the signed WebSocket upgrade request.
+	var initialMsg []byte
+	if req.Body != nil {
+		if r.DryRun {
+			req.Body.Close()
+		} else {
+			var err error
+			initialMsg, err = io.ReadAll(req.Body)
+			req.Body.Close()
+			if err != nil {
+				return 1, err
+			}
+		}
+		req.Body = http.NoBody
+		req.GetBody = nil
+		req.ContentLength = 0
+	}
+
 	// Extract Sec-WebSocket-Protocol for DialOptions.Subprotocols.
 	var subprotocols []string
 	if proto := req.Header.Get("Sec-WebSocket-Protocol"); proto != "" {
@@ -42,6 +61,10 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 			}
 		}
 		req.Header.Del("Sec-WebSocket-Protocol")
+	}
+
+	if err := signWebSocketHandshake(r, req); err != nil {
+		return 1, err
 	}
 
 	// Print request metadata / dry-run.
@@ -88,16 +111,6 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		p.Flush()
 	}
 
-	// Prepare the initial message from -d or -j flags.
-	var initialMsg []byte
-	if req.Body != nil {
-		initialMsg, err = io.ReadAll(req.Body)
-		req.Body.Close()
-		if err != nil {
-			return 1, err
-		}
-	}
-
 	// Detect interactive mode: default to TUI only when all three FDs are terminals.
 	interactive := core.IsStdinTerm && core.IsStdoutTerm && core.IsStderrTerm
 	switch r.WSInteractive {
@@ -137,4 +150,25 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		return 1, err
 	}
 	return 0, nil
+}
+
+func signWebSocketHandshake(r *Request, req *http.Request) error {
+	if r.AWSSigv4 == nil {
+		return nil
+	}
+	if req.Body == nil || req.Body == http.NoBody {
+		return signAWSRequest(r, req)
+	}
+
+	body := req.Body
+	getBody := req.GetBody
+	contentLength := req.ContentLength
+	req.Body = http.NoBody
+	req.GetBody = nil
+	req.ContentLength = 0
+	err := signAWSRequest(r, req)
+	req.Body = body
+	req.GetBody = getBody
+	req.ContentLength = contentLength
+	return err
 }

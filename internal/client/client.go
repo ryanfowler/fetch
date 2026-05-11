@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/resolver"
@@ -397,7 +396,6 @@ func (c *Client) SetJar(jar http.CookieJar) {
 
 // RequestConfig represents the configuration for creating an HTTP request.
 type RequestConfig struct {
-	AWSSigV4    *aws.Config
 	Basic       *core.KeyVal[string]
 	Bearer      string
 	ContentType string
@@ -508,11 +506,6 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 
 	// Optionally set the authorization header.
 	switch {
-	case cfg.AWSSigV4 != nil:
-		err = aws.Sign(req, *cfg.AWSSigV4, time.Now().UTC())
-		if err != nil {
-			return nil, err
-		}
 	case cfg.Basic != nil:
 		req.SetBasicAuth(cfg.Basic.Key, cfg.Basic.Val)
 	case cfg.Bearer != "":
