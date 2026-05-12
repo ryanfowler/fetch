@@ -89,6 +89,27 @@ func streamEvents(r io.Reader) iter.Seq2[event, error] {
 		var eventType string
 		var sb strings.Builder
 		var lastEventID string
+		dispatch := func() bool {
+			ev := event{
+				LastID: lastEventID,
+				Type:   eventType,
+				Data:   sb.String(),
+			}
+			ev.Data = strings.TrimSuffix(ev.Data, "\n")
+
+			eventType = ""
+			sb.Reset()
+
+			if ev.Data == "" {
+				// Empty data, return.
+				return true
+			}
+
+			if ev.Type == "" {
+				ev.Type = "message"
+			}
+			return yield(ev, nil)
+		}
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			if !seenLine {
@@ -98,25 +119,7 @@ func streamEvents(r io.Reader) iter.Seq2[event, error] {
 
 			if len(line) == 0 {
 				// Empty line, dispatch the ev.
-				ev := event{
-					LastID: lastEventID,
-					Type:   eventType,
-					Data:   sb.String(),
-				}
-				ev.Data = strings.TrimSuffix(ev.Data, "\n")
-
-				eventType = ""
-				sb.Reset()
-
-				if ev.Data == "" {
-					// Empty data, return.
-					continue
-				}
-
-				if ev.Type == "" {
-					ev.Type = "message"
-				}
-				if !yield(ev, nil) {
+				if !dispatch() {
 					return
 				}
 				continue
@@ -141,6 +144,10 @@ func streamEvents(r io.Reader) iter.Seq2[event, error] {
 		}
 		if err := scanner.Err(); err != nil {
 			yield(event{}, err)
+			return
+		}
+		if sb.Len() > 0 {
+			dispatch()
 		}
 	}
 }
