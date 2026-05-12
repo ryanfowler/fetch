@@ -26,6 +26,7 @@ type Config struct {
 	CACerts    []*x509.Certificate
 	ClientCert *tls.Certificate
 	DNSServer  *url.URL
+	HTTP       core.HTTPVersion
 	Insecure   bool
 	TLSMax     uint16
 	TLSMin     uint16
@@ -44,6 +45,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		TLSMin:     cfg.TLSMin,
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
+	tlsConfig.NextProtos = alpnProtocols(cfg.HTTP)
 	res := resolver.New(resolver.Config{Server: cfg.DNSServer})
 
 	// Resolve host:port.
@@ -79,6 +81,13 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	render(p, &cs)
 	p.Flush()
 	return 0
+}
+
+func alpnProtocols(httpVersion core.HTTPVersion) []string {
+	if httpVersion == core.HTTP1 {
+		return []string{"http/1.1"}
+	}
+	return []string{"h2", "http/1.1"}
 }
 
 // writeTLSError writes a TLS connection error, suggesting --insecure for cert errors.

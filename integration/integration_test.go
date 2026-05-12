@@ -1837,6 +1837,7 @@ func TestMain(t *testing.T) {
 		}))
 		server.TLS = &tls.Config{
 			Certificates: []tls.Certificate{tlsCert},
+			NextProtos:   []string{"h2", "http/1.1"},
 		}
 		server.StartTLS()
 		t.Cleanup(func() { server.Close() })
@@ -1863,6 +1864,27 @@ func TestMain(t *testing.T) {
 			)
 			assertExitCode(t, 0, res)
 			assertBufContains(t, res.stderr, "TLS 1.3")
+		})
+
+		t.Run("shows default ALPN negotiation", func(t *testing.T) {
+			t.Parallel()
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--ca-cert", caCertPath,
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "ALPN: h2")
+		})
+
+		t.Run("honors HTTP/1 ALPN setting", func(t *testing.T) {
+			t.Parallel()
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--http", "1",
+				"--ca-cert", caCertPath,
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "ALPN: http/1.1")
 		})
 
 		t.Run("shows SANs", func(t *testing.T) {

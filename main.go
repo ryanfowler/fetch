@@ -583,6 +583,7 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		CACerts:    app.Cfg.CACerts,
 		ClientCert: clientCert,
 		DNSServer:  app.Cfg.DNSServer,
+		HTTP:       app.Cfg.HTTP,
 		Insecure:   getValue(app.Cfg.Insecure),
 		TLSMax:     getValue(app.Cfg.TLSMax),
 		TLSMin:     getValue(app.Cfg.TLSMin),
