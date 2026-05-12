@@ -54,19 +54,22 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Parse any config file, and merge with it.
-	handle := core.NewHandle(app.Cfg.Color)
-	err = parseConfigFile(app, handle.Stderr())
+	// Parse any config file with the CLI color setting for parse errors, then
+	// recreate the handle after config values are merged.
+	tmpHandle := core.NewHandle(app.Cfg.Color)
+	configPath, err := parseConfigFile(app)
 	if err != nil {
-		p := handle.Stderr()
+		p := tmpHandle.Stderr()
 		core.WriteErrorMsg(p, err)
 		os.Exit(1)
 	}
+	handle := core.NewHandle(app.Cfg.Color)
 	if err := app.Cfg.Validate(); err != nil {
 		p := handle.Stderr()
 		core.WriteErrorMsg(p, err)
 		os.Exit(1)
 	}
+	printConfigDebug(app, handle.Stderr(), configPath)
 
 	// Start async update, if necessary.
 	if !app.Update && !core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
@@ -247,13 +250,13 @@ func handleCompletion(name string, args []string) error {
 }
 
 // parse and merge any config file with the CLI app configuration.
-func parseConfigFile(app *cli.App, p *core.Printer) error {
+func parseConfigFile(app *cli.App) (string, error) {
 	file, err := config.GetFile(app.ConfigPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if file == nil {
-		return nil
+		return "", nil
 	}
 
 	if app.URL != nil {
@@ -265,6 +268,13 @@ func parseConfigFile(app *cli.App, p *core.Printer) error {
 
 	app.Cfg.Merge(file.Global)
 
+	return file.Path, nil
+}
+
+func printConfigDebug(app *cli.App, p *core.Printer, path string) {
+	if path == "" {
+		return
+	}
 	if getVerbosity(app) >= core.VDebug {
 		p.WriteInfoPrefix()
 		p.Set(core.Bold)
@@ -274,15 +284,13 @@ func parseConfigFile(app *cli.App, p *core.Printer) error {
 
 		p.WriteString(": '")
 		p.Set(core.Dim)
-		p.WriteString(file.Path)
+		p.WriteString(path)
 		p.Reset()
 		p.WriteString("'\n")
 		p.WriteInfoPrefix()
 		p.WriteString("\n")
 		p.Flush()
 	}
-
-	return nil
 }
 
 func getValue[T any](v *T) T {
