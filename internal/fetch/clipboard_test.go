@@ -3,11 +3,51 @@ package fetch
 import (
 	"bytes"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
+
+func TestClipboardCopierFinishCopiesEmptyBuffer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clipboard")
+	t.Setenv("FETCH_TEST_CLIPBOARD_HELPER", "1")
+	t.Setenv("FETCH_TEST_CLIPBOARD_OUT", path)
+
+	cc := &clipboardCopier{
+		cmd: &clipboardCmd{
+			path: os.Args[0],
+			args: []string{"-test.run=^TestClipboardCommandHelper$"},
+		},
+		buf: &limitedBuffer{max: maxBodyBytes},
+	}
+
+	cc.finish(newTestPrinter())
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("clipboard command was not invoked: %v", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("copied %d bytes, want empty clipboard data", len(data))
+	}
+}
+
+func TestClipboardCommandHelper(t *testing.T) {
+	if os.Getenv("FETCH_TEST_CLIPBOARD_HELPER") != "1" {
+		return
+	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		t.Fatalf("unable to read stdin: %v", err)
+	}
+	if err := os.WriteFile(os.Getenv("FETCH_TEST_CLIPBOARD_OUT"), data, 0o600); err != nil {
+		t.Fatalf("unable to write clipboard output: %v", err)
+	}
+	os.Exit(0)
+}
 
 func TestStreamToStdoutDrainsSuppressedBinaryForClipboard(t *testing.T) {
 	wasStdoutTerm := core.IsStdoutTerm
