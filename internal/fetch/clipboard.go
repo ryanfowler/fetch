@@ -84,7 +84,7 @@ func newClipboardCopier(r *Request, resp *http.Response) *clipboardCopier {
 // finish copies the captured bytes to the system clipboard. It writes a
 // warning to stderr on failure but never returns an error.
 func (cc *clipboardCopier) finish(p *core.Printer) {
-	if cc == nil || cc.buf.buf.Len() == 0 {
+	if cc == nil {
 		return
 	}
 	if cc.buf.overflow {
