@@ -10,7 +10,7 @@ require (
 	github.com/quic-go/quic-go v0.59.1
 	github.com/tinylib/msgp v1.6.4
 	github.com/yuin/goldmark v1.8.2
-	golang.org/x/crypto v0.50.0
+	golang.org/x/crypto v0.51.0
 	golang.org/x/image v0.40.0
 	golang.org/x/net v0.53.0
 	golang.org/x/sys v0.44.0
