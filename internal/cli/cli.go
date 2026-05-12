@@ -17,6 +17,8 @@ import (
 
 var unixOS = []string{"linux", "darwin", "freebsd", "openbsd", "netbsd", "aix", "dragonfly", "solaris"}
 
+const curlDefaultMaxRedirects = 50
+
 type CLI struct {
 	Description    string
 	ArgFn          func(s string) error
@@ -709,15 +711,14 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 	}
 
 	// Network.
+	redirects := 0
 	if r.FollowRedirects {
-		redirects := 10
-		if r.MaxRedirects > 0 {
+		redirects = curlDefaultMaxRedirects
+		if r.MaxRedirectsSet {
 			redirects = r.MaxRedirects
 		}
-		a.Cfg.Redirects = &redirects
-	} else if r.MaxRedirects > 0 {
-		a.Cfg.Redirects = &r.MaxRedirects
 	}
+	a.Cfg.Redirects = &redirects
 	if r.Timeout > 0 {
 		if err := a.Cfg.ParseTimeout(strconv.FormatFloat(r.Timeout, 'f', -1, 64)); err != nil {
 			return err

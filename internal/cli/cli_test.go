@@ -220,6 +220,60 @@ func TestFromCurlGetData(t *testing.T) {
 	})
 }
 
+func TestFromCurlRedirects(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		want int
+	}{
+		{
+			name: "disabled by default",
+			cmd:  "curl https://example.com",
+			want: 0,
+		},
+		{
+			name: "max redirs alone does not follow",
+			cmd:  "curl --max-redirs 5 https://example.com",
+			want: 0,
+		},
+		{
+			name: "location uses curl default limit",
+			cmd:  "curl -L https://example.com",
+			want: curlDefaultMaxRedirects,
+		},
+		{
+			name: "location with max redirs",
+			cmd:  "curl -L --max-redirs 5 https://example.com",
+			want: 5,
+		},
+		{
+			name: "location with explicit zero max redirs",
+			cmd:  "curl -L --max-redirs 0 https://example.com",
+			want: 0,
+		},
+		{
+			name: "location with unlimited max redirs",
+			cmd:  "curl -L --max-redirs -1 https://example.com",
+			want: -1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, err := Parse([]string{"--from-curl", tt.cmd})
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if app.Cfg.Redirects == nil {
+				t.Fatal("Redirects = nil, want explicit from-curl redirect setting")
+			}
+			if *app.Cfg.Redirects != tt.want {
+				t.Fatalf("Redirects = %d, want %d", *app.Cfg.Redirects, tt.want)
+			}
+		})
+	}
+}
+
 func TestFromCurlDataFileClose(t *testing.T) {
 	// Verify that file descriptors are properly closed after reading.
 	dir := t.TempDir()

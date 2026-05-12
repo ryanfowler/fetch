@@ -42,6 +42,7 @@ type Result struct {
 	RemoteHeaderName bool
 	FollowRedirects  bool
 	MaxRedirects     int
+	MaxRedirectsSet  bool
 	Timeout          float64
 	ConnectTimeout   float64
 	Proxy            string

@@ -563,6 +563,7 @@ func TestParseNetwork(t *testing.T) {
 			check: func(t *testing.T, r *Result) {
 				assertTrue(t, "FollowRedirects", r.FollowRedirects)
 				assertIntEqual(t, "MaxRedirects", r.MaxRedirects, 5)
+				assertTrue(t, "MaxRedirectsSet", r.MaxRedirectsSet)
 			},
 		},
 		{
