@@ -90,6 +90,32 @@ func TestCertDisplayName(t *testing.T) {
 	}
 }
 
+func TestALPNProtocols(t *testing.T) {
+	tests := []struct {
+		name        string
+		httpVersion core.HTTPVersion
+		want        []string
+	}{
+		{name: "default offers HTTP/2 and HTTP/1.1", httpVersion: core.HTTPDefault, want: []string{"h2", "http/1.1"}},
+		{name: "HTTP/2 offers HTTP/2 and HTTP/1.1", httpVersion: core.HTTP2, want: []string{"h2", "http/1.1"}},
+		{name: "HTTP/1 offers only HTTP/1.1", httpVersion: core.HTTP1, want: []string{"http/1.1"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := alpnProtocols(tt.httpVersion)
+			if len(got) != len(tt.want) {
+				t.Fatalf("alpnProtocols() length = %d, want %d: %v", len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("alpnProtocols()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestCertExpiryInfo(t *testing.T) {
 	fixedNow := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	origNow := tlsInspectNow
