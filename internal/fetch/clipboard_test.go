@@ -1,10 +1,37 @@
 package fetch
 
 import (
+	"bytes"
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
+
+func TestStreamToStdoutDrainsSuppressedBinaryForClipboard(t *testing.T) {
+	wasStdoutTerm := core.IsStdoutTerm
+	core.IsStdoutTerm = true
+	t.Cleanup(func() {
+		core.IsStdoutTerm = wasStdoutTerm
+	})
+
+	data := bytes.Repeat([]byte("a"), 4096)
+	data[10] = 0
+
+	lb := &limitedBuffer{max: int64(len(data))}
+	r := io.TeeReader(bytes.NewReader(data), lb)
+	if err := streamToStdout(r, newTestPrinter(), false, true, true); err != nil {
+		t.Fatalf("streamToStdout returned error: %v", err)
+	}
+
+	if got := lb.buf.Bytes(); !bytes.Equal(got, data) {
+		t.Fatalf("captured %d bytes, want %d", len(got), len(data))
+	}
+	if lb.overflow {
+		t.Fatal("buffer should not overflow when response fits")
+	}
+}
 
 func TestLimitedBuffer(t *testing.T) {
 	t.Run("under limit", func(t *testing.T) {

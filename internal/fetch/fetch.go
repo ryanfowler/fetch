@@ -352,7 +352,7 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 
 	if body != nil {
 		p := r.PrinterHandle.Stderr()
-		err = streamToStdout(body, p, r.Output == "-", r.NoPager)
+		err = streamToStdout(body, p, r.Output == "-", r.NoPager, cc != nil)
 		if err != nil {
 			return 0, err
 		}
@@ -463,7 +463,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	return bytes.NewReader(buf), nil
 }
 
-func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager bool) error {
+func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary bool) error {
 	// Check output to see if it's likely safe to print to stdout.
 	if core.IsStdoutTerm && !forceOutput {
 		var ok bool
@@ -474,6 +474,10 @@ func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager bool) err
 		}
 		if !ok {
 			printBinaryWarning(p)
+			if drainSuppressedBinary {
+				_, err = io.Copy(io.Discard, r)
+				return err
+			}
 			return nil
 		}
 	}
