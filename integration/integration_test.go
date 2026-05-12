@@ -39,8 +39,6 @@ import (
 	"github.com/coder/websocket"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 	"google.golang.org/protobuf/encoding/protowire"
 	protoMarshal "google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
@@ -3293,7 +3291,10 @@ func startReflectionGRPCServer(t *testing.T, useTLS, enableReflection bool) refl
 		server.StartTLS()
 		scheme = "https"
 	} else {
-		server.Config.Handler = h2c.NewHandler(handler, &http2.Server{})
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetUnencryptedHTTP2(true)
+		server.Config.Protocols = protocols
 		server.Start()
 		scheme = "http"
 	}
