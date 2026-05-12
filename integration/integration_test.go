@@ -2691,6 +2691,7 @@ func TestMain(t *testing.T) {
 
 	t.Run("websocket piped stdin", func(t *testing.T) {
 		t.Parallel()
+		var echoed atomic.Int64
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			conn, err := websocket.Accept(w, r, nil)
 			if err != nil {
@@ -2703,6 +2704,10 @@ func TestMain(t *testing.T) {
 					return
 				}
 				conn.Write(r.Context(), typ, data)
+				if echoed.Add(1) == 2 {
+					conn.Close(websocket.StatusNormalClosure, "done")
+					return
+				}
 			}
 		})
 		defer server.Close()
@@ -2842,14 +2847,16 @@ func TestMain(t *testing.T) {
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			n := count.Add(1)
 			if n <= 1 {
-				// First attempt: delay longer than the per-attempt timeout.
-				time.Sleep(2 * time.Second)
+				// First attempt: block until the client-side per-attempt
+				// timeout cancels the request.
+				<-r.Context().Done()
+				return
 			}
 			io.WriteString(w, "ok")
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "--timeout", "0.5")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "--timeout", "0.1")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 		if count.Load() != 2 {
@@ -3082,7 +3089,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl --retry 2 --retry-delay 0 %s`, server.URL))
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl --retry 2 --retry-delay 0.01 %s`, server.URL))
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 	})
@@ -3166,29 +3173,42 @@ func runFetchStdin(t *testing.T, input, path string, args ...string) runResult {
 func runFetchOpts(t *testing.T, path string, opts fetchOpts, args ...string) runResult {
 	t.Helper()
 
-	var stderr, stdout = new(bytes.Buffer), new(bytes.Buffer)
-	cmd := exec.Command(path, args...)
-	if opts.stdin != "" {
-		cmd.Stdin = strings.NewReader(opts.stdin)
-	}
-	if opts.dir != "" {
-		cmd.Dir = opts.dir
-	}
-	if len(opts.env) > 0 {
-		cmd.Env = append(os.Environ(), opts.env...)
-	}
-	cmd.Stderr = stderr
-	cmd.Stdout = stdout
-	if err := cmd.Run(); err != nil {
-		if _, ok := errors.AsType[*exec.ExitError](err); !ok {
-			t.Fatalf("unexpected error running the fetch command: %s", err.Error())
+	deadline := time.Now().Add(2 * time.Second)
+	delay := 10 * time.Millisecond
+	for {
+		var stderr, stdout = new(bytes.Buffer), new(bytes.Buffer)
+		cmd := exec.Command(path, args...)
+		if opts.stdin != "" {
+			cmd.Stdin = strings.NewReader(opts.stdin)
+		}
+		if opts.dir != "" {
+			cmd.Dir = opts.dir
+		}
+		if len(opts.env) > 0 {
+			cmd.Env = append(os.Environ(), opts.env...)
+		}
+		cmd.Stderr = stderr
+		cmd.Stdout = stdout
+		if err := cmd.Run(); err != nil {
+			if isTextFileBusy(err) && time.Now().Before(deadline) {
+				time.Sleep(delay)
+				delay = min(delay*2, 100*time.Millisecond)
+				continue
+			}
+			if _, ok := errors.AsType[*exec.ExitError](err); !ok {
+				t.Fatalf("unexpected error running the fetch command: %s", err.Error())
+			}
+		}
+		return runResult{
+			state:  cmd.ProcessState,
+			stderr: stderr,
+			stdout: stdout,
 		}
 	}
-	return runResult{
-		state:  cmd.ProcessState,
-		stderr: stderr,
-		stdout: stdout,
-	}
+}
+
+func isTextFileBusy(err error) bool {
+	return strings.Contains(err.Error(), "text file busy")
 }
 
 func copyFile(t *testing.T, src, dst string) {
@@ -3198,13 +3218,37 @@ func copyFile(t *testing.T, src, dst string) {
 		t.Fatalf("unable to open source file: %s", err.Error())
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, 0755)
+
+	info, err := in.Stat()
 	if err != nil {
-		t.Fatalf("unable to create destination file: %s", err.Error())
+		t.Fatalf("unable to stat source file: %s", err.Error())
 	}
-	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
+
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".fetch-copy-*")
+	if err != nil {
+		t.Fatalf("unable to create temporary destination file: %s", err.Error())
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if err := tmp.Chmod(info.Mode()); err != nil {
+		tmp.Close()
+		t.Fatalf("unable to set destination file mode: %s", err.Error())
+	}
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
 		t.Fatalf("unable to copy file: %s", err.Error())
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		t.Fatalf("unable to sync destination file: %s", err.Error())
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatalf("unable to close destination file: %s", err.Error())
+	}
+
+	if err := os.Rename(tmpPath, dst); err != nil {
+		t.Fatalf("unable to move destination file into place: %s", err.Error())
 	}
 }
 
