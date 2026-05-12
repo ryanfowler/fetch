@@ -64,7 +64,7 @@ func handleZipFile(root *os.Root, f *zip.File) error {
 	}
 
 	if f.FileInfo().IsDir() {
-		return root.Mkdir(name, f.Mode())
+		return root.MkdirAll(name, f.Mode().Perm())
 	}
 
 	rc, err := f.Open()
@@ -73,7 +73,7 @@ func handleZipFile(root *os.Root, f *zip.File) error {
 	}
 	defer rc.Close()
 
-	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode().Perm())
 	if err != nil {
 		return err
 	}

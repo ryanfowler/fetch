@@ -58,13 +58,13 @@ func handleHeader(root *os.Root, tr *tar.Reader, header *tar.Header) error {
 	}
 
 	if header.Typeflag == tar.TypeDir {
-		return root.Mkdir(name, os.FileMode(header.Mode))
+		return root.MkdirAll(name, os.FileMode(header.Mode))
 	}
 	if header.Typeflag != tar.TypeReg {
 		return nil
 	}
 
-	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
+	f, err := root.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
 	if err != nil {
 		return err
 	}
