@@ -132,6 +132,24 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "* TTFB:")
 	})
 
+	t.Run("config color", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"ok":"yes"}`)
+		})
+		defer server.Close()
+
+		path := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(path, []byte("color = on\nformat = on\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", path, server.URL)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "\x1b[")
+	})
+
 	t.Run("aws-sigv4 auth", func(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
