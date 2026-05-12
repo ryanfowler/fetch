@@ -64,6 +64,33 @@ func TestUnpackArtifact_PathTraversal(t *testing.T) {
 	}
 }
 
+func TestUnpackArtifact_ExplicitDirectoryEntry(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	if _, err := zw.Create("bin/"); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := zw.Create("bin/fetch.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte("content")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	if err := unpackArtifact(dir, bytes.NewReader(buf.Bytes())); err != nil {
+		t.Fatalf("unpackArtifact: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bin", "fetch.exe")); err != nil {
+		t.Fatalf("expected file to exist: %v", err)
+	}
+}
+
 func createZip(t *testing.T, filename string, content []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
