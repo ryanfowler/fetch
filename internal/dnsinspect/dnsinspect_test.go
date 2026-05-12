@@ -2,6 +2,7 @@ package dnsinspect
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -167,13 +168,73 @@ func TestLookupUDPRecordsReturnsTTL(t *testing.T) {
 	}
 }
 
+func TestLookupUsesDefaultResolverWhenNoSystemDNSServerDiscovered(t *testing.T) {
+	origReadResolvConf := readResolvConf
+	origDefaultLookupIPAddr := defaultLookupIPAddr
+	t.Cleanup(func() {
+		readResolvConf = origReadResolvConf
+		defaultLookupIPAddr = origDefaultLookupIPAddr
+	})
+
+	readResolvConf = func() ([]byte, error) {
+		return nil, errors.New("missing resolv.conf")
+	}
+	var lookedUpHost string
+	defaultLookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		lookedUpHost = host
+		return []net.IPAddr{
+			{IP: net.ParseIP("192.0.2.44")},
+			{IP: net.ParseIP("2001:db8::44")},
+		}, nil
+	}
+
+	res, err := lookup(context.Background(), &Config{}, "example.com", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lookedUpHost != "example.com" {
+		t.Fatalf("default resolver looked up host %q, want example.com", lookedUpHost)
+	}
+	if strings.Contains(res.resolver, "127.0.0.1") {
+		t.Fatalf("resolver label = %q, must not silently fall back to loopback", res.resolver)
+	}
+	if got, want := res.records["A"][0].value, "192.0.2.44"; got != want {
+		t.Fatalf("A record = %q, want %q", got, want)
+	}
+	if got, want := res.records["AAAA"][0].value, "2001:db8::44"; got != want {
+		t.Fatalf("AAAA record = %q, want %q", got, want)
+	}
+	if res.records["A"][0].hasTTL || res.records["AAAA"][0].hasTTL {
+		t.Fatalf("default resolver records unexpectedly reported TTLs: %#v", res.records)
+	}
+}
+
+func TestResolverTargetDoesNotDefaultToLoopback(t *testing.T) {
+	origReadResolvConf := readResolvConf
+	t.Cleanup(func() {
+		readResolvConf = origReadResolvConf
+	})
+
+	readResolvConf = func() ([]byte, error) {
+		return []byte("# no nameservers\n"), nil
+	}
+
+	target := resolverTarget(nil)
+	if !target.useDefault {
+		t.Fatalf("useDefault = false, want true")
+	}
+	if strings.Contains(target.label, "127.0.0.1") || strings.Contains(target.udpAddr, "127.0.0.1") {
+		t.Fatalf("resolver target silently used loopback: %#v", target)
+	}
+}
+
 func TestRenderShowsUnavailableTTLPerRecord(t *testing.T) {
 	p := core.TestPrinter(false)
 	render(p, &result{
 		host:     "example.com",
 		resolver: "system",
 		records: map[string][]record{
-			"A": {{typ: "A", value: "192.0.2.1", ttl: 60}},
+			"A": {{typ: "A", value: "192.0.2.1", ttl: 60, hasTTL: true}},
 		},
 	})
 
@@ -190,8 +251,8 @@ func TestRenderSortsRecordsWithinType(t *testing.T) {
 		resolver: "system",
 		records: map[string][]record{
 			"A": {
-				{typ: "A", value: "192.0.2.20", ttl: 60},
-				{typ: "A", value: "192.0.2.10", ttl: 60},
+				{typ: "A", value: "192.0.2.20", ttl: 60, hasTTL: true},
+				{typ: "A", value: "192.0.2.10", ttl: 60, hasTTL: true},
 			},
 		},
 	})

@@ -52,9 +52,10 @@ type queryType struct {
 }
 
 type record struct {
-	typ   string
-	value string
-	ttl   uint32
+	typ    string
+	value  string
+	ttl    uint32
+	hasTTL bool
 }
 
 type result struct {
@@ -68,6 +69,17 @@ type queryResult struct {
 	records []record
 	err     error
 }
+
+type resolverTargetInfo struct {
+	label      string
+	udpAddr    string
+	useDefault bool
+}
+
+var (
+	readResolvConf      = func() ([]byte, error) { return os.ReadFile("/etc/resolv.conf") }
+	defaultLookupIPAddr = net.DefaultResolver.LookupIPAddr
+)
 
 // Inspect resolves the configured URL hostname and renders DNS information to
 // the printer. It returns a non-zero exit code on failure.
@@ -86,8 +98,8 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 
 	start := time.Now()
 	if ip := net.ParseIP(host); ip != nil {
-		resolver, _ := resolverTarget(cfg.DNSServer)
-		renderIPLiteral(p, host, ip, resolver, time.Since(start))
+		target := resolverTarget(cfg.DNSServer)
+		renderIPLiteral(p, host, ip, target.label, time.Since(start))
 		p.Flush()
 		return 0
 	}
@@ -103,11 +115,26 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 }
 
 func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*result, error) {
-	resolverLabel, udpAddr := resolverTarget(cfg.DNSServer)
+	target := resolverTarget(cfg.DNSServer)
 	out := &result{
 		host:     host,
-		resolver: resolverLabel,
+		resolver: target.label,
 		records:  make(map[string][]record),
+	}
+
+	if target.useDefault {
+		records, err := lookupDefaultResolverRecords(ctx, host)
+		out.duration = time.Since(start)
+		if err != nil {
+			return nil, fmt.Errorf("lookup %s: %w", host, err)
+		}
+		for _, rec := range records {
+			out.records[rec.typ] = append(out.records[rec.typ], rec)
+		}
+		if recordCount(out) == 0 {
+			return nil, fmt.Errorf("lookup %s: no DNS records found", host)
+		}
+		return out, nil
 	}
 
 	results := make([]queryResult, len(inspectTypes))
@@ -120,7 +147,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 				results[i].records, results[i].err = lookupDOHRecords(ctx, cfg.DNSServer, host, qt)
 				return
 			}
-			results[i].records, results[i].err = lookupUDPRecords(ctx, udpAddr, host, qt)
+			results[i].records, results[i].err = lookupUDPRecords(ctx, target.udpAddr, host, qt)
 		}()
 	}
 	wg.Wait()
@@ -153,6 +180,25 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		return nil, fmt.Errorf("lookup %s: %w", host, firstErr)
 	}
 	return nil, fmt.Errorf("lookup %s: no DNS records found", host)
+}
+
+func lookupDefaultResolverRecords(ctx context.Context, host string) ([]record, error) {
+	addrs, err := defaultLookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+
+	records := make([]record, 0, len(addrs))
+	for _, addr := range addrs {
+		ip := addr.IP
+		switch {
+		case ip.To4() != nil:
+			records = append(records, record{typ: "A", value: ip.String()})
+		case ip.To16() != nil:
+			records = append(records, record{typ: "AAAA", value: ip.String()})
+		}
+	}
+	return records, nil
 }
 
 func lookupDOHRecords(ctx context.Context, serverURL *url.URL, host string, qt queryType) ([]record, error) {
@@ -211,9 +257,10 @@ func lookupDOHRecords(ctx context.Context, serverURL *url.URL, host string, qt q
 		typ := dnsmessage.Type(answer.Type)
 		label := typeLabel(typ)
 		records = append(records, record{
-			typ:   label,
-			value: normalizeDOHValue(typ, answer.Data),
-			ttl:   answer.TTL,
+			typ:    label,
+			value:  normalizeDOHValue(typ, answer.Data),
+			ttl:    answer.TTL,
+			hasTTL: true,
 		})
 	}
 	return records, nil
@@ -292,9 +339,10 @@ func resourceRecord(res dnsmessage.Resource) (record, bool) {
 		return record{}, false
 	}
 	return record{
-		typ:   typeLabel(res.Header.Type),
-		value: value,
-		ttl:   res.Header.TTL,
+		typ:    typeLabel(res.Header.Type),
+		value:  value,
+		ttl:    res.Header.TTL,
+		hasTTL: true,
 	}, true
 }
 
@@ -487,20 +535,23 @@ func unpackDNSName(raw []byte, off int) (string, int, bool) {
 	}
 }
 
-func resolverTarget(server *url.URL) (label, udpAddr string) {
+func resolverTarget(server *url.URL) resolverTargetInfo {
 	switch {
 	case server == nil:
-		addr := systemDNSServer()
-		return "system (" + addr + ")", addr
+		addr, ok := systemDNSServer()
+		if !ok {
+			return resolverTargetInfo{label: "system resolver", useDefault: true}
+		}
+		return resolverTargetInfo{label: "system (" + addr + ")", udpAddr: addr}
 	case server.Scheme == "":
-		return "udp " + server.Host, server.Host
+		return resolverTargetInfo{label: "udp " + server.Host, udpAddr: server.Host}
 	default:
-		return server.String(), ""
+		return resolverTargetInfo{label: server.String()}
 	}
 }
 
-func systemDNSServer() string {
-	raw, err := os.ReadFile("/etc/resolv.conf")
+func systemDNSServer() (string, bool) {
+	raw, err := readResolvConf()
 	if err == nil {
 		for _, line := range strings.Split(string(raw), "\n") {
 			line = strings.TrimSpace(line)
@@ -509,11 +560,11 @@ func systemDNSServer() string {
 			}
 			fields := strings.Fields(line)
 			if len(fields) >= 2 && fields[0] == "nameserver" {
-				return net.JoinHostPort(fields[1], "53")
+				return net.JoinHostPort(fields[1], "53"), true
 			}
 		}
 	}
-	return net.JoinHostPort("127.0.0.1", "53")
+	return "", false
 }
 
 func absoluteName(host string) string {
@@ -703,12 +754,14 @@ func renderSection(p *core.Printer, name string, records []record) {
 		p.Set(core.Green)
 		p.WriteString(rec.value)
 		p.Reset()
-		p.WriteString(" ")
-		p.Set(core.Dim)
-		p.WriteString("(TTL ")
-		p.WriteString(formatTTL(rec.ttl))
-		p.WriteString(")")
-		p.Reset()
+		if rec.hasTTL {
+			p.WriteString(" ")
+			p.Set(core.Dim)
+			p.WriteString("(TTL ")
+			p.WriteString(formatTTL(rec.ttl))
+			p.WriteString(")")
+			p.Reset()
+		}
 		p.WriteString("\n")
 	}
 
