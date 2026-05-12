@@ -35,6 +35,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 		}
 		if replayer != nil {
 			defer replayer.close()
+			req.GetBody = replayer.open
 		}
 	}
 

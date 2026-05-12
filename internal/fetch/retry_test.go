@@ -17,6 +17,7 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
+	imultipart "github.com/ryanfowler/fetch/internal/multipart"
 )
 
 func TestComputeDelay(t *testing.T) {
@@ -370,6 +371,73 @@ func TestDoOnceDigestAfterRedirectUsesChallengedRequest(t *testing.T) {
 	}
 	if digestURI != "/protected?token=1" {
 		t.Fatalf("digest uri = %q, want /protected?token=1", digestURI)
+	}
+}
+
+func TestRetryableRequestSetsGetBodyForMultipartRedirect(t *testing.T) {
+	var startHits, finalHits int
+	var finalMethod, finalBody, finalContentType string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			startHits++
+			http.Redirect(w, r, server.URL+"/final", http.StatusTemporaryRedirect)
+		case "/final":
+			finalHits++
+			finalMethod = r.Method
+			finalContentType = r.Header.Get("Content-Type")
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read final body: %v", err)
+			}
+			finalBody = string(body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	mp := imultipart.NewMultipart([]core.KeyVal[string]{
+		{Key: "field", Val: "value"},
+	})
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/start", mp)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", mp.ContentType())
+
+	code, err := retryableRequest(
+		context.Background(),
+		&Request{
+			Digest:        &core.KeyVal[string]{Key: "user", Val: "pass"},
+			Discard:       true,
+			PrinterHandle: core.NewHandle(core.ColorOff),
+		},
+		client.NewClient(client.ClientConfig{}),
+		req,
+	)
+	if err != nil {
+		t.Fatalf("retryableRequest: %v", err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if startHits != 1 {
+		t.Fatalf("start hits = %d, want 1", startHits)
+	}
+	if finalHits != 1 {
+		t.Fatalf("final hits = %d, want 1", finalHits)
+	}
+	if finalMethod != http.MethodPost {
+		t.Fatalf("final method = %s, want POST", finalMethod)
+	}
+	if !strings.HasPrefix(finalContentType, "multipart/form-data; boundary=") {
+		t.Fatalf("final content-type = %q, want multipart/form-data", finalContentType)
+	}
+	if !strings.Contains(finalBody, `name="field"`) || !strings.Contains(finalBody, "value") {
+		t.Fatalf("final body did not contain multipart field: %q", finalBody)
 	}
 }
 
