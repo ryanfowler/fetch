@@ -217,6 +217,7 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 			return 0, fmt.Errorf("invalid --max-redirs value: %s", v)
 		}
 		r.MaxRedirects = num
+		r.MaxRedirectsSet = true
 		return n, nil
 	case "max-time":
 		v, n, err := consumeArg()
