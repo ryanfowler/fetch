@@ -16,13 +16,17 @@ import (
 func FormatGRPCStream(r io.Reader, md protoreflect.MessageDescriptor, p *core.Printer) error {
 	var written bool
 	for {
-		data, _, err := grpc.ReadFrame(r)
+		data, compressed, err := grpc.ReadFrame(r)
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
 			p.Discard()
 			return err
+		}
+		if compressed {
+			p.Discard()
+			return errors.New("compressed gRPC messages are not supported")
 		}
 
 		if written {

@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -52,6 +53,19 @@ func TestFormatGRPCStream(t *testing.T) {
 		p := core.NewHandle(core.ColorOff).Stderr()
 		err := FormatGRPCStream(bytes.NewReader(framed), nil, p)
 		if err != nil {
+			t.Fatalf("FormatGRPCStream() error = %v", err)
+		}
+	})
+
+	t.Run("compressed frame", func(t *testing.T) {
+		framed := grpc.Frame([]byte("compressed payload"), true)
+
+		p := core.NewHandle(core.ColorOff).Stderr()
+		err := FormatGRPCStream(bytes.NewReader(framed), nil, p)
+		if err == nil {
+			t.Fatal("expected error for compressed frame")
+		}
+		if !strings.Contains(err.Error(), "compressed gRPC messages are not supported") {
 			t.Fatalf("FormatGRPCStream() error = %v", err)
 		}
 	})
