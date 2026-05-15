@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -60,6 +61,38 @@ func TestFlagsAlphabeticalOrder(t *testing.T) {
 			t.Errorf("flags out of alphabetical order: %q should come before %q", curr, prev)
 		}
 	}
+}
+
+func TestEndOfOptions(t *testing.T) {
+	t.Run("normal parse treats remaining args as positional", func(t *testing.T) {
+		app, err := Parse([]string{"--", "https://example.com"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if app.URL == nil || app.URL.String() != "https://example.com" {
+			t.Fatalf("URL = %v, want https://example.com", app.URL)
+		}
+		if len(app.ExtraArgs) != 0 {
+			t.Fatalf("ExtraArgs = %v, want none", app.ExtraArgs)
+		}
+	})
+
+	t.Run("completion parse keeps remaining args as extra args", func(t *testing.T) {
+		app, err := Parse([]string{"--complete=bash", "--", "fetch", "--"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if app.Complete != "bash" {
+			t.Fatalf("Complete = %q, want bash", app.Complete)
+		}
+		want := []string{"fetch", "--"}
+		if !slices.Equal(app.ExtraArgs, want) {
+			t.Fatalf("ExtraArgs = %v, want %v", app.ExtraArgs, want)
+		}
+		if app.URL != nil {
+			t.Fatalf("URL = %v, want nil", app.URL)
+		}
+	})
 }
 
 func TestWebSocketSchemeExclusives(t *testing.T) {

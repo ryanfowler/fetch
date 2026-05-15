@@ -84,13 +84,14 @@ func (a *App) CLI() *CLI {
 			{Name: "URL", Description: "The URL to make a request to"},
 		},
 		ArgFn: func(s string) error {
-			// Append extra args, if necessary.
 			if extraArgs {
 				a.ExtraArgs = append(a.ExtraArgs, s)
 				return nil
 			}
 			if s == "--" {
-				extraArgs = true
+				if a.Complete != "" {
+					extraArgs = true
+				}
 				return nil
 			}
 
