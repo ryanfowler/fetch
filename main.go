@@ -32,6 +32,7 @@ func main() {
 	signal.Notify(chSig, syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM)
 	go func() {
 		sig := <-chSig
+		signal.Stop(chSig)
 		cancel(core.SignalError(sig.String()))
 	}()
 
