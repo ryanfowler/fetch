@@ -258,8 +258,11 @@ func TestRenderSANs(t *testing.T) {
 		renderSANs(p, leaf)
 		out := string(p.Bytes())
 
-		if !strings.Contains(out, "SANs:") {
-			t.Errorf("expected 'SANs:' in output, got:\n%s", out)
+		if !strings.Contains(out, "* SANs:") {
+			t.Errorf("expected '* SANs:' in output, got:\n%s", out)
+		}
+		if strings.Contains(out, "*   SANs:") {
+			t.Errorf("expected SANs line to align with Certificate chain line, got:\n%s", out)
 		}
 		if !strings.Contains(out, "example.com") {
 			t.Errorf("expected 'example.com' in output, got:\n%s", out)
@@ -323,8 +326,11 @@ func TestRender(t *testing.T) {
 		if !strings.Contains(out, "TLS 1.3") {
 			t.Errorf("expected 'TLS 1.3' in output, got:\n%s", out)
 		}
-		if !strings.Contains(out, "ALPN: h2") {
-			t.Errorf("expected 'ALPN: h2' in output, got:\n%s", out)
+		if !strings.Contains(out, "* ALPN: h2") {
+			t.Errorf("expected '* ALPN: h2' in output, got:\n%s", out)
+		}
+		if strings.Contains(out, "*   ALPN: h2") {
+			t.Errorf("expected ALPN line to align with TLS line, got:\n%s", out)
 		}
 		if !strings.Contains(out, "Certificate chain") {
 			t.Errorf("expected 'Certificate chain' in output, got:\n%s", out)

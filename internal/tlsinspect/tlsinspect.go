@@ -134,7 +134,7 @@ func render(p *core.Printer, cs *tls.ConnectionState) {
 	// ALPN negotiated protocol.
 	if cs.NegotiatedProtocol != "" {
 		p.WriteInfoPrefix()
-		p.WriteString("  ALPN: ")
+		p.WriteString("ALPN: ")
 		p.Set(core.Italic)
 		p.WriteString(cs.NegotiatedProtocol)
 		p.Reset()
@@ -258,7 +258,7 @@ func renderSANs(p *core.Printer, leaf *x509.Certificate) {
 	p.WriteInfoPrefix()
 	p.WriteString("\n")
 	p.WriteInfoPrefix()
-	p.WriteString("  SANs: ")
+	p.WriteString("SANs: ")
 	p.Set(core.Italic)
 	p.WriteString(strings.Join(sans, ", "))
 	p.Reset()
