@@ -323,8 +323,11 @@ func TestRender(t *testing.T) {
 		if !strings.Contains(out, "TLS 1.3") {
 			t.Errorf("expected 'TLS 1.3' in output, got:\n%s", out)
 		}
-		if !strings.Contains(out, "ALPN: h2") {
-			t.Errorf("expected 'ALPN: h2' in output, got:\n%s", out)
+		if !strings.Contains(out, "* ALPN: h2") {
+			t.Errorf("expected '* ALPN: h2' in output, got:\n%s", out)
+		}
+		if strings.Contains(out, "*   ALPN: h2") {
+			t.Errorf("expected ALPN line to align with TLS line, got:\n%s", out)
 		}
 		if !strings.Contains(out, "Certificate chain") {
 			t.Errorf("expected 'Certificate chain' in output, got:\n%s", out)

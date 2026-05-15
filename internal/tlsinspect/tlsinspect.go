@@ -134,7 +134,7 @@ func render(p *core.Printer, cs *tls.ConnectionState) {
 	// ALPN negotiated protocol.
 	if cs.NegotiatedProtocol != "" {
 		p.WriteInfoPrefix()
-		p.WriteString("  ALPN: ")
+		p.WriteString("ALPN: ")
 		p.Set(core.Italic)
 		p.WriteString(cs.NegotiatedProtocol)
 		p.Reset()
