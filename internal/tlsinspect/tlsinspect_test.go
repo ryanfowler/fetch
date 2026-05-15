@@ -1,20 +1,28 @@
 package tlsinspect
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"net"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
+
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 func newTestPrinter() *core.Printer {
-	return core.NewHandle(core.ColorOff).Stderr()
+	return core.TestPrinter(false)
 }
 
 func TestCertDisplayName(t *testing.T) {
@@ -99,6 +107,7 @@ func TestALPNProtocols(t *testing.T) {
 		{name: "default offers HTTP/2 and HTTP/1.1", httpVersion: core.HTTPDefault, want: []string{"h2", "http/1.1"}},
 		{name: "HTTP/2 offers HTTP/2 and HTTP/1.1", httpVersion: core.HTTP2, want: []string{"h2", "http/1.1"}},
 		{name: "HTTP/1 offers only HTTP/1.1", httpVersion: core.HTTP1, want: []string{"http/1.1"}},
+		{name: "HTTP/3 offers only HTTP/3", httpVersion: core.HTTP3, want: []string{http3.NextProtoH3}},
 	}
 
 	for _, tt := range tests {
@@ -113,6 +122,66 @@ func TestALPNProtocols(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestInspectHTTP3UsesQUICAndH3ALPN(t *testing.T) {
+	caCert, caKey := generateTestCACert(t)
+	serverCert, serverKey := generateTestCert(t, caCert, caKey, "quic-server")
+
+	ln, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{serverCert.Raw},
+			PrivateKey:  serverKey,
+			Leaf:        serverCert,
+		}},
+		NextProtos: []string{http3.NextProtoH3},
+	}, nil)
+	if err != nil {
+		t.Fatalf("quic.ListenAddr() error = %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	acceptErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept(context.Background())
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		acceptErr <- conn.CloseWithError(0, "")
+	}()
+
+	u, err := url.Parse("https://" + ln.Addr().String())
+	if err != nil {
+		t.Fatalf("url.Parse() error = %v", err)
+	}
+	p := newTestPrinter()
+	code := Inspect(context.Background(), p, &Config{
+		CACerts: []*x509.Certificate{caCert},
+		HTTP:    core.HTTP3,
+		Timeout: 5 * time.Second,
+		URL:     u,
+	})
+	if code != 0 {
+		t.Fatalf("Inspect() exit code = %d, output:\n%s", code, string(p.Bytes()))
+	}
+
+	select {
+	case err := <-acceptErr:
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("server accept error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not accept QUIC connection")
+	}
+
+	out := string(p.Bytes())
+	if !strings.Contains(out, "ALPN: h3") {
+		t.Fatalf("expected h3 ALPN in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "quic-server") {
+		t.Fatalf("expected certificate chain in output, got:\n%s", out)
 	}
 }
 
@@ -286,6 +355,62 @@ func TestRenderSANs(t *testing.T) {
 			t.Errorf("expected empty output for no SANs, got:\n%s", out)
 		}
 	})
+}
+
+func generateTestCACert(t *testing.T) (*x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey() error = %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now().Add(-time.Minute),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate() error = %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("x509.ParseCertificate() error = %v", err)
+	}
+	return cert, key
+}
+
+func generateTestCert(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKey, name string) (*x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey() error = %v", err)
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: name},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate() error = %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("x509.ParseCertificate() error = %v", err)
+	}
+	return cert, key
 }
 
 func TestRender(t *testing.T) {
