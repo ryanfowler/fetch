@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/fileutil"
+	"golang.org/x/net/idna"
+	"golang.org/x/net/publicsuffix"
 )
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -125,7 +128,7 @@ func (s *Session) Save() error {
 
 // Jar returns an http.CookieJar that persists cookies to this session.
 func (s *Session) Jar() http.CookieJar {
-	jar, _ := cookiejar.New(nil)
+	jar := newCookieJar()
 
 	// Pre-populate the jar with saved cookies, grouped by URL.
 	byURL := make(map[string][]*http.Cookie)
@@ -167,6 +170,11 @@ func (s *Session) Jar() http.CookieJar {
 	return &sessionJar{jar: jar, session: s}
 }
 
+func newCookieJar() *cookiejar.Jar {
+	jar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	return jar
+}
+
 // sessionJar wraps a cookiejar.Jar and records cookies for persistence.
 type sessionJar struct {
 	jar     *cookiejar.Jar
@@ -179,34 +187,12 @@ func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	// Record cookies into the session.
 	now := time.Now()
 	for _, c := range cookies {
-		sc := SessionCookie{
-			Name:     c.Name,
-			Value:    c.Value,
-			Domain:   c.Domain,
-			HostOnly: c.Domain == "",
-			Path:     c.Path,
-			Expires:  cookieExpires(c, now),
-			Secure:   c.Secure,
-			HttpOnly: c.HttpOnly,
+		sc, remove, ok := sessionCookieFromSetCookie(u, c, now)
+		if !ok {
+			continue
 		}
-		if sc.Domain == "" {
-			sc.Domain = u.Hostname()
-		}
-		if sc.Path == "" {
-			sc.Path = defaultCookiePath(u.Path)
-		}
-		switch c.SameSite {
-		case http.SameSiteLaxMode:
-			sc.SameSite = "lax"
-		case http.SameSiteStrictMode:
-			sc.SameSite = "strict"
-		case http.SameSiteNoneMode:
-			sc.SameSite = "none"
-		}
-		sc.Domain = normalizeCookieDomain(sc.Domain)
-		sc.Path = normalizeCookiePath(sc.Path)
 
-		if isDeletionCookie(c, now) {
+		if remove {
 			j.session.removeCookie(sc.Name, sc.Domain, sc.Path)
 			continue
 		}
@@ -228,6 +214,150 @@ func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 
 func (j *sessionJar) Cookies(u *url.URL) []*http.Cookie {
 	return j.jar.Cookies(u)
+}
+
+func sessionCookieFromSetCookie(u *url.URL, c *http.Cookie, now time.Time) (SessionCookie, bool, bool) {
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return SessionCookie{}, false, false
+	}
+	host, ok := canonicalCookieHost(u.Host)
+	if !ok {
+		return SessionCookie{}, false, false
+	}
+	domain, hostOnly, ok := cookieDomainAndType(host, c.Domain)
+	if !ok {
+		return SessionCookie{}, false, false
+	}
+
+	sc := SessionCookie{
+		Name:     c.Name,
+		Value:    c.Value,
+		Domain:   domain,
+		HostOnly: hostOnly,
+		Path:     cookiePath(u.Path, c.Path),
+		Expires:  cookieExpires(c, now),
+		Secure:   c.Secure,
+		HttpOnly: c.HttpOnly,
+	}
+	switch c.SameSite {
+	case http.SameSiteLaxMode:
+		sc.SameSite = "lax"
+	case http.SameSiteStrictMode:
+		sc.SameSite = "strict"
+	case http.SameSiteNoneMode:
+		sc.SameSite = "none"
+	}
+
+	return sc, isDeletionCookie(c, now), true
+}
+
+func canonicalCookieHost(host string) (string, bool) {
+	if hasPort(host) {
+		var err error
+		host, _, err = net.SplitHostPort(host)
+		if err != nil {
+			return "", false
+		}
+	}
+	host = strings.TrimSuffix(host, ".")
+	if lower, ok := asciiLower(host); ok {
+		return lower, true
+	}
+	encoded, err := idna.ToASCII(host)
+	if err != nil {
+		return "", false
+	}
+	lower, ok := asciiLower(encoded)
+	return lower, ok
+}
+
+func hasPort(host string) bool {
+	colons := strings.Count(host, ":")
+	if colons == 0 {
+		return false
+	}
+	if colons == 1 {
+		return true
+	}
+	return host[0] == '[' && strings.Contains(host, "]:")
+}
+
+func cookieDomainAndType(host, domain string) (string, bool, bool) {
+	if domain == "" {
+		return host, true, true
+	}
+
+	if isIP(host) {
+		if host != domain {
+			return "", false, false
+		}
+		return host, true, true
+	}
+
+	domain = strings.TrimPrefix(domain, ".")
+	if len(domain) == 0 || domain[0] == '.' {
+		return "", false, false
+	}
+
+	var ok bool
+	domain, ok = asciiLower(domain)
+	if !ok {
+		return "", false, false
+	}
+	if domain[len(domain)-1] == '.' {
+		return "", false, false
+	}
+
+	if ps := publicsuffix.List.PublicSuffix(domain); ps != "" && !hasDotSuffix(domain, ps) {
+		if host == domain {
+			return host, true, true
+		}
+		return "", false, false
+	}
+
+	if host != domain && !hasDotSuffix(host, domain) {
+		return "", false, false
+	}
+
+	return domain, false, true
+}
+
+func cookiePath(requestPath, cookiePath string) string {
+	if cookiePath == "" || cookiePath[0] != '/' {
+		return defaultCookiePath(requestPath)
+	}
+	return cookiePath
+}
+
+func asciiLower(s string) (string, bool) {
+	var b []byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x80 {
+			return "", false
+		}
+		if 'A' <= c && c <= 'Z' {
+			if b == nil {
+				b = []byte(s)
+			}
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	if b != nil {
+		return string(b), true
+	}
+	return s, true
+}
+
+func hasDotSuffix(s, suffix string) bool {
+	return len(s) > len(suffix) && s[len(s)-len(suffix)-1] == '.' && s[len(s)-len(suffix):] == suffix
+}
+
+func isIP(host string) bool {
+	if strings.ContainsAny(host, ":%") {
+		return true
+	}
+	return net.ParseIP(host) != nil
 }
 
 func (s *Session) removeCookie(name, domain, path string) {
