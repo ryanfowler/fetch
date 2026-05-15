@@ -365,10 +365,14 @@ func writeCLIErr(p *core.Printer, err error) {
 	p.Flush()
 }
 
-// inspectDNS performs DNS resolution only and renders the resolved records.
-func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
-	p := handle.Stderr()
+type inspectionMode string
 
+const (
+	inspectionDNS inspectionMode = "--inspect-dns"
+	inspectionTLS inspectionMode = "--inspect-tls"
+)
+
+func ignoredInspectionFlags(app *cli.App, mode inspectionMode) []string {
 	var ignored []string
 	if app.Data != nil {
 		ignored = append(ignored, "--data/--json/--xml")
@@ -433,49 +437,64 @@ func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 	if app.UnixSocket != "" {
 		ignored = append(ignored, "--unix")
 	}
-	if app.InspectTLS {
-		ignored = append(ignored, "--inspect-tls")
+
+	if mode == inspectionDNS {
+		if app.InspectTLS {
+			ignored = append(ignored, "--inspect-tls")
+		}
+		if app.Bearer != "" {
+			ignored = append(ignored, "--bearer")
+		}
+		if app.Basic != nil {
+			ignored = append(ignored, "--basic")
+		}
+		if app.Digest != nil {
+			ignored = append(ignored, "--digest")
+		}
+		if app.AWSSigv4 != nil {
+			ignored = append(ignored, "--aws-sigv4")
+		}
+		if len(app.Cfg.CACerts) > 0 {
+			ignored = append(ignored, "--ca-cert")
+		}
+		if app.Cfg.CertPath != "" {
+			ignored = append(ignored, "--cert")
+		}
+		if app.Cfg.KeyPath != "" {
+			ignored = append(ignored, "--key")
+		}
+		if app.Cfg.TLSMin != nil {
+			ignored = append(ignored, "--tls")
+		}
+		if app.Cfg.TLSMax != nil {
+			ignored = append(ignored, "--max-tls")
+		}
+		if getValue(app.Cfg.Insecure) {
+			ignored = append(ignored, "--insecure")
+		}
+		if app.Cfg.Format != core.FormatUnknown {
+			ignored = append(ignored, "--format")
+		}
+		if app.DryRun {
+			ignored = append(ignored, "--dry-run")
+		}
 	}
-	if app.Bearer != "" {
-		ignored = append(ignored, "--bearer")
+
+	return ignored
+}
+
+func warnIgnoredInspectionFlags(p *core.Printer, mode inspectionMode, ignored []string) {
+	if len(ignored) == 0 {
+		return
 	}
-	if app.Basic != nil {
-		ignored = append(ignored, "--basic")
-	}
-	if app.Digest != nil {
-		ignored = append(ignored, "--digest")
-	}
-	if app.AWSSigv4 != nil {
-		ignored = append(ignored, "--aws-sigv4")
-	}
-	if len(app.Cfg.CACerts) > 0 {
-		ignored = append(ignored, "--ca-cert")
-	}
-	if app.Cfg.CertPath != "" {
-		ignored = append(ignored, "--cert")
-	}
-	if app.Cfg.KeyPath != "" {
-		ignored = append(ignored, "--key")
-	}
-	if app.Cfg.TLSMin != nil {
-		ignored = append(ignored, "--tls")
-	}
-	if app.Cfg.TLSMax != nil {
-		ignored = append(ignored, "--max-tls")
-	}
-	if getValue(app.Cfg.Insecure) {
-		ignored = append(ignored, "--insecure")
-	}
-	if app.Cfg.Format != core.FormatUnknown {
-		ignored = append(ignored, "--format")
-	}
-	if app.DryRun {
-		ignored = append(ignored, "--dry-run")
-	}
-	if len(ignored) > 0 {
-		msg := "--inspect-dns ignores: " + strings.Join(ignored, ", ") + "\n"
-		core.WriteWarningMsg(p, msg)
-	}
+	core.WriteWarningMsg(p, string(mode)+" ignores: "+strings.Join(ignored, ", "))
+}
+
+// inspectDNS performs DNS resolution only and renders the resolved records.
+func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
+	p := handle.Stderr()
+
+	warnIgnoredInspectionFlags(p, inspectionDNS, ignoredInspectionFlags(app, inspectionDNS))
 
 	return dnsinspect.Inspect(ctx, p, &dnsinspect.Config{
 		DNSServer: app.Cfg.DNSServer,
@@ -525,72 +544,7 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		return 1
 	}
 
-	// Warn on incompatible flags.
-	var ignored []string
-	if app.Data != nil {
-		ignored = append(ignored, "--data/--json/--xml")
-	}
-	if len(app.Form) > 0 {
-		ignored = append(ignored, "--form")
-	}
-	if len(app.Multipart) > 0 {
-		ignored = append(ignored, "--multipart")
-	}
-	if app.GRPC {
-		ignored = append(ignored, "--grpc")
-	}
-	if app.GRPCDescribe != "" {
-		ignored = append(ignored, "--grpc-describe")
-	}
-	if app.GRPCList {
-		ignored = append(ignored, "--grpc-list")
-	}
-	if app.Output != "" {
-		ignored = append(ignored, "--output")
-	}
-	if app.RemoteName {
-		ignored = append(ignored, "--remote-name")
-	}
-	if getValue(app.Cfg.Copy) {
-		ignored = append(ignored, "--copy")
-	}
-	if app.Method != "" {
-		ignored = append(ignored, "--method")
-	}
-	if len(app.Cfg.Headers) > 0 {
-		ignored = append(ignored, "--header")
-	}
-	if len(app.Cfg.QueryParams) > 0 {
-		ignored = append(ignored, "--query")
-	}
-	if app.Edit {
-		ignored = append(ignored, "--edit")
-	}
-	if getValue(app.Cfg.Session) != "" {
-		ignored = append(ignored, "--session")
-	}
-	if getValue(app.Cfg.Retry) > 0 {
-		ignored = append(ignored, "--retry")
-	}
-	if len(app.Range) > 0 {
-		ignored = append(ignored, "--range")
-	}
-	if getValue(app.Cfg.Timing) {
-		ignored = append(ignored, "--timing")
-	}
-	if app.Cfg.Proxy != nil {
-		ignored = append(ignored, "--proxy")
-	}
-	if app.Discard {
-		ignored = append(ignored, "--discard")
-	}
-	if app.UnixSocket != "" {
-		ignored = append(ignored, "--unix")
-	}
-	if len(ignored) > 0 {
-		msg := "--inspect-tls ignores: " + strings.Join(ignored, ", ") + "\n"
-		core.WriteWarningMsg(p, msg)
-	}
+	warnIgnoredInspectionFlags(p, inspectionTLS, ignoredInspectionFlags(app, inspectionTLS))
 
 	// Parse client certificate for mTLS.
 	clientCert, err := app.Cfg.ClientCert()
