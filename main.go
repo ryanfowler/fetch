@@ -55,6 +55,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Metadata-only commands should never be blocked by config errors or start
+	// background update work. Valid config is still merged so presentation
+	// settings like color and buildinfo formatting continue to apply.
+	if app.Help || app.Version || app.BuildInfo {
+		_, _ = parseConfigFile(app)
+		handleMetadataCommand(app, core.NewHandle(app.Cfg.Color))
+		os.Exit(0)
+	}
+
 	// Parse any config file with the CLI color setting for parse errors, then
 	// recreate the handle after config values are merged.
 	tmpHandle := core.NewHandle(app.Cfg.Color)
@@ -75,33 +84,6 @@ func main() {
 	// Start async update, if necessary.
 	if !app.Update && !core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
 		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate)
-	}
-
-	// Print help to stdout.
-	if app.Help {
-		p := handle.Stdout()
-		app.PrintHelp(p)
-		p.Flush()
-		os.Exit(0)
-	}
-
-	// Print version to stdout.
-	if app.Version {
-		fmt.Fprintln(os.Stdout, "fetch", core.Version)
-		os.Exit(0)
-	}
-
-	// Print build info to stdout.
-	if app.BuildInfo {
-		p := handle.Stdout()
-		info := core.GetBuildInfo()
-		if app.Cfg.Format != core.FormatOff {
-			format.FormatJSON(info, p)
-		} else {
-			p.Write(info)
-		}
-		p.Flush()
-		os.Exit(0)
 	}
 
 	// Attempt to update the current executable.
@@ -233,6 +215,35 @@ func main() {
 	}
 	status := fetch.Fetch(ctx, &req)
 	os.Exit(status)
+}
+
+func handleMetadataCommand(app *cli.App, handle *core.Handle) {
+	// Print help to stdout.
+	if app.Help {
+		p := handle.Stdout()
+		app.PrintHelp(p)
+		p.Flush()
+		return
+	}
+
+	// Print version to stdout.
+	if app.Version {
+		fmt.Fprintln(os.Stdout, "fetch", core.Version)
+		return
+	}
+
+	// Print build info to stdout.
+	if app.BuildInfo {
+		p := handle.Stdout()
+		info := core.GetBuildInfo()
+		if app.Cfg.Format != core.FormatOff {
+			format.FormatJSON(info, p)
+		} else {
+			p.Write(info)
+		}
+		p.Flush()
+		return
+	}
 }
 
 func handleCompletion(name string, args []string) error {
