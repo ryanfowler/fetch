@@ -284,6 +284,31 @@ func TestNewClientExplicitProxyOverridesEnvironment(t *testing.T) {
 	}
 }
 
+func TestCloseClosesIdleConnections(t *testing.T) {
+	transport := &trackingCloseIdleTransport{}
+	c := &Client{c: &http.Client{Transport: transport}}
+
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !transport.closeIdleCalled {
+		t.Fatal("CloseIdleConnections was not called")
+	}
+}
+
+func TestCloseClosesTransportAfterIdleConnections(t *testing.T) {
+	transport := &trackingCloseTransport{}
+	c := &Client{c: &http.Client{Transport: transport}}
+
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"close-idle", "close"}
+	if !slicesEqual(transport.calls, want) {
+		t.Fatalf("calls = %v, want %v", transport.calls, want)
+	}
+}
+
 func TestDecodeResponseBodyClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
 	decoderErr := errors.New("bad header")
 	tests := []struct {
@@ -338,6 +363,35 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+type trackingCloseIdleTransport struct {
+	closeIdleCalled bool
+}
+
+func (t *trackingCloseIdleTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected RoundTrip")
+}
+
+func (t *trackingCloseIdleTransport) CloseIdleConnections() {
+	t.closeIdleCalled = true
+}
+
+type trackingCloseTransport struct {
+	calls []string
+}
+
+func (t *trackingCloseTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected RoundTrip")
+}
+
+func (t *trackingCloseTransport) CloseIdleConnections() {
+	t.calls = append(t.calls, "close-idle")
+}
+
+func (t *trackingCloseTransport) Close() error {
+	t.calls = append(t.calls, "close")
+	return nil
+}
+
 type trackingReadCloser struct {
 	*bytes.Reader
 	closed bool
@@ -346,6 +400,18 @@ type trackingReadCloser struct {
 func (r *trackingReadCloser) Close() error {
 	r.closed = true
 	return nil
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func newEncodingRequestedRequest(t *testing.T) *http.Request {
