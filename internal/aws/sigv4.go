@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -225,11 +226,7 @@ func buildCanonicalRequest(req *http.Request, headers []core.KeyVal[string], pay
 	buf.WriteString(req.Method)
 	buf.WriteByte('\n')
 
-	path := req.URL.Path
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	escapeURIPath(&buf, path)
+	writeCanonicalURIPath(&buf, req.URL)
 	buf.WriteByte('\n')
 
 	buf.WriteString(strings.ReplaceAll(req.URL.Query().Encode(), "+", "%20"))
@@ -254,6 +251,32 @@ func buildCanonicalRequest(req *http.Request, headers []core.KeyVal[string], pay
 	buf.WriteString(payload)
 
 	return buf.Bytes()
+}
+
+func writeCanonicalURIPath(buf *bytes.Buffer, u *url.URL) {
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	} else if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	for i := 0; i < len(path); i++ {
+		b := path[i]
+		if b == '%' && i+2 < len(path) && isHex(path[i+1]) && isHex(path[i+2]) {
+			buf.WriteByte('%')
+			buf.WriteByte(toUpperHex(path[i+1]))
+			buf.WriteByte(toUpperHex(path[i+2]))
+			i += 2
+			continue
+		}
+		if validURIBytes[b] {
+			buf.WriteByte(b)
+			continue
+		}
+		buf.WriteByte('%')
+		encodeHexUpper(buf, b)
+	}
 }
 
 func buildStringToSign(datetime string, region, service string, req []byte) []byte {

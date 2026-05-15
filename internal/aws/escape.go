@@ -2,35 +2,23 @@ package aws
 
 import (
 	"bytes"
-	"unicode/utf8"
 )
-
-// escapeURIPath writes the path-escaped version of uri to w.
-func escapeURIPath(w *bytes.Buffer, uri string) {
-	var n int
-	for i, c := range uri {
-		if validURIBytes[uri[i]] {
-			continue
-		}
-
-		w.WriteString(uri[n:i])
-		n = i + utf8.RuneLen(c)
-
-		var buf [utf8.UTFMax]byte
-		length := utf8.EncodeRune(buf[:], c)
-
-		for i := range length {
-			w.WriteByte('%')
-			encodeHexUpper(w, buf[i])
-		}
-	}
-	w.WriteString(uri[n:])
-}
 
 func encodeHexUpper(w *bytes.Buffer, b byte) {
 	const hexUpper = "0123456789ABCDEF"
 	w.WriteByte(hexUpper[b>>4])
 	w.WriteByte(hexUpper[b&0x0F])
+}
+
+func isHex(b byte) bool {
+	return ('0' <= b && b <= '9') || ('a' <= b && b <= 'f') || ('A' <= b && b <= 'F')
+}
+
+func toUpperHex(b byte) byte {
+	if 'a' <= b && b <= 'f' {
+		return b - ('a' - 'A')
+	}
+	return b
 }
 
 // mapping of valid uri path bytes.
