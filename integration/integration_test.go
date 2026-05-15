@@ -150,6 +150,45 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stdout, "\x1b[")
 	})
 
+	t.Run("metadata commands use best-effort config", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(path, []byte("format = nope\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", path, "--help")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufContains(t, res.stdout, "Usage")
+
+		res = runFetch(t, fetchPath, "--config", path, "--version")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufContains(t, res.stdout, "fetch ")
+
+		res = runFetch(t, fetchPath, "--config", path, "--buildinfo")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufContains(t, res.stdout, `"fetch"`)
+
+		path = filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(path, []byte("color = on\nformat = off\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res = runFetch(t, fetchPath, "--config", path, "--help")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufContains(t, res.stdout, "\x1b[")
+
+		res = runFetch(t, fetchPath, "--config", path, "--buildinfo")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufContains(t, res.stdout, `"fetch"`)
+		assertBufNotContains(t, res.stdout, "\n")
+	})
+
 	t.Run("aws-sigv4 auth", func(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
@@ -1568,7 +1607,9 @@ func TestMain(t *testing.T) {
 		urlStr.Store(&empty)
 		var newVersion atomic.Pointer[string]
 		newVersion.Store(&version)
+		var updateRequests atomic.Int64
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			updateRequests.Add(1)
 			if r.URL.Path != "/artifact" {
 				type Asset struct {
 					Name string `json:"name"`
@@ -1709,8 +1750,24 @@ func TestMain(t *testing.T) {
 			t.Fatal("binary was modified during dry-run update")
 		}
 
-		// Test the auto-update functionality.
+		// Metadata-only commands should not start background auto-updates.
+		metadataRequests := updateRequests.Load()
+		metadataModTime := getModTime(t, updateFetchPath)
 		res = runFetchOpts(t, updateFetchPath, fetchOpts{env: updateEnv}, "--version", "--auto-update", "0s")
+		assertExitCode(t, 0, res)
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if updateRequests.Load() != metadataRequests {
+				t.Fatal("metadata command started an auto-update request")
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if !getModTime(t, updateFetchPath).Equal(metadataModTime) {
+			t.Fatal("metadata command modified the binary")
+		}
+
+		// Test the auto-update functionality.
+		res = runFetchOpts(t, updateFetchPath, fetchOpts{env: updateEnv}, server.URL, "--auto-update", "0s")
 		assertExitCode(t, 0, res)
 		var n int
 		for {
