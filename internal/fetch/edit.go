@@ -123,7 +123,31 @@ func parseEditorArgs(s string) []string {
 		return []string{s}
 	}
 
+	if args, ok := parseEditorExecutablePrefix(s); ok {
+		return args
+	}
+
 	return splitArgs(s)
+}
+
+func parseEditorExecutablePrefix(s string) ([]string, bool) {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] != ' ' && s[i] != '\t' {
+			continue
+		}
+		name := strings.TrimSpace(s[:i])
+		if name == "" {
+			continue
+		}
+		if _, err := exec.LookPath(name); err != nil {
+			continue
+		}
+
+		args := []string{name}
+		args = append(args, splitArgs(s[i+1:])...)
+		return args, true
+	}
+	return nil, false
 }
 
 // splitArgs splits a string into arguments, respecting single and double
