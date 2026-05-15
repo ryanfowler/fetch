@@ -224,6 +224,65 @@ func TestSessionJar(t *testing.T) {
 	}
 }
 
+func TestSessionJarDoesNotPersistForeignDomainCookie(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("foreign-domain-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	origin, _ := url.Parse("https://example.com/")
+	jar := sess.Jar()
+	jar.SetCookies(origin, []*http.Cookie{
+		{Name: "token", Value: "secret", Domain: "evil.com"},
+	})
+
+	if cookies := jar.Cookies(origin); len(cookies) != 0 {
+		t.Fatalf("origin cookies = %+v, want none", cookies)
+	}
+	if len(sess.Cookies) != 0 {
+		t.Fatalf("foreign-domain cookie was persisted: %+v", sess.Cookies)
+	}
+	if err := sess.Save(); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	reloaded, err := Load("foreign-domain-test")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	jar = reloaded.Jar()
+	evil, _ := url.Parse("https://evil.com/")
+	if cookies := jar.Cookies(evil); len(cookies) != 0 {
+		t.Fatalf("foreign-domain cookie leaked after reload: %+v", cookies)
+	}
+}
+
+func TestSessionJarRejectsPublicSuffixCookie(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("public-suffix-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	origin, _ := url.Parse("https://example.com/")
+	jar := sess.Jar()
+	jar.SetCookies(origin, []*http.Cookie{
+		{Name: "token", Value: "secret", Domain: "com"},
+	})
+
+	if cookies := jar.Cookies(origin); len(cookies) != 0 {
+		t.Fatalf("public-suffix cookie accepted by jar: %+v", cookies)
+	}
+	if len(sess.Cookies) != 0 {
+		t.Fatalf("public-suffix cookie was persisted: %+v", sess.Cookies)
+	}
+}
+
 func TestSessionJarReloadUsesRFCDefaultPath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
