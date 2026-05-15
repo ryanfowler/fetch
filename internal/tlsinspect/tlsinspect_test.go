@@ -258,8 +258,11 @@ func TestRenderSANs(t *testing.T) {
 		renderSANs(p, leaf)
 		out := string(p.Bytes())
 
-		if !strings.Contains(out, "SANs:") {
-			t.Errorf("expected 'SANs:' in output, got:\n%s", out)
+		if !strings.Contains(out, "* SANs:") {
+			t.Errorf("expected '* SANs:' in output, got:\n%s", out)
+		}
+		if strings.Contains(out, "*   SANs:") {
+			t.Errorf("expected SANs line to align with Certificate chain line, got:\n%s", out)
 		}
 		if !strings.Contains(out, "example.com") {
 			t.Errorf("expected 'example.com' in output, got:\n%s", out)

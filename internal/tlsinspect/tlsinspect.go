@@ -258,7 +258,7 @@ func renderSANs(p *core.Printer, leaf *x509.Certificate) {
 	p.WriteInfoPrefix()
 	p.WriteString("\n")
 	p.WriteInfoPrefix()
-	p.WriteString("  SANs: ")
+	p.WriteString("SANs: ")
 	p.Set(core.Italic)
 	p.WriteString(strings.Join(sans, ", "))
 	p.Reset()
