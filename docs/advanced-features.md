@@ -251,12 +251,17 @@ Expiry is color-coded: red if expired or less than 7 days remaining, yellow if l
 
 HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning when used with `--inspect-tls`.
 
+When combined with `--http 3`, TLS inspection uses a QUIC handshake and offers `h3` ALPN instead of dialing TCP.
+
 ```sh
 # Check certificate chain
 fetch --inspect-tls example.com
 
 # Inspect certificates even if invalid
 fetch --inspect-tls --insecure expired.badssl.com
+
+# Inspect the HTTP/3 QUIC/TLS path
+fetch --inspect-tls --http 3 example.com
 ```
 
 ### Configuration File

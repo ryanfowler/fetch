@@ -407,10 +407,11 @@ fetch --min-tls 1.2 --max-tls 1.2 example.com
 
 ### `--inspect-tls`
 
-Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning.
+Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. With `--http 3`, inspection uses a QUIC handshake and offers `h3` ALPN. HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning.
 
 ```sh
 fetch --inspect-tls example.com
+fetch --inspect-tls --http 3 example.com
 fetch --inspect-tls --insecure expired.badssl.com
 ```
 

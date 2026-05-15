@@ -15,6 +15,8 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/resolver"
 
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/crypto/ocsp"
 )
 
@@ -64,6 +66,17 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		defer cancel()
 	}
 
+	if cfg.HTTP == core.HTTP3 {
+		cs, err := inspectQUIC(ctx, res, addr, tlsConfig)
+		if err != nil {
+			writeTLSError(p, err)
+			return 1
+		}
+		render(p, cs)
+		p.Flush()
+		return 0
+	}
+
 	// Dial and handshake using context for cancellation support.
 	rawConn, err := res.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -83,11 +96,53 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	return 0
 }
 
-func alpnProtocols(httpVersion core.HTTPVersion) []string {
-	if httpVersion == core.HTTP1 {
-		return []string{"http/1.1"}
+func inspectQUIC(ctx context.Context, res *resolver.Resolver, addr string, tlsConfig *tls.Config) (*tls.ConnectionState, error) {
+	endpoint, err := res.ResolveAddress(ctx, "udp", addr)
+	if err != nil {
+		return nil, err
 	}
-	return []string{"h2", "http/1.1"}
+
+	port, err := net.LookupPort("udp", endpoint.Port)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, ip := range endpoint.Addrs {
+		udpAddr := &net.UDPAddr{IP: ip.IP, Port: port}
+		var lc net.ListenConfig
+		packetConn, dialErr := lc.ListenPacket(ctx, "udp", ":0")
+		if dialErr != nil {
+			err = dialErr
+			continue
+		}
+
+		conn, dialErr := quic.Dial(ctx, packetConn, udpAddr, tlsConfig, nil)
+		if dialErr != nil {
+			packetConn.Close()
+			err = dialErr
+			continue
+		}
+
+		state := conn.ConnectionState().TLS
+		conn.CloseWithError(0, "")
+		packetConn.Close()
+		return &state, nil
+	}
+	if err == nil {
+		err = errors.New("no addresses found")
+	}
+	return nil, err
+}
+
+func alpnProtocols(httpVersion core.HTTPVersion) []string {
+	switch httpVersion {
+	case core.HTTP1:
+		return []string{"http/1.1"}
+	case core.HTTP3:
+		return []string{http3.NextProtoH3}
+	default:
+		return []string{"h2", "http/1.1"}
+	}
 }
 
 // writeTLSError writes a TLS connection error, suggesting --insecure for cert errors.
