@@ -95,6 +95,28 @@ func TestEndOfOptions(t *testing.T) {
 	})
 }
 
+func TestHeaderFlag(t *testing.T) {
+	t.Run("allows empty value", func(t *testing.T) {
+		app, err := Parse([]string{"-H", "X-Test:", "https://example.com"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if len(app.Cfg.Headers) != 1 || app.Cfg.Headers[0].Key != "X-Test" || app.Cfg.Headers[0].Val != "" {
+			t.Fatalf("Headers = %+v, want X-Test with empty value", app.Cfg.Headers)
+		}
+	})
+
+	t.Run("rejects empty name", func(t *testing.T) {
+		_, err := Parse([]string{"-H", ": value", "https://example.com"})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "--header") {
+			t.Fatalf("error = %q, want --header", err.Error())
+		}
+	})
+}
+
 func TestWebSocketSchemeExclusives(t *testing.T) {
 	tests := []struct {
 		name string
