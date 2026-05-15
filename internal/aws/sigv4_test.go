@@ -134,6 +134,42 @@ func TestGetSignedHeadersCanonicalizesHeaderValues(t *testing.T) {
 	}
 }
 
+func TestBuildCanonicalRequestUsesEscapedPath(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "escaped slash",
+			url:  "https://example.com/a%2Fb",
+			want: "/a%2Fb",
+		},
+		{
+			name: "escaped space",
+			url:  "https://example.com/space%20here",
+			want: "/space%20here",
+		},
+		{
+			name: "non-ascii segment",
+			url:  "https://example.com/café/日本",
+			want: "/caf%C3%A9/%E6%97%A5%E6%9C%AC",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", test.url, nil)
+
+			canonicalRequest := string(buildCanonicalRequest(req, nil, emptySha256))
+			lines := strings.SplitN(canonicalRequest, "\n", 3)
+			if lines[1] != test.want {
+				t.Fatalf("unexpected canonical path: got %q, want %q", lines[1], test.want)
+			}
+		})
+	}
+}
+
 func TestGetSignedHeadersUsesRequestHost(t *testing.T) {
 	req, _ := http.NewRequest("GET", "https://127.0.0.1", nil)
 	req.Host = "vhost.example"
