@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
+
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/session"
 )
@@ -376,10 +378,12 @@ func (c *Config) ParseFormat(value string) error {
 }
 
 func (c *Config) ParseHeader(value string) error {
-	key, val, _ := core.CutTrimmed(value, ":")
+	key, val, ok := core.CutTrimmed(value, ":")
+	if !ok || key == "" || !httpguts.ValidHeaderFieldName(key) {
+		return core.NewValueError("header", value, "must be in the format NAME:VALUE with a valid non-empty header name", c.isFile)
+	}
 	c.Headers = append(c.Headers, core.KeyVal[string]{Key: key, Val: val})
 	return nil
-
 }
 
 func (c *Config) ParseHTTP(value string) error {

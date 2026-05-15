@@ -1,8 +1,58 @@
 package config
 
 import (
+	"reflect"
 	"testing"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
+
+func TestParseHeader(t *testing.T) {
+	t.Run("valid header", func(t *testing.T) {
+		c := &Config{}
+		if err := c.ParseHeader("X-Test: value"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		want := []core.KeyVal[string]{{Key: "X-Test", Val: "value"}}
+		if !reflect.DeepEqual(c.Headers, want) {
+			t.Fatalf("headers = %+v, want %+v", c.Headers, want)
+		}
+	})
+
+	t.Run("empty value", func(t *testing.T) {
+		c := &Config{}
+		if err := c.ParseHeader("X-Test:"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		want := []core.KeyVal[string]{{Key: "X-Test", Val: ""}}
+		if !reflect.DeepEqual(c.Headers, want) {
+			t.Fatalf("headers = %+v, want %+v", c.Headers, want)
+		}
+	})
+
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "missing colon", value: "X-Test"},
+		{name: "empty name", value: ": value"},
+		{name: "malformed name", value: "Bad Header: value"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c := &Config{}
+			if err := c.ParseHeader(test.value); err == nil {
+				t.Fatalf("expected error for %q", test.value)
+			}
+			if len(c.Headers) != 0 {
+				t.Fatalf("headers = %+v, want none", c.Headers)
+			}
+		})
+	}
+}
 
 func TestParseRetry(t *testing.T) {
 	t.Run("negative value", func(t *testing.T) {
