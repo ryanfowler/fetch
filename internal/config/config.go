@@ -622,7 +622,8 @@ func (c *Config) ParseVerbosity(value string) error {
 
 func parseDurationSeconds(flag, value, usage string, isFile bool) (*time.Duration, error) {
 	secs, err := strconv.ParseFloat(value, 64)
-	if err != nil || secs < 0 || math.IsNaN(secs) || math.IsInf(secs, 0) {
+	maxSeconds := float64(math.MaxInt64) / float64(time.Second)
+	if err != nil || secs < 0 || secs > maxSeconds || math.IsNaN(secs) || math.IsInf(secs, 0) {
 		return nil, core.NewValueError(flag, value, usage, isFile)
 	}
 	return new(time.Duration(float64(time.Second) * secs)), nil
