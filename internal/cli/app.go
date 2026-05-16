@@ -146,7 +146,7 @@ func (a *App) CLI() *CLI {
 				func() bool { return a.Cfg.AutoUpdate != nil }, a.Cfg.ParseAutoUpdate).
 				WithHidden(true),
 
-			// Custom: AWS signature V4 with env var lookups
+			// Custom: AWS signature V4
 			{
 				Long:        "aws-sigv4",
 				Args:        "REGION/SERVICE",
@@ -636,22 +636,13 @@ func (a *App) parseWSInteractiveFlag(value string) error {
 	return nil
 }
 
-// buildAWSConfig creates an AWS configuration from region and service,
-// reading credentials from environment variables.
+// buildAWSConfig creates an AWS configuration from region and service.
+// Credentials are loaded when the request is signed so inspection modes can
+// ignore --aws-sigv4 without requiring AWS environment variables.
 func buildAWSConfig(region, service string) (*aws.Config, error) {
-	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-	if accessKey == "" {
-		return nil, missingEnvVarErr("AWS_ACCESS_KEY_ID", "aws-sigv4")
-	}
-	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	if secretKey == "" {
-		return nil, missingEnvVarErr("AWS_SECRET_ACCESS_KEY", "aws-sigv4")
-	}
 	return &aws.Config{
-		Region:    region,
-		Service:   service,
-		AccessKey: accessKey,
-		SecretKey: secretKey,
+		Region:  region,
+		Service: service,
 	}, nil
 }
 

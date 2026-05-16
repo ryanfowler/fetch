@@ -114,6 +114,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Handle --inspect-dns: resolve the URL hostname only, no HTTP request.
+	if app.InspectDNS {
+		os.Exit(inspectDNS(ctx, app, handle))
+	}
+
+	// Handle --inspect-tls: perform TLS handshake only, no HTTP request.
+	if app.InspectTLS {
+		os.Exit(inspectTLS(ctx, app, handle))
+	}
+
 	// Respond with an error if a proxy is specified with HTTP/2 or higher.
 	if app.Cfg.Proxy != nil && app.Cfg.HTTP >= core.HTTP2 {
 		p := handle.Stderr()
@@ -126,16 +136,6 @@ func main() {
 		p := handle.Stderr()
 		writeCLIErr(p, errors.New("cannot use a unix socket with HTTP/3.0"))
 		os.Exit(1)
-	}
-
-	// Handle --inspect-dns: resolve the URL hostname only, no HTTP request.
-	if app.InspectDNS {
-		os.Exit(inspectDNS(ctx, app, handle))
-	}
-
-	// Handle --inspect-tls: perform TLS handshake only, no HTTP request.
-	if app.InspectTLS {
-		os.Exit(inspectTLS(ctx, app, handle))
 	}
 
 	// Respond with an error if WebSocket is used with HTTP/3.
