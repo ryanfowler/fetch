@@ -415,12 +415,12 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		return resp.Body, nil
 	}
 
-	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(buf) >= maxBodyBytes {
-		// We've reached the limit of bytes read into memory, skip formatting.
+	if len(buf) > maxBodyBytes {
+		// We've read past the in-memory formatting limit, skip formatting.
 		return io.MultiReader(bytes.NewReader(buf), resp.Body), nil
 	}
 
