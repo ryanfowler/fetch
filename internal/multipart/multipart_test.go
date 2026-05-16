@@ -2,6 +2,7 @@ package multipart
 
 import (
 	"bytes"
+	"io"
 	"mime"
 	"mime/multipart"
 	"os"
@@ -139,15 +140,21 @@ func TestMultipart(t *testing.T) {
 
 			mp := NewMultipart(input)
 
-			var buf bytes.Buffer
-			_, err := buf.ReadFrom(mp)
+			body, err := mp.Open()
 			if err != nil {
-				t.Fatalf("unable to read from multipart: %s", err.Error())
+				t.Fatalf("unable to open multipart: %s", err.Error())
 			}
+			defer body.Close()
 
 			_, params, err := mime.ParseMediaType(mp.ContentType())
 			if err != nil {
 				t.Fatalf("unable to parse media type: %s", err.Error())
+			}
+
+			var buf bytes.Buffer
+			_, err = buf.ReadFrom(body)
+			if err != nil {
+				t.Fatalf("unable to read from multipart: %s", err.Error())
 			}
 
 			form, err := multipart.NewReader(&buf, params["boundary"]).ReadForm(1 << 24)
@@ -158,4 +165,36 @@ func TestMultipart(t *testing.T) {
 			test.fnPost(t, form)
 		})
 	}
+}
+
+func TestMultipartOpenReplaysWithStableBoundary(t *testing.T) {
+	mp := NewMultipart([]core.KeyVal[string]{
+		{Key: "field", Val: "value"},
+	})
+
+	first := readMultipartBody(t, mp)
+	second := readMultipartBody(t, mp)
+
+	if !bytes.Equal(first, second) {
+		t.Fatal("multipart Open produced different bodies")
+	}
+	if !bytes.Contains(first, []byte(`name="field"`)) || !bytes.Contains(first, []byte("value")) {
+		t.Fatalf("multipart body missing field: %q", first)
+	}
+}
+
+func readMultipartBody(t *testing.T, mp *Multipart) []byte {
+	t.Helper()
+
+	body, err := mp.Open()
+	if err != nil {
+		t.Fatalf("unable to open multipart: %s", err.Error())
+	}
+	defer body.Close()
+
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("unable to read multipart: %s", err.Error())
+	}
+	return raw
 }

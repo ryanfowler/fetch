@@ -11,9 +11,10 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
-// Multipart implements io.Reader for multipart data.
+// Multipart builds replayable multipart request bodies.
 type Multipart struct {
-	io.Reader
+	fields      []core.KeyVal[string]
+	boundary    string
 	contentType string
 }
 
@@ -23,38 +24,58 @@ func NewMultipart(kvs []core.KeyVal[string]) *Multipart {
 		return nil
 	}
 
+	mpw := multipart.NewWriter(io.Discard)
+	fields := append([]core.KeyVal[string](nil), kvs...)
+	boundary := mpw.Boundary()
+
+	return &Multipart{
+		fields:      fields,
+		boundary:    boundary,
+		contentType: mpw.FormDataContentType(),
+	}
+}
+
+// Open returns a fresh multipart request body stream.
+func (m *Multipart) Open() (io.ReadCloser, error) {
 	// Create a pipe and asynchronously write to it in a goroutine.
 	reader, writer := io.Pipe()
 	mpw := multipart.NewWriter(writer)
+	if err := mpw.SetBoundary(m.boundary); err != nil {
+		_ = reader.CloseWithError(err)
+		_ = writer.CloseWithError(err)
+		return nil, err
+	}
+
 	go func() {
+		var err error
 		defer func() {
-			mpw.Close()
-			writer.Close()
+			if err != nil {
+				_ = writer.CloseWithError(err)
+				return
+			}
+			if err = mpw.Close(); err != nil {
+				_ = writer.CloseWithError(err)
+				return
+			}
+			_ = writer.Close()
 		}()
 
-		for _, kv := range kvs {
+		for _, kv := range m.fields {
 			if !strings.HasPrefix(kv.Val, "@") {
-				err := mpw.WriteField(kv.Key, kv.Val)
-				if err != nil {
-					writer.CloseWithError(err)
+				if err = mpw.WriteField(kv.Key, kv.Val); err != nil {
 					return
 				}
 				continue
 			}
 
 			// Form part is a file.
-			err := writeFilePart(mpw, kv.Key, kv.Val[1:])
-			if err != nil {
-				writer.CloseWithError(err)
+			if err = writeFilePart(mpw, kv.Key, kv.Val[1:]); err != nil {
 				return
 			}
 		}
 	}()
 
-	return &Multipart{
-		Reader:      reader,
-		contentType: mpw.FormDataContentType(),
-	}
+	return reader, nil
 }
 
 // ContentType returns the Content-Type header value to use for this request.

@@ -86,6 +86,7 @@ prettier -w .
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 
 Retryable requests replay bodies by calling `req.GetBody` when available, reopening file-backed bodies directly when possible, and only spooling the original body to a temp file as a final fallback for one-shot streams. This avoids holding large uploads in memory and keeps retries working for closable bodies like `*os.File`.
+Multipart `-F` request bodies are produced by a replayable factory with a stable boundary; request construction sets `req.GetBody` so 307/308 redirects can resend them without relying on retry/digest spooling.
 
 ### Content Type Detection
 
