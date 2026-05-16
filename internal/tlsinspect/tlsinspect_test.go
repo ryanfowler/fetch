@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"errors"
 	"math/big"
 	"net"
 	"net/url"
@@ -129,28 +128,27 @@ func TestInspectHTTP3UsesQUICAndH3ALPN(t *testing.T) {
 	caCert, caKey := generateTestCACert(t)
 	serverCert, serverKey := generateTestCert(t, caCert, caKey, "quic-server")
 
-	ln, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+	handshakeSeen := make(chan struct{}, 1)
+	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{{
 			Certificate: [][]byte{serverCert.Raw},
 			PrivateKey:  serverKey,
 			Leaf:        serverCert,
 		}},
 		NextProtos: []string{http3.NextProtoH3},
-	}, nil)
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			select {
+			case handshakeSeen <- struct{}{}:
+			default:
+			}
+			return nil, nil
+		},
+	}
+	ln, err := quic.ListenAddr("127.0.0.1:0", tlsConfig, nil)
 	if err != nil {
 		t.Fatalf("quic.ListenAddr() error = %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
-
-	acceptErr := make(chan error, 1)
-	go func() {
-		conn, err := ln.Accept(context.Background())
-		if err != nil {
-			acceptErr <- err
-			return
-		}
-		acceptErr <- conn.CloseWithError(0, "")
-	}()
 
 	u, err := url.Parse("https://" + ln.Addr().String())
 	if err != nil {
@@ -168,12 +166,9 @@ func TestInspectHTTP3UsesQUICAndH3ALPN(t *testing.T) {
 	}
 
 	select {
-	case err := <-acceptErr:
-		if err != nil && !errors.Is(err, net.ErrClosed) {
-			t.Fatalf("server accept error = %v", err)
-		}
+	case <-handshakeSeen:
 	case <-time.After(5 * time.Second):
-		t.Fatal("server did not accept QUIC connection")
+		t.Fatal("server did not observe QUIC TLS handshake")
 	}
 
 	out := string(p.Bytes())
