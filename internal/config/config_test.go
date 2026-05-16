@@ -126,6 +126,29 @@ func TestParseConnectTimeout(t *testing.T) {
 	})
 }
 
+func TestParseDurationSecondsRejectsNonFiniteValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		parse func(*Config, string) error
+	}{
+		{name: "connect-timeout", parse: (*Config).ParseConnectTimeout},
+		{name: "retry-delay", parse: (*Config).ParseRetryDelay},
+		{name: "timeout", parse: (*Config).ParseTimeout},
+	}
+	values := []string{"NaN", "+Inf", "-Inf", "Inf"}
+
+	for _, tt := range tests {
+		for _, value := range values {
+			t.Run(tt.name+"/"+value, func(t *testing.T) {
+				c := &Config{}
+				if err := tt.parse(c, value); err == nil {
+					t.Fatalf("expected error for %s=%s", tt.name, value)
+				}
+			})
+		}
+	}
+}
+
 func TestParseRetryDelay(t *testing.T) {
 	t.Run("negative value", func(t *testing.T) {
 		c := &Config{}
