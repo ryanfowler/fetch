@@ -223,10 +223,12 @@ func colorForStatus(code int) core.Sequence {
 func isPrintable(r io.Reader) (bool, io.Reader, error) {
 	buf := make([]byte, 1024)
 	n, err := io.ReadFull(r, buf)
+	previewComplete := false
 	switch {
 	case err == io.EOF || err == io.ErrUnexpectedEOF:
 		buf = buf[:n]
 		r = bytes.NewReader(buf)
+		previewComplete = true
 	case err != nil:
 		return false, nil, err
 	default:
@@ -239,13 +241,14 @@ func isPrintable(r io.Reader) (bool, io.Reader, error) {
 
 	var safe, total int
 	for len(buf) > 0 {
-		c, size := utf8.DecodeRune(buf)
-		buf = buf[size:]
-		if c == utf8.RuneError && len(buf) < 4 {
+		if !previewComplete && !utf8.FullRune(buf) {
 			break
 		}
+		c, size := utf8.DecodeRune(buf)
+		buf = buf[size:]
 		total++
-		if unicode.IsPrint(c) || unicode.IsSpace(c) || c == '\x1b' {
+		validRune := c != utf8.RuneError || size > 1
+		if validRune && (unicode.IsPrint(c) || unicode.IsSpace(c) || c == '\x1b') {
 			safe++
 		}
 	}

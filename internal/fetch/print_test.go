@@ -1,6 +1,8 @@
 package fetch
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -185,6 +187,24 @@ func TestPrintResponseHeadersPrefix(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestIsPrintableRejectsInvalidUTF8(t *testing.T) {
+	input := []byte{0xff, 0xfe, 0xfd}
+	ok, r, err := isPrintable(bytes.NewReader(input))
+	if err != nil {
+		t.Fatalf("isPrintable returned error: %v", err)
+	}
+	if ok {
+		t.Fatal("isPrintable accepted invalid UTF-8 bytes")
+	}
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading returned reader: %v", err)
+	}
+	if !bytes.Equal(got, input) {
+		t.Fatalf("returned reader = %v, want %v", got, input)
+	}
 }
 
 func mustParseURL(raw string) *url.URL {
