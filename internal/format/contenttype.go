@@ -45,11 +45,12 @@ func GetContentType(headers http.Header) (ContentType, string) {
 		case "image":
 			return TypeImage, charset
 		case "application":
+			if subtype == "grpc" || strings.HasPrefix(subtype, "grpc+") {
+				return TypeGRPC, charset
+			}
 			switch subtype {
 			case "csv":
 				return TypeCSV, charset
-			case "grpc", "grpc+proto":
-				return TypeGRPC, charset
 			case "json":
 				return TypeJSON, charset
 			case "msgpack", "x-msgpack", "vnd.msgpack":

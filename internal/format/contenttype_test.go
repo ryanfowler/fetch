@@ -171,6 +171,18 @@ func TestGetContentType(t *testing.T) {
 			wantType:    TypeCSV,
 			wantCharset: "shift_jis",
 		},
+		{
+			name:        "grpc json",
+			contentType: "application/grpc+json",
+			wantType:    TypeGRPC,
+			wantCharset: "",
+		},
+		{
+			name:        "grpc with charset",
+			contentType: "application/grpc+proto; charset=utf-8",
+			wantType:    TypeGRPC,
+			wantCharset: "utf-8",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
