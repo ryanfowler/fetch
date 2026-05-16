@@ -31,9 +31,36 @@ type Config struct {
 	Service   string
 }
 
+// MissingEnvVarError is returned when credentials are required for signing but
+// the corresponding environment variable is not set.
+type MissingEnvVarError struct {
+	EnvVar string
+}
+
+func (err *MissingEnvVarError) Error() string {
+	return "missing environment variable '" + err.EnvVar + "' required for option '--aws-sigv4'"
+}
+
+func (err *MissingEnvVarError) PrintTo(p *core.Printer) {
+	p.WriteString("missing environment variable '")
+	p.Set(core.Yellow)
+	p.WriteString(err.EnvVar)
+	p.Reset()
+
+	p.WriteString("' required for option '")
+	p.Set(core.Bold)
+	p.WriteString("--aws-sigv4")
+	p.Reset()
+	p.WriteString("'")
+}
+
 // Sign signs the provided HTTP request with the information from Config,
 // returning any error encountered.
 func Sign(req *http.Request, cfg Config, now time.Time) error {
+	if err := fillEnvCredentials(&cfg); err != nil {
+		return err
+	}
+
 	datetime := now.Format(datetimeFormat)
 	req.Header.Set("X-Amz-Date", datetime)
 
@@ -73,6 +100,22 @@ func Sign(req *http.Request, cfg Config, now time.Time) error {
 	sb.WriteString(signature)
 
 	req.Header.Set("Authorization", sb.String())
+	return nil
+}
+
+func fillEnvCredentials(cfg *Config) error {
+	if cfg.AccessKey == "" {
+		cfg.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
+		if cfg.AccessKey == "" {
+			return &MissingEnvVarError{EnvVar: "AWS_ACCESS_KEY_ID"}
+		}
+	}
+	if cfg.SecretKey == "" {
+		cfg.SecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+		if cfg.SecretKey == "" {
+			return &MissingEnvVarError{EnvVar: "AWS_SECRET_ACCESS_KEY"}
+		}
+	}
 	return nil
 }
 

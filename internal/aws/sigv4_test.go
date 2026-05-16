@@ -108,6 +108,40 @@ func TestSign(t *testing.T) {
 	}
 }
 
+func TestSignLoadsMissingCredentialsFromEnv(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+
+	req, _ := http.NewRequest("GET", "https://examplebucket.s3.amazonaws.com/test.txt", nil)
+	cfg := Config{
+		Region:  "us-east-1",
+		Service: "s3",
+	}
+	err := Sign(req, cfg, time.Date(2013, 05, 24, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+
+	auth := req.Header.Get("Authorization")
+	if !strings.Contains(auth, "Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request") {
+		t.Fatalf("Authorization = %q, want env access key credential", auth)
+	}
+}
+
+func TestSignReportsMissingEnvCredentials(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+
+	req, _ := http.NewRequest("GET", "https://examplebucket.s3.amazonaws.com/test.txt", nil)
+	err := Sign(req, Config{Region: "us-east-1", Service: "s3"}, time.Date(2013, 05, 24, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("Sign() error = nil, want missing env error")
+	}
+	if !strings.Contains(err.Error(), "AWS_ACCESS_KEY_ID") {
+		t.Fatalf("Sign() error = %q, want AWS_ACCESS_KEY_ID", err.Error())
+	}
+}
+
 func TestGetSignedHeadersCanonicalizesHeaderValues(t *testing.T) {
 	req, _ := http.NewRequest("GET", "https://example.com", nil)
 	req.Header["X-Foo"] = []string{"  a  ", "  b  "}

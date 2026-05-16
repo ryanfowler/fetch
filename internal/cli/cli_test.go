@@ -632,3 +632,41 @@ func TestDigestFlag(t *testing.T) {
 		}
 	})
 }
+
+func TestAWSSigv4CredentialsAreNotLoadedDuringParse(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+
+	app, err := Parse([]string{"--aws-sigv4", "us-east-1/s3", "https://example.com"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if app.AWSSigv4 == nil {
+		t.Fatal("AWSSigv4 = nil, want config")
+	}
+	if app.AWSSigv4.Region != "us-east-1" || app.AWSSigv4.Service != "s3" {
+		t.Fatalf("AWSSigv4 = %#v, want region us-east-1 and service s3", app.AWSSigv4)
+	}
+	if app.AWSSigv4.AccessKey != "" || app.AWSSigv4.SecretKey != "" {
+		t.Fatalf("AWSSigv4 credentials = %q/%q, want empty", app.AWSSigv4.AccessKey, app.AWSSigv4.SecretKey)
+	}
+}
+
+func TestFromCurlAWSSigv4CredentialsAreNotLoadedDuringParse(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+
+	app, err := Parse([]string{"--from-curl", `curl --aws-sigv4 "aws:amz:us-east-1:s3" https://example.com`})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if app.AWSSigv4 == nil {
+		t.Fatal("AWSSigv4 = nil, want config")
+	}
+	if app.AWSSigv4.Region != "us-east-1" || app.AWSSigv4.Service != "s3" {
+		t.Fatalf("AWSSigv4 = %#v, want region us-east-1 and service s3", app.AWSSigv4)
+	}
+	if app.AWSSigv4.AccessKey != "" || app.AWSSigv4.SecretKey != "" {
+		t.Fatalf("AWSSigv4 credentials = %q/%q, want empty", app.AWSSigv4.AccessKey, app.AWSSigv4.SecretKey)
+	}
+}
