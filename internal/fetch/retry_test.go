@@ -402,11 +402,16 @@ func TestRetryableRequestSetsGetBodyForMultipartRedirect(t *testing.T) {
 	mp := imultipart.NewMultipart([]core.KeyVal[string]{
 		{Key: "field", Val: "value"},
 	})
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/start", mp)
+	body, err := mp.Open()
+	if err != nil {
+		t.Fatalf("open multipart: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/start", body)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", mp.ContentType())
+	req.GetBody = mp.Open
 
 	code, err := retryableRequest(
 		context.Background(),

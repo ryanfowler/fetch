@@ -12,6 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanfowler/fetch/internal/core"
+	imultipart "github.com/ryanfowler/fetch/internal/multipart"
+
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 )
@@ -61,6 +64,50 @@ func TestIsLoopback(t *testing.T) {
 				t.Errorf("IsLoopback(%q) = %v, want %v", tt.host, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewRequestSetsGetBodyForMultipart(t *testing.T) {
+	rawURL, err := url.Parse("https://example.com/upload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mp := imultipart.NewMultipart([]core.KeyVal[string]{
+		{Key: "field", Val: "value"},
+	})
+
+	req, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+		Method:    http.MethodPost,
+		Multipart: mp,
+		URL:       rawURL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer req.Body.Close()
+
+	if req.GetBody == nil {
+		t.Fatal("GetBody is nil")
+	}
+	if ct := req.Header.Get("Content-Type"); ct != mp.ContentType() {
+		t.Fatalf("Content-Type = %q, want %q", ct, mp.ContentType())
+	}
+
+	initial, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := req.GetBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replay.Close()
+	replayed, err := io.ReadAll(replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(initial, replayed) {
+		t.Fatal("replayed multipart body differs from initial body")
 	}
 }
 

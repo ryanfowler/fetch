@@ -437,7 +437,11 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		}
 		body = strings.NewReader(q.Encode())
 	case cfg.Multipart != nil:
-		body = cfg.Multipart
+		var err error
+		body, err = cfg.Multipart.Open()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// If no scheme was provided, default to HTTPS except for loopback
@@ -458,6 +462,9 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	// Create the initial HTTP request.
 	req, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL.String(), body)
 	if err != nil {
+		if closer, ok := body.(io.Closer); ok {
+			_ = closer.Close()
+		}
 		return nil, err
 	}
 
@@ -499,8 +506,10 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	// Set the content-length header if the body is a file.
 	setFileContentLength(req)
 
-	// Set GetBody for file bodies so the request can be replayed.
-	if f, ok := body.(*os.File); ok && f != os.Stdin {
+	// Set GetBody for replayable request bodies.
+	if cfg.Multipart != nil {
+		req.GetBody = cfg.Multipart.Open
+	} else if f, ok := body.(*os.File); ok && f != os.Stdin {
 		path := f.Name()
 		req.GetBody = func() (io.ReadCloser, error) {
 			return os.Open(path)

@@ -630,6 +630,77 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 	})
 
+	t.Run("multipart 307 redirect", func(t *testing.T) {
+		t.Parallel()
+		var startHits, finalHits atomic.Int64
+		var server *httptest.Server
+		server = startServer(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/start":
+				startHits.Add(1)
+				http.Redirect(w, r, server.URL+"/final", http.StatusTemporaryRedirect)
+			case "/final":
+				finalHits.Add(1)
+				if r.Method != http.MethodPost {
+					w.WriteHeader(400)
+					io.WriteString(w, "invalid method: "+r.Method)
+					return
+				}
+				mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+				if err != nil {
+					w.WriteHeader(400)
+					io.WriteString(w, "cannot parse media type: "+err.Error())
+					return
+				}
+				if mediaType != "multipart/form-data" {
+					w.WriteHeader(400)
+					io.WriteString(w, "invalid media type: "+mediaType)
+					return
+				}
+
+				form, err := multipart.NewReader(r.Body, params["boundary"]).ReadForm(1 << 24)
+				if err != nil {
+					w.WriteHeader(400)
+					io.WriteString(w, "cannot read form: "+err.Error())
+					return
+				}
+				values := form.Value["key1"]
+				if len(form.Value) != 1 || len(values) != 1 || values[0] != "val1" {
+					w.WriteHeader(400)
+					io.WriteString(w, fmt.Sprintf("invalid form values: %+v", form.Value))
+					return
+				}
+				files := form.File["file1"]
+				if len(form.File) != 1 || len(files) != 1 {
+					w.WriteHeader(400)
+					io.WriteString(w, fmt.Sprintf("invalid form files: %+v", form.File))
+					return
+				}
+				header := files[0]
+				if header.Filename != filepath.Base(header.Filename) {
+					w.WriteHeader(400)
+					io.WriteString(w, "multipart filename includes path: "+header.Filename)
+					return
+				}
+				w.WriteHeader(200)
+			default:
+				w.WriteHeader(404)
+			}
+		})
+		defer server.Close()
+
+		tempFile := createTempFile(t, "redirected file")
+		defer os.Remove(tempFile)
+		res := runFetch(t, fetchPath, server.URL+"/start", "-m", "POST", "-F", "key1=val1", "-F", "file1=@"+tempFile)
+		assertExitCode(t, 0, res)
+		if got := startHits.Load(); got != 1 {
+			t.Fatalf("start hits = %d, want 1", got)
+		}
+		if got := finalHits.Load(); got != 1 {
+			t.Fatalf("final hits = %d, want 1", got)
+		}
+	})
+
 	t.Run("output", func(t *testing.T) {
 		t.Parallel()
 		const data = "this is the data"
