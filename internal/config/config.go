@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -325,11 +326,11 @@ func (c *Config) ParseColor(value string) error {
 }
 
 func (c *Config) ParseConnectTimeout(value string) error {
-	secs, err := strconv.ParseFloat(value, 64)
-	if err != nil || secs < 0 {
-		return core.NewValueError("connect-timeout", value, "must be a non-negative number", c.isFile)
+	timeout, err := parseDurationSeconds("connect-timeout", value, "must be a non-negative number", c.isFile)
+	if err != nil {
+		return err
 	}
-	c.ConnectTimeout = new(time.Duration(float64(time.Second) * secs))
+	c.ConnectTimeout = timeout
 	return nil
 }
 
@@ -518,11 +519,11 @@ func (c *Config) ParseRetry(value string) error {
 }
 
 func (c *Config) ParseRetryDelay(value string) error {
-	secs, err := strconv.ParseFloat(value, 64)
-	if err != nil || secs < 0 {
-		return core.NewValueError("retry-delay", value, "must be a non-negative number", c.isFile)
+	delay, err := parseDurationSeconds("retry-delay", value, "must be a non-negative number", c.isFile)
+	if err != nil {
+		return err
 	}
-	c.RetryDelay = new(time.Duration(float64(time.Second) * secs))
+	c.RetryDelay = delay
 	return nil
 }
 
@@ -545,11 +546,11 @@ func (c *Config) ParseSilent(value string) error {
 }
 
 func (c *Config) ParseTimeout(value string) error {
-	secs, err := strconv.ParseFloat(value, 64)
-	if err != nil || secs < 0 {
-		return core.NewValueError("timeout", value, "must be a non-negative number", c.isFile)
+	timeout, err := parseDurationSeconds("timeout", value, "must be a non-negative number", c.isFile)
+	if err != nil {
+		return err
 	}
-	c.Timeout = new(time.Duration(float64(time.Second) * secs))
+	c.Timeout = timeout
 	return nil
 }
 
@@ -617,6 +618,15 @@ func (c *Config) ParseVerbosity(value string) error {
 	}
 	c.Verbosity = &v
 	return nil
+}
+
+func parseDurationSeconds(flag, value, usage string, isFile bool) (*time.Duration, error) {
+	secs, err := strconv.ParseFloat(value, 64)
+	maxSeconds := float64(math.MaxInt64) / float64(time.Second)
+	if err != nil || secs < 0 || secs > maxSeconds || math.IsNaN(secs) || math.IsInf(secs, 0) {
+		return nil, core.NewValueError(flag, value, usage, isFile)
+	}
+	return new(time.Duration(float64(time.Second) * secs)), nil
 }
 
 func (c *Config) ClientCert() (*tls.Certificate, error) {
