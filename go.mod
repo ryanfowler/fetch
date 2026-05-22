@@ -11,7 +11,7 @@ require (
 	github.com/tinylib/msgp v1.6.4
 	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.52.0
-	golang.org/x/image v0.40.0
+	golang.org/x/image v0.41.0
 	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
