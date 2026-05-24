@@ -9,7 +9,7 @@ use prost_types::{
     FileDescriptorProto, FileDescriptorSet, MethodDescriptorProto, ServiceDescriptorProto,
     field_descriptor_proto,
 };
-use sha1::{Digest as Sha1Digest, Sha1};
+use sha1::Sha1;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
