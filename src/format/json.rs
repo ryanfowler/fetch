@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde_json::Value;
 
 use crate::core::{Printer, Sequence};
@@ -32,8 +34,8 @@ pub fn format_ndjson(bytes: &[u8], color: bool) -> Result<Vec<u8>, serde_json::E
 fn write_value(out: &mut Printer, value: &Value, indent: usize) {
     match value {
         Value::Null => out.push_str("null"),
-        Value::Bool(value) => out.push_str(&value.to_string()),
-        Value::Number(value) => out.push_str(&value.to_string()),
+        Value::Bool(value) => write_bool(out, *value),
+        Value::Number(value) => write!(out, "{value}").expect("write to printer cannot fail"),
         Value::String(value) => write_json_string(out, value, &[Sequence::Green]),
         Value::Array(values) => write_array(out, values, indent),
         Value::Object(values) => write_object(out, values, indent),
@@ -43,8 +45,8 @@ fn write_value(out: &mut Printer, value: &Value, indent: usize) {
 fn write_line_value(out: &mut Printer, value: &Value) {
     match value {
         Value::Null => out.push_str("null"),
-        Value::Bool(value) => out.push_str(&value.to_string()),
-        Value::Number(value) => out.push_str(&value.to_string()),
+        Value::Bool(value) => write_bool(out, *value),
+        Value::Number(value) => write!(out, "{value}").expect("write to printer cannot fail"),
         Value::String(value) => write_json_string(out, value, &[Sequence::Green]),
         Value::Array(values) => write_line_array(out, values),
         Value::Object(values) => write_line_object(out, values),
@@ -122,10 +124,21 @@ fn write_object(out: &mut Printer, values: &serde_json::Map<String, Value>, inde
     out.push('}');
 }
 
+fn write_bool(out: &mut Printer, value: bool) {
+    out.push_str(if value { "true" } else { "false" });
+}
+
 fn write_json_string(out: &mut Printer, value: &str, color_codes: &[Sequence]) {
     out.push('"');
-    let escaped = escape_json_string(value);
-    out.write_styled(&escaped, color_codes);
+    if out.use_color() {
+        for code in color_codes {
+            out.set(*code);
+        }
+        write_escaped_json_string(out, value).expect("write to printer cannot fail");
+        out.reset();
+    } else {
+        write_escaped_json_string(out, value).expect("write to printer cannot fail");
+    }
     out.push('"');
 }
 
@@ -135,22 +148,28 @@ fn write_indent(out: &mut Printer, indent: usize) {
     }
 }
 
+#[cfg(test)]
 fn escape_json_string(value: &str) -> String {
     let mut out = String::new();
+    write_escaped_json_string(&mut out, value).expect("write to string cannot fail");
+    out
+}
+
+fn write_escaped_json_string(out: &mut impl std::fmt::Write, value: &str) -> std::fmt::Result {
     for c in value.chars() {
         match c {
-            '\u{08}' => out.push_str(r"\b"),
-            '\u{0c}' => out.push_str(r"\f"),
-            '\n' => out.push_str(r"\n"),
-            '\r' => out.push_str(r"\r"),
-            '\t' => out.push_str(r"\t"),
-            '"' => out.push_str(r#"\""#),
-            '\\' => out.push_str(r"\\"),
-            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!(r"\u{:04x}", c as u32)),
-            c => out.push(c),
+            '\u{08}' => out.write_str(r"\b")?,
+            '\u{0c}' => out.write_str(r"\f")?,
+            '\n' => out.write_str(r"\n")?,
+            '\r' => out.write_str(r"\r")?,
+            '\t' => out.write_str(r"\t")?,
+            '"' => out.write_str(r#"\""#)?,
+            '\\' => out.write_str(r"\\")?,
+            c if c < ' ' || c == '\u{7f}' => write!(out, r"\u{:04x}", c as u32)?,
+            c => out.write_char(c)?,
         }
     }
-    out
+    Ok(())
 }
 
 #[cfg(test)]

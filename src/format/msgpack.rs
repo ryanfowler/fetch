@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fmt::Write as _;
 
 use base64::Engine;
 
@@ -54,7 +55,7 @@ impl<'a> MsgPackParser<'a> {
     fn write_value(&mut self, out: &mut String) -> Result<(), MsgPackError> {
         let marker = self.read_u8()?;
         match marker {
-            0x00..=0x7f => out.push_str(&marker.to_string()),
+            0x00..=0x7f => write!(out, "{marker}").expect("write to string cannot fail"),
             0x80..=0x8f => self.write_map(out, u32::from(marker & 0x0f))?,
             0x90..=0x9f => self.write_array(out, u32::from(marker & 0x0f))?,
             0xa0..=0xbf => self.write_string(out, usize::from(marker & 0x1f))?,
@@ -86,16 +87,26 @@ impl<'a> MsgPackParser<'a> {
                 let len = self.read_len_u32()?;
                 self.write_extension(out, len)?;
             }
-            0xca => out.push_str(&f64::from(f32::from_bits(self.read_u32()?)).to_string()),
-            0xcb => out.push_str(&f64::from_bits(self.read_u64()?).to_string()),
-            0xcc => out.push_str(&self.read_u8()?.to_string()),
-            0xcd => out.push_str(&self.read_u16()?.to_string()),
-            0xce => out.push_str(&self.read_u32()?.to_string()),
-            0xcf => out.push_str(&self.read_u64()?.to_string()),
-            0xd0 => out.push_str(&(self.read_u8()? as i8).to_string()),
-            0xd1 => out.push_str(&(self.read_u16()? as i16).to_string()),
-            0xd2 => out.push_str(&(self.read_u32()? as i32).to_string()),
-            0xd3 => out.push_str(&(self.read_u64()? as i64).to_string()),
+            0xca => write!(out, "{}", f64::from(f32::from_bits(self.read_u32()?)))
+                .expect("write to string cannot fail"),
+            0xcb => write!(out, "{}", f64::from_bits(self.read_u64()?))
+                .expect("write to string cannot fail"),
+            0xcc => write!(out, "{}", self.read_u8()?).expect("write to string cannot fail"),
+            0xcd => write!(out, "{}", self.read_u16()?).expect("write to string cannot fail"),
+            0xce => write!(out, "{}", self.read_u32()?).expect("write to string cannot fail"),
+            0xcf => write!(out, "{}", self.read_u64()?).expect("write to string cannot fail"),
+            0xd0 => {
+                write!(out, "{}", self.read_u8()? as i8).expect("write to string cannot fail");
+            }
+            0xd1 => {
+                write!(out, "{}", self.read_u16()? as i16).expect("write to string cannot fail");
+            }
+            0xd2 => {
+                write!(out, "{}", self.read_u32()? as i32).expect("write to string cannot fail");
+            }
+            0xd3 => {
+                write!(out, "{}", self.read_u64()? as i64).expect("write to string cannot fail");
+            }
             0xd4 => self.write_extension(out, 1)?,
             0xd5 => self.write_extension(out, 2)?,
             0xd6 => self.write_extension(out, 4)?,
@@ -129,7 +140,9 @@ impl<'a> MsgPackParser<'a> {
                 let len = self.read_u32()?;
                 self.write_map(out, len)?;
             }
-            0xe0..=0xff => out.push_str(&(marker as i8).to_string()),
+            0xe0..=0xff => {
+                write!(out, "{}", marker as i8).expect("write to string cannot fail");
+            }
         }
         Ok(())
     }
@@ -163,7 +176,7 @@ impl<'a> MsgPackParser<'a> {
     fn write_map_key(&mut self, out: &mut String) -> Result<(), MsgPackError> {
         let marker = self.read_u8()?;
         match marker {
-            0x00..=0x7f => write_json_string(out, marker.to_string().as_bytes()),
+            0x00..=0x7f => write_json_map_key_number(out, marker),
             0xa0..=0xbf => self.write_map_key_bytes(out, usize::from(marker & 0x1f))?,
             0xc4 => {
                 let len = usize::from(self.read_u8()?);
@@ -177,14 +190,14 @@ impl<'a> MsgPackParser<'a> {
                 let len = self.read_len_u32()?;
                 self.write_map_key_bytes(out, len)?;
             }
-            0xcc => write_json_string(out, self.read_u8()?.to_string().as_bytes()),
-            0xcd => write_json_string(out, self.read_u16()?.to_string().as_bytes()),
-            0xce => write_json_string(out, self.read_u32()?.to_string().as_bytes()),
-            0xcf => write_json_string(out, self.read_u64()?.to_string().as_bytes()),
-            0xd0 => write_json_string(out, (self.read_u8()? as i8).to_string().as_bytes()),
-            0xd1 => write_json_string(out, (self.read_u16()? as i16).to_string().as_bytes()),
-            0xd2 => write_json_string(out, (self.read_u32()? as i32).to_string().as_bytes()),
-            0xd3 => write_json_string(out, (self.read_u64()? as i64).to_string().as_bytes()),
+            0xcc => write_json_map_key_number(out, self.read_u8()?),
+            0xcd => write_json_map_key_number(out, self.read_u16()?),
+            0xce => write_json_map_key_number(out, self.read_u32()?),
+            0xcf => write_json_map_key_number(out, self.read_u64()?),
+            0xd0 => write_json_map_key_number(out, self.read_u8()? as i8),
+            0xd1 => write_json_map_key_number(out, self.read_u16()? as i16),
+            0xd2 => write_json_map_key_number(out, self.read_u32()? as i32),
+            0xd3 => write_json_map_key_number(out, self.read_u64()? as i64),
             0xd9 => {
                 let len = usize::from(self.read_u8()?);
                 self.write_map_key_bytes(out, len)?;
@@ -197,7 +210,7 @@ impl<'a> MsgPackParser<'a> {
                 let len = self.read_len_u32()?;
                 self.write_map_key_bytes(out, len)?;
             }
-            0xe0..=0xff => write_json_string(out, (marker as i8).to_string().as_bytes()),
+            0xe0..=0xff => write_json_map_key_number(out, marker as i8),
             _ => return Err(MsgPackError::new("unsupported MessagePack map key type")),
         }
         Ok(())
@@ -221,7 +234,7 @@ impl<'a> MsgPackParser<'a> {
     fn write_binary(&mut self, out: &mut String, len: usize) -> Result<(), MsgPackError> {
         let bytes = self.read_exact(len)?;
         out.push('"');
-        out.push_str(&base64::engine::general_purpose::STANDARD.encode(bytes));
+        base64::engine::general_purpose::STANDARD.encode_string(bytes, out);
         out.push('"');
         Ok(())
     }
@@ -230,9 +243,9 @@ impl<'a> MsgPackParser<'a> {
         let typ = self.read_u8()? as i8;
         let data = self.read_exact(len)?;
         out.push_str(r#"{"type":"#);
-        out.push_str(&typ.to_string());
+        write!(out, "{typ}").expect("write to string cannot fail");
         out.push_str(r#","data":""#);
-        out.push_str(&base64::engine::general_purpose::STANDARD.encode(data));
+        base64::engine::general_purpose::STANDARD.encode_string(data, out);
         out.push_str(r#""}"#);
         Ok(())
     }
@@ -306,10 +319,18 @@ fn write_json_string(out: &mut String, bytes: &[u8]) {
             '&' => out.push_str(r"\u0026"),
             '\u{2028}' => out.push_str(r"\u2028"),
             '\u{2029}' => out.push_str(r"\u2029"),
-            c if c < ' ' || c == '\u{7f}' => out.push_str(&format!(r"\u{:04x}", c as u32)),
+            c if c < ' ' || c == '\u{7f}' => {
+                write!(out, r"\u{:04x}", c as u32).expect("write to string cannot fail");
+            }
             c => out.push(c),
         }
     }
+    out.push('"');
+}
+
+fn write_json_map_key_number(out: &mut String, value: impl fmt::Display) {
+    out.push('"');
+    write!(out, "{value}").expect("write to string cannot fail");
     out.push('"');
 }
 

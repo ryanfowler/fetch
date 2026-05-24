@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fmt::Write as _;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtobufError(String);
@@ -29,7 +30,7 @@ fn format_message(mut buf: &[u8], out: &mut String, indent: usize) -> Result<(),
         }
 
         write_indent(out, indent);
-        out.push_str(&field_number.to_string());
+        write!(out, "{field_number}").expect("write to string cannot fail");
         out.push(':');
 
         match wire_type {
@@ -37,7 +38,7 @@ fn format_message(mut buf: &[u8], out: &mut String, indent: usize) -> Result<(),
                 let (value, n) = consume_varint(buf)?;
                 buf = &buf[n..];
                 out.push_str(" (varint) ");
-                out.push_str(&value.to_string());
+                write!(out, "{value}").expect("write to string cannot fail");
                 out.push('\n');
             }
             1 => {
@@ -49,7 +50,7 @@ fn format_message(mut buf: &[u8], out: &mut String, indent: usize) -> Result<(),
                 let value = u64::from_le_bytes(buf[..8].try_into().expect("slice length checked"));
                 buf = &buf[8..];
                 out.push_str(" (fixed64) ");
-                out.push_str(&format!("0x{value:016x}"));
+                write!(out, "0x{value:016x}").expect("write to string cannot fail");
                 out.push('\n');
             }
             2 => {
@@ -89,7 +90,7 @@ fn format_message(mut buf: &[u8], out: &mut String, indent: usize) -> Result<(),
                 let value = u32::from_le_bytes(buf[..4].try_into().expect("slice length checked"));
                 buf = &buf[4..];
                 out.push_str(" (fixed32) ");
-                out.push_str(&format!("0x{value:08x}"));
+                write!(out, "0x{value:08x}").expect("write to string cannot fail");
                 out.push('\n');
             }
             3 | 4 => return Err(ProtobufError("deprecated group wire type".to_string())),
@@ -175,7 +176,7 @@ fn write_protobuf_string(out: &mut String, value: &str) {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str(r"\\"),
             ch if (ch as u32) < 0x20 || ch == '\u{7f}' => {
-                out.push_str(&format!("\\u{:04x}", ch as u32));
+                write!(out, "\\u{:04x}", ch as u32).expect("write to string cannot fail");
             }
             ch => out.push(ch),
         }
@@ -189,7 +190,7 @@ fn write_protobuf_bytes(out: &mut String, bytes: &[u8]) {
         if idx > 0 {
             out.push(' ');
         }
-        out.push_str(&format!("{byte:02x}"));
+        write!(out, "{byte:02x}").expect("write to string cannot fail");
     }
     out.push('>');
 }
