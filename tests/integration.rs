@@ -850,7 +850,7 @@ fn start_tls_server(
     fs::write(&ca_cert_path, certified.cert.pem()).unwrap();
     let cert_der = certified.cert.der().clone();
     let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()),
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
     );
     let config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -920,6 +920,7 @@ fn start_mtls_server() -> MtlsTestServer {
         rcgen::KeyUsagePurpose::CrlSign,
     ];
     let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
 
     let server_key =
         rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
@@ -929,9 +930,7 @@ fn start_mtls_server() -> MtlsTestServer {
         .distinguished_name
         .push(rcgen::DnType::CommonName, "server");
     server_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
-    let server_cert = server_params
-        .signed_by(&server_key, &ca_cert, &ca_key)
-        .unwrap();
+    let server_cert = server_params.signed_by(&server_key, &ca_issuer).unwrap();
 
     let client_key =
         rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
@@ -941,9 +940,7 @@ fn start_mtls_server() -> MtlsTestServer {
         .distinguished_name
         .push(rcgen::DnType::CommonName, "client");
     client_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
-    let client_cert = client_params
-        .signed_by(&client_key, &ca_cert, &ca_key)
-        .unwrap();
+    let client_cert = client_params.signed_by(&client_key, &ca_issuer).unwrap();
 
     let ca_cert_path = dir.join("ca.crt");
     let client_cert_path = dir.join("client.crt");
@@ -1035,7 +1032,7 @@ fn start_http3_server(
 
     let cert_der = certified.cert.der().clone();
     let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()),
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
     );
     let mut crypto = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -1191,7 +1188,7 @@ fn start_reflection_grpc_tls_server(enable_reflection: bool) -> ReflectionGrpcSe
     fs::write(&ca_cert_path, certified.cert.pem()).unwrap();
     let cert_der = certified.cert.der().clone();
     let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()),
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
     );
     let mut config = rustls::ServerConfig::builder()
         .with_no_client_auth()
