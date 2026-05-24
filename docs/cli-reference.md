@@ -383,7 +383,7 @@ fetch --unix /var/run/docker.sock http://unix/containers/json
 
 ### `--tls VERSION`
 
-Minimum TLS version. This is an alias for `--min-tls`. Values: `1.0`, `1.1`, `1.2`, `1.3`.
+Minimum TLS version. This is an alias for `--min-tls`. Values: `1.2`, `1.3`.
 
 ```sh
 fetch --tls 1.3 example.com
@@ -391,7 +391,7 @@ fetch --tls 1.3 example.com
 
 ### `--min-tls VERSION`
 
-Minimum TLS version. Values: `1.0`, `1.1`, `1.2`, `1.3`.
+Minimum TLS version. Values: `1.2`, `1.3`.
 
 ```sh
 fetch --min-tls 1.2 example.com
@@ -399,7 +399,7 @@ fetch --min-tls 1.2 example.com
 
 ### `--max-tls VERSION`
 
-Maximum TLS version. Values: `1.0`, `1.1`, `1.2`, `1.3`. Combine with `--min-tls` to allow a bounded range or require an exact TLS version.
+Maximum TLS version. Values: `1.2`, `1.3`. Combine with `--min-tls` to allow a bounded range or require an exact TLS version.
 
 ```sh
 fetch --min-tls 1.2 --max-tls 1.2 example.com
@@ -487,7 +487,7 @@ fetch -vvv example.com
 
 ### `-T, --timing`
 
-Display a timing waterfall chart after the response. Shows DNS, TCP, TLS, TTFB, and body download phases as a proportional bar chart. Works independently of verbosity. Phases that don't apply (e.g., TLS for HTTP, TCP for HTTP/3, DNS/TCP/TLS for reused connections) are omitted.
+Display a timing waterfall chart after the response. Shows DNS, Connect, TTFB, and body download phases as a proportional bar chart. Connect is the full connector phase and may include TCP plus TLS. Works independently of verbosity. Phases that don't apply (e.g., connection phases for reused connections) are omitted.
 
 ```sh
 fetch --timing https://example.com
@@ -654,7 +654,7 @@ Print version.
 
 ### `--buildinfo`
 
-Print detailed build information.
+Print build information. Use `-v --buildinfo` to include dependency details.
 
 ### `--update`
 

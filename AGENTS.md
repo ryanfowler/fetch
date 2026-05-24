@@ -4,73 +4,81 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## Project Overview
 
-`fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support with reflection/discovery and JSON-to-protobuf conversion, and authentication (Basic, Digest, Bearer, AWS SigV4).
-
-The repository currently targets Go 1.26.3 in `go.mod` and GitHub Actions.
+`fetch` is a modern HTTP(S) client CLI implemented as the Rust Cargo binary
+named `fetch`. It features automatic response formatting (JSON, XML, YAML,
+HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support
+with reflection/discovery and JSON-to-protobuf conversion, and authentication
+(Basic, Digest, Bearer, AWS SigV4).
 
 ## Common Commands
 
+After making any code or documentation changes, AI agents must run:
+
 ```bash
-# Run all tests
-go test -v ./...
+cargo fmt
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
 
-# Run specific package tests
-go test -v ./internal/format
-go test -v ./integration
+```bash
+# Run Rust unit tests
+cargo test --all-features
 
-# Run a single test
-go test -v ./internal/cli -run TestParseFlagAWS
+# Run the Rust integration suite against the Rust binary
+cargo test --all-features --test integration -- --test-threads=1
 
-# Build the binary
-go build -o bin/fetch .
+# Run a focused Rust test
+cargo test --all-features image::tests
+
+# Build the Rust binary
+cargo build --release
 
 # Format code (CI will fail if not formatted)
-gofmt -s -w .
+cargo fmt
 
-# Verify modules
-go mod tidy && go mod verify
-
-# Run linter (CI uses staticcheck)
-staticcheck ./...
+# Lint
+cargo clippy --locked --all-targets --all-features -- -D warnings
 
 # Format other files
 prettier -w .
+
+# Run a focused Rust integration test
+cargo test --all-features --test integration request_construction_and_data_sources
 ```
 
 ## Architecture
 
 ### Entry Point
 
-`main.go` orchestrates the CLI: parses arguments via `internal/cli`, loads config via `internal/config`, and delegates to `internal/fetch.Fetch()`.
+`src/main.rs` is intentionally thin and delegates to `src/app.rs`, which parses
+CLI arguments via `src/cli.rs`, loads config via `src/config`, dispatches
+metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 
 ### Key Packages
 
-- **internal/aws** - AWS Signature V4 request signing.
-- **internal/cli** - Command-line argument parsing. `App` struct holds all parsed options.
-- **internal/client** - HTTP client wrapper and HTTP version-specific transport setup.
-- **internal/complete** - Shell completion implementation.
-- **internal/config** - INI-format config file parsing with host-specific overrides.
-- **internal/core** - Shared types (`Printer`, `Color`, `Format`, `HTTPVersion`) and utilities.
-- **internal/curl** - Curl command parser for `--from-curl` flag. Tokenizes and parses curl command strings into an intermediate `Result` struct.
-- **internal/digest** - HTTP Digest Authentication challenge parsing and response computation (RFC 7616).
-- **internal/fetch** - Core HTTP request execution. `fetch.go:Fetch()` is the main entry point that builds requests, handles gRPC framing/reflection/discovery, and routes to formatters.
-- **internal/fileutil** - Shared file helpers, including cross-platform atomic replacement for temp-file write flows.
-- **internal/format** - Response body formatters (JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, SSE, NDJSON). Each formatter writes colored output to a `Printer`.
-- **internal/grpc** - gRPC framing, headers, and status code handling.
-- **internal/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
-- **internal/image** - Multipart form implementation.
-- **internal/proto** - Protocol buffer compilation and message handling for gRPC support.
-- **internal/resolver** - Shared DNS resolution and dialing for system DNS, UDP DNS, and DNS-over-HTTPS across HTTP, HTTP/3, gRPC, and TLS inspection.
-- **internal/session** - Named cookie sessions with persistent storage across invocations.
-- **internal/update** - Check for updates, download from Github, and self-update.
-- **internal/ws** - WebSocket message loop (read, write, bidirectional coordination).
+- **src/auth** - Basic, Bearer, Digest, and AWS Signature V4 authentication helpers.
+- **src/cli** - Command-line argument parsing, shell completion, and `--from-curl` support.
+- **src/config** - INI-format config file parsing with host-specific overrides.
+- **src/core.rs** - Shared printer, color, format, and terminal utilities.
+- **src/dns** - DNS-over-HTTPS, UDP DNS, system resolver fallback, and `--inspect-dns`.
+- **src/format** - Response body formatters for JSON, XML, YAML, HTML, CSS, CSV, Markdown, msgpack, protobuf, SSE, NDJSON, gRPC, and images.
+- **src/grpc** - gRPC framing, reflection, status handling, and protobuf request/response support.
+- **src/http** - Core HTTP request construction and execution, multipart uploads, output routing, retries, proxies, TLS, Unix sockets, and timing.
+- **src/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
+- **src/output** - Response output, progress summaries, and atomic output-file writes.
+- **src/proto** - Protocol buffer descriptor loading, compilation, and dynamic message handling.
+- **src/session.rs** - Named cookie sessions with persistent storage across invocations.
+- **src/tls** - TCP and QUIC/TLS inspection.
+- **src/update.rs** - Check for updates, download release artifacts, and self-update.
+- **src/websocket** - WebSocket message loop and interactive terminal prompt.
 
 ### Request Flow
 
-1. CLI args parsed (`cli.Parse`) → `App` struct
-2. Config file merged (`config.GetFile`)
-3. `fetch.Request` built from merged config
+1. CLI args parsed via `src/cli.rs` into an `App` struct
+2. Config file merged via `src/config`
+3. HTTP request built from merged config and CLI state
 4. If gRPC: load local proto schema or resolve it via reflection, setup descriptors, convert JSON→protobuf, frame message
+5. HTTP client executes request
+6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 
 ## Recent Notes
 
@@ -79,24 +87,29 @@ prettier -w .
 - Plaintext loopback gRPC servers are supported via `h2c` for both calls and discovery.
 - `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP or DoH responses.
 - `--inspect-tls --http 3` performs QUIC/TLS inspection with `h3` ALPN instead of the TCP TLS path.
+- Rust `--inspect-tls` renders a verified certificate chain when verification succeeds, appending omitted trusted roots or replacing server-sent cross-signed roots with the matching platform/custom trusted root for expiry display; `--insecure` keeps the raw peer chain.
 - `--tls` remains a compatibility alias for setting the minimum TLS version; prefer `--min-tls` in new docs/examples, and use `--max-tls` to cap negotiation or combine min/max for an exact TLS version.
 - WebSocket terminal sessions use the interactive prompt by default and can be controlled with `--ws-interactive auto|on|off`; output-file/clipboard/retry flags are rejected because the WebSocket path streams through the message loop instead of the normal response pipeline.
 - Metadata-only commands (`--help`, `--version`, `--buildinfo`) perform best-effort config parsing for presentation settings, but config errors and background auto-updates cannot block them.
-5. HTTP client executes request
-6. Response formatted based on Content-Type and output to stdout (optionally via pager)
+- Rust formatting code has a central `core::Printer`/`PrinterHandle` and ANSI `Sequence` abstraction; JSON/NDJSON write through the printer directly, other formatter/progress style helpers route escape emission through the shared sequence writer, and stderr metadata/inspection/error/warning renderers use the same printer for request/response headers and `--inspect-dns`/`--inspect-tls`.
+- Rust error rendering uses rich diagnostics for common CLI/config errors, styling labels, flags/options, invalid values, file paths, and config line context while preserving plain-text `Display` output.
+- Rust `-vvv` output prints config, DNS, TCP, and TTFB debug metadata through the central printer, including color policy and the blank response-header separator before formatted bodies.
+- Rust `--timing` enables DNS pre-resolution timing and wraps reqwest's connector service so the waterfall includes DNS, TCP, TTFB, and Body phases. reqwest does not currently expose a separate TLS handshake duration, so Rust reports the combined TCP/TLS connector phase as TCP timing.
+- GitHub Actions run Cargo fmt, clippy, unit tests, and the Rust integration suite. Release builds Cargo archives named for the self-updater, and Dependabot tracks Cargo and Actions. Release builds set `FETCH_VERSION` from the release tag so the compiled binary reports the published version; `Cargo.toml` intentionally remains `0.0.0` unless crate publishing becomes a goal. Local builds derive `FETCH_VERSION` from a matching `v*` git tag, then `git describe`, then `v0.0.0-dev`.
+- Rust default config discovery on Windows honors `XDG_CONFIG_HOME/fetch/config` and `HOME/.config/fetch/config` before falling back to `AppData/fetch/config`; Windows mTLS integration fixtures use RSA test certificates to stay compatible with reqwest/rustls platform verification.
 
-Retryable requests replay bodies by calling `req.GetBody` when available, reopening file-backed bodies directly when possible, and only spooling the original body to a temp file as a final fallback for one-shot streams. This avoids holding large uploads in memory and keeps retries working for closable bodies like `*os.File`.
-Multipart `-F` request bodies are produced by a replayable factory with a stable boundary; request construction sets `req.GetBody` so 307/308 redirects can resend them without relying on retry/digest spooling.
+Retryable requests use replayable request bodies so retries and 307/308 redirects can resend data without holding unrelated state.
+Multipart `-F` request bodies are produced with a stable boundary so redirected requests preserve the original body shape.
 
 ### Content Type Detection
 
-`internal/fetch/fetch.go:getContentType()` maps MIME types to formatters. Supported types include JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, gRPC, SSE, NDJSON, and images.
+`src/format/content_type.rs` maps MIME types to formatters. Supported types include JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, gRPC, SSE, NDJSON, Markdown, and images.
 
 ## Testing
 
-- Unit tests: `*_test.go` files alongside source in each package
-- Integration tests: `integration/integration_test.go` (comprehensive end-to-end tests)
-- CI runs tests on Ubuntu, macOS, and Windows
+- Rust unit tests live alongside modules in `src/`.
+- Rust integration tests live in `tests/integration.rs` and run the compiled Rust binary via Cargo.
+- CI runs Rust checks once on Ubuntu and runs the Rust integration harness once on each supported GitHub Actions runner: Ubuntu, macOS, and Windows.
 
 ## Docs
 

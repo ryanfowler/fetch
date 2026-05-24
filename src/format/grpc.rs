@@ -1,0 +1,132 @@
+use std::fmt;
+
+use crate::grpc::framing;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcFormatError(String);
+
+impl fmt::Display for GrpcFormatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GrpcFormatError {}
+
+pub fn format_grpc_stream(buf: &[u8]) -> Result<String, GrpcFormatError> {
+    let frames = framing::read_frames(buf).map_err(|err| GrpcFormatError(err.to_string()))?;
+    let mut out = String::new();
+
+    for (idx, frame) in frames.iter().enumerate() {
+        if frame.compressed {
+            return Err(GrpcFormatError(
+                "compressed gRPC messages are not supported".to_string(),
+            ));
+        }
+        if idx > 0 {
+            out.push('\n');
+        }
+        out.push_str(
+            &crate::format::protobuf::format_protobuf(&frame.data)
+                .map_err(|err| GrpcFormatError(err.to_string()))?,
+        );
+    }
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grpc::framing::frame;
+
+    #[test]
+    fn test_format_grpc_stream_single_frame() {
+        let proto_data = append_bytes(append_varint(Vec::new(), 1, 42), 2, b"hello");
+        let output = format_grpc_stream(&frame(&proto_data, false)).unwrap();
+        assert!(output.contains("1:"));
+        assert!(output.contains("42"));
+        assert!(output.contains("2:"));
+        assert!(output.contains("\"hello\""));
+    }
+
+    #[test]
+    fn test_format_grpc_stream_multiple_frames() {
+        let frame1 = frame(&append_varint(Vec::new(), 1, 100), false);
+        let frame2 = frame(&append_varint(Vec::new(), 1, 200), false);
+        let frame3 = frame(&append_varint(Vec::new(), 1, 300), false);
+
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&frame1);
+        stream.extend_from_slice(&frame2);
+        stream.extend_from_slice(&frame3);
+
+        let output = format_grpc_stream(&stream).unwrap();
+        assert!(output.contains("100"));
+        assert!(output.contains("200"));
+        assert!(output.contains("300"));
+    }
+
+    #[test]
+    fn test_format_grpc_stream_empty_stream_and_message() {
+        assert_eq!(format_grpc_stream(&[]).unwrap(), "");
+        assert_eq!(format_grpc_stream(&frame(&[], false)).unwrap(), "");
+    }
+
+    #[test]
+    fn test_format_grpc_stream_compressed_frame() {
+        let err = format_grpc_stream(&frame(b"compressed payload", true)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("compressed gRPC messages are not supported")
+        );
+    }
+
+    #[test]
+    fn test_format_grpc_stream_error_mid_stream() {
+        let mut stream = frame(&append_varint(Vec::new(), 1, 42), false);
+        stream.extend_from_slice(&[0x00, 0x00]);
+        assert!(format_grpc_stream(&stream).is_err());
+    }
+
+    #[test]
+    fn test_format_grpc_stream_multiple_frames_with_multi_field_messages() {
+        let msg1 = append_bytes(append_varint(Vec::new(), 1, 10), 2, b"first");
+        let msg2 = append_bytes(append_varint(Vec::new(), 1, 20), 2, b"second");
+
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&frame(&msg1, false));
+        stream.extend_from_slice(&frame(&msg2, false));
+
+        let output = format_grpc_stream(&stream).unwrap();
+        assert!(output.contains("10"));
+        assert!(output.contains("\"first\""));
+        assert!(output.contains("20"));
+        assert!(output.contains("\"second\""));
+    }
+
+    fn append_varint(mut bytes: Vec<u8>, field_number: u64, value: u64) -> Vec<u8> {
+        append_tag(&mut bytes, field_number, 0);
+        append_raw_varint(&mut bytes, value);
+        bytes
+    }
+
+    fn append_bytes(mut bytes: Vec<u8>, field_number: u64, value: &[u8]) -> Vec<u8> {
+        append_tag(&mut bytes, field_number, 2);
+        append_raw_varint(&mut bytes, value.len() as u64);
+        bytes.extend_from_slice(value);
+        bytes
+    }
+
+    fn append_tag(bytes: &mut Vec<u8>, field_number: u64, wire_type: u64) {
+        append_raw_varint(bytes, (field_number << 3) | wire_type);
+    }
+
+    fn append_raw_varint(bytes: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            bytes.push(((value as u8) & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        bytes.push(value as u8);
+    }
+}

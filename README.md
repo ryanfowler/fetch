@@ -28,8 +28,8 @@ curl -fsSL https://raw.githubusercontent.com/ryanfowler/fetch/main/install.sh | 
 # Or install fetch with homebrew (macOS or Linux)
 brew install ryanfowler/tap/fetch
 
-# Or install fetch with Go
-go install github.com/ryanfowler/fetch@latest
+# Or build fetch from source with Cargo
+cargo install --git https://github.com/ryanfowler/fetch --locked
 ```
 
 #### Usage

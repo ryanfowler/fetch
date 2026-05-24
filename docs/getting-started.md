@@ -22,10 +22,10 @@ brew install ryanfowler/tap/fetch
 
 ### Building from Source
 
-If you have Go installed:
+If you have Rust and Cargo installed:
 
 ```sh
-go install github.com/ryanfowler/fetch@latest
+cargo install --git https://github.com/ryanfowler/fetch --locked
 ```
 
 ### Pre-built Binaries
@@ -178,7 +178,7 @@ The `> ` and `< ` prefixes indicate outgoing request and incoming response lines
 
 ### `-vvv` - DNS, TLS, and Timing Details
 
-Show the full connection lifecycle including DNS resolution, TCP connect, TLS handshake, and time-to-first-byte:
+Show the request lifecycle including DNS resolution, connection establishment, and time-to-first-byte:
 
 ```sh
 fetch -vvv httpbin.org/json
@@ -194,7 +194,7 @@ fetch -vvv httpbin.org/json
 * DNS: httpbin.org (2.7ms)
 *   3.210.41.225
 *   3.223.36.72
-* TCP: 3.210.41.225:443 (81.9ms)
+* Connect: 3.210.41.225:443 (81.9ms)
 * TLS 1.2: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (176.6ms)
 *   ALPN: h2
 *   Resumed: no

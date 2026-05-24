@@ -202,8 +202,6 @@ fetch --min-tls 1.2 --max-tls 1.2 example.com  # Require exactly TLS 1.2
 
 | Value | Protocol                      |
 | ----- | ----------------------------- |
-| `1.0` | TLS 1.0 (legacy)              |
-| `1.1` | TLS 1.1 (deprecated)          |
 | `1.2` | TLS 1.2 (recommended minimum) |
 | `1.3` | TLS 1.3 (most secure)         |
 
@@ -493,7 +491,7 @@ Sessions are stored as JSON in the user's cache directory:
 
 - **Expired cookies**: Cookies with an explicit expiry in the past are filtered out on load.
 - **Session cookies** (no explicit expiry): Persist across invocations since the session is explicitly named.
-- **Cookie domain matching**: Delegated to Go's `net/http/cookiejar`, which implements RFC 6265.
+- **Cookie domain matching**: Delegated to the Rust cookie store, which implements RFC 6265 behavior.
 - **Atomic writes**: Session files are written atomically (temp file + rename) to avoid corruption.
 - **Name validation**: Only `[a-zA-Z0-9_-]` characters are allowed to prevent path traversal.
 
@@ -501,13 +499,13 @@ Sessions are stored as JSON in the user's cache directory:
 
 ### Timing Waterfall
 
-`--timing` (or `-T`) displays a timing waterfall chart after the response, showing how time was spent across DNS resolution, TCP connection, TLS handshake, time to first byte, and body download:
+`--timing` (or `-T`) displays a timing waterfall chart after the response, showing how time was spent across DNS resolution, connection establishment, time to first byte, and body download:
 
 ```sh
 fetch --timing https://example.com
 ```
 
-The chart adapts to the request: TLS is omitted for HTTP, TCP is omitted for HTTP/3 (QUIC), and DNS/TCP/TLS are omitted when the connection is reused. Combine with `-vvv` for both inline debug text and the waterfall summary.
+The chart adapts to the request: Connect represents the full connector phase and may include TCP plus TLS. DNS and Connect are omitted when the connection is reused. Combine with `-vvv` for both inline debug text and the waterfall summary.
 
 Can also be configured in the [configuration file](configuration.md):
 
