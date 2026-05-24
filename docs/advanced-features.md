@@ -491,7 +491,7 @@ Sessions are stored as JSON in the user's cache directory:
 
 - **Expired cookies**: Cookies with an explicit expiry in the past are filtered out on load.
 - **Session cookies** (no explicit expiry): Persist across invocations since the session is explicitly named.
-- **Cookie domain matching**: Delegated to Go's `net/http/cookiejar`, which implements RFC 6265.
+- **Cookie domain matching**: Delegated to the Rust cookie store, which implements RFC 6265 behavior.
 - **Atomic writes**: Session files are written atomically (temp file + rename) to avoid corruption.
 - **Name validation**: Only `[a-zA-Z0-9_-]` characters are allowed to prevent path traversal.
 

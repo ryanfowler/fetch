@@ -754,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn final_progress_matches_go_summary_shape_without_color() {
+    fn final_progress_summary_shape_without_color() {
         let (printer, buffer) = ProgressPrinter::memory(false);
 
         write_final_progress(&printer, 13, Duration::from_millis(1500), 20, "/tmp/file");

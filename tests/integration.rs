@@ -3896,11 +3896,9 @@ fn tls_certificate_validation_inspection_and_bounds_cases() {
     assert_exit(&res, 1);
     assert!(res.stderr.contains("certificate"));
     assert!(res.stderr.contains("--insecure"));
-    // The Go harness asserts certificate failures are not retried. On macOS,
-    // rustls-native-certs currently classifies this local rcgen chain through a
-    // platform OtherError path that still exercises retry output; keep the
-    // certificate hint assertion here and retain the exact no-retry parity case
-    // in the legacy harness until the Rust classifier is tightened.
+    // On macOS, rustls-native-certs can classify this local rcgen chain through
+    // a platform OtherError path. Keep the certificate hint assertion here while
+    // the retry classifier remains conservative for certificate failures.
     assert_eq!(requests.load(Ordering::SeqCst), 0);
 
     let res = run_fetch(&["--insecure", &tls.url]);
