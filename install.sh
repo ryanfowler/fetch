@@ -38,7 +38,7 @@ error() {
 
 # Print compile from source message.
 compile_msg() {
-    echo -e "\nTry compiling from source by running: '${DIM}go install github.com/ryanfowler/fetch@latest${RESET}'"
+    echo -e "\nTry compiling from source by running: '${DIM}cargo install --git https://github.com/ryanfowler/fetch --locked${RESET}'"
 }
 
 # Determine OS and architecture.
@@ -174,4 +174,3 @@ if ! command -v fetch &> /dev/null; then
   echo ""
   warning "you may need to add '${DIM}${INSTALL_DIR}${RESET}' to your PATH"
 fi
-

@@ -29,23 +29,58 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/crypto/ocsp"
 	"google.golang.org/protobuf/encoding/protowire"
 	protoMarshal "google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
+const fastRetryDelay = "0.000001"
+
+func init() {
+	if os.Getenv("FETCH_INTEGRATION_FAKE_EDITOR") != "1" {
+		return
+	}
+
+	code := 0
+	if raw := os.Getenv("FETCH_INTEGRATION_FAKE_EDITOR_EXIT"); raw != "" {
+		var err error
+		code, err = strconv.Atoi(raw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid FETCH_INTEGRATION_FAKE_EDITOR_EXIT: %v\n", err)
+			os.Exit(2)
+		}
+	}
+	if code == 0 {
+		if len(os.Args) < 2 {
+			fmt.Fprintln(os.Stderr, "missing editor target path")
+			os.Exit(2)
+		}
+		path := os.Args[len(os.Args)-1]
+		if err := os.WriteFile(path, []byte(os.Getenv("FETCH_INTEGRATION_FAKE_EDITOR_BODY")), 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "writing fake editor body: %v\n", err)
+			os.Exit(2)
+		}
+	}
+	os.Exit(code)
+}
+
 func TestMain(t *testing.T) {
-	fetchPath := goBuild(t, t.TempDir())
+	fetchPath := testFetchBinary(t)
 	version := getFetchVersion(t, fetchPath)
 
 	t.Run("help", func(t *testing.T) {
@@ -54,6 +89,15 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 		assertBufEmpty(t, res.stderr)
 		assertBufNotEmpty(t, res.stdout)
+		assertBufContains(t, res.stdout, "[URL]  The URL to make a request to")
+		assertBufContains(t, res.stdout, "--aws-sigv4 <REGION/SERVICE>  Sign the request using AWS signature V4")
+		assertBufContains(t, res.stdout, "--format <OPTION>             Enable/disable formatting [auto, off, on]")
+		for line := range strings.Lines(res.stdout.String()) {
+			line = strings.TrimSuffix(line, "\n")
+			if utf8.RuneCountInString(line) > 80 {
+				t.Fatalf("help line too long: %q", line)
+			}
+		}
 	})
 
 	t.Run("no url", func(t *testing.T) {
@@ -62,6 +106,12 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 1, res)
 		assertBufEmpty(t, res.stdout)
 		assertBufContains(t, res.stderr, "<URL> must be provided")
+
+		res = runFetch(t, fetchPath, "--color", "on")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "\x1b[31m\x1b[1merror\x1b[0m: <URL> must be provided")
+		assertBufContains(t, res.stderr, "\x1b[1m--help\x1b[0m")
 	})
 
 	t.Run("too many args", func(t *testing.T) {
@@ -77,7 +127,14 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, "--invalid")
 		assertExitCode(t, 1, res)
 		assertBufEmpty(t, res.stdout)
-		assertBufContains(t, res.stderr, "unknown flag")
+		assertBufContains(t, res.stderr, "error: unknown flag '--invalid'")
+		assertBufNotContains(t, res.stderr, "Usage:")
+
+		res = runFetch(t, fetchPath, "--color", "on", "--invalid")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "\x1b[31m\x1b[1merror\x1b[0m: unknown flag '--invalid'")
+		assertBufContains(t, res.stderr, "\x1b[1m--help\x1b[0m")
 	})
 
 	t.Run("conflicting flags", func(t *testing.T) {
@@ -85,7 +142,60 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, "--basic", "user:pass", "--bearer", "token")
 		assertExitCode(t, 1, res)
 		assertBufEmpty(t, res.stdout)
-		assertBufContains(t, res.stderr, "cannot be used together")
+		assertBufContains(t, res.stderr, "error: flags '--basic' and '--bearer' cannot be used together")
+		assertBufNotContains(t, res.stderr, "Usage:")
+	})
+
+	t.Run("missing flag argument", func(t *testing.T) {
+		t.Parallel()
+		res := runFetch(t, fetchPath, "--output")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "error: argument required for flag '--output'")
+		assertBufNotContains(t, res.stderr, "Usage:")
+	})
+
+	t.Run("flag with disallowed value", func(t *testing.T) {
+		t.Parallel()
+		res := runFetch(t, fetchPath, "--help=1")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "error: flag '--help' does not take any arguments")
+		assertBufNotContains(t, res.stderr, "Usage:")
+	})
+
+	t.Run("invalid proxy flag", func(t *testing.T) {
+		t.Parallel()
+		res := runFetch(t, fetchPath, "--proxy", ":bad", "http://example.com")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "invalid value ':bad' for option '--proxy'")
+		assertBufContains(t, res.stderr, "missing protocol scheme")
+	})
+
+	t.Run("shell completion", func(t *testing.T) {
+		t.Parallel()
+
+		res := runFetch(t, fetchPath, "--complete", "bash")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufContains(t, res.stdout, "_fetch_complete()")
+		assertBufContains(t, res.stdout, "complete -o nosort -o nospace")
+
+		res = runFetch(t, fetchPath, "--complete", "fish", "--", "fetch", "--col")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufEquals(t, res.stdout, "--color\tEnable/disable color\n")
+
+		res = runFetch(t, fetchPath, "--complete", "bash", "--", "fetch", "--color", "o")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufEquals(t, res.stdout, "off \non \n")
+
+		res = runFetch(t, fetchPath, "--complete", "powershell")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "completions not supported for shell 'powershell'")
 	})
 
 	t.Run("verbosity", func(t *testing.T) {
@@ -100,6 +210,7 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, server.URL)
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "HTTP/1.1 200 OK")
+		assertBufContains(t, res.stderr, "HTTP/1.1 200 OK\n\n")
 		assertBufNotContains(t, res.stderr, "user-agent")
 		assertBufNotContains(t, res.stderr, "x-custom-header")
 		assertBufEquals(t, res.stdout, "hello")
@@ -124,12 +235,85 @@ func TestMain(t *testing.T) {
 		assertBufNotContains(t, res.stderr, "* ")
 		assertBufEquals(t, res.stdout, "hello")
 
+		res = runFetch(t, fetchPath, server.URL, "-vv", "--color", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "\x1b[1m\x1b[33mGET\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[1m\x1b[34muser-agent\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[32m\x1b[1m200\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[1m\x1b[36mx-custom-header\x1b[0m")
+		assertBufEquals(t, res.stdout, "hello")
+
 		res = runFetch(t, fetchPath, server.URL, "-vvv")
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "> GET / HTTP/1.1")
 		assertBufContains(t, res.stderr, "< HTTP/1.1 200 OK")
 		assertBufContains(t, res.stderr, "* TCP:")
 		assertBufContains(t, res.stderr, "* TTFB:")
+
+		configPath := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(configPath, []byte("format = off\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		res = runFetch(t, fetchPath, "--config", configPath, server.URL, "-vvv", "--color", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "\x1b[1m\x1b[33mConfig\x1b[0m")
+		assertBufContains(t, res.stderr, configPath)
+		assertBufContains(t, res.stderr, "\x1b[1m\x1b[33mTCP\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[1m\x1b[33mTTFB\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[2m< \x1b[0m\n")
+
+		localhostURL := strings.Replace(server.URL, "127.0.0.1", "localhost", 1)
+		if localhostURL != server.URL {
+			res = runFetch(t, fetchPath, localhostURL, "-vvv", "--color", "on")
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "\x1b[1m\x1b[33mDNS\x1b[0m: localhost")
+			assertBufContains(t, res.stderr, "\x1b[3m127.0.0.1\x1b[0m")
+		}
+	})
+
+	t.Run("default scheme loopback", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.TLS != nil {
+				http.Error(w, "expected plaintext loopback request", http.StatusBadRequest)
+				return
+			}
+			if r.URL.Query().Get("probe") != "1" {
+				http.Error(w, "missing query", http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		target := strings.TrimPrefix(server.URL, "http://") + "?probe=1"
+		res := runFetch(t, fetchPath, target)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+	})
+
+	t.Run("dry-run prints request headers and body", func(t *testing.T) {
+		t.Parallel()
+		res := runFetch(t, fetchPath, "-j", `{"key":"val1"}`, "localhost:3000", "--dry-run")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "GET / HTTP/1.1\n")
+		assertBufContains(t, res.stderr, "accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*\n")
+		assertBufContains(t, res.stderr, "accept-encoding: gzip, zstd\n")
+		assertBufContains(t, res.stderr, "content-length: 14\n")
+		assertBufContains(t, res.stderr, "content-type: application/json\n")
+		assertBufContains(t, res.stderr, "host: localhost:3000\n")
+		assertBufContains(t, res.stderr, "user-agent: fetch/"+version)
+		assertBufContains(t, res.stderr, "\n\n{\"key\":\"val1\"}")
+		assertBufNotContains(t, res.stderr, "> GET")
+
+		res = runFetch(t, fetchPath, "-j", `{"key":"val1"}`, "localhost:3000", "--dry-run", "--color", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "\x1b[1m\x1b[33mGET\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[1m\x1b[36m/\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[2mHTTP/1.1\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[1m\x1b[34mhost\x1b[0m: localhost:3000")
+		assertBufContains(t, res.stderr, "\n\n{\"key\":\"val1\"}")
 	})
 
 	t.Run("config color", func(t *testing.T) {
@@ -148,6 +332,272 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, "--config", path, server.URL)
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stdout, "\x1b[")
+	})
+
+	t.Run("cli color and format flags", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"ok":"yes"}`)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on", "--color", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "\x1b[")
+		assertBufContains(t, res.stdout, "yes")
+
+		res = runFetch(t, fetchPath, server.URL, "--format", "on", "--color", "off")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "{\n  \"ok\": \"yes\"\n}\n")
+
+		res = runFetch(t, fetchPath, server.URL, "--format", "off", "--color", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, `{"ok":"yes"}`)
+	})
+
+	t.Run("config request options", func(t *testing.T) {
+		t.Parallel()
+		var attempts atomic.Int32
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			query := r.URL.Query()
+			if query.Get("global") != "1" || query.Get("host") != "1" || query.Get("cli") != "1" {
+				http.Error(w, "missing query", http.StatusBadRequest)
+				return
+			}
+			if r.Header.Get("X-Global") != "yes" || r.Header.Get("X-Host") != "yes" || r.Header.Get("X-Cli") != "yes" {
+				http.Error(w, "missing header", http.StatusBadRequest)
+				return
+			}
+			if attempts.Add(1) == 1 {
+				http.Error(w, "retry me", http.StatusServiceUnavailable)
+				return
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		serverURL, err := url.Parse(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "config")
+		config := fmt.Sprintf(`
+format = off
+retry = 1
+retry-delay = %s
+header = X-Global: yes
+query = global=1
+
+[%s]
+header = X-Host: yes
+query = host=1
+`, fastRetryDelay, serverURL.Hostname())
+		if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", path, "-H", "X-Cli: yes", "-q", "cli=1", server.URL)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "ok")
+		if got := attempts.Load(); got != 2 {
+			t.Fatalf("attempts = %d, want 2", got)
+		}
+	})
+
+	t.Run("config duplicate host section replaces previous section", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			query := r.URL.Query()
+			if query.Get("old") != "" || r.Header.Get("X-Old") != "" {
+				http.Error(w, "old duplicate host section values leaked", http.StatusBadRequest)
+				return
+			}
+			if query.Get("new") != "1" || r.Header.Get("X-New") != "yes" {
+				http.Error(w, "new duplicate host section values missing", http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, "duplicate")
+		})
+		defer server.Close()
+
+		serverURL, err := url.Parse(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "config")
+		config := fmt.Sprintf(`
+format = off
+
+[%s]
+header = X-Old: yes
+query = old=1
+
+[%s]
+header = X-New: yes
+query = new=1
+`, serverURL.Hostname(), serverURL.Hostname())
+		if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", path, server.URL)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "duplicate")
+	})
+
+	t.Run("config TLS PEM validation", func(t *testing.T) {
+		t.Parallel()
+		var requests atomic.Int32
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			io.WriteString(w, "unexpected")
+		})
+		defer server.Close()
+
+		dir := t.TempDir()
+		notCertPath := writeTempPEM(t, dir, "not-client-cert.pem", "RSA PRIVATE KEY", []byte("fake"))
+		configPath := filepath.Join(dir, "config")
+		if err := os.WriteFile(configPath, []byte("cert = "+notCertPath+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", configPath, server.URL)
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "config file")
+		assertBufContains(t, res.stderr, "line 1")
+		assertBufContains(t, res.stderr, "invalid client certificate")
+		assertBufContains(t, res.stderr, "expected CERTIFICATE, got RSA PRIVATE KEY")
+		if got := requests.Load(); got != 0 {
+			t.Fatalf("server received %d requests, want 0", got)
+		}
+	})
+
+	t.Run("config key without cert is ignored", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "key-only-config-ok")
+		})
+		defer server.Close()
+
+		dir := t.TempDir()
+		keyPath := writeTempPEM(t, dir, "client.key", "RSA PRIVATE KEY", []byte("fake"))
+		configPath := filepath.Join(dir, "config")
+		if err := os.WriteFile(configPath, []byte("format = off\nkey = "+keyPath+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", configPath, server.URL)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "key-only-config-ok")
+	})
+
+	t.Run("config min-tls does not override cli tls alias", func(t *testing.T) {
+		t.Parallel()
+		var requests atomic.Int32
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			io.WriteString(w, "unexpected")
+		})
+		defer server.Close()
+
+		configPath := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(configPath, []byte("min-tls = 1.2\nmax-tls = 1.2\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", configPath, "--tls", "1.3", server.URL)
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "min-tls must be less than or equal to max-tls")
+		if got := requests.Load(); got != 0 {
+			t.Fatalf("server received %d requests, want 0", got)
+		}
+	})
+
+	t.Run("config source precedence from-curl insecure", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "curl-insecure-config-ok")
+		}))
+		defer server.Close()
+
+		configPath := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(configPath, []byte("format = off\ninsecure = false\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", configPath, "--from-curl", fmt.Sprintf("curl -k %s", server.URL))
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "curl-insecure-config-ok")
+	})
+
+	t.Run("config invalid proxy preserves file context", func(t *testing.T) {
+		t.Parallel()
+		configPath := filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(configPath, []byte("proxy = :bad\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", configPath, "http://example.com")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "config file")
+		assertBufContains(t, res.stderr, "line 1")
+		assertBufContains(t, res.stderr, "invalid value ':bad' for option 'proxy'")
+	})
+
+	t.Run("certificate validation failure suggests insecure and is not retried", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "insecure-ok")
+		}))
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--retry", "2", "--retry-delay", fastRetryDelay, server.URL)
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "certificate")
+		assertBufContains(t, res.stderr, "If you absolutely trust the server, try '")
+		assertBufContains(t, res.stderr, "--insecure")
+		assertBufNotContains(t, res.stderr, "retry: attempt")
+
+		res = runFetch(t, fetchPath, "--insecure", server.URL)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "insecure-ok")
+	})
+
+	t.Run("default config search", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			query := r.URL.Query()
+			if query.Get("default") != "1" || r.Header.Get("X-Default") != "yes" {
+				http.Error(w, "default config was not applied", http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, "default")
+		})
+		defer server.Close()
+
+		dir := t.TempDir()
+		xdgHome := filepath.Join(dir, "xdg")
+		configDir := filepath.Join(xdgHome, "fetch")
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		config := "format = off\nheader = X-Default: yes\nquery = default=1\n"
+		if err := os.WriteFile(filepath.Join(configDir, "config"), []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		env := []string{
+			"XDG_CONFIG_HOME=" + xdgHome,
+			"HOME=" + filepath.Join(dir, "home"),
+		}
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: env}, server.URL)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "default")
 	})
 
 	t.Run("metadata commands use best-effort config", func(t *testing.T) {
@@ -170,7 +620,10 @@ func TestMain(t *testing.T) {
 		res = runFetch(t, fetchPath, "--config", path, "--buildinfo")
 		assertExitCode(t, 0, res)
 		assertBufEmpty(t, res.stderr)
+		assertBufContains(t, res.stdout, "{\n")
 		assertBufContains(t, res.stdout, `"fetch"`)
+		assertBufContains(t, res.stdout, `"settings"`)
+		assertBufContains(t, res.stdout, `"deps"`)
 
 		path = filepath.Join(t.TempDir(), "config")
 		if err := os.WriteFile(path, []byte("color = on\nformat = off\n"), 0o600); err != nil {
@@ -187,6 +640,17 @@ func TestMain(t *testing.T) {
 		assertBufEmpty(t, res.stderr)
 		assertBufContains(t, res.stdout, `"fetch"`)
 		assertBufNotContains(t, res.stdout, "\n")
+
+		path = filepath.Join(t.TempDir(), "config")
+		if err := os.WriteFile(path, []byte("color = on\nformat = on\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res = runFetch(t, fetchPath, "--config", path, "--buildinfo")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		assertBufContains(t, res.stdout, "{\n")
+		assertBufContains(t, res.stdout, "\x1b[")
 	})
 
 	t.Run("aws-sigv4 auth", func(t *testing.T) {
@@ -261,6 +725,13 @@ func TestMain(t *testing.T) {
 
 		res := runFetch(t, fetchPath, server.URL, "--basic", "user:pass")
 		assertExitCode(t, 0, res)
+	})
+
+	t.Run("basic auth invalid format", func(t *testing.T) {
+		t.Parallel()
+		res := runFetch(t, fetchPath, "http://example.com", "--basic", "nocolon")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "invalid value 'nocolon' for option '--basic': format must be <USERNAME:PASSWORD>")
 	})
 
 	t.Run("bearer auth", func(t *testing.T) {
@@ -382,6 +853,74 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("digest auth after 303 redirect uses challenged request", func(t *testing.T) {
+		t.Parallel()
+		var startHits, protectedHits int
+		var protectedMethod, protectedBody, digestURI string
+		var server *httptest.Server
+		server = startServer(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/start":
+				startHits++
+				http.Redirect(w, r, server.URL+"/protected?token=1", http.StatusSeeOther)
+			case "/protected":
+				protectedHits++
+				auth := r.Header.Get("Authorization")
+				if auth == "" {
+					w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				if !strings.HasPrefix(auth, "Digest ") {
+					w.WriteHeader(400)
+					return
+				}
+				params := parseDigestAuthParams(auth[len("Digest "):])
+				if params["username"] != "user" || params["realm"] != "test" {
+					w.WriteHeader(400)
+					return
+				}
+				protectedMethod = r.Method
+				var buf bytes.Buffer
+				buf.ReadFrom(r.Body)
+				protectedBody = buf.String()
+				digestURI = params["uri"]
+				if digestURI != "/protected?token=1" {
+					w.WriteHeader(400)
+					return
+				}
+				ha1 := hashMD5("user:test:pass")
+				ha2 := hashMD5(r.Method + ":" + params["uri"])
+				expected := hashMD5(ha1 + ":abc123:" + params["nc"] + ":" + params["cnonce"] + ":auth:" + ha2)
+				if params["response"] != expected {
+					w.WriteHeader(400)
+					return
+				}
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL+"/start", "--digest", "user:pass", "--data", "payload")
+		assertExitCode(t, 0, res)
+		if startHits != 1 {
+			t.Fatalf("start hits = %d, want 1", startHits)
+		}
+		if protectedHits != 2 {
+			t.Fatalf("protected hits = %d, want 2", protectedHits)
+		}
+		if protectedMethod != http.MethodGet {
+			t.Fatalf("protected retry method = %s, want GET", protectedMethod)
+		}
+		if protectedBody != "" {
+			t.Fatalf("protected retry body = %q, want empty", protectedBody)
+		}
+		if digestURI != "/protected?token=1" {
+			t.Fatalf("digest uri = %q, want /protected?token=1", digestURI)
+		}
+	})
+
 	t.Run("digest auth from curl", func(t *testing.T) {
 		t.Parallel()
 		var challenged bool
@@ -449,6 +988,9 @@ func TestMain(t *testing.T) {
 		if req.body != "hello" {
 			t.Fatalf("unexpected body: %s", req.body)
 		}
+		if h := req.headers.Get("Content-Type"); h != "text/plain; charset=utf-8" {
+			t.Fatalf("unexpected content-type: %s", h)
+		}
 
 		res = runFetch(t, fetchPath, server.URL, "--json", `{"key":"val"}`)
 		assertExitCode(t, 0, res)
@@ -479,11 +1021,122 @@ func TestMain(t *testing.T) {
 		if req.body != "temp file data" {
 			t.Fatalf("unexpected body: %s", req.body)
 		}
+		if h := req.headers.Get("Content-Type"); h != "text/plain; charset=utf-8" {
+			t.Fatalf("unexpected file content-type: %s", h)
+		}
 		// Files should include content-length.
 		if req.contentLength != int64(len(fileContent)) {
 			t.Fatalf("unexpected content-length: %d", req.contentLength)
 		}
 
+	})
+
+	t.Run("edit request body", func(t *testing.T) {
+		t.Parallel()
+		type requestData struct {
+			body        string
+			contentType string
+		}
+		chReq := make(chan requestData, 1)
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			var buf bytes.Buffer
+			buf.ReadFrom(r.Body)
+			chReq <- requestData{
+				body:        buf.String(),
+				contentType: r.Header.Get("Content-Type"),
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		env := []string{
+			"VISUAL=",
+			"EDITOR=" + os.Args[0],
+			"FETCH_INTEGRATION_FAKE_EDITOR=1",
+			`FETCH_INTEGRATION_FAKE_EDITOR_BODY={"edited":true}`,
+		}
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: env}, server.URL, "--edit", "--json", `{"template":true}`)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "HTTP/1.1 200 OK")
+		assertBufEquals(t, res.stdout, "ok")
+		req := <-chReq
+		if req.body != `{"edited":true}` {
+			t.Fatalf("body = %q, want edited JSON body", req.body)
+		}
+		if req.contentType != "application/json" {
+			t.Fatalf("content-type = %q, want application/json", req.contentType)
+		}
+
+		res = runFetchOpts(t, fetchPath, fetchOpts{env: []string{
+			"VISUAL=",
+			"EDITOR=" + os.Args[0],
+			"FETCH_INTEGRATION_FAKE_EDITOR=1",
+			"FETCH_INTEGRATION_FAKE_EDITOR_BODY=",
+		}}, server.URL, "--edit", "--data", "template")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "aborting request due to empty request body after editing")
+	})
+
+	t.Run("request construction", func(t *testing.T) {
+		t.Parallel()
+		type requestData struct {
+			method      string
+			rawQuery    string
+			contentType string
+			custom      string
+			body        string
+		}
+		chReq := make(chan requestData, 1)
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			var buf bytes.Buffer
+			buf.ReadFrom(r.Body)
+			chReq <- requestData{
+				method:      r.Method,
+				rawQuery:    r.URL.RawQuery,
+				contentType: r.Header.Get("Content-Type"),
+				custom:      r.Header.Get("X-Custom"),
+				body:        buf.String(),
+			}
+			io.WriteString(w, "ok")
+		})
+		defer server.Close()
+
+		dir := t.TempDir()
+		payload := filepath.Join(dir, "payload.json")
+		if err := os.WriteFile(payload, []byte(`{"ok":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath,
+			server.URL+"?z=old",
+			"--method", "PUT",
+			"-H", "X-Custom: value",
+			"-q", "a=one",
+			"-q", "z=two",
+			"--data", "@"+payload,
+		)
+		assertExitCode(t, 0, res)
+		req := <-chReq
+		if req.method != "PUT" {
+			t.Fatalf("method = %q, want PUT", req.method)
+		}
+		if req.rawQuery != "a=one&z=old&z=two" {
+			t.Fatalf("raw query = %q, want sorted Go query encoding", req.rawQuery)
+		}
+		if req.contentType != "application/json" {
+			t.Fatalf("content-type = %q, want application/json", req.contentType)
+		}
+		if req.custom != "value" {
+			t.Fatalf("X-Custom = %q, want value", req.custom)
+		}
+		if req.body != `{"ok":true}` {
+			t.Fatalf("body = %q, want JSON payload", req.body)
+		}
+
+		res = runFetch(t, fetchPath, "-H", ": value", server.URL)
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "invalid value ': value' for option '--header'")
 	})
 
 	t.Run("host header", func(t *testing.T) {
@@ -529,6 +1182,204 @@ func TestMain(t *testing.T) {
 		res = runFetch(t, fetchPath, urlStr, "--dns-server", server.URL+"/dns-query-nxdomain")
 		assertExitCode(t, 1, res)
 		assertBufContains(t, res.stderr, "no such host")
+		assertBufNotContains(t, res.stderr, "For more information")
+	})
+
+	t.Run("udp dns server", func(t *testing.T) {
+		t.Parallel()
+		var wantHost string
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.Host != wantHost {
+				t.Errorf("Host = %q, want %q", r.Host, wantHost)
+			}
+			io.WriteString(w, "udp dns ok")
+		})
+		defer server.Close()
+
+		_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+		if err != nil {
+			t.Fatalf("unable to split host and port from server url: %s", err.Error())
+		}
+		wantHost = "fetch-dns.test:" + port
+		dnsAddr := startUDPDNSServer(t, "fetch-dns.test.", net.ParseIP("127.0.0.1"))
+
+		res := runFetch(t, fetchPath, "--dns-server", dnsAddr, "http://fetch-dns.test:"+port)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "udp dns ok")
+	})
+
+	t.Run("inspect dns", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/dns-query" {
+				http.NotFound(w, r)
+				return
+			}
+			switch r.URL.Query().Get("type") {
+			case "A":
+				io.WriteString(w, `{"Status":0,"Answer":[{"type":5,"data":"alias.example.com.","TTL":120},{"type":1,"data":"192.0.2.1","TTL":60}]}`)
+			case "AAAA":
+				io.WriteString(w, `{"Status":0,"Answer":[{"type":28,"data":"2001:db8::1","TTL":300}]}`)
+			case "TXT":
+				io.WriteString(w, `{"Status":0,"Answer":[{"type":16,"data":"v=spf1 -all","TTL":180}]}`)
+			default:
+				io.WriteString(w, `{"Status":0}`)
+			}
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, "--inspect-dns", "--dns-server", server.URL+"/dns-query", "https://example.com")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "DNS lookup: example.com")
+		assertBufContains(t, res.stderr, "Resolver: "+server.URL+"/dns-query")
+		assertBufContains(t, res.stderr, "A\n")
+		assertBufContains(t, res.stderr, "192.0.2.1 (TTL 1m)")
+		assertBufContains(t, res.stderr, "AAAA\n")
+		assertBufContains(t, res.stderr, "2001:db8::1 (TTL 5m)")
+		assertBufContains(t, res.stderr, "alias.example.com. (TTL 2m)")
+		assertBufContains(t, res.stderr, "v=spf1 -all (TTL 3m)")
+		assertBufContains(t, res.stderr, "Addresses: 2")
+
+		res = runFetch(t, fetchPath, "--inspect-dns", "--dns-server", server.URL+"/dns-query", "--color", "on", "https://example.com")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "\x1b[2m* \x1b[0m\x1b[1m\x1b[36mDNS lookup\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[3m"+server.URL+"/dns-query\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[32m192.0.2.1\x1b[0m")
+		assertBufContains(t, res.stderr, "\x1b[2m(TTL 1m)\x1b[0m")
+	})
+
+	t.Run("proxy", func(t *testing.T) {
+		t.Parallel()
+		proxy := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if !r.URL.IsAbs() {
+				http.Error(w, "request URL was not absolute-form", http.StatusBadRequest)
+				return
+			}
+			if r.URL.Scheme != "http" || r.URL.Host != "target.example" || r.URL.Path != "/via-proxy" {
+				http.Error(w, "unexpected proxied URL: "+r.URL.String(), http.StatusBadRequest)
+				return
+			}
+			if r.Header.Get("X-Proxy-Test") != "yes" {
+				http.Error(w, "missing proxied header", http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, "proxied "+r.URL.String())
+		})
+		defer proxy.Close()
+
+		res := runFetch(t, fetchPath,
+			"--proxy", proxy.URL,
+			"--format", "off",
+			"-H", "X-Proxy-Test: yes",
+			"http://target.example/via-proxy?x=1",
+		)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "proxied http://target.example/via-proxy?x=1")
+	})
+
+	t.Run("proxy from config", func(t *testing.T) {
+		t.Parallel()
+		proxy := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if !r.URL.IsAbs() || r.URL.Host != "config-proxy.example" {
+				http.Error(w, "unexpected proxied URL: "+r.URL.String(), http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, "config proxy")
+		})
+		defer proxy.Close()
+
+		path := filepath.Join(t.TempDir(), "config")
+		config := "format = off\nproxy = " + proxy.URL + "\n"
+		if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		res := runFetch(t, fetchPath, "--config", path, "http://config-proxy.example/from-config")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "config proxy")
+	})
+
+	t.Run("proxy from environment", func(t *testing.T) {
+		t.Parallel()
+		proxy := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if !r.URL.IsAbs() || r.URL.Host != "env-proxy.example" {
+				http.Error(w, "unexpected proxied URL: "+r.URL.String(), http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, "environment proxy")
+		})
+		defer proxy.Close()
+
+		env := []string{
+			"HTTP_PROXY=" + proxy.URL,
+			"http_proxy=" + proxy.URL,
+			"HTTPS_PROXY=",
+			"https_proxy=",
+			"ALL_PROXY=",
+			"all_proxy=",
+			"NO_PROXY=",
+			"no_proxy=",
+			"REQUEST_METHOD=",
+		}
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: env}, "--format", "off", "http://env-proxy.example/from-env")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "environment proxy")
+	})
+
+	t.Run("proxy from curl", func(t *testing.T) {
+		t.Parallel()
+		proxy := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if !r.URL.IsAbs() || r.URL.Host != "curl-proxy.example" {
+				http.Error(w, "unexpected proxied URL: "+r.URL.String(), http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, "curl proxy")
+		})
+		defer proxy.Close()
+
+		cmd := fmt.Sprintf("curl --proxy %s http://curl-proxy.example/from-curl", proxy.URL)
+		res := runFetch(t, fetchPath, "--format", "off", "--from-curl", cmd)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "curl proxy")
+	})
+
+	t.Run("socks proxy", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/via-socks" && r.URL.Path != "/from-curl-socks" {
+				http.Error(w, "unexpected path", http.StatusBadRequest)
+				return
+			}
+			io.WriteString(w, "socks "+r.URL.Path)
+		})
+		defer server.Close()
+
+		targetAddr := strings.TrimPrefix(server.URL, "http://")
+		proxyURL, seen := startSOCKS5Proxy(t, targetAddr)
+
+		res := runFetch(t, fetchPath, "--proxy", proxyURL, "--format", "off", server.URL+"/via-socks")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "socks /via-socks")
+		assertSOCKSProxyConnected(t, seen, targetAddr)
+
+		cmd := fmt.Sprintf("curl --proxy %s --silent %s/from-curl-socks", proxyURL, server.URL)
+		res = runFetch(t, fetchPath, "--from-curl", cmd)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "socks /from-curl-socks")
+		assertSOCKSProxyConnected(t, seen, targetAddr)
+	})
+
+	t.Run("proxy rejects HTTP2", func(t *testing.T) {
+		t.Parallel()
+		res := runFetch(t, fetchPath,
+			"--proxy", "http://proxy.example:8080",
+			"--http", "2",
+			"https://example.com",
+		)
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "a proxy can only be used with HTTP/1.1")
 	})
 
 	t.Run("form", func(t *testing.T) {
@@ -567,6 +1418,248 @@ func TestMain(t *testing.T) {
 		res = runFetch(t, fetchPath, server.URL, "--http", "2")
 		assertExitCode(t, 1, res)
 		assertBufContains(t, res.stderr, "http2:")
+	})
+
+	t.Run("http3 request", func(t *testing.T) {
+		t.Parallel()
+
+		type requestData struct {
+			method   string
+			path     string
+			rawQuery string
+			headers  http.Header
+			body     string
+			proto    string
+		}
+		reqCh := make(chan requestData, 1)
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var buf bytes.Buffer
+			buf.ReadFrom(r.Body)
+			reqCh <- requestData{
+				method:   r.Method,
+				path:     r.URL.Path,
+				rawQuery: r.URL.RawQuery,
+				headers:  r.Header.Clone(),
+				body:     buf.String(),
+				proto:    r.Proto,
+			}
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusCreated)
+			io.WriteString(w, "h3 ok")
+		})
+		server3 := startHTTP3Server(t, handler)
+
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: noProxyEnv()},
+			server3.url+"/h3?existing=1",
+			"--http", "3",
+			"--ca-cert", server3.caCertPath,
+			"--method", "PUT",
+			"-H", "X-H3: yes",
+			"-q", "cli=1",
+			"-d", "payload",
+		)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "h3 ok")
+		assertBufContains(t, res.stderr, "HTTP/3.0 201 Created")
+
+		req := <-reqCh
+		if req.proto != "HTTP/3.0" {
+			t.Fatalf("proto = %q, want HTTP/3.0", req.proto)
+		}
+		if req.method != "PUT" {
+			t.Fatalf("method = %q, want PUT", req.method)
+		}
+		if req.path != "/h3" {
+			t.Fatalf("path = %q, want /h3", req.path)
+		}
+		if req.rawQuery != "cli=1&existing=1" {
+			t.Fatalf("raw query = %q, want Go-style sorted query", req.rawQuery)
+		}
+		if req.headers.Get("X-H3") != "yes" {
+			t.Fatalf("X-H3 = %q, want yes", req.headers.Get("X-H3"))
+		}
+		if req.body != "payload" {
+			t.Fatalf("body = %q, want payload", req.body)
+		}
+
+		res = runFetch(t, fetchPath, "http://example.com", "--http", "3")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "http3: unsupported protocol scheme: http")
+	})
+
+	t.Run("http3 redirect", func(t *testing.T) {
+		t.Parallel()
+
+		type requestData struct {
+			method string
+			path   string
+			body   string
+			proto  string
+		}
+		reqCh := make(chan requestData, 2)
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			reqCh <- requestData{
+				method: r.Method,
+				path:   r.URL.Path,
+				body:   string(body),
+				proto:  r.Proto,
+			}
+			if r.URL.Path == "/start" {
+				w.Header().Set("Location", "/final")
+				w.WriteHeader(http.StatusTemporaryRedirect)
+				return
+			}
+			if r.URL.Path != "/final" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			if r.Method != "POST" || string(body) != "redirect-body" {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, "method=%s body=%q", r.Method, string(body))
+				return
+			}
+			io.WriteString(w, "h3 redirected")
+		})
+		server3 := startHTTP3Server(t, handler)
+
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: noProxyEnv()},
+			server3.url+"/start",
+			"--http", "3",
+			"--ca-cert", server3.caCertPath,
+			"--method", "POST",
+			"-d", "redirect-body",
+		)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "h3 redirected")
+		assertBufContains(t, res.stderr, "HTTP/3.0 200 OK")
+
+		first := receiveHTTP3Request(t, reqCh)
+		second := receiveHTTP3Request(t, reqCh)
+		if first.path != "/start" || second.path != "/final" {
+			t.Fatalf("redirect paths = %q then %q, want /start then /final", first.path, second.path)
+		}
+		for _, req := range []requestData{first, second} {
+			if req.proto != "HTTP/3.0" {
+				t.Fatalf("%s proto = %q, want HTTP/3.0", req.path, req.proto)
+			}
+			if req.method != "POST" {
+				t.Fatalf("%s method = %q, want POST", req.path, req.method)
+			}
+			if req.body != "redirect-body" {
+				t.Fatalf("%s body = %q, want redirect-body", req.path, req.body)
+			}
+		}
+	})
+
+	t.Run("http3 retry with request body", func(t *testing.T) {
+		t.Parallel()
+
+		var count atomic.Int64
+		type requestData struct {
+			body  string
+			proto string
+		}
+		reqCh := make(chan requestData, 2)
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			reqCh <- requestData{
+				body:  string(body),
+				proto: r.Proto,
+			}
+			if count.Add(1) <= 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			io.WriteString(w, "h3 retry ok")
+		})
+		server3 := startHTTP3Server(t, handler)
+
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: noProxyEnv()},
+			server3.url+"/retry",
+			"--http", "3",
+			"--ca-cert", server3.caCertPath,
+			"--retry", "1",
+			"--retry-delay", fastRetryDelay,
+			"-d", "retry-body",
+		)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "h3 retry ok")
+		assertBufContains(t, res.stderr, "retry")
+		if count.Load() != 2 {
+			t.Fatalf("expected 2 requests, got %d", count.Load())
+		}
+		for i := 0; i < 2; i++ {
+			req := receiveHTTP3Request(t, reqCh)
+			if req.proto != "HTTP/3.0" {
+				t.Fatalf("attempt %d proto = %q, want HTTP/3.0", i+1, req.proto)
+			}
+			if req.body != "retry-body" {
+				t.Fatalf("attempt %d body = %q, want retry-body", i+1, req.body)
+			}
+		}
+	})
+
+	t.Run("http3 session cookies persist", func(t *testing.T) {
+		t.Parallel()
+
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Proto != "HTTP/3.0" {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, "proto=%s", r.Proto)
+				return
+			}
+			switch r.URL.Path {
+			case "/login":
+				http.SetCookie(w, &http.Cookie{
+					Name:  "h3_session",
+					Value: "abc123",
+					Path:  "/",
+				})
+				io.WriteString(w, "logged in")
+			case "/dashboard":
+				cookie, err := r.Cookie("h3_session")
+				if err != nil || cookie.Value != "abc123" {
+					w.WriteHeader(http.StatusUnauthorized)
+					io.WriteString(w, "unauthorized")
+					return
+				}
+				io.WriteString(w, "welcome h3")
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		server3 := startHTTP3Server(t, handler)
+		sessEnv := noProxyEnv("FETCH_INTERNAL_SESSIONS_DIR=" + t.TempDir())
+
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: sessEnv},
+			server3.url+"/login",
+			"--http", "3",
+			"--ca-cert", server3.caCertPath,
+			"--session", "h3-integ",
+		)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "logged in")
+
+		res = runFetchOpts(t, fetchPath, fetchOpts{env: sessEnv},
+			server3.url+"/dashboard",
+			"--http", "3",
+			"--ca-cert", server3.caCertPath,
+			"--session", "h3-integ",
+		)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "welcome h3")
+	})
+
+	t.Run("http3 proxy rejection", func(t *testing.T) {
+		t.Parallel()
+		res := runFetch(t, fetchPath,
+			"--proxy", "http://proxy.example:8080",
+			"--http", "3",
+			"https://example.com",
+		)
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "a proxy can only be used with HTTP/1.1")
 	})
 
 	t.Run("multipart", func(t *testing.T) {
@@ -720,6 +1813,8 @@ func TestMain(t *testing.T) {
 		path := filepath.Join(dir, "output")
 		res := runFetch(t, fetchPath, server.URL, "-o", path)
 		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "Downloaded 16B")
+		assertBufContains(t, res.stderr, path)
 
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -733,6 +1828,66 @@ func TestMain(t *testing.T) {
 		res = runFetch(t, fetchPath, server.URL, "-o", "-")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, data)
+
+		// Test decoded compressed responses when writing to an output file.
+		var compressed bytes.Buffer
+		gw := gzip.NewWriter(&compressed)
+		if _, err := io.WriteString(gw, data); err != nil {
+			t.Fatalf("unable to write gzip body: %s", err.Error())
+		}
+		if err := gw.Close(); err != nil {
+			t.Fatalf("unable to close gzip writer: %s", err.Error())
+		}
+		gzipServer := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.WriteHeader(200)
+			w.Write(compressed.Bytes())
+		})
+		defer gzipServer.Close()
+
+		gzipPath := filepath.Join(dir, "gzip-output")
+		res = runFetch(t, fetchPath, gzipServer.URL, "-o", gzipPath)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "Downloaded 16B")
+
+		raw, err = os.ReadFile(gzipPath)
+		if err != nil {
+			t.Fatalf("unable to read from gzip output file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("unexpected gzip output file data: %s", raw)
+		}
+
+		var zstdCompressed bytes.Buffer
+		zw, err := zstd.NewWriter(&zstdCompressed)
+		if err != nil {
+			t.Fatalf("unable to create zstd writer: %s", err.Error())
+		}
+		if _, err := io.WriteString(zw, data); err != nil {
+			t.Fatalf("unable to write zstd body: %s", err.Error())
+		}
+		if err := zw.Close(); err != nil {
+			t.Fatalf("unable to close zstd writer: %s", err.Error())
+		}
+		zstdServer := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Encoding", "zstd")
+			w.WriteHeader(200)
+			w.Write(zstdCompressed.Bytes())
+		})
+		defer zstdServer.Close()
+
+		zstdPath := filepath.Join(dir, "zstd-output")
+		res = runFetch(t, fetchPath, zstdServer.URL, "-o", zstdPath)
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "Downloaded 16B")
+
+		raw, err = os.ReadFile(zstdPath)
+		if err != nil {
+			t.Fatalf("unable to read from zstd output file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("unexpected zstd output file data: %s", raw)
+		}
 	})
 
 	t.Run("output-current-dir", func(t *testing.T) {
@@ -985,6 +2140,7 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, server.URL, "-t", "0.0000001")
 		assertExitCode(t, 1, res)
 		assertBufContains(t, res.stderr, "request timed out after 100ns")
+		assertBufNotContains(t, res.stderr, "For more information")
 	})
 
 	t.Run("connect timeout", func(t *testing.T) {
@@ -1150,6 +2306,7 @@ func TestMain(t *testing.T) {
 		res = runFetch(t, fetchPath, server.URL, "--redirects", "1")
 		assertExitCode(t, 1, res)
 		assertBufContains(t, res.stderr, "exceeded maximum number of redirects")
+		assertBufNotContains(t, res.stderr, "For more information")
 
 		// Redirect at -vv shows prefixed request/response for each hop.
 		count.Store(1)
@@ -1173,6 +2330,178 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, server.URL, "--format", "on")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "[message]\n{ \"key\": \"val\" }\n\n[ev1]\nthis is my data\n")
+	})
+
+	t.Run("ndjson formatting", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			const data = "{\"b\":1.2300,\"a\":2}\n[true,null]\n"
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "{ \"b\": 1.2300, \"a\": 2 }\n[true, null]\n")
+	})
+
+	t.Run("charset-aware json formatting", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json; charset=iso-8859-1")
+			w.WriteHeader(200)
+			w.Write([]byte{'{', '"', 'w', 'o', 'r', 'd', '"', ':', '"', 'c', 'a', 'f', 0xe9, '"', '}'})
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "{\n  \"word\": \"café\"\n}\n")
+	})
+
+	t.Run("csv formatting", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			const data = "name,age\nAlice,30\nBob,9"
+			w.Header().Set("Content-Type", "text/csv")
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "name   age\nAlice  30\nBob    9\n")
+	})
+
+	t.Run("xml formatting", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			const data = `<?xml version="1.0"?><root attr="value"><item>hello</item><empty/></root>`
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "<?xml version=\"1.0\"?>\n<root attr=\"value\">\n  <item>hello</item>\n  <empty></empty>\n</root>\n")
+	})
+
+	t.Run("yaml formatting", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			const data = "name: John\nitems:\n  - one\n  - two\n# kept\n"
+			w.Header().Set("Content-Type", "application/x-yaml")
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "name: John\nitems:\n  - one\n  - two\n# kept\n")
+	})
+
+	t.Run("html formatting", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			const data = `<!DOCTYPE html><html><head><title>Test</title></head><body><div class="container"><h1>Hello</h1><p>Text with <strong>bold</strong></p><br><img src="x.jpg"></div></body></html>`
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, `<!DOCTYPE html>
+<html>
+  <head>
+    <title>Test</title>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Hello</h1>
+      <p>Text with <strong>bold</strong></p>
+      <br>
+      <img src="x.jpg">
+    </div>
+  </body>
+</html>
+`)
+	})
+
+	t.Run("markdown formatting", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			const data = "# Title\n\nSome **bold** text.\n\n- one\n- two\n"
+			w.Header().Set("Content-Type", "text/markdown")
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "# Title\n\nSome bold text.\n\n- one\n- two\n")
+	})
+
+	t.Run("msgpack formatting", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			data := []byte{
+				0x82,
+				0xa4, 'k', 'e', 'y', '1',
+				0xa4, 'v', 'a', 'l', '1',
+				0xa4, 'k', 'e', 'y', '2',
+				0xa4, 'v', 'a', 'l', '2',
+			}
+			w.Header().Set("Content-Type", "application/vnd.msgpack")
+			w.WriteHeader(200)
+			w.Write(data)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "{\n  \"key1\": \"val1\",\n  \"key2\": \"val2\"\n}\n")
+	})
+
+	t.Run("css formatting", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			const data = "body{color:red;margin:0}.container{display:flex}"
+			w.Header().Set("Content-Type", "text/css")
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "body {\n  color: red;\n  margin: 0;\n}\n\n.container {\n  display: flex;\n}\n")
+	})
+
+	t.Run("image off", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(200)
+			io.WriteString(w, "raw image bytes")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on", "--image", "off")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "raw image bytes")
+
+		res = runFetch(t, fetchPath, server.URL, "--image", "bad")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "invalid value 'bad' for option '--image'")
 	})
 
 	t.Run("gzip compression", func(t *testing.T) {
@@ -1284,6 +2613,26 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stdout, "123")
 		assertBufContains(t, res.stdout, "2:")
 		assertBufContains(t, res.stdout, "hello")
+
+		// In gRPC mode, Go uses the method's response descriptor even when a
+		// server replies with a plain application/protobuf body instead of a
+		// gRPC-framed stream.
+		descFile := writeHealthDescriptorSet(t)
+		schemaServer := startServer(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/protobuf")
+			w.WriteHeader(200)
+			w.Write(buildHealthCheckResponse())
+		})
+		defer schemaServer.Close()
+
+		res = runFetch(t, fetchPath,
+			schemaServer.URL+"/grpc.health.v1.Health/Check",
+			"--grpc", "--proto-desc", descFile,
+			"--http", "1", "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, `"status": "SERVING"`)
+		assertBufNotContains(t, res.stdout, "1:")
 	})
 
 	t.Run("connect rpc error response", func(t *testing.T) {
@@ -1535,6 +2884,44 @@ func TestMain(t *testing.T) {
 				"--grpc", "--proto-desc", descFile,
 				"--http", "1", "--format", "on")
 			assertExitCode(t, 0, res)
+		})
+
+		t.Run("proto-file compiles local schema", func(t *testing.T) {
+			t.Parallel()
+			if _, err := exec.LookPath("protoc"); err != nil {
+				t.Skip("protoc not found in PATH, skipping proto-file integration test")
+			}
+			protoFile := filepath.Join(t.TempDir(), "stream.proto")
+			if err := os.WriteFile(protoFile, []byte(`
+syntax = "proto3";
+package streampkg;
+
+message StreamRequest {
+  string value = 1;
+}
+
+message StreamResponse {
+  int64 count = 1;
+}
+
+service StreamService {
+  rpc ClientStream(stream StreamRequest) returns (StreamResponse);
+}
+`), 0644); err != nil {
+				t.Fatalf("failed to write proto file: %v", err)
+			}
+
+			res := runFetch(t, fetchPath, "--grpc-list", "--proto-file", protoFile)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, "streampkg.StreamService")
+
+			res = runFetch(t, fetchPath,
+				server.URL+"/streampkg.StreamService/ClientStream",
+				"--grpc", "--proto-file", protoFile,
+				"-d", `{"value":"one"}{"value":"two"}`,
+				"--http", "1", "--format", "on")
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stdout, "2")
 		})
 	})
 
@@ -1962,6 +3349,67 @@ func TestMain(t *testing.T) {
 		})
 	})
 
+	t.Run("tls version bounds", func(t *testing.T) {
+		t.Parallel()
+		tlsDir := t.TempDir()
+
+		caCert, caKey := generateCACert(t)
+		serverCert, serverKey := generateCert(t, caCert, caKey, "tls-version-server")
+		caCertPath := writeTempPEM(t, tlsDir, "version-ca.crt", "CERTIFICATE", caCert.Raw)
+		serverCertPath := writeTempPEM(t, tlsDir, "version-server.crt", "CERTIFICATE", serverCert.Raw)
+		serverKeyPath := writeTempPEM(t, tlsDir, "version-server.key", "RSA PRIVATE KEY", x509.MarshalPKCS1PrivateKey(serverKey))
+
+		tlsCert, err := tls.LoadX509KeyPair(serverCertPath, serverKeyPath)
+		if err != nil {
+			t.Fatalf("unable to load server cert: %s", err.Error())
+		}
+		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "tls-version-ok")
+		}))
+		server.TLS = &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			MinVersion:   tls.VersionTLS13,
+			MaxVersion:   tls.VersionTLS13,
+		}
+		server.StartTLS()
+		t.Cleanup(func() { server.Close() })
+
+		res := runFetch(t, fetchPath, server.URL,
+			"--ca-cert", caCertPath,
+			"--min-tls", "1.3",
+			"--max-tls", "1.3",
+		)
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "tls-version-ok")
+
+		res = runFetch(t, fetchPath, server.URL,
+			"--ca-cert", caCertPath,
+			"--max-tls", "1.2",
+		)
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "tls")
+
+		res = runFetch(t, fetchPath, server.URL,
+			"--inspect-tls",
+			"--ca-cert", caCertPath,
+			"--min-tls", "1.3",
+			"--max-tls", "1.3",
+		)
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "TLS 1.3")
+
+		res = runFetch(t, fetchPath, server.URL,
+			"--inspect-tls",
+			"--ca-cert", caCertPath,
+			"--max-tls", "1.2",
+		)
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "tls")
+	})
+
 	t.Run("inspect-tls", func(t *testing.T) {
 		t.Parallel()
 		tlsDir := t.TempDir()
@@ -1978,6 +3426,7 @@ func TestMain(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unable to load server cert: %s", err.Error())
 		}
+		tlsCert.OCSPStaple = createOCSPResponse(t, caCert, serverCert, caKey, ocsp.Good)
 		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, "tls-body")
 		}))
@@ -2055,6 +3504,32 @@ func TestMain(t *testing.T) {
 			assertBufContains(t, res.stderr, "expires in <1 day")
 		})
 
+		t.Run("shows stapled OCSP status", func(t *testing.T) {
+			t.Parallel()
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--ca-cert", caCertPath,
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "OCSP: good (stapled)")
+		})
+
+		t.Run("colors inspection output", func(t *testing.T) {
+			t.Parallel()
+			res := runFetch(t, fetchPath, server.URL,
+				"--inspect-tls",
+				"--ca-cert", caCertPath,
+				"--color", "on",
+			)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "\x1b[1m\x1b[33mTLS 1.3\x1b[0m")
+			assertBufContains(t, res.stderr, "ALPN: \x1b[3mh2\x1b[0m")
+			assertBufContains(t, res.stderr, "\x1b[1mCertificate chain\x1b[0m")
+			assertBufContains(t, res.stderr, "\x1b[31mexpires in <1 day\x1b[0m")
+			assertBufContains(t, res.stderr, "\x1b[32mgood\x1b[0m (stapled)")
+			assertBufEmpty(t, res.stdout)
+		})
+
 		t.Run("works with insecure flag", func(t *testing.T) {
 			t.Parallel()
 			res := runFetch(t, fetchPath, server.URL,
@@ -2118,6 +3593,53 @@ func TestMain(t *testing.T) {
 			assertBufContains(t, res.stderr, "Certificate chain")
 			assertBufEmpty(t, res.stdout)
 		})
+	})
+
+	t.Run("inspect-tls http3", func(t *testing.T) {
+		t.Parallel()
+		tlsDir := t.TempDir()
+
+		caCert, caKey := generateCACert(t)
+		serverCert, serverKey := generateCert(t, caCert, caKey, "quic-server")
+		caCertPath := writeTempPEM(t, tlsDir, "quic-ca.crt", "CERTIFICATE", caCert.Raw)
+		handshakeSeen := make(chan struct{}, 1)
+
+		ln, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+			Certificates: []tls.Certificate{{
+				Certificate: [][]byte{serverCert.Raw},
+				PrivateKey:  serverKey,
+				Leaf:        serverCert,
+			}},
+			NextProtos: []string{http3.NextProtoH3},
+			GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				select {
+				case handshakeSeen <- struct{}{}:
+				default:
+				}
+				return nil, nil
+			},
+		}, nil)
+		if err != nil {
+			t.Fatalf("unable to start QUIC listener: %s", err.Error())
+		}
+		t.Cleanup(func() { ln.Close() })
+
+		res := runFetch(t, fetchPath, "https://"+ln.Addr().String(),
+			"--inspect-tls",
+			"--http", "3",
+			"--ca-cert", caCertPath,
+		)
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "TLS 1.3")
+		assertBufContains(t, res.stderr, "ALPN: h3")
+		assertBufContains(t, res.stderr, "quic-server")
+
+		select {
+		case <-handshakeSeen:
+		case <-time.After(5 * time.Second):
+			t.Fatal("server did not observe QUIC TLS handshake")
+		}
 	})
 
 	t.Run("session", func(t *testing.T) {
@@ -2255,6 +3777,56 @@ func TestMain(t *testing.T) {
 			res = runFetchOpts(t, fetchPath, fetchOpts{env: sessEnv}, server.URL+"/get", "--session", "sess-b")
 			assertExitCode(t, 0, res)
 			assertBufEquals(t, res.stdout, "beta")
+		})
+
+		t.Run("public suffix domain cookies are rejected", func(t *testing.T) {
+			t.Parallel()
+			sessDir := t.TempDir()
+			sessEnv := []string{
+				"FETCH_INTERNAL_SESSIONS_DIR=" + sessDir,
+				"HTTP_PROXY=",
+				"HTTPS_PROXY=",
+				"ALL_PROXY=",
+				"NO_PROXY=*",
+			}
+
+			server := startServer(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/set" {
+					http.SetCookie(w, &http.Cookie{
+						Name:   "token",
+						Value:  "secret",
+						Domain: "github.io",
+						Path:   "/",
+					})
+					io.WriteString(w, "set")
+					return
+				}
+				if r.URL.Path == "/check" {
+					if _, err := r.Cookie("token"); err == nil {
+						w.WriteHeader(500)
+						io.WriteString(w, "public suffix cookie was sent")
+						return
+					}
+					io.WriteString(w, "clean")
+					return
+				}
+			})
+			defer server.Close()
+
+			_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+			if err != nil {
+				t.Fatalf("unable to split host and port from server url: %s", err.Error())
+			}
+			dnsAddr := startUDPDNSServer(t, "user.github.io.", net.ParseIP("127.0.0.1"))
+			baseURL := "http://user.github.io:" + port
+
+			res := runFetchOpts(t, fetchPath, fetchOpts{env: sessEnv}, "--dns-server", dnsAddr, baseURL+"/set", "--session", "psl-integ")
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, "set")
+
+			res = runFetchOpts(t, fetchPath, fetchOpts{env: sessEnv}, "--dns-server", dnsAddr, baseURL+"/check", "--session", "psl-integ")
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, "clean")
 		})
 
 		t.Run("invalid session name rejected", func(t *testing.T) {
@@ -2463,7 +4035,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "3", "--retry-delay", "0.01")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "3", "--retry-delay", fastRetryDelay)
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 		assertBufContains(t, res.stderr, "retry")
@@ -2485,7 +4057,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", "0.01")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", fastRetryDelay)
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "recovered")
 	})
@@ -2503,7 +4075,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", fastRetryDelay)
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 	})
@@ -2522,7 +4094,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", fastRetryDelay)
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 	})
@@ -2536,7 +4108,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "3", "--retry-delay", "0.01")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "3", "--retry-delay", fastRetryDelay)
 		assertExitCode(t, 4, res)
 		assertBufNotContains(t, res.stderr, "retry")
 		if count.Load() != 1 {
@@ -2553,7 +4125,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "3", "--retry-delay", "0.01")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "3", "--retry-delay", fastRetryDelay)
 		assertExitCode(t, 0, res)
 		if count.Load() != 1 {
 			t.Fatalf("expected 1 request, got %d", count.Load())
@@ -2569,7 +4141,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", "0.01")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", fastRetryDelay)
 		assertExitCode(t, 5, res)
 		if count.Load() != 3 { // 1 initial + 2 retries
 			t.Fatalf("expected 3 requests, got %d", count.Load())
@@ -2593,7 +4165,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01",
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", fastRetryDelay,
 			"-d", "test-body")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
@@ -2615,7 +4187,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "-s")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", fastRetryDelay, "-s")
 		assertExitCode(t, 0, res)
 		assertBufEmpty(t, res.stderr)
 		assertBufEquals(t, res.stdout, "ok")
@@ -2634,7 +4206,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "-v")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", fastRetryDelay, "-v")
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "retry")
 		assertBufNotContains(t, res.stderr, "* retry")
@@ -2655,7 +4227,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "-vv")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", fastRetryDelay, "-vv")
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "* retry")
 		assertBufContains(t, res.stderr, "> GET / HTTP/1.1")
@@ -2673,7 +4245,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", "0.01", "--redirects", "1")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", fastRetryDelay, "--redirects", "1")
 		assertExitCode(t, 1, res)
 		assertBufNotContains(t, res.stderr, "retry")
 		assertBufContains(t, res.stderr, "exceeded maximum number of redirects")
@@ -2688,7 +4260,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "0", "--retry-delay", "0.01")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "0", "--retry-delay", fastRetryDelay)
 		assertExitCode(t, 5, res)
 		if count.Load() != 1 {
 			t.Fatalf("expected 1 request, got %d", count.Load())
@@ -2987,6 +4559,72 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("request ctrl-c reports signal", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == "windows" {
+			t.Skip("signal test not supported on Windows")
+		}
+
+		requestStarted := make(chan struct{})
+		var once sync.Once
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			once.Do(func() {
+				close(requestStarted)
+			})
+			<-r.Context().Done()
+		})
+		defer server.Close()
+
+		var stdout syncBuffer
+		var stderr syncBuffer
+		cmd := exec.Command(fetchPath, server.URL, "--no-pager")
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("failed to start: %v", err)
+		}
+
+		select {
+		case <-requestStarted:
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+			t.Fatal("timed out waiting for request")
+		}
+
+		if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
+			cmd.Process.Kill()
+			t.Fatalf("failed to signal process: %v", err)
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			done <- cmd.Wait()
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("process exited successfully after SIGINT, want exit code 1")
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("unexpected wait error: %v", err)
+			}
+			if code := exitErr.ExitCode(); code != 1 {
+				t.Fatalf("exit code = %d, want 1", code)
+			}
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+			t.Fatal("process did not exit after SIGINT")
+		}
+
+		if got := stdout.String(); got != "" {
+			t.Fatalf("stdout = %q, want empty", got)
+		}
+		if got := stderr.String(); !strings.Contains(got, "received signal: interrupt") {
+			t.Fatalf("stderr = %q, want signal error", got)
+		}
+	})
+
 	t.Run("retry on per-attempt timeout", func(t *testing.T) {
 		t.Parallel()
 		var count atomic.Int64
@@ -3002,7 +4640,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "--timeout", "0.1")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", fastRetryDelay, "--timeout", "0.1")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 		if count.Load() != 2 {
@@ -3100,7 +4738,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--timing", "--retry", "1", "--retry-delay", "0.01")
+		res := runFetch(t, fetchPath, server.URL, "--timing", "--retry", "1", "--retry-delay", fastRetryDelay)
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 		assertBufContains(t, res.stderr, "Total")
@@ -3208,6 +4846,20 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, "user:pass")
 	})
 
+	t.Run("from-curl key without cert is ignored", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "key-only-curl-ok")
+		})
+		defer server.Close()
+
+		dir := t.TempDir()
+		keyPath := writeTempPEM(t, dir, "curl-client.key", "RSA PRIVATE KEY", []byte("fake"))
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl --key %s %s`, keyPath, server.URL))
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "key-only-curl-ok")
+	})
+
 	t.Run("from-curl with verbose", func(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
@@ -3235,7 +4887,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl --retry 2 --retry-delay 0.01 %s`, server.URL))
+		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf(`curl --retry 2 --retry-delay %s %s`, fastRetryDelay, server.URL))
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 	})
@@ -3331,7 +4983,7 @@ func runFetchOpts(t *testing.T, path string, opts fetchOpts, args ...string) run
 			cmd.Dir = opts.dir
 		}
 		if len(opts.env) > 0 {
-			cmd.Env = append(os.Environ(), opts.env...)
+			cmd.Env = overlayEnv(os.Environ(), opts.env)
 		}
 		cmd.Stderr = stderr
 		cmd.Stdout = stdout
@@ -3351,6 +5003,36 @@ func runFetchOpts(t *testing.T, path string, opts fetchOpts, args ...string) run
 			stdout: stdout,
 		}
 	}
+}
+
+func overlayEnv(base, overrides []string) []string {
+	env := append([]string(nil), base...)
+	index := make(map[string]int, len(env))
+	for i, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			index[key] = i
+		}
+	}
+	for _, entry := range overrides {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			env = append(env, entry)
+			continue
+		}
+		if i, ok := index[key]; ok {
+			env[i] = entry
+			continue
+		}
+		index[key] = len(env)
+		env = append(env, entry)
+	}
+	return env
+}
+
+func noProxyEnv(extra ...string) []string {
+	env := []string{"HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY=", "NO_PROXY=*"}
+	return append(env, extra...)
 }
 
 func isTextFileBusy(err error) bool {
@@ -3415,29 +5097,41 @@ func createTempFile(t *testing.T, data string) string {
 	return f.Name()
 }
 
-func goBuild(t *testing.T, dir string) string {
+func testFetchBinary(t *testing.T) string {
 	t.Helper()
 
-	path := filepath.Join(dir, getExeName())
+	if path := os.Getenv("FETCH_BIN"); path != "" {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			t.Fatalf("unable to resolve FETCH_BIN: %s", err.Error())
+		}
+		if _, err := os.Stat(abs); err != nil {
+			t.Fatalf("FETCH_BIN is not usable: %s", err.Error())
+		}
+		return abs
+	}
+
+	return cargoBuild(t)
+}
+
+func cargoBuild(t *testing.T) string {
+	t.Helper()
+
 	workingDir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("unable to get current working directory: %s", err.Error())
 	}
 	mainPath := filepath.Dir(workingDir)
 
-	cmd := exec.Command("go",
-		"build",
-		"-o", path,
-		"-trimpath",
-		mainPath,
-	)
+	cmd := exec.Command("cargo", "build", "--bin", "fetch")
+	cmd.Dir = mainPath
 	stderr := new(bytes.Buffer)
 	cmd.Stderr = stderr
 	if err = cmd.Run(); err != nil {
-		t.Fatalf("unable to build fetch binary: %s: %s", err.Error(), stderr.String())
+		t.Fatalf("unable to build Rust fetch binary: %s: %s", err.Error(), stderr.String())
 	}
 
-	return path
+	return filepath.Join(mainPath, "target", "debug", getExeName())
 }
 
 func getExeName() string {
@@ -3471,6 +5165,279 @@ func getFetchVersion(t *testing.T, path string) string {
 
 func startServer(h http.HandlerFunc) *httptest.Server {
 	return httptest.NewServer(h)
+}
+
+func startUDPDNSServer(t *testing.T, host string, ip net.IP) string {
+	t.Helper()
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		conn.Close()
+	})
+
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, addr, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			name, qtype, questionEnd, ok := parseDNSQuestion(buf[:n])
+			if !ok {
+				continue
+			}
+
+			var response bytes.Buffer
+			response.Write(buf[:2])
+			response.Write([]byte{0x81, 0x80})
+			binary.Write(&response, binary.BigEndian, uint16(1))
+			answer := name == host && qtype == 1 && ip.To4() != nil
+			if answer {
+				binary.Write(&response, binary.BigEndian, uint16(1))
+			} else {
+				binary.Write(&response, binary.BigEndian, uint16(0))
+			}
+			binary.Write(&response, binary.BigEndian, uint16(0))
+			binary.Write(&response, binary.BigEndian, uint16(0))
+			response.Write(buf[12:questionEnd])
+			if answer {
+				response.Write([]byte{0xc0, 0x0c})
+				binary.Write(&response, binary.BigEndian, uint16(1))
+				binary.Write(&response, binary.BigEndian, uint16(1))
+				binary.Write(&response, binary.BigEndian, uint32(30))
+				binary.Write(&response, binary.BigEndian, uint16(4))
+				response.Write(ip.To4())
+			}
+			_, _ = conn.WriteTo(response.Bytes(), addr)
+		}
+	}()
+
+	return conn.LocalAddr().String()
+}
+
+func parseDNSQuestion(raw []byte) (string, uint16, int, bool) {
+	if len(raw) < 12 {
+		return "", 0, 0, false
+	}
+	off := 12
+	var labels []string
+	for {
+		if off >= len(raw) {
+			return "", 0, 0, false
+		}
+		ln := int(raw[off])
+		off++
+		if ln == 0 {
+			break
+		}
+		if ln&0xc0 != 0 || off+ln > len(raw) {
+			return "", 0, 0, false
+		}
+		labels = append(labels, string(raw[off:off+ln]))
+		off += ln
+	}
+	if off+4 > len(raw) {
+		return "", 0, 0, false
+	}
+	name := "."
+	if len(labels) > 0 {
+		name = strings.Join(labels, ".") + "."
+	}
+	qtype := binary.BigEndian.Uint16(raw[off : off+2])
+	return name, qtype, off + 4, true
+}
+
+func startSOCKS5Proxy(t *testing.T, targetAddr string) (string, <-chan string) {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(chan string, 10)
+	t.Cleanup(func() {
+		ln.Close()
+	})
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handleSOCKS5ProxyConn(conn, targetAddr, seen)
+		}
+	}()
+
+	return "socks5://" + ln.Addr().String(), seen
+}
+
+type http3TestServer struct {
+	url        string
+	caCertPath string
+}
+
+func startHTTP3Server(t *testing.T, handler http.Handler) http3TestServer {
+	t.Helper()
+
+	tlsDir := t.TempDir()
+	caCert, caKey := generateCACert(t)
+	serverCert, serverKey := generateCert(t, caCert, caKey, "http3-server")
+	caCertPath := writeTempPEM(t, tlsDir, "http3-ca.crt", "CERTIFICATE", caCert.Raw)
+	tlsCert := tls.Certificate{
+		Certificate: [][]byte{serverCert.Raw},
+		PrivateKey:  serverKey,
+		Leaf:        serverCert,
+	}
+	tlsConfig := http3.ConfigureTLSConfig(&tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+	})
+	ln, err := quic.ListenAddr("127.0.0.1:0", tlsConfig, nil)
+	if err != nil {
+		t.Fatalf("unable to start HTTP/3 listener: %s", err.Error())
+	}
+	server3 := &http3.Server{Handler: handler}
+	errCh := make(chan error, 1)
+	go func() {
+		if err := server3.ServeListener(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+	t.Cleanup(func() {
+		server3.Close()
+		ln.Close()
+		select {
+		case err := <-errCh:
+			t.Fatalf("HTTP/3 server error: %s", err.Error())
+		default:
+		}
+	})
+
+	return http3TestServer{
+		url:        "https://" + ln.Addr().String(),
+		caCertPath: caCertPath,
+	}
+}
+
+func receiveHTTP3Request[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+
+	select {
+	case req := <-ch:
+		return req
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for HTTP/3 request")
+	}
+
+	var zero T
+	return zero
+}
+
+func handleSOCKS5ProxyConn(conn net.Conn, targetAddr string, seen chan<- string) {
+	defer conn.Close()
+
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return
+	}
+	if header[0] != 0x05 {
+		return
+	}
+	methods := make([]byte, int(header[1]))
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		return
+	}
+	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+		return
+	}
+
+	req := make([]byte, 4)
+	if _, err := io.ReadFull(conn, req); err != nil {
+		return
+	}
+	if req[0] != 0x05 || req[1] != 0x01 || req[2] != 0x00 {
+		writeSOCKS5Reply(conn, 0x07)
+		return
+	}
+
+	host, err := readSOCKS5Host(conn, req[3])
+	if err != nil {
+		writeSOCKS5Reply(conn, 0x08)
+		return
+	}
+	portBytes := make([]byte, 2)
+	if _, err := io.ReadFull(conn, portBytes); err != nil {
+		return
+	}
+	port := int(binary.BigEndian.Uint16(portBytes))
+	seen <- net.JoinHostPort(host, strconv.Itoa(port))
+
+	target, err := net.Dial("tcp", targetAddr)
+	if err != nil {
+		writeSOCKS5Reply(conn, 0x05)
+		return
+	}
+	defer target.Close()
+
+	if err := writeSOCKS5Reply(conn, 0x00); err != nil {
+		return
+	}
+
+	go func() {
+		io.Copy(target, conn)
+		target.Close()
+	}()
+	io.Copy(conn, target)
+}
+
+func readSOCKS5Host(r io.Reader, atyp byte) (string, error) {
+	switch atyp {
+	case 0x01:
+		addr := make([]byte, net.IPv4len)
+		if _, err := io.ReadFull(r, addr); err != nil {
+			return "", err
+		}
+		return net.IP(addr).String(), nil
+	case 0x03:
+		var length [1]byte
+		if _, err := io.ReadFull(r, length[:]); err != nil {
+			return "", err
+		}
+		name := make([]byte, int(length[0]))
+		if _, err := io.ReadFull(r, name); err != nil {
+			return "", err
+		}
+		return string(name), nil
+	case 0x04:
+		addr := make([]byte, net.IPv6len)
+		if _, err := io.ReadFull(r, addr); err != nil {
+			return "", err
+		}
+		return net.IP(addr).String(), nil
+	default:
+		return "", fmt.Errorf("unsupported SOCKS address type: %d", atyp)
+	}
+}
+
+func writeSOCKS5Reply(w io.Writer, code byte) error {
+	_, err := w.Write([]byte{0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	return err
+}
+
+func assertSOCKSProxyConnected(t *testing.T, seen <-chan string, want string) {
+	t.Helper()
+
+	select {
+	case got := <-seen:
+		if got != want {
+			t.Fatalf("SOCKS proxy CONNECT target = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("SOCKS proxy was not used")
+	}
 }
 
 type reflectionGRPCServer struct {
@@ -3921,6 +5888,21 @@ func generateCert(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKey,
 	}
 
 	return cert, key
+}
+
+func createOCSPResponse(t *testing.T, issuer, leaf *x509.Certificate, issuerKey *rsa.PrivateKey, status int) []byte {
+	t.Helper()
+
+	response, err := ocsp.CreateResponse(issuer, leaf, ocsp.Response{
+		Status:       status,
+		SerialNumber: leaf.SerialNumber,
+		ThisUpdate:   time.Now().Add(-time.Minute),
+		NextUpdate:   time.Now().Add(time.Hour),
+	}, issuerKey)
+	if err != nil {
+		t.Fatalf("unable to create OCSP response: %s", err.Error())
+	}
+	return response
 }
 
 // writeTempPEM writes a PEM-encoded file to the temp directory.

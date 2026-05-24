@@ -170,7 +170,7 @@ silent = false
 **Type**: Boolean
 **Default**: `false`
 
-Display a timing waterfall chart after the response, showing DNS, TCP, TLS, TTFB, and body download phases.
+Display a timing waterfall chart after the response, showing DNS, Connect, TTFB, and body download phases.
 
 ```ini
 # Enable timing waterfall
@@ -349,7 +349,7 @@ http = 2
 #### `tls`
 
 **Type**: String
-**Values**: `1.0`, `1.1`, `1.2`, `1.3`
+**Values**: `1.2`, `1.3`
 **Default**: `1.2`
 
 Specify the minimum TLS version to use. This is an alias for `min-tls`.
@@ -365,7 +365,7 @@ tls = 1.3
 #### `min-tls`
 
 **Type**: String
-**Values**: `1.0`, `1.1`, `1.2`, `1.3`
+**Values**: `1.2`, `1.3`
 **Default**: `1.2`
 
 Specify the minimum TLS version to use.
@@ -377,7 +377,7 @@ min-tls = 1.2
 #### `max-tls`
 
 **Type**: String
-**Values**: `1.0`, `1.1`, `1.2`, `1.3`
+**Values**: `1.2`, `1.3`
 **Default**: No maximum
 
 Specify the maximum TLS version to use. Set `min-tls` and `max-tls` to the same value to require an exact TLS version.

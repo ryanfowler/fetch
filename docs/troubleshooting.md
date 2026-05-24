@@ -55,7 +55,7 @@ fetch -vvv example.com
 Shows:
 
 - `> ` prefixed request lines
-- `* ` prefixed connection info (DNS, TCP, TLS, TTFB)
+- `* ` prefixed connection info (DNS, Connect, TTFB)
 - `< ` prefixed response lines
 
 ## Dry Run Mode
@@ -370,7 +370,7 @@ If you encounter a bug:
 2. Note your environment:
 
    ```sh
-   fetch --buildinfo
+   fetch -v --buildinfo
    uname -a
    ```
 
