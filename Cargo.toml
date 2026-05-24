@@ -67,6 +67,6 @@ h3 = "0.0.8"
 h3-quinn = "0.0.10"
 h2 = "0.4"
 predicates = "3"
-rcgen = { version = "0.13", features = ["aws_lc_rs"] }
+rcgen = { version = "0.14", features = ["aws_lc_rs"] }
 sha1 = "0.11"
 tempfile = "3"
