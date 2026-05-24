@@ -4,11 +4,17 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/index");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
+    println!("cargo:rerun-if-changed=.git/refs/heads");
+    println!("cargo:rerun-if-changed=.git/refs/tags");
+    println!("cargo:rerun-if-env-changed=FETCH_VERSION");
 
     set_env(
         "FETCH_RUSTC_VERSION",
         command_output("rustc", &["--version"]),
     );
+    set_env("FETCH_VERSION", Some(build_version()));
     if let Ok(profile) = env::var("PROFILE") {
         println!("cargo:rustc-env=FETCH_BUILD_PROFILE={profile}");
     }
@@ -33,6 +39,32 @@ fn set_env(key: &str, value: Option<String>) {
     if let Some(value) = value {
         println!("cargo:rustc-env={key}={value}");
     }
+}
+
+fn build_version() -> String {
+    env::var("FETCH_VERSION")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            command_output(
+                "git",
+                &[
+                    "describe",
+                    "--tags",
+                    "--exact-match",
+                    "--match",
+                    "v[0-9]*",
+                    "HEAD",
+                ],
+            )
+        })
+        .or_else(|| {
+            command_output(
+                "git",
+                &["describe", "--tags", "--long", "--match", "v[0-9]*"],
+            )
+        })
+        .unwrap_or_else(|| "v0.0.0-dev".to_string())
 }
 
 fn command_output(program: &str, args: &[&str]) -> Option<String> {

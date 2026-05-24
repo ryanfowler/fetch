@@ -387,6 +387,16 @@ fn run_fetch(args: &[&str]) -> FetchOutput {
     run_fetch_opts(FetchOpts::default(), args)
 }
 
+fn fetch_version() -> String {
+    let res = run_fetch(&["--version"]);
+    assert_exit(&res, 0);
+    res.stdout
+        .trim()
+        .strip_prefix("fetch ")
+        .expect("version output prefix")
+        .to_string()
+}
+
 fn run_fetch_opts(opts: FetchOpts, args: &[&str]) -> FetchOutput {
     let can_retry = opts.stdin.is_none() && opts.cwd.is_none();
     let env = opts.env.clone();
@@ -3989,7 +3999,7 @@ fn self_update_go_harness_cases() {
     let auto_update_bin = dir.path().join("fetch-auto");
     install_update_launcher(&auto_update_bin);
 
-    let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let current_version = fetch_version();
     let latest_version = Arc::new(Mutex::new(current_version.clone()));
     let update_requests = Arc::new(AtomicUsize::new(0));
     let server_url = Arc::new(Mutex::new(String::new()));

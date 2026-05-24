@@ -358,10 +358,8 @@ pub fn terminal_size() -> Option<TerminalSize> {
     None
 }
 
-const DEFAULT_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
-
 pub fn version() -> &'static str {
-    option_env!("FETCH_VERSION").unwrap_or(DEFAULT_VERSION)
+    option_env!("FETCH_VERSION").unwrap_or("v0.0.0-dev")
 }
 
 pub fn user_agent() -> String {
