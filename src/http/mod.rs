@@ -43,6 +43,7 @@ use crate::format::xml;
 use crate::format::yaml;
 use crate::grpc::status as grpc_status;
 use crate::output;
+use crate::output::clipboard;
 use crate::proto;
 use crate::timing::{self, AttemptTiming, DnsTiming, ResponseTiming};
 
@@ -888,8 +889,10 @@ async fn finish_response(
             path,
             cli.clobber,
             progress,
+            cli.copy,
         )
         .await?;
+        handle_optional_clipboard_outcome(cli, streamed.clipboard);
         let body_duration = if method_is_head || streamed.bytes_written == 0 {
             None
         } else {
@@ -909,6 +912,9 @@ async fn finish_response(
         let (bytes, trailers) = read_response_body(response).await?;
         let body_duration = body_duration(method_is_head, bytes.as_ref(), body_start);
         let bytes = decode_response_bytes(encoding_requested, &response_headers, bytes.as_ref())?;
+        if cli.copy {
+            handle_clipboard_outcome(cli, clipboard::copy_bytes(&bytes));
+        }
         let bytes = format_stdout_bytes(
             cli,
             &response_headers,
@@ -933,6 +939,7 @@ async fn read_response_body(response: Response) -> Result<(Vec<u8>, HeaderMap), 
 struct StreamedOutput {
     trailers: HeaderMap,
     bytes_written: i64,
+    clipboard: Option<clipboard::CopyOutcome>,
 }
 
 async fn stream_response_to_output(
@@ -942,6 +949,7 @@ async fn stream_response_to_output(
     path: String,
     clobber: bool,
     progress: output::WriteProgress,
+    copy: bool,
 ) -> Result<StreamedOutput, FetchError> {
     let response: http::Response<reqwest::Body> = response.into();
     let body = response.into_body();
@@ -956,8 +964,16 @@ async fn stream_response_to_output(
 
     let result = tokio::task::spawn_blocking(move || -> Result<StreamedOutput, FetchError> {
         let mut reader = decoded_response_reader(reader, encoding_requested, &response_headers)?;
-        let bytes_written = output::write_output_reader(&path, &mut reader, clobber, progress)
-            .map_err(|err| FetchError::Message(err.to_string()))?;
+        let mut capture = copy.then(clipboard::Capture::default);
+        let bytes_written = if let Some(capture) = capture.as_mut() {
+            let mut reader = ClipboardTeeReader { reader, capture };
+            output::write_output_reader(&path, &mut reader, clobber, progress)
+                .map_err(|err| FetchError::Message(err.to_string()))?
+        } else {
+            output::write_output_reader(&path, &mut reader, clobber, progress)
+                .map_err(|err| FetchError::Message(err.to_string()))?
+        };
+        let clipboard = capture.map(clipboard::Capture::copy);
         let trailers = trailers
             .lock()
             .map(|trailers| trailers.clone())
@@ -965,12 +981,39 @@ async fn stream_response_to_output(
         Ok(StreamedOutput {
             trailers,
             bytes_written,
+            clipboard,
         })
     })
     .await
     .map_err(|err| FetchError::Message(err.to_string()))??;
 
     Ok(result)
+}
+
+struct ClipboardTeeReader<'a> {
+    reader: Box<dyn Read + Send>,
+    capture: &'a mut clipboard::Capture,
+}
+
+impl Read for ClipboardTeeReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.reader.read(out)?;
+        self.capture.push(&out[..n]);
+        Ok(n)
+    }
+}
+
+fn handle_optional_clipboard_outcome(cli: &Cli, outcome: Option<clipboard::CopyOutcome>) {
+    if let Some(outcome) = outcome {
+        handle_clipboard_outcome(cli, outcome);
+    }
+}
+
+fn handle_clipboard_outcome(cli: &Cli, outcome: clipboard::CopyOutcome) {
+    match outcome {
+        clipboard::CopyOutcome::Copied { .. } => {}
+        other => write_warning(cli, &other.to_string()),
+    }
 }
 
 struct BlockingBodyReader {

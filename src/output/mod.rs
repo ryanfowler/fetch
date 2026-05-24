@@ -12,6 +12,7 @@ use crate::output::progress::{
     Bar, ProgressPrinter, Spinner, emit_native_progress, write_final_progress,
 };
 
+pub mod clipboard;
 pub mod progress;
 
 #[derive(Debug, Error)]
