@@ -122,6 +122,10 @@ AWS SigV4 signs the request by:
 3. Computing an HMAC-SHA256 signature
 4. Adding the signature to the `Authorization` header
 
+When `AWS_SESSION_TOKEN` is set for temporary STS or role credentials, fetch
+adds it as `x-amz-security-token` before signing so AWS can validate the
+temporary credential scope.
+
 ## Mutual TLS (mTLS)
 
 mTLS provides two-way authentication where both client and server present certificates.

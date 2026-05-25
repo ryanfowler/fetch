@@ -17,6 +17,7 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct Config {
     pub access_key: String,
     pub secret_key: String,
+    pub session_token: Option<String>,
     pub region: String,
     pub service: String,
 }
@@ -26,6 +27,7 @@ impl Config {
         Self {
             access_key: String::new(),
             secret_key: String::new(),
+            session_token: None,
             region: region.into(),
             service: service.into(),
         }
@@ -77,6 +79,13 @@ pub fn sign(
         HeaderValue::from_str(&payload)
             .map_err(|err| AwsSigV4Error::InvalidHeaderValue(err.to_string()))?,
     );
+    if let Some(token) = config.session_token.as_deref() {
+        headers.insert(
+            HeaderName::from_static("x-amz-security-token"),
+            HeaderValue::from_str(token)
+                .map_err(|err| AwsSigV4Error::InvalidHeaderValue(err.to_string()))?,
+        );
+    }
 
     let signed_headers = signed_headers(url, headers)?;
     let canonical_request = build_canonical_request(method, url, &signed_headers, &payload);
@@ -131,6 +140,12 @@ fn fill_env_credentials(config: &Config) -> Result<Config, AwsSigV4Error> {
         if out.secret_key.is_empty() {
             return Err(AwsSigV4Error::MissingEnvVar("AWS_SECRET_ACCESS_KEY"));
         }
+    }
+    if out.session_token.is_none()
+        && let Ok(token) = std::env::var("AWS_SESSION_TOKEN")
+        && !token.is_empty()
+    {
+        out.session_token = Some(token);
     }
     Ok(out)
 }
@@ -436,6 +451,7 @@ mod tests {
             service: service.to_string(),
             access_key: "AKIAIOSFODNN7EXAMPLE".to_string(),
             secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: None,
         }
     }
 
@@ -534,6 +550,33 @@ mod tests {
         assert_eq!(
             headers.get(AUTHORIZATION).unwrap(),
             "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;x-amz-content-sha256;x-amz-date,Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"
+        );
+    }
+
+    #[test]
+    fn test_sign_includes_session_token_in_signed_headers() {
+        let url = Url::parse("https://examplebucket.s3.amazonaws.com/test.txt").unwrap();
+        let mut headers = HeaderMap::new();
+        let mut config = example_config("s3");
+        config.session_token = Some("session-token".to_string());
+
+        sign("GET", &url, &mut headers, None, &config, fixed_now(), false).unwrap();
+
+        assert_eq!(
+            headers
+                .get(HeaderName::from_static("x-amz-security-token"))
+                .unwrap(),
+            "session-token"
+        );
+        assert!(
+            headers
+                .get(AUTHORIZATION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains(
+                    "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token"
+                )
         );
     }
 

@@ -136,7 +136,7 @@ fetch --bearer mysecrettoken example.com
 
 ### `--aws-sigv4 REGION/SERVICE`
 
-Sign requests with AWS Signature V4. Requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables.
+Sign requests with AWS Signature V4. Requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables. Temporary credentials can also set `AWS_SESSION_TOKEN`.
 
 ```sh
 fetch --aws-sigv4 us-east-1/s3 s3.amazonaws.com/bucket/key
@@ -626,7 +626,7 @@ fetch --from-curl 'https://example.com'
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Request      | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G`                                         |
 | Auth         | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                            |
-| TLS          | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`                                                                             |
+| TLS          | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`                                                                            |
 | Output       | `-o`, `-O`, `-J`                                                                                                                              |
 | Network      | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r`            |
 | HTTP version | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                                       |
@@ -681,14 +681,15 @@ fetch --update --dry-run
 
 ## Environment Variables
 
-| Variable                | Description                      |
-| ----------------------- | -------------------------------- |
-| `AWS_ACCESS_KEY_ID`     | AWS access key for `--aws-sigv4` |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key for `--aws-sigv4` |
-| `VISUAL` / `EDITOR`     | Editor for `--edit` option       |
-| `HTTPS_PROXY`           | HTTPS proxy URL                  |
-| `HTTP_PROXY`            | HTTP proxy URL                   |
-| `NO_PROXY`              | Hosts to bypass proxy            |
+| Variable                | Description                                               |
+| ----------------------- | --------------------------------------------------------- |
+| `AWS_ACCESS_KEY_ID`     | AWS access key for `--aws-sigv4`                          |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key for `--aws-sigv4`                          |
+| `AWS_SESSION_TOKEN`     | AWS session token for temporary `--aws-sigv4` credentials |
+| `VISUAL` / `EDITOR`     | Editor for `--edit` option                                |
+| `HTTPS_PROXY`           | HTTPS proxy URL                                           |
+| `HTTP_PROXY`            | HTTP proxy URL                                            |
+| `NO_PROXY`              | Hosts to bypass proxy                                     |
 
 ## File References
 

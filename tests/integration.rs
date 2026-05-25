@@ -2232,6 +2232,8 @@ fn basic_bearer_and_aws_auth_headers() {
         if req.path == "/aws" {
             if !req.header("authorization").starts_with("AWS4-HMAC-SHA256 ")
                 || req.header("x-amz-date").is_empty()
+                || req.header("x-amz-security-token") != "session-token"
+                || !req.header("authorization").contains("x-amz-security-token")
             {
                 return TestResponse::status(400, "Bad Request", "bad aws auth");
             }
@@ -2251,6 +2253,7 @@ fn basic_bearer_and_aws_auth_headers() {
             env: vec![
                 ("AWS_ACCESS_KEY_ID".to_string(), "1234".to_string()),
                 ("AWS_SECRET_ACCESS_KEY".to_string(), "5678".to_string()),
+                ("AWS_SESSION_TOKEN".to_string(), "session-token".to_string()),
             ],
             ..Default::default()
         },
