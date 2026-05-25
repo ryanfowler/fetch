@@ -3178,6 +3178,39 @@ fn proxy_config_environment_and_curl_http1_cases() {
         res.stderr
             .contains("a proxy can only be used with HTTP/1.1")
     );
+
+    let tls = start_tls_server(|_| TestResponse::ok("unused"));
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: vec![
+                (
+                    "HTTPS_PROXY".to_string(),
+                    "http://proxy.example:8080".to_string(),
+                ),
+                (
+                    "https_proxy".to_string(),
+                    "http://proxy.example:8080".to_string(),
+                ),
+                ("ALL_PROXY".to_string(), String::new()),
+                ("all_proxy".to_string(), String::new()),
+                ("NO_PROXY".to_string(), String::new()),
+                ("no_proxy".to_string(), String::new()),
+            ],
+            ..Default::default()
+        },
+        &[
+            "--http",
+            "2",
+            "--ca-cert",
+            tls.ca_cert_path.to_str().unwrap(),
+            &tls.url,
+        ],
+    );
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("a proxy can only be used with HTTP/1.1")
+    );
 }
 
 #[test]
@@ -3227,6 +3260,38 @@ fn http3_go_harness_cases() {
         "3",
         "https://example.com",
     ]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("a proxy can only be used with HTTP/1.1")
+    );
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: vec![
+                (
+                    "HTTPS_PROXY".to_string(),
+                    "http://proxy.example:8080".to_string(),
+                ),
+                (
+                    "https_proxy".to_string(),
+                    "http://proxy.example:8080".to_string(),
+                ),
+                ("ALL_PROXY".to_string(), String::new()),
+                ("all_proxy".to_string(), String::new()),
+                ("NO_PROXY".to_string(), String::new()),
+                ("no_proxy".to_string(), String::new()),
+            ],
+            ..Default::default()
+        },
+        &[
+            "--http",
+            "3",
+            "--ca-cert",
+            h3.ca_cert_path.to_str().unwrap(),
+            &h3.url,
+        ],
+    );
     assert_exit(&res, 1);
     assert!(
         res.stderr
