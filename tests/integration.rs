@@ -29,6 +29,8 @@ const FAST_RETRY_DELAY: &str = "0.000001";
 use image::ImageEncoder;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 #[derive(Debug)]
 struct FetchOutput {
@@ -3289,38 +3291,91 @@ fn timeout_copy_discard_and_session_cases() {
         }
         TestResponse::ok("copy-body")
     });
-    let res = run_fetch(&[&copy_server.url, "--copy"]);
+    let clipboard_dir = TempDir::new().unwrap();
+    let clipboard_path = clipboard_dir.path().to_string_lossy().into_owned();
+    #[cfg(unix)]
+    let clipboard_file = {
+        let clipboard_file = clipboard_dir.path().join("clipboard.txt");
+        for command in ["pbcopy", "wl-copy", "xclip", "xsel"] {
+            let script = clipboard_dir.path().join(command);
+            fs::write(
+                &script,
+                format!("#!/bin/sh\n/bin/cat > '{}'\n", clipboard_file.display()),
+            )
+            .unwrap();
+            let mut perms = fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script, perms).unwrap();
+        }
+        clipboard_file
+    };
+    let copy_opts = || FetchOpts {
+        env: vec![("PATH".to_string(), clipboard_path.clone())],
+        ..FetchOpts::default()
+    };
+
+    let res = run_fetch_opts(copy_opts(), &[&copy_server.url, "--copy"]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "copy-body");
+    #[cfg(unix)]
+    assert_eq!(fs::read_to_string(&clipboard_file).unwrap(), "copy-body");
     let dir = TempDir::new().unwrap();
     let out = dir.path().join("copy-output.txt");
-    let res = run_fetch(&[&copy_server.url, "--copy", "-o", out.to_str().unwrap()]);
+    let res = run_fetch_opts(
+        copy_opts(),
+        &[&copy_server.url, "--copy", "-o", out.to_str().unwrap()],
+    );
     assert_exit(&res, 0);
     assert_eq!(fs::read_to_string(&out).unwrap(), "copy-body");
-    let res = run_fetch(&[
-        &format!("{}/sse", copy_server.url),
-        "--copy",
-        "--format",
-        "off",
-    ]);
+    #[cfg(unix)]
+    assert_eq!(fs::read_to_string(&clipboard_file).unwrap(), "copy-body");
+    let res = run_fetch_opts(
+        copy_opts(),
+        &[
+            &format!("{}/sse", copy_server.url),
+            "--copy",
+            "--format",
+            "off",
+        ],
+    );
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "data: one\n\n");
+    #[cfg(unix)]
+    assert_eq!(
+        fs::read_to_string(&clipboard_file).unwrap(),
+        "data: one\n\n"
+    );
     assert!(!res.stderr.contains("not supported"));
-    let res = run_fetch(&[
-        &format!("{}/ndjson", copy_server.url),
-        "--copy",
-        "--format",
-        "off",
-    ]);
+    let res = run_fetch_opts(
+        copy_opts(),
+        &[
+            &format!("{}/ndjson", copy_server.url),
+            "--copy",
+            "--format",
+            "off",
+        ],
+    );
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "{\"a\":1}\n{\"b\":2}\n");
+    #[cfg(unix)]
+    assert_eq!(
+        fs::read_to_string(&clipboard_file).unwrap(),
+        "{\"a\":1}\n{\"b\":2}\n"
+    );
     assert!(!res.stderr.contains("not supported"));
-    let res = run_fetch(&[&format!("{}/head", copy_server.url), "--copy", "-m", "HEAD"]);
+    let res = run_fetch_opts(
+        copy_opts(),
+        &[&format!("{}/head", copy_server.url), "--copy", "-m", "HEAD"],
+    );
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
-    let res = run_fetch(&[&copy_server.url, "--copy", "-s"]);
+    #[cfg(unix)]
+    assert_eq!(fs::read_to_string(&clipboard_file).unwrap(), "");
+    let res = run_fetch_opts(copy_opts(), &[&copy_server.url, "--copy", "-s"]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "copy-body");
+    #[cfg(unix)]
+    assert_eq!(fs::read_to_string(&clipboard_file).unwrap(), "copy-body");
     assert!(!res.stderr.contains("200 OK"));
 
     let res = run_fetch(&[&copy_server.url, "--discard"]);
