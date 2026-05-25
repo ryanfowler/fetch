@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use reqwest::header::{ACCEPT, USER_AGENT};
 use serde::Deserialize;
@@ -27,13 +28,17 @@ pub struct DnsRecord {
     pub ttl: Option<u32>,
 }
 
-pub async fn lookup_doh(server_url: &Url, host: &str) -> Result<Vec<IpAddr>, DnsError> {
+pub async fn lookup_doh(
+    server_url: &Url,
+    host: &str,
+    timeout: Option<Duration>,
+) -> Result<Vec<IpAddr>, DnsError> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![ip]);
     }
 
-    let a = lookup_doh_type(server_url, host, "A", DNS_TYPE_A).await;
-    let aaaa = lookup_doh_type(server_url, host, "AAAA", DNS_TYPE_AAAA).await;
+    let a = lookup_doh_type(server_url, host, "A", DNS_TYPE_A, timeout).await;
+    let aaaa = lookup_doh_type(server_url, host, "AAAA", DNS_TYPE_AAAA, timeout).await;
 
     let mut addrs = Vec::new();
     if let Ok(records) = &a {
@@ -56,13 +61,15 @@ pub async fn lookup_doh_type(
     host: &str,
     dns_type: &str,
     answer_type: u16,
+    timeout: Option<Duration>,
 ) -> Result<Vec<DnsRecord>, DnsError> {
     let url = doh_query_url(server_url, host, dns_type);
 
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .build()
-        .map_err(|err| DnsError(err.to_string()))?;
+    let mut builder = reqwest::Client::builder().use_rustls_tls();
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    let client = builder.build().map_err(|err| DnsError(err.to_string()))?;
     let response = client
         .get(url)
         .header(ACCEPT, "application/dns-json")
@@ -265,7 +272,7 @@ mod tests {
         })
         .await;
 
-        let addrs = lookup_doh(&url, "example.com").await.unwrap();
+        let addrs = lookup_doh(&url, "example.com", None).await.unwrap();
 
         assert_eq!(
             addrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -280,7 +287,7 @@ mod tests {
         let (url, task) =
             start_test_server(|_| http::Response::new(r#"{"Status":3}"#.to_string())).await;
 
-        let err = lookup_doh(&url, "missing.example").await.unwrap_err();
+        let err = lookup_doh(&url, "missing.example", None).await.unwrap_err();
 
         assert!(err.to_string().contains("NXDomain"));
         task.abort();
@@ -295,7 +302,7 @@ mod tests {
         })
         .await;
 
-        let records = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A)
+        let records = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A, None)
             .await
             .unwrap();
 
