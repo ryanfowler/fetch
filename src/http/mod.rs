@@ -119,42 +119,21 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         .connect_timeout
         .map(|seconds| duration_from_seconds("connect-timeout", seconds))
         .transpose()?;
-    let dns_timeout = dns_resolution_timeout(request_timeout, connect_timeout, request_start)?;
-    let dns_resolution = resolve_dns_for_client(cli, &url, http_version, dns_timeout).await?;
-
     crate::tls::install_default_crypto_provider();
 
-    let mut builder = Client::builder()
-        .use_rustls_tls()
-        .no_brotli()
-        .no_gzip()
-        .no_zstd();
     let connect_timing = ConnectionTiming::default();
-    builder = configure_http_version(builder, http_version);
-    builder = configure_unix_socket(builder, cli.unix.as_deref())?;
-    builder = configure_http3_local_address(builder, http_version, &url, dns_resolution.as_ref());
-    builder = configure_dns_resolution(builder, url.host_str(), dns_resolution.as_ref());
-    if cli.timing || (cli.verbose >= 3 && !cli.silent) {
-        builder = builder.connector_layer(ConnectionTimingLayer::new(connect_timing.clone()));
-    }
-    builder = configure_tls(builder, cli)?;
-    builder = configure_proxy(builder, cli.proxy.as_deref())?;
-    if cli.insecure {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    if let Some(timeout) = remaining_request_timeout(request_timeout, request_start)? {
-        builder = builder.timeout(timeout);
-    }
-    if let Some(timeout) = connect_timeout {
-        builder = builder.connect_timeout(timeout);
-    }
-    if let Some(session) = &session {
-        builder = builder.cookie_provider(session.cookie_provider());
-    }
-    builder = builder.redirect(redirect::Policy::none());
-    let client = builder.build()?;
+    let client_build = ClientBuildContext {
+        http_version,
+        request_timeout,
+        connect_timeout,
+        request_start,
+        session: session.as_ref(),
+        connect_timing: &connect_timing,
+    };
+    let initial_client = build_client_for_url(cli, &url, &client_build).await?;
     if cli.grpc && grpc_method.is_none() && grpc_request_requires_schema(cli) {
-        let schema = crate::grpc::reflection::schema_for_call(cli, &url, &client).await?;
+        let schema =
+            crate::grpc::reflection::schema_for_call(cli, &url, &initial_client.client).await?;
         grpc_method = Some(proto::method_for_url(&schema, &url)?);
     }
     let method_name = effective_method(cli);
@@ -217,6 +196,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         let mut request_method = method.clone();
         let mut request_url = url.clone();
         let mut request_body = body.clone();
+        let mut request_client = initial_client.clone();
         let mut redirect_statuses = Vec::new();
         let mut redirect_count = 0_usize;
         let mut timing = AttemptTiming::start();
@@ -234,7 +214,8 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             }
             if cli.verbose >= 3
                 && !cli.silent
-                && let Some(dns) = dns_resolution
+                && let Some(dns) = request_client
+                    .dns_resolution
                     .as_ref()
                     .and_then(|resolution| resolution.timing.as_ref())
             {
@@ -252,7 +233,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             }
 
             let req = build_request(
-                &client,
+                &request_client.client,
                 request_method.clone(),
                 request_url.clone(),
                 attempt_headers,
@@ -261,7 +242,8 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 None,
             )?;
             timing.set_dns(
-                dns_resolution
+                request_client
+                    .dns_resolution
                     .as_ref()
                     .and_then(|resolution| resolution.timing.as_ref())
                     .map(|dns| dns.duration),
@@ -276,10 +258,20 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         redirect_statuses.push(response.status());
                         let (next_method, next_body) =
                             redirected_request(request_method, request_body, response.status())?;
+                        let refresh_client = redirect_requires_client_refresh(
+                            cli,
+                            http_version,
+                            &request_url,
+                            &redirect,
+                        );
                         drain_response_body_bounded(response).await;
                         request_method = next_method;
                         request_url = redirect;
                         request_body = next_body;
+                        if refresh_client {
+                            request_client =
+                                build_client_for_url(cli, &request_url, &client_build).await?;
+                        }
                         redirect_count += 1;
                         continue;
                     }
@@ -293,14 +285,17 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 timing.mark_response_headers();
                 timing.set_connect(connect_timing.duration());
                 if cli.verbose >= 3 && !cli.silent {
-                    let connect_target =
-                        connect_debug_target(&response, &request_url, dns_resolution.as_ref());
+                    let connect_target = connect_debug_target(
+                        &response,
+                        &request_url,
+                        request_client.dns_resolution.as_ref(),
+                    );
                     timing::print_debug_lines(&timing, &connect_target, cli.color.as_deref());
                 }
                 let response = apply_digest_challenge(
                     response,
                     DigestRetryContext {
-                        client: &client,
+                        client: &request_client.client,
                         method: request_method,
                         headers: headers.clone(),
                         body: request_body.clone(),
@@ -436,6 +431,92 @@ fn configure_unix_socket(
 struct DnsResolution {
     socket_addrs: Vec<SocketAddr>,
     timing: Option<DnsTiming>,
+}
+
+#[derive(Clone)]
+struct UrlClient {
+    client: Client,
+    dns_resolution: Option<DnsResolution>,
+}
+
+struct ClientBuildContext<'a> {
+    http_version: Option<HttpVersion>,
+    request_timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+    request_start: Instant,
+    session: Option<&'a crate::session::Session>,
+    connect_timing: &'a ConnectionTiming,
+}
+
+async fn build_client_for_url(
+    cli: &Cli,
+    url: &Url,
+    context: &ClientBuildContext<'_>,
+) -> Result<UrlClient, FetchError> {
+    let dns_timeout = dns_resolution_timeout(
+        context.request_timeout,
+        context.connect_timeout,
+        context.request_start,
+    )?;
+    let dns_resolution =
+        resolve_dns_for_client(cli, url, context.http_version, dns_timeout).await?;
+    let mut builder = Client::builder()
+        .use_rustls_tls()
+        .no_brotli()
+        .no_gzip()
+        .no_zstd();
+    builder = configure_http_version(builder, context.http_version);
+    builder = configure_unix_socket(builder, cli.unix.as_deref())?;
+    builder =
+        configure_http3_local_address(builder, context.http_version, url, dns_resolution.as_ref());
+    builder = configure_dns_resolution(builder, url.host_str(), dns_resolution.as_ref());
+    if cli.timing || (cli.verbose >= 3 && !cli.silent) {
+        builder =
+            builder.connector_layer(ConnectionTimingLayer::new(context.connect_timing.clone()));
+    }
+    builder = configure_tls(builder, cli)?;
+    builder = configure_proxy(builder, cli.proxy.as_deref())?;
+    if cli.insecure {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    if let Some(timeout) =
+        remaining_request_timeout(context.request_timeout, context.request_start)?
+    {
+        builder = builder.timeout(timeout);
+    }
+    if let Some(timeout) = context.connect_timeout {
+        builder = builder.connect_timeout(timeout);
+    }
+    if let Some(session) = context.session {
+        builder = builder.cookie_provider(session.cookie_provider());
+    }
+    builder = builder.redirect(redirect::Policy::none());
+    Ok(UrlClient {
+        client: builder.build()?,
+        dns_resolution,
+    })
+}
+
+fn redirect_requires_client_refresh(
+    cli: &Cli,
+    http_version: Option<HttpVersion>,
+    current: &Url,
+    next: &Url,
+) -> bool {
+    if url_client_endpoint(current) == url_client_endpoint(next) {
+        return false;
+    }
+    if cli.proxy.is_some() || cli.unix.is_some() {
+        return false;
+    }
+    cli.dns_server.is_some()
+        || matches!(http_version, Some(HttpVersion::Http3))
+        || cli.timing
+        || (cli.verbose >= 3 && !cli.silent)
+}
+
+fn url_client_endpoint(url: &Url) -> Option<(&str, &str, Option<u16>)> {
+    Some((url.scheme(), url.host_str()?, url.port_or_known_default()))
 }
 
 fn dns_resolution_timeout(
