@@ -168,6 +168,7 @@ async fn invoke(
 fn reflection_client(cli: &Cli) -> Result<Client, FetchError> {
     let mut builder = Client::builder()
         .use_rustls_tls()
+        .no_brotli()
         .no_gzip()
         .no_zstd()
         .http2_prior_knowledge()

@@ -285,6 +285,7 @@ Control automatic compression negotiation:
 
 ```sh
 fetch --compress auto example.com
+fetch --compress br example.com
 fetch --compress gzip example.com
 fetch --compress zstd example.com
 fetch --compress off example.com
@@ -292,12 +293,13 @@ fetch --compress off example.com
 
 By default, `fetch`:
 
-- Sends `Accept-Encoding: gzip, zstd` header
+- Sends `Accept-Encoding: gzip, br, zstd` header
 - Automatically decompresses responses
 
 Compression modes:
 
-- `auto` requests gzip or zstd and decompresses either response encoding
+- `auto` requests gzip, brotli, or zstd and decompresses any of those response encodings
+- `br`/`brotli` requests and decompresses brotli only
 - `gzip` requests and decompresses gzip only
 - `zstd` requests and decompresses zstd only
 - `off` sends no automatic `Accept-Encoding` header and leaves compressed response bodies untouched

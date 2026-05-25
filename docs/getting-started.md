@@ -156,7 +156,7 @@ name without changing the request itself.
 ```
 > GET /json HTTP/1.1
 > accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
-> accept-encoding: gzip, zstd
+> accept-encoding: gzip, br, zstd
 > host: httpbin.org
 > user-agent: fetch/v0.17.3
 >
@@ -190,7 +190,7 @@ fetch -vvv httpbin.org/json
 ```
 > GET /json HTTP/1.1
 > accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
-> accept-encoding: gzip, zstd
+> accept-encoding: gzip, br, zstd
 > host: httpbin.org
 > user-agent: fetch/v0.17.3
 >
@@ -226,7 +226,7 @@ fetch --dry-run -vv -j '{"hello":"world"}' -m POST httpbin.org/post
 ```
 > POST /post HTTP/1.1
 > accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
-> accept-encoding: gzip, zstd
+> accept-encoding: gzip, br, zstd
 > content-length: 17
 > content-type: application/json
 > host: httpbin.org

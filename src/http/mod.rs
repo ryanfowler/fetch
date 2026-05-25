@@ -87,7 +87,11 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     crate::tls::install_default_crypto_provider();
 
-    let mut builder = Client::builder().use_rustls_tls().no_gzip().no_zstd();
+    let mut builder = Client::builder()
+        .use_rustls_tls()
+        .no_brotli()
+        .no_gzip()
+        .no_zstd();
     let connect_timing = ConnectionTiming::default();
     builder = configure_http_version(builder, http_version);
     builder = configure_unix_socket(builder, cli.unix.as_deref())?;
@@ -2211,6 +2215,7 @@ fn decode_response_bytes(
     let mut decoded = bytes.to_vec();
     for encoding in encodings {
         decoded = match encoding.as_str() {
+            "br" => decode_brotli(&decoded)?,
             "gzip" => decode_gzip(&decoded)?,
             "zstd" => decode_zstd(&decoded)?,
             "aws-chunked" => decoded,
@@ -2239,6 +2244,10 @@ where
 
     for encoding in encodings {
         reader = match encoding.as_str() {
+            "br" => Box::new(PrefixedReadError {
+                prefix: "br",
+                inner: brotli::Decompressor::new(reader, 4096),
+            }),
             "gzip" => Box::new(PrefixedReadError {
                 prefix: "gzip",
                 inner: GzDecoder::new(reader),
@@ -2320,6 +2329,15 @@ fn decode_gzip(bytes: &[u8]) -> Result<Vec<u8>, FetchError> {
     decoder
         .read_to_end(&mut decoded)
         .map_err(|err| FetchError::Message(format!("gzip: {err}")))?;
+    Ok(decoded)
+}
+
+fn decode_brotli(bytes: &[u8]) -> Result<Vec<u8>, FetchError> {
+    let mut decoder = brotli::Decompressor::new(bytes, 4096);
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .map_err(|err| FetchError::Message(format!("br: {err}")))?;
     Ok(decoded)
 }
 
@@ -3624,7 +3642,17 @@ mod tests {
             (
                 vec!["fetch", "https://example.com"],
                 CompressionMode::Auto,
-                Some("gzip, zstd"),
+                Some("gzip, br, zstd"),
+            ),
+            (
+                vec!["fetch", "--compress", "br", "https://example.com"],
+                CompressionMode::Brotli,
+                Some("br"),
+            ),
+            (
+                vec!["fetch", "--compress", "brotli", "https://example.com"],
+                CompressionMode::Brotli,
+                Some("br"),
             ),
             (
                 vec!["fetch", "--compress", "gzip", "https://example.com"],
@@ -3691,6 +3719,21 @@ mod tests {
     }
 
     #[test]
+    fn decodes_brotli_content_encoding() {
+        let data = b"this is brotli encoded data";
+        let body = brotli_encode(data);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("br"),
+        );
+
+        let decoded = decode_response_bytes(CompressionMode::Brotli, &headers, &body).unwrap();
+
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
     fn decodes_aws_chunked_plus_gzip() {
         let data = b"this is gzip encoded data";
         let body = gzip_encode(data);
@@ -3718,6 +3761,9 @@ mod tests {
         let decoded = decode_response_bytes(CompressionMode::Gzip, &headers, &body).unwrap();
         assert_eq!(decoded, data);
 
+        let decoded = decode_response_bytes(CompressionMode::Brotli, &headers, &body).unwrap();
+        assert_eq!(decoded, body);
+
         let decoded = decode_response_bytes(CompressionMode::Zstd, &headers, &body).unwrap();
         assert_eq!(decoded, body);
     }
@@ -3728,7 +3774,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             reqwest::header::CONTENT_ENCODING,
-            HeaderValue::from_static("br, gzip"),
+            HeaderValue::from_static("deflate, gzip"),
         );
 
         let decoded = decode_response_bytes(CompressionMode::Auto, &headers, body).unwrap();
@@ -3786,7 +3832,7 @@ mod tests {
         let mut unsupported_headers = HeaderMap::new();
         unsupported_headers.insert(
             reqwest::header::CONTENT_ENCODING,
-            HeaderValue::from_static("br"),
+            HeaderValue::from_static("deflate"),
         );
         assert_eq!(
             output_progress_total_bytes(
@@ -3811,10 +3857,33 @@ mod tests {
         assert!(err.to_string().contains("gzip:"));
     }
 
+    #[test]
+    fn brotli_decoder_errors_are_prefixed() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("br"),
+        );
+
+        let err =
+            decode_response_bytes(CompressionMode::Auto, &headers, b"not brotli").unwrap_err();
+
+        assert!(err.to_string().contains("br:"));
+    }
+
     fn gzip_encode(data: &[u8]) -> Vec<u8> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(data).unwrap();
         encoder.finish().unwrap()
+    }
+
+    fn brotli_encode(data: &[u8]) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut encoded, 4096, 5, 22);
+            encoder.write_all(data).unwrap();
+        }
+        encoded
     }
 
     fn zstd_encode(data: &[u8]) -> Vec<u8> {
