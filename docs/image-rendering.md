@@ -8,20 +8,20 @@
 
 Control how images are rendered:
 
-| Value    | Description                                                |
-| -------- | ---------------------------------------------------------- |
-| `auto`   | Try optimal protocol, fallback to external tools (default) |
-| `native` | Use only built-in decoders                                 |
-| `off`    | Disable image rendering                                    |
+| Value      | Description                                                   |
+| ---------- | ------------------------------------------------------------- |
+| `auto`     | Try optimal terminal protocol with built-in decoders (default) |
+| `external` | Allow external adapters for additional formats                 |
+| `off`      | Disable image rendering                                       |
 
 ```sh
-fetch --image native example.com/photo.jpg
+fetch --image external example.com/photo.avif
 fetch --image off example.com/image.png
 ```
 
 ## Supported Image Formats
 
-### Built-in Decoders (Native)
+### Built-in Decoders
 
 These formats are decoded without external tools:
 
@@ -32,7 +32,7 @@ These formats are decoded without external tools:
 
 ### With External Adapters
 
-When `--image auto` (default), these additional formats are supported if you have the required tools installed:
+When `--image external` is set, these additional formats are supported if you have the required tools installed:
 
 - **AVIF** - `.avif`
 - **HEIF/HEIC** - `.heif`, `.heic`
@@ -84,7 +84,7 @@ Fallback rendering using Unicode block characters (▀▄█). Works everywhere 
 
 ## External Adapters
 
-When native decoders can't handle an image format, `fetch` tries external tools in this order:
+When `--image external` is enabled and built-in decoders can't handle an image format, `fetch` tries external tools in this order:
 
 ### 1. VIPS (`vips`)
 
@@ -130,11 +130,11 @@ Set image rendering preferences in your [configuration file](configuration.md):
 # Disable image rendering
 image = off
 
-# Use only native decoders
-image = native
-
-# Auto-detect (default)
+# Auto-detect terminal protocol with built-in decoders (default)
 image = auto
+
+# Opt in to external adapters
+image = external
 ```
 
 ## Image Sizing
@@ -155,12 +155,6 @@ fetch example.com/photo.jpg
 fetch -o photo.jpg example.com/photo.jpg
 ```
 
-### Force Native Decoding
-
-```sh
-fetch --image native example.com/image.png
-```
-
 ### Disable Image Rendering
 
 ```sh
@@ -172,8 +166,8 @@ fetch --image off example.com/image.jpg
 ### Image Not Displaying
 
 1. **Check terminal support**: Not all terminals support inline images
-2. **Verify format**: Use `--image native` to test if it's a format issue
-3. **Install adapters**: Install VIPS, ImageMagick, or FFmpeg for more formats
+2. **Verify format**: Built-in decoders handle JPEG, PNG, TIFF, and WebP by default
+3. **Install adapters**: Install VIPS, ImageMagick, or FFmpeg and use `--image external` for more formats
 4. **Check terminal size**: Very small terminals may not render properly
 
 ### Poor Quality
@@ -186,7 +180,7 @@ fetch --image off example.com/image.jpg
 
 1. **Terminal color support**: Ensure your terminal supports 24-bit color
 2. **tmux/screen**: May reduce color depth
-3. **Try native decoding**: `--image native`
+3. **Try default decoding**: `--image auto`
 
 ### Image Dimensions Too Large
 

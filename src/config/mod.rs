@@ -100,7 +100,7 @@ pub fn validate(cli: &Cli) -> Result<(), FetchError> {
         }
     }
     if let Some(value) = cli.image.as_deref() {
-        validate_cli_choice("image", value, &["auto", "native", "off"])?;
+        validate_cli_choice("image", value, &["auto", "external", "off"])?;
     }
     if let Some(value) = cli.proxy.as_deref() {
         validate_proxy_value(value).map_err(|usage| {
@@ -368,7 +368,7 @@ fn set_value(
             config.ignore_status = Some(parse_bool_value(path, line_num, "ignore-status", value)?);
         }
         "image" => {
-            validate_choice(path, line_num, "image", value, &["auto", "native", "off"])?;
+            validate_choice(path, line_num, "image", value, &["auto", "external", "off"])?;
             config.image = Some(value.to_string());
         }
         "insecure" => config.insecure = Some(parse_bool_value(path, line_num, "insecure", value)?),
@@ -1359,14 +1359,14 @@ mod tests {
     #[test]
     fn validate_image_flag_matches_go_choices() {
         let cli =
-            Cli::try_parse_from(["fetch", "--image", "native", "https://example.com"]).unwrap();
+            Cli::try_parse_from(["fetch", "--image", "external", "https://example.com"]).unwrap();
         validate(&cli).unwrap();
 
         let cli = Cli::try_parse_from(["fetch", "--image", "bad", "https://example.com"]).unwrap();
         let err = validate(&cli).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "invalid value 'bad' for option '--image': must be one of [auto, native, off]"
+            "invalid value 'bad' for option '--image': must be one of [auto, external, off]"
         );
     }
 

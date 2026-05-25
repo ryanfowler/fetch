@@ -47,7 +47,7 @@ impl HttpVersion {
 pub enum ImageSetting {
     Unknown,
     Auto,
-    Native,
+    External,
     Off,
 }
 
