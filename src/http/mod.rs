@@ -63,6 +63,7 @@ pub(crate) type RequestBody = Option<(Vec<u8>, Option<String>)>;
 type AsyncReadBox = Pin<Box<dyn AsyncRead + Send>>;
 
 const MAX_BUFFERED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_DISCARDED_RESPONSE_BYTES: usize = 1024 * 1024;
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let http_version =
@@ -273,7 +274,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         delay,
                         &retry_reason(status),
                     );
-                    let _ = response.bytes().await;
+                    drain_response_body_bounded(response).await;
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
@@ -1163,6 +1164,18 @@ async fn read_decoded_response_body_limited(
     }
 }
 
+async fn drain_response_body_bounded(mut response: Response) {
+    let mut discarded = 0usize;
+    while discarded < MAX_DISCARDED_RESPONSE_BYTES {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                discarded = discarded.saturating_add(chunk.len());
+            }
+            Ok(None) | Err(_) => break,
+        }
+    }
+}
+
 struct StreamedOutput {
     trailers: HeaderMap,
     bytes_written: i64,
@@ -1606,7 +1619,7 @@ async fn apply_digest_challenge(
         Err(_) => return Ok(response),
     };
 
-    let _ = response.bytes().await;
+    drain_response_body_bounded(response).await;
     build_request(
         context.client,
         challenged_method,

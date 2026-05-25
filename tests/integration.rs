@@ -149,6 +149,12 @@ struct TestServer {
     join: Option<thread::JoinHandle<()>>,
 }
 
+struct PartialBodyReplayServer {
+    url: String,
+    requests: Arc<Mutex<Vec<TestRequest>>>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
 struct TlsTestServer {
     url: String,
     ca_cert_path: PathBuf,
@@ -287,6 +293,89 @@ impl Drop for TestServer {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl PartialBodyReplayServer {
+    fn start(
+        status: u16,
+        reason: &'static str,
+        headers: Vec<(&'static str, &'static str)>,
+        final_body: &'static str,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind partial body server");
+        listener
+            .set_nonblocking(true)
+            .expect("set partial body listener nonblocking");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_log = Arc::clone(&requests);
+        let join = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut first = true;
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                        let reader_stream = stream.try_clone().expect("clone request stream");
+                        let mut reader = BufReader::new(reader_stream);
+                        let Some(req) = read_request(&mut reader) else {
+                            continue;
+                        };
+                        request_log.lock().unwrap().push(req);
+                        if first {
+                            first = false;
+                            let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\n");
+                            for (name, value) in &headers {
+                                let _ = write!(stream, "{name}: {value}\r\n");
+                            }
+                            let _ = write!(
+                                stream,
+                                "Content-Length: 1073741824\r\nConnection: keep-alive\r\n\r\n"
+                            );
+                            let chunk = vec![b'x'; 16 * 1024];
+                            for _ in 0..128 {
+                                if stream.write_all(&chunk).is_err() {
+                                    break;
+                                }
+                            }
+                            let _ = stream.flush();
+                            if let Ok(hold_stream) = stream.try_clone() {
+                                thread::spawn(move || {
+                                    let _hold_stream = hold_stream;
+                                    thread::sleep(Duration::from_secs(5));
+                                });
+                            }
+                        } else {
+                            write_response(&mut stream, TestResponse::ok(final_body));
+                            break;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            url,
+            requests,
+            join: Some(join),
+        }
+    }
+
+    fn requests(&self) -> Vec<TestRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for PartialBodyReplayServer {
+    fn drop(&mut self) {
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -2484,6 +2573,37 @@ fn digest_auth_replays_after_challenge() {
 }
 
 #[test]
+fn digest_auth_drain_is_bounded_for_large_challenge_body() {
+    let server = PartialBodyReplayServer::start(
+        401,
+        "Unauthorized",
+        vec![(
+            "WWW-Authenticate",
+            r#"Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5""#,
+        )],
+        "authenticated",
+    );
+
+    let res = run_fetch(&[
+        &server.url,
+        "--digest",
+        "user:pass",
+        "--data",
+        "hello=world",
+        "--timeout",
+        "3",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "authenticated");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].header("authorization").is_empty());
+    assert!(requests[1].header("authorization").starts_with("Digest "));
+    assert_eq!(requests[1].body_string(), "hello=world");
+}
+
+#[test]
 fn redirects_range_status_and_timeouts() {
     let server = TestServer::start(|req| match req.path.as_str() {
         "/start" => TestResponse::status(302, "Found", "")
@@ -2561,6 +2681,24 @@ fn retry_statuses_and_request_body_replay() {
         "payload",
     ]);
     assert_exit(&res, 0);
+}
+
+#[test]
+fn retry_status_drain_is_bounded_for_large_error_body() {
+    let server = PartialBodyReplayServer::start(503, "Service Unavailable", Vec::new(), "retried");
+
+    let res = run_fetch(&[
+        &server.url,
+        "--retry",
+        "1",
+        "--retry-delay",
+        FAST_RETRY_DELAY,
+        "--timeout",
+        "3",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "retried");
+    assert_eq!(server.requests().len(), 2);
 }
 
 #[test]
