@@ -25,6 +25,7 @@ const SELF_DELETE_SUFFIX: &str = ".__selfdelete.exe";
 const TEMP_EXE_SUFFIX: &str = ".__temp.exe";
 #[cfg(windows)]
 const SELF_DELETE_ENV: &str = "FETCH_INTERNAL_UPDATE_SELF_DELETE";
+const MAX_UPDATE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct Release {
@@ -191,6 +192,15 @@ async fn download_artifact(
     artifact_url: &str,
     silent: bool,
 ) -> Result<Vec<u8>, FetchError> {
+    download_artifact_with_limit(client, artifact_url, silent, MAX_UPDATE_ARTIFACT_BYTES).await
+}
+
+async fn download_artifact_with_limit(
+    client: &reqwest::Client,
+    artifact_url: &str,
+    silent: bool,
+    max_artifact_bytes: u64,
+) -> Result<Vec<u8>, FetchError> {
     let response = update_get(client, artifact_url).send().await?;
     if !response.status().is_success() {
         return Err(format!(
@@ -200,17 +210,22 @@ async fn download_artifact(
         .into());
     }
 
+    if let Some(len) = response.content_length()
+        && len > max_artifact_bytes
+    {
+        return Err(format!("update artifact is too large: {len} bytes").into());
+    }
+
     let content_length = response
         .content_length()
         .and_then(|value| i64::try_from(value).ok())
         .unwrap_or(-1);
     let mut progress = UpdateDownloadProgress::maybe_start(silent, content_length);
-    let mut artifact = Vec::with_capacity(
-        response
-            .content_length()
-            .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or_default(),
-    );
+    let capacity = response
+        .content_length()
+        .unwrap_or(0)
+        .min(max_artifact_bytes) as usize;
+    let mut artifact = Vec::with_capacity(capacity);
 
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -221,6 +236,10 @@ async fn download_artifact(
                 return Err(err.into());
             }
         };
+        if artifact.len().saturating_add(chunk.len()) > max_artifact_bytes as usize {
+            progress.finish();
+            return Err("update artifact exceeded maximum allowed size".into());
+        }
         progress.add(chunk.len());
         artifact.extend_from_slice(&chunk);
     }
@@ -1069,8 +1088,10 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use std::io::Write;
+    use std::io::{BufRead, Write};
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+    use std::thread::JoinHandle;
     use tar::{Builder, Header};
 
     #[derive(Clone)]
@@ -1095,6 +1116,35 @@ mod tests {
         )
     }
 
+    fn start_artifact_response(
+        headers: Vec<(&'static str, String)>,
+        chunks: Vec<Vec<u8>>,
+    ) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let join = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+
+            write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\n").unwrap();
+            for (name, value) in headers {
+                write!(stream, "{name}: {value}\r\n").unwrap();
+            }
+            write!(stream, "\r\n").unwrap();
+            for chunk in chunks {
+                stream.write_all(&chunk).unwrap();
+            }
+        });
+        (url, join)
+    }
+
     #[test]
     fn update_requests_use_go_client_headers() {
         let client = reqwest::Client::builder().use_rustls_tls().build().unwrap();
@@ -1116,6 +1166,42 @@ mod tests {
         assert_eq!(
             request.headers().get(ACCEPT).and_then(|v| v.to_str().ok()),
             Some(core::DEFAULT_ACCEPT_HEADER)
+        );
+    }
+
+    #[tokio::test]
+    async fn download_artifact_rejects_content_length_above_limit() {
+        let (url, join) =
+            start_artifact_response(vec![("Content-Length", "11".to_string())], Vec::new());
+        let client = reqwest::Client::builder().use_rustls_tls().build().unwrap();
+
+        let err = download_artifact_with_limit(&client, &url, true, 10)
+            .await
+            .unwrap_err();
+        join.join().unwrap();
+
+        assert!(
+            err.to_string()
+                .contains("update artifact is too large: 11 bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn download_artifact_rejects_stream_above_limit() {
+        let (url, join) = start_artifact_response(
+            Vec::new(),
+            vec![b"12345".to_vec(), b"67890".to_vec(), b"!".to_vec()],
+        );
+        let client = reqwest::Client::builder().use_rustls_tls().build().unwrap();
+
+        let err = download_artifact_with_limit(&client, &url, true, 10)
+            .await
+            .unwrap_err();
+        join.join().unwrap();
+
+        assert!(
+            err.to_string()
+                .contains("update artifact exceeded maximum allowed size")
         );
     }
 
