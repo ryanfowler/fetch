@@ -911,6 +911,11 @@ async fn finish_response(
     let response_content_length = response
         .content_length()
         .and_then(|len| i64::try_from(len).ok());
+    let output_progress_total = output_progress_total_bytes(
+        encoding_requested,
+        &response_headers,
+        response_content_length,
+    );
     let method_is_head = cli.method().eq_ignore_ascii_case("HEAD");
     let response_timing = timing.and_then(AttemptTiming::response_timing);
     if cli.discard {
@@ -940,7 +945,7 @@ async fn finish_response(
                 core::color_enabled(cli.color.as_deref(), stderr_is_terminal),
                 stderr_is_terminal,
                 std::io::stdout().is_terminal(),
-                response_content_length,
+                output_progress_total,
             )
         };
         let body_start = Instant::now();
@@ -2242,6 +2247,20 @@ where
         };
     }
     Ok(reader)
+}
+
+fn output_progress_total_bytes(
+    encoding_requested: bool,
+    headers: &HeaderMap,
+    content_length: Option<i64>,
+) -> Option<i64> {
+    if encoding_requested
+        && content_encoding_decoders(headers).is_some_and(|decoders| !decoders.is_empty())
+    {
+        None
+    } else {
+        content_length
+    }
 }
 
 struct PrefixedReadError<R> {
@@ -3592,6 +3611,46 @@ mod tests {
         let decoded = decode_response_bytes(false, &headers, &body).unwrap();
 
         assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn output_progress_omits_total_for_decoded_content_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+
+        assert_eq!(output_progress_total_bytes(true, &headers, Some(10)), None);
+    }
+
+    #[test]
+    fn output_progress_keeps_total_when_written_length_matches_wire_length() {
+        let content_length = Some(10);
+        assert_eq!(
+            output_progress_total_bytes(true, &HeaderMap::new(), content_length),
+            content_length
+        );
+
+        let mut compressed_headers = HeaderMap::new();
+        compressed_headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        assert_eq!(
+            output_progress_total_bytes(false, &compressed_headers, content_length),
+            content_length
+        );
+
+        let mut unsupported_headers = HeaderMap::new();
+        unsupported_headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("br"),
+        );
+        assert_eq!(
+            output_progress_total_bytes(true, &unsupported_headers, content_length),
+            content_length
+        );
     }
 
     #[test]
