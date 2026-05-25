@@ -456,6 +456,9 @@ pub struct Cli {
     #[arg(short = 's', long, help = "Print only errors to stderr")]
     pub silent: bool,
 
+    #[arg(long = "sort-headers", help = "Sort displayed headers by name")]
+    pub sort_headers: bool,
+
     #[arg(
         short = 't',
         long,
@@ -604,6 +607,7 @@ mod tests {
             )
         );
         assert!(help.contains("--pager <MODE>                Control pager use [auto, on, off]"));
+        assert!(help.contains("--sort-headers                Sort displayed headers by name"));
         assert!(
             help.contains("-m, --method <METHOD>             HTTP method to use [default: GET]")
         );

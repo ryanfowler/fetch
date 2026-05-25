@@ -150,6 +150,9 @@ Show the outgoing request headers followed by the response:
 fetch -vv httpbin.org/json
 ```
 
+Add `--sort-headers` to sort the displayed request and response headers by
+name without changing the request itself.
+
 ```
 > GET /json HTTP/1.1
 > accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*

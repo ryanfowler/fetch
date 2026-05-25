@@ -205,6 +205,18 @@ verbosity = 2
 verbosity = 3
 ```
 
+#### `sort-headers`
+
+**Type**: Boolean
+**Default**: `false`
+
+Sort displayed request and response headers alphabetically by name. This only
+changes verbose output; request headers are still sent in their normal order.
+
+```ini
+sort-headers = true
+```
+
 ### Network Options
 
 #### `ca-cert`

@@ -385,6 +385,7 @@ const FLAGS: &[Flag] = &[
         "Use a named session for cookies",
     ),
     flag(Some('s'), "silent", "", "Print only errors to stderr"),
+    flag(None, "sort-headers", "", "Sort displayed headers by name"),
     flag(
         Some('t'),
         "timeout",
