@@ -261,7 +261,7 @@ fetch --image off example.com/photo.jpg
 
 ### `--no-pager`
 
-Disable piping output to a pager (`less`).
+Disable piping terminal output to a pager (`less -FIRX`).
 
 ```sh
 fetch --no-pager example.com

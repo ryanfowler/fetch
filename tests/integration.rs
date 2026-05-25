@@ -1835,6 +1835,98 @@ fn run_image_render_pty(env: Vec<(String, String)>) -> String {
     output
 }
 
+#[cfg(unix)]
+fn install_fake_less(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let less = dir.join("less");
+    fs::write(
+        &less,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$FETCH_TEST_LESS_ARGS\"\ncat > \"$FETCH_TEST_LESS_INPUT\"\ncat \"$FETCH_TEST_LESS_INPUT\"\n",
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&less).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&less, perms).unwrap();
+    less
+}
+
+#[cfg(unix)]
+fn run_fetch_pty_with_fake_less(extra_args: &[&str]) -> (String, Option<String>, Option<String>) {
+    let server = TestServer::start(|_| TestResponse::ok("pager body\n"));
+    let dir = TempDir::new().unwrap();
+    install_fake_less(dir.path());
+    let less_args = dir.path().join("less.args");
+    let less_input = dir.path().join("less.input");
+    let path = env::join_paths(
+        std::iter::once(dir.path().to_path_buf()).chain(
+            env::var_os("PATH")
+                .map(|path| env::split_paths(&path).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+    )
+    .unwrap();
+
+    let pty = open_pty(24, 80, 800, 480);
+    let mut cmd = Command::new(fetch_bin());
+    cmd.arg(server.url.as_str());
+    cmd.args(extra_args);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("PATH", path);
+    cmd.env("FETCH_TEST_LESS_ARGS", &less_args);
+    cmd.env("FETCH_TEST_LESS_INPUT", &less_input);
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+    configure_pty_child(&mut cmd, &pty.slave);
+    let mut child = cmd.spawn().expect("spawn fetch under PTY");
+    drop(pty.slave);
+    let capture = start_pty_capture(&pty.master);
+    let status = wait_child(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            panic!(
+                "fetch did not exit after paged response; PTY output:\n{}",
+                capture.output()
+            )
+        })
+        .expect("wait fetch under PTY");
+    assert!(
+        status.success(),
+        "fetch exited with {status}; PTY output:\n{}",
+        capture.output()
+    );
+    let output = capture.output();
+    drop(pty.master);
+    capture.close();
+    (
+        output,
+        fs::read_to_string(less_args).ok(),
+        fs::read_to_string(less_input).ok(),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_stdout_uses_less_pager_by_default() {
+    let (output, less_args, less_input) = run_fetch_pty_with_fake_less(&[]);
+
+    assert!(output.contains("pager body"), "{output:?}");
+    assert_eq!(less_args.as_deref(), Some("-FIRX\n"));
+    assert_eq!(less_input.as_deref(), Some("pager body\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn no_pager_writes_terminal_stdout_directly() {
+    let (output, less_args, less_input) = run_fetch_pty_with_fake_less(&["--no-pager"]);
+
+    assert!(output.contains("pager body"), "{output:?}");
+    assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
+    assert!(less_input.is_none(), "pager received input: {less_input:?}");
+}
+
 #[test]
 fn help_matches_go_harness_expectations() {
     let res = run_fetch(&["--help"]);
