@@ -912,6 +912,10 @@ fn fake_editor(dir: &Path, body: &str, code: i32) -> PathBuf {
 }
 
 fn start_udp_dns_server(host: &'static str, ip: Ipv4Addr) -> String {
+    start_udp_dns_server_with_hosts(vec![(host, ip)])
+}
+
+fn start_udp_dns_server_with_hosts(records: Vec<(&'static str, Ipv4Addr)>) -> String {
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
     let addr = socket.local_addr().unwrap().to_string();
     thread::spawn(move || {
@@ -924,12 +928,14 @@ fn start_udp_dns_server(host: &'static str, ip: Ipv4Addr) -> String {
             resp.extend_from_slice(&buf[..2]);
             resp.extend_from_slice(&[0x81, 0x80]);
             resp.extend_from_slice(&1_u16.to_be_bytes());
-            let answer = name == host && qtype == 1;
-            resp.extend_from_slice(&(if answer { 1_u16 } else { 0_u16 }).to_be_bytes());
+            let answer = records
+                .iter()
+                .find_map(|(host, ip)| (name == *host && qtype == 1).then_some(*ip));
+            resp.extend_from_slice(&(if answer.is_some() { 1_u16 } else { 0_u16 }).to_be_bytes());
             resp.extend_from_slice(&0_u16.to_be_bytes());
             resp.extend_from_slice(&0_u16.to_be_bytes());
             resp.extend_from_slice(&buf[12..question_end]);
-            if answer {
+            if let Some(ip) = answer {
                 resp.extend_from_slice(&[0xc0, 0x0c]);
                 resp.extend_from_slice(&1_u16.to_be_bytes());
                 resp.extend_from_slice(&1_u16.to_be_bytes());
@@ -4331,6 +4337,49 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert!(res.stderr.contains("DNS"));
     assert!(res.stderr.contains("TCP"));
     assert!(res.stderr.contains("TTFB"));
+
+    let redirect_location = Arc::new(Mutex::new(String::new()));
+    let redirect_location_for_handler = Arc::clone(&redirect_location);
+    let redirect_target = TestServer::start(move |req| {
+        if req.path == "/start" && req.header("host").starts_with("fetch-redirect-a.test:") {
+            return TestResponse::status(302, "Found", "")
+                .header("Location", &redirect_location_for_handler.lock().unwrap())
+                .header("Connection", "close");
+        }
+        if req.path == "/final" && req.header("host").starts_with("fetch-redirect-b.test:") {
+            return TestResponse::ok("redirect custom dns ok");
+        }
+        TestResponse::status(400, "Bad Request", req.header("host"))
+    });
+    let redirect_port = host_port(&redirect_target.url).split(':').nth(1).unwrap();
+    *redirect_location.lock().unwrap() =
+        format!("http://fetch-redirect-b.test:{redirect_port}/final");
+    let redirect_dns_addr = start_udp_dns_server_with_hosts(vec![
+        ("fetch-redirect-a.test.", Ipv4Addr::new(127, 0, 0, 1)),
+        ("fetch-redirect-b.test.", Ipv4Addr::new(127, 0, 0, 1)),
+    ]);
+    let res = run_fetch(&[
+        "--dns-server",
+        &redirect_dns_addr,
+        "-vvv",
+        &format!("http://fetch-redirect-a.test:{redirect_port}/start"),
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "redirect custom dns ok");
+    assert!(res.stderr.contains("* DNS: fetch-redirect-a.test"));
+    assert!(res.stderr.contains("* DNS: fetch-redirect-b.test"));
+    let requests = redirect_target.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .header("host")
+            .starts_with("fetch-redirect-a.test:")
+    );
+    assert!(
+        requests[1]
+            .header("host")
+            .starts_with("fetch-redirect-b.test:")
+    );
 
     let unresponsive_dns_addr = start_unresponsive_udp_dns_server();
     let res = run_fetch(&[
