@@ -40,8 +40,9 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let interactive = should_use_interactive(cli)?;
 
     let initial_message = websocket_initial_message(cli)?;
+    let request = build_handshake_request(cli, &url)?;
     if cli.dry_run {
-        print_request_metadata(cli, method, &url, None);
+        print_request_metadata(cli, method, &url, Some(request.headers()));
         return Ok(0);
     }
     let stdin_messages = if interactive {
@@ -50,7 +51,6 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         read_stdin_messages()?
     };
 
-    let request = build_handshake_request(cli, &url)?;
     if cli.verbose >= 2 && !cli.silent {
         print_request_metadata(cli, method, &url, Some(request.headers()));
     }
