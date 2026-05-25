@@ -475,10 +475,13 @@ ca-cert = /path/to/api-ca.crt
 Control automatic compression negotiation and decompression.
 
 ```ini
-# Request gzip or zstd compression (default)
+# Request gzip, brotli, or zstd compression (default)
 compress = auto
 
 # Request one algorithm only
+compress = br
+# The brotli alias is also accepted:
+compress = brotli
 compress = gzip
 compress = zstd
 

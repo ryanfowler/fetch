@@ -457,14 +457,16 @@ fetch --grpc --http 2 http://localhost:50051/pkg.Svc/Method  # uses h2c
 
 ### `--compress MODE`
 
-Control response compression negotiation. Values: `auto`, `gzip`, `zstd`, `off`.
+Control response compression negotiation. Values: `auto`, `br`/`brotli`, `gzip`, `zstd`, `off`.
 
-- `auto` - request gzip or zstd compression (default)
+- `auto` - request gzip, brotli, or zstd compression (default)
+- `br`/`brotli` - request brotli compression only
 - `gzip` - request gzip compression only
 - `zstd` - request zstd compression only
 - `off` - disable automatic compression negotiation and decompression
 
 ```sh
+fetch --compress br example.com
 fetch --compress gzip example.com
 fetch --compress off example.com
 ```

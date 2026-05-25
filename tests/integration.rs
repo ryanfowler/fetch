@@ -2228,7 +2228,7 @@ fn dry_run_prints_effective_request_without_network() {
     assert!(res.stdout.is_empty());
     assert!(res.stderr.contains("GET / HTTP/1.1\n"));
     assert!(res.stderr.contains("accept: application/json"));
-    assert!(res.stderr.contains("accept-encoding: gzip, zstd\n"));
+    assert!(res.stderr.contains("accept-encoding: gzip, br, zstd\n"));
     assert!(res.stderr.contains("content-length: 14\n"));
     assert!(res.stderr.contains("content-type: application/json\n"));
     assert!(res.stderr.contains("host: localhost:3000\n"));
@@ -2246,7 +2246,7 @@ fn dry_run_prints_effective_request_without_network() {
     ]);
     assert_exit(&res, 0);
     let accept = res.stderr.find("accept: application/json").unwrap();
-    let accept_encoding = res.stderr.find("accept-encoding: gzip, zstd").unwrap();
+    let accept_encoding = res.stderr.find("accept-encoding: gzip, br, zstd").unwrap();
     let content_length = res.stderr.find("content-length: 14").unwrap();
     let content_type = res.stderr.find("content-type: application/json").unwrap();
     let host = res.stderr.find("host: localhost:3000").unwrap();
@@ -3253,14 +3253,23 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
     gzip.write_all(b"this is the test data").unwrap();
     let gzip_body = gzip.finish().unwrap();
+    let mut brotli_body = Vec::new();
+    {
+        let mut brotli = brotli::CompressorWriter::new(&mut brotli_body, 4096, 5, 22);
+        brotli.write_all(b"this is the test data").unwrap();
+    }
     let zstd_body = zstd::encode_all(&b"this is the test data"[..], 0).unwrap();
     let compressed = TestServer::start(move |req| match req.header("accept-encoding").as_str() {
-        "gzip, zstd" if req.path == "/zstd" => {
+        "gzip, br, zstd" if req.path == "/br" => {
+            TestResponse::ok(brotli_body.clone()).header("Content-Encoding", "br")
+        }
+        "gzip, br, zstd" if req.path == "/zstd" => {
             TestResponse::ok(zstd_body.clone()).header("Content-Encoding", "zstd")
         }
-        "gzip, zstd" | "gzip" => {
+        "gzip, br, zstd" | "gzip" => {
             TestResponse::ok(gzip_body.clone()).header("Content-Encoding", "gzip")
         }
+        "br" => TestResponse::ok(brotli_body.clone()).header("Content-Encoding", "br"),
         "zstd" => TestResponse::ok(zstd_body.clone()).header("Content-Encoding", "zstd"),
         "" => TestResponse::ok("this is the test data"),
         other => TestResponse::status(
@@ -3277,6 +3286,10 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "this is the test data");
     assert!(res.stderr.contains("zstd"));
+    let res = run_fetch(&[&format!("{}/br", compressed.url), "-v"]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "this is the test data");
+    assert!(res.stderr.contains("br"));
     let res = run_fetch(&[&compressed.url, "-v", "--compress", "gzip"]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "this is the test data");
@@ -3290,9 +3303,18 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "this is the test data");
     assert!(res.stderr.contains("zstd"));
+    let res = run_fetch(&[&compressed.url, "-v", "--compress", "br"]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "this is the test data");
+    assert!(res.stderr.contains("br"));
+    let res = run_fetch(&[&compressed.url, "-v", "--compress", "brotli"]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "this is the test data");
+    assert!(res.stderr.contains("br"));
     let res = run_fetch(&[&compressed.url, "-v", "--compress", "off"]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "this is the test data");
+    assert!(!res.stderr.contains("br"));
     assert!(!res.stderr.contains("gzip"));
     assert!(!res.stderr.contains("zstd"));
     let res = run_fetch(&[&compressed.url, "--compress", "bad"]);

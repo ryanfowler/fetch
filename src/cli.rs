@@ -23,13 +23,14 @@ impl HttpVersion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompressionMode {
     Auto,
+    Brotli,
     Gzip,
     Zstd,
     Off,
 }
 
 impl CompressionMode {
-    pub const VALUES: &[&str] = &["auto", "gzip", "zstd", "off"];
+    pub const VALUES: &[&str] = &["auto", "br", "brotli", "gzip", "zstd", "off"];
 
     pub fn from_cli(cli: &Cli) -> Self {
         if cli.no_encode {
@@ -42,6 +43,7 @@ impl CompressionMode {
     pub fn from_value(value: &str) -> Option<Self> {
         match value {
             "auto" => Some(Self::Auto),
+            "br" | "brotli" => Some(Self::Brotli),
             "gzip" => Some(Self::Gzip),
             "zstd" => Some(Self::Zstd),
             "off" => Some(Self::Off),
@@ -51,7 +53,8 @@ impl CompressionMode {
 
     pub fn accept_encoding(self) -> Option<&'static str> {
         match self {
-            Self::Auto => Some("gzip, zstd"),
+            Self::Auto => Some("gzip, br, zstd"),
+            Self::Brotli => Some("br"),
             Self::Gzip => Some("gzip"),
             Self::Zstd => Some("zstd"),
             Self::Off => None,
@@ -61,7 +64,8 @@ impl CompressionMode {
     pub fn decodes(self, encoding: &str) -> bool {
         matches!(
             (self, encoding),
-            (Self::Auto, "gzip" | "zstd" | "aws-chunked")
+            (Self::Auto, "br" | "gzip" | "zstd" | "aws-chunked")
+                | (Self::Brotli, "br" | "aws-chunked")
                 | (Self::Gzip, "gzip" | "aws-chunked")
                 | (Self::Zstd, "zstd" | "aws-chunked")
         )
@@ -162,10 +166,10 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "MODE",
-        value_parser = ["auto", "gzip", "zstd", "off"],
+        value_parser = ["auto", "br", "brotli", "gzip", "zstd", "off"],
         hide_possible_values = true,
         conflicts_with = "no_encode",
-        help = "Compression mode [auto, gzip, zstd, off]"
+        help = "Compression mode [auto, br, gzip, zstd, off]"
     )]
     pub compress: Option<String>,
 

@@ -57,7 +57,15 @@ const COMPLETE_VALUES: &[FlagValue] = &[
 const COMPRESS_VALUES: &[FlagValue] = &[
     FlagValue {
         key: "auto",
-        value: "Request gzip or zstd",
+        value: "Request gzip, brotli, or zstd",
+    },
+    FlagValue {
+        key: "br",
+        value: "Request brotli compression",
+    },
+    FlagValue {
+        key: "brotli",
+        value: "Request brotli compression",
     },
     FlagValue {
         key: "gzip",

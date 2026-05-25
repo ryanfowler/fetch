@@ -1182,11 +1182,11 @@ mod tests {
     #[test]
     fn parse_file_rejects_invalid_compress_value() {
         let path = PathBuf::from("test/config");
-        let err = parse_file(&path, "compress = brotli\n").unwrap_err();
+        let err = parse_file(&path, "compress = deflate\n").unwrap_err();
 
         assert!(err.contains("line 1"));
-        assert!(err.contains("invalid value 'brotli' for option 'compress'"));
-        assert!(err.contains("must be one of [auto, gzip, zstd, off]"));
+        assert!(err.contains("invalid value 'deflate' for option 'compress'"));
+        assert!(err.contains("must be one of [auto, br, brotli, gzip, zstd, off]"));
     }
 
     #[test]
