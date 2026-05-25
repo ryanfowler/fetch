@@ -4608,6 +4608,26 @@ fn websocket_noninteractive_go_cases() {
     assert!(res.stderr.contains("GET") || res.stderr.contains("method"));
 }
 
+#[test]
+fn websocket_dry_run_prints_effective_handshake_headers() {
+    let res = run_fetch(&[
+        "ws://example.com/socket",
+        "--dry-run",
+        "-H",
+        "X-Test: yes",
+        "--bearer",
+        "token",
+    ]);
+
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(res.stderr.contains("> GET /socket HTTP/1.1"));
+    assert!(res.stderr.contains("> x-test: yes"));
+    assert!(res.stderr.contains("> authorization: Bearer token"));
+    assert!(res.stderr.contains("> accept: application/json, */*;q=0.5"));
+    assert!(res.stderr.contains("> user-agent: fetch/"));
+}
+
 #[cfg(unix)]
 #[test]
 fn websocket_interactive_pty_go_case() {
