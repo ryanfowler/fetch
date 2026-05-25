@@ -9,6 +9,7 @@ use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, USER_AGENT};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -26,6 +27,7 @@ const TEMP_EXE_SUFFIX: &str = ".__temp.exe";
 #[cfg(windows)]
 const SELF_DELETE_ENV: &str = "FETCH_INTERNAL_UPDATE_SELF_DELETE";
 const MAX_UPDATE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_UPDATE_CHECKSUM_BYTES: u64 = 1024;
 
 #[derive(Debug, Deserialize)]
 struct Release {
@@ -37,6 +39,13 @@ struct Release {
 struct Asset {
     name: String,
     browser_download_url: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ReleaseArtifact<'a> {
+    archive_name: &'a str,
+    archive_url: &'a str,
+    checksum_url: &'a str,
 }
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
@@ -134,9 +143,9 @@ async fn update_inner(
         return Ok(());
     }
 
-    let artifact_url = artifact_url(&latest).ok_or_else(|| {
+    let release_artifact = release_artifact(&latest).ok_or_else(|| {
         FetchError::Message(format!(
-            "no release artifact found for {}/{}",
+            "no release artifact and checksum found for {}/{}",
             goos(),
             goarch()
         ))
@@ -145,7 +154,9 @@ async fn update_inner(
         eprintln!("Downloading {}\n", latest.tag_name);
     }
 
-    let artifact = download_artifact(client, artifact_url, silent).await?;
+    let artifact = download_artifact(client, release_artifact.archive_url, silent).await?;
+    let checksum = download_checksum(client, release_artifact.checksum_url).await?;
+    verify_artifact_checksum(release_artifact.archive_name, &artifact, &checksum)?;
 
     let temp_dir = std::env::temp_dir().join(format!("fetch-update-{}", unique_suffix()));
     std::fs::create_dir_all(&temp_dir)?;
@@ -248,6 +259,78 @@ async fn download_artifact_with_limit(
     Ok(artifact)
 }
 
+async fn download_checksum(
+    client: &reqwest::Client,
+    checksum_url: &str,
+) -> Result<String, FetchError> {
+    let response = update_get(client, checksum_url).send().await?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "fetching artifact checksum: received status: {}",
+            response.status().as_u16()
+        )
+        .into());
+    }
+
+    if let Some(len) = response.content_length()
+        && len > MAX_UPDATE_CHECKSUM_BYTES
+    {
+        return Err(format!("update artifact checksum is too large: {len} bytes").into());
+    }
+
+    let mut checksum = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if checksum.len().saturating_add(chunk.len()) > MAX_UPDATE_CHECKSUM_BYTES as usize {
+            return Err("update artifact checksum exceeded maximum allowed size".into());
+        }
+        checksum.extend_from_slice(&chunk);
+    }
+
+    let checksum = String::from_utf8(checksum).map_err(|_| {
+        FetchError::Message("update artifact checksum is not valid UTF-8".to_string())
+    })?;
+    parse_sha256_checksum(&checksum)
+}
+
+fn parse_sha256_checksum(contents: &str) -> Result<String, FetchError> {
+    let digest: String = contents.trim_start().chars().take(64).collect();
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("update artifact checksum does not start with a SHA-256 digest".into());
+    }
+    Ok(digest.to_ascii_lowercase())
+}
+
+fn verify_artifact_checksum(
+    artifact_name: &str,
+    artifact: &[u8],
+    expected: &str,
+) -> Result<(), FetchError> {
+    let actual = sha256_hex(artifact);
+    if actual != expected {
+        return Err(FetchError::Message(format!(
+            "update artifact checksum mismatch for {artifact_name}: expected {expected}, got {actual}"
+        )));
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    hex_encode(&digest)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 fn update_get(client: &reqwest::Client, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
     client
         .get(url)
@@ -312,15 +395,15 @@ impl UpdateDownloadProgress {
     }
 }
 
-fn artifact_url(release: &Release) -> Option<&str> {
-    artifact_url_for_platform(release, goos(), goarch())
+fn release_artifact(release: &Release) -> Option<ReleaseArtifact<'_>> {
+    release_artifact_for_platform(release, goos(), goarch())
 }
 
-fn artifact_url_for_platform<'a>(
+fn release_artifact_for_platform<'a>(
     release: &'a Release,
     goos: &str,
     goarch: &str,
-) -> Option<&'a str> {
+) -> Option<ReleaseArtifact<'a>> {
     let want = format!(
         "fetch-{}-{}-{}.{}",
         release.tag_name,
@@ -328,11 +411,17 @@ fn artifact_url_for_platform<'a>(
         goarch,
         artifact_suffix_for_goos(goos)
     );
-    release
+    let archive = release.assets.iter().find(|asset| asset.name == want)?;
+    let checksum_name = format!("{want}.sha256");
+    let checksum = release
         .assets
         .iter()
-        .find(|asset| asset.name == want)
-        .map(|asset| asset.browser_download_url.as_str())
+        .find(|asset| asset.name == checksum_name)?;
+    Some(ReleaseArtifact {
+        archive_name: archive.name.as_str(),
+        archive_url: archive.browser_download_url.as_str(),
+        checksum_url: checksum.browser_download_url.as_str(),
+    })
 }
 
 #[cfg(windows)]
@@ -1206,28 +1295,39 @@ mod tests {
     }
 
     #[test]
-    fn artifact_url_matches_go_platform_names() {
+    fn release_artifact_matches_go_platform_names() {
+        let archive_name = format!(
+            "fetch-v1.2.3-{}-{}.{}",
+            goos(),
+            goarch(),
+            artifact_suffix_for_goos(goos())
+        );
         let release = Release {
             tag_name: "v1.2.3".to_string(),
-            assets: vec![Asset {
-                name: format!(
-                    "fetch-v1.2.3-{}-{}.{}",
-                    goos(),
-                    goarch(),
-                    artifact_suffix_for_goos(goos())
-                ),
-                browser_download_url: "https://example.test/artifact".to_string(),
-            }],
+            assets: vec![
+                Asset {
+                    name: archive_name.clone(),
+                    browser_download_url: "https://example.test/artifact".to_string(),
+                },
+                Asset {
+                    name: format!("{archive_name}.sha256"),
+                    browser_download_url: "https://example.test/artifact.sha256".to_string(),
+                },
+            ],
         };
 
         assert_eq!(
-            artifact_url(&release),
-            Some("https://example.test/artifact")
+            release_artifact(&release),
+            Some(ReleaseArtifact {
+                archive_name: archive_name.as_str(),
+                archive_url: "https://example.test/artifact",
+                checksum_url: "https://example.test/artifact.sha256",
+            })
         );
     }
 
     #[test]
-    fn artifact_url_uses_zip_for_windows_release_assets() {
+    fn release_artifact_uses_zip_for_windows_release_assets() {
         let release = Release {
             tag_name: "v1.2.3".to_string(),
             assets: vec![
@@ -1239,16 +1339,67 @@ mod tests {
                     name: "fetch-v1.2.3-windows-amd64.zip".to_string(),
                     browser_download_url: "https://example.test/windows".to_string(),
                 },
+                Asset {
+                    name: "fetch-v1.2.3-windows-amd64.zip.sha256".to_string(),
+                    browser_download_url: "https://example.test/windows.sha256".to_string(),
+                },
             ],
         };
 
         assert_eq!(
-            artifact_url_for_platform(&release, "windows", "amd64"),
-            Some("https://example.test/windows")
+            release_artifact_for_platform(&release, "windows", "amd64"),
+            Some(ReleaseArtifact {
+                archive_name: "fetch-v1.2.3-windows-amd64.zip",
+                archive_url: "https://example.test/windows",
+                checksum_url: "https://example.test/windows.sha256",
+            })
         );
         assert_eq!(
-            artifact_url_for_platform(&release, "windows", "arm64"),
+            release_artifact_for_platform(&release, "windows", "arm64"),
             None
+        );
+    }
+
+    #[test]
+    fn release_artifact_requires_checksum_sidecar() {
+        let release = Release {
+            tag_name: "v1.2.3".to_string(),
+            assets: vec![Asset {
+                name: "fetch-v1.2.3-linux-amd64.tar.gz".to_string(),
+                browser_download_url: "https://example.test/linux".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            release_artifact_for_platform(&release, "linux", "amd64"),
+            None
+        );
+    }
+
+    #[test]
+    fn update_artifact_checksum_accepts_valid_sidecar_digest() {
+        let artifact = b"verified release bytes";
+        let checksum = format!(
+            "{}  fetch-v1.2.3-linux-amd64.tar.gz\n",
+            sha256_hex(artifact)
+        );
+
+        let parsed = parse_sha256_checksum(&checksum).unwrap();
+
+        verify_artifact_checksum("fetch-v1.2.3-linux-amd64.tar.gz", artifact, &parsed).unwrap();
+    }
+
+    #[test]
+    fn update_artifact_checksum_rejects_wrong_digest() {
+        let artifact = b"tampered release bytes";
+        let checksum = "0000000000000000000000000000000000000000000000000000000000000000";
+
+        let err = verify_artifact_checksum("fetch-v1.2.3-linux-amd64.tar.gz", artifact, checksum)
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("update artifact checksum mismatch")
         );
     }
 
