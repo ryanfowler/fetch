@@ -303,7 +303,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         client: &client,
                         method: request_method,
                         headers: headers.clone(),
-                        body: request_body,
+                        body: request_body.clone(),
                         cli,
                         redirect_statuses,
                     },
@@ -312,6 +312,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 .await?;
                 let status = response.status();
                 if attempt < retry_count && should_retry_status(status) {
+                    ensure_request_body_replayable(&request_body, "retry")?;
                     let delay =
                         compute_delay(retry_delay, attempt, parse_retry_after(response.headers()));
                     print_retry(
@@ -340,6 +341,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     break Err(FetchError::Runtime(message));
                 }
                 if attempt < retry_count && is_retryable_error(&err) {
+                    ensure_request_body_replayable(&request_body, "retry")?;
                     let delay = compute_delay(retry_delay, attempt, Duration::ZERO);
                     print_retry(cli, attempt + 2, total_attempts, delay, &err.to_string());
                     tokio::time::sleep(delay).await;
@@ -1681,6 +1683,7 @@ async fn apply_digest_challenge(
     let challenged_url = response.url().clone();
     let (challenged_method, challenged_body) =
         digest_challenged_request(context.method, context.body, &context.redirect_statuses);
+    ensure_request_body_replayable(&challenged_body, "digest authentication")?;
     let auth = match digest::response(
         challenged_method.as_str(),
         &request_target(&challenged_url),
@@ -2358,6 +2361,15 @@ fn request_body_replayable(body: &RequestBody) -> bool {
         body.as_ref().map(|body| &body.source),
         Some(RequestBodySource::Stdin)
     )
+}
+
+fn ensure_request_body_replayable(body: &RequestBody, action: &str) -> Result<(), FetchError> {
+    if request_body_replayable(body) {
+        return Ok(());
+    }
+    Err(FetchError::Runtime(format!(
+        "request body from stdin cannot be replayed for {action}"
+    )))
 }
 
 fn print_redirect_status(cli: &Cli, status: StatusCode) {

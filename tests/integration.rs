@@ -2587,6 +2587,32 @@ fn digest_auth_replays_after_challenge() {
 }
 
 #[test]
+fn digest_auth_rejects_stdin_body_replay_after_challenge() {
+    let server = TestServer::start(|req| {
+        assert!(req.header("authorization").is_empty());
+        TestResponse::status(401, "Unauthorized", "").header(
+            "WWW-Authenticate",
+            r#"Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5""#,
+        )
+    });
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            stdin: Some("hello=world".to_string()),
+            ..Default::default()
+        },
+        &[&server.url, "--digest", "user:pass", "--data", "@-"],
+    );
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("request body from stdin cannot be replayed for digest authentication"),
+        "stderr:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
 fn digest_auth_drain_is_bounded_for_large_challenge_body() {
     let server = PartialBodyReplayServer::start(
         401,
@@ -2695,6 +2721,36 @@ fn retry_statuses_and_request_body_replay() {
         "payload",
     ]);
     assert_exit(&res, 0);
+}
+
+#[test]
+fn retry_status_rejects_stdin_body_replay() {
+    let server = TestServer::start(|_| {
+        TestResponse::status(503, "Service Unavailable", "retry").header("Connection", "keep-alive")
+    });
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            stdin: Some("payload".to_string()),
+            ..Default::default()
+        },
+        &[
+            &server.url,
+            "--retry",
+            "1",
+            "--retry-delay",
+            FAST_RETRY_DELAY,
+            "--data",
+            "@-",
+        ],
+    );
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("request body from stdin cannot be replayed for retry"),
+        "stderr:\n{}",
+        res.stderr
+    );
 }
 
 #[test]
