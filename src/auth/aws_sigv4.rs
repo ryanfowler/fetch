@@ -324,12 +324,19 @@ fn canonical_uri_path(url: &Url) -> String {
 }
 
 fn canonical_query(url: &Url) -> String {
+    let Some(query) = url.query() else {
+        return String::new();
+    };
+
     let mut pairs = Vec::new();
-    for (key, value) in url.query_pairs() {
+    for part in query.split('&') {
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        let key = percent_encoding::percent_decode(key.as_bytes()).collect::<Vec<_>>();
+        let value = percent_encoding::percent_decode(value.as_bytes()).collect::<Vec<_>>();
         pairs.push(format!(
             "{}={}",
-            aws_percent_encode(key.as_bytes()),
-            aws_percent_encode(value.as_bytes())
+            aws_percent_encode(&key),
+            aws_percent_encode(&value)
         ));
     }
     pairs.sort();
@@ -639,6 +646,13 @@ mod tests {
             canonical_query(&url),
             "%C3%A9=first&slash=%2F&space=bang%21&space=two%20words&z=last"
         );
+    }
+
+    #[test]
+    fn test_canonical_query_treats_plus_as_literal() {
+        let url = Url::parse("https://example.com/?plus=a+b&space=a%20b").unwrap();
+
+        assert_eq!(canonical_query(&url), "plus=a%2Bb&space=a%20b");
     }
 
     #[test]
