@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 
 use crate::error::FetchError;
@@ -264,7 +267,11 @@ impl TempEditFile {
                 extension
             );
             let path = dir.join(filename);
-            let file = OpenOptions::new().write(true).create_new(true).open(&path);
+            let mut opts = OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            opts.mode(0o600);
+            let file = opts.open(&path);
             let mut file = match file {
                 Ok(file) => file,
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -428,6 +435,17 @@ mod tests {
             HeaderValue::from_static("application/json; charset=utf-8"),
         );
         assert_eq!(extension_for_content_type(&headers), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_edit_file_is_user_readable_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempEditFile::create(".json", br#"{"token":"secret"}"#).unwrap();
+
+        let mode = std::fs::metadata(&temp.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[cfg(unix)]
