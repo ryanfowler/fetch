@@ -97,7 +97,7 @@ jobs:
         env:
           FETCH_VERSION: ${{ env.RELEASE_VERSION }}
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx_deployment_target || '' }}
-          RUSTFLAGS: ${{ matrix.rustflags || '' }}
+          RUSTFLAGS: --cfg reqwest_unstable ${{ matrix.rustflags || '' }}
         run: |
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             cargo zigbuild --release --locked --target "${{ matrix.cargo_target }}.${LINUX_GLIBC_VERSION}"
