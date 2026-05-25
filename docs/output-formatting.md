@@ -327,7 +327,7 @@ fetch -o output.json --clobber example.com/data
 
 ## Pager
 
-When stdout is a terminal, `fetch` pipes response body output through `less` for easier navigation. The `-F` flag makes `less` exit immediately when the output fits on one screen.
+When stdout is a terminal, `fetch` pipes response body output through `less` for easier navigation. Image responses bypass the pager so native terminal image protocols are interpreted by the terminal. The `-F` flag makes `less` exit immediately when the output fits on one screen.
 
 ### Disable Pager
 
