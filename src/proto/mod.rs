@@ -217,7 +217,7 @@ pub(crate) fn grpc_request_body(
         Vec::new()
     };
     Ok(Some(crate::http::RequestBodyPayload::from_bytes(
-        framing::frame(&raw, false),
+        framing::frame(&raw, false).map_err(|err| FetchError::Message(err.to_string()))?,
         Some(grpc_content_type()),
     )))
 }
@@ -369,7 +369,7 @@ fn frame_raw_body(body: crate::http::RequestBody) -> Result<crate::http::Request
         .map(|(bytes, _)| bytes)
         .unwrap_or_default();
     Ok(Some(crate::http::RequestBodyPayload::from_bytes(
-        framing::frame(&raw, false),
+        framing::frame(&raw, false).map_err(|err| FetchError::Message(err.to_string()))?,
         Some(grpc_content_type()),
     )))
 }
@@ -444,7 +444,9 @@ pub fn stream_json_to_grpc_frames(
         deserializer
             .end()
             .map_err(|err| ProtoError::Message(format!("failed to decode JSON message: {err}")))?;
-        out.extend_from_slice(&framing::frame(&msg.encode_to_vec(), false));
+        let frame = framing::frame(&msg.encode_to_vec(), false)
+            .map_err(|err| ProtoError::Message(err.to_string()))?;
+        out.extend_from_slice(&frame);
     }
     Ok(out)
 }
@@ -959,7 +961,7 @@ mod tests {
         let method = schema
             .find_method("streampkg.StreamService/ClientStream")
             .unwrap();
-        let body = framing::frame(b"\x08\x03", false);
+        let body = framing::frame(b"\x08\x03", false).unwrap();
 
         let out = format_grpc_stream_with_descriptor(&body, &method.output()).unwrap();
 

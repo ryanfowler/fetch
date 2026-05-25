@@ -4196,7 +4196,7 @@ mod tests {
     fn grpc_request_body_frames_empty_and_raw_bodies() {
         let empty = proto::grpc_request_body(None, None).unwrap();
         let empty = request_body_into_bytes(empty).unwrap().unwrap();
-        assert_eq!(empty.0, crate::grpc::framing::frame(&[], false));
+        assert_eq!(empty.0, crate::grpc::framing::frame(&[], false).unwrap());
         assert_eq!(empty.1.as_deref(), Some("application/grpc+proto"));
 
         let framed = proto::grpc_request_body(
@@ -4205,7 +4205,10 @@ mod tests {
         )
         .unwrap();
         let framed = request_body_into_bytes(framed).unwrap().unwrap();
-        assert_eq!(framed.0, crate::grpc::framing::frame(b"hello", false));
+        assert_eq!(
+            framed.0,
+            crate::grpc::framing::frame(b"hello", false).unwrap()
+        );
     }
 
     #[test]
