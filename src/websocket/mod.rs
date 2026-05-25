@@ -152,7 +152,10 @@ fn interactive_for_mode(mode: Option<&str>, all_terms: bool) -> Result<bool, Fet
 }
 
 fn websocket_initial_message(cli: &Cli) -> Result<Option<Vec<u8>>, FetchError> {
-    Ok(crate::http::request_body(cli)?.map(|(bytes, _content_type)| bytes))
+    Ok(
+        crate::http::request_body_into_bytes(crate::http::request_body(cli)?)?
+            .map(|(bytes, _content_type)| bytes),
+    )
 }
 
 fn read_stdin_messages() -> Result<Vec<String>, FetchError> {

@@ -13,7 +13,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap};
 
 use crate::error::FetchError;
 
-use super::RequestBody;
+use super::{RequestBody, request_body_into_bytes};
 
 pub(crate) fn edit_request_body(
     headers: &HeaderMap,
@@ -28,12 +28,16 @@ fn edit_request_body_with_editor(
     body: RequestBody,
     editor: Vec<String>,
 ) -> Result<RequestBody, FetchError> {
+    let body = request_body_into_bytes(body)?;
     let content_type = body
         .as_ref()
         .and_then(|(_, content_type)| content_type.clone());
     let input = body.map(|(bytes, _)| bytes).unwrap_or_default();
     let edited = edit_bytes_with_editor(headers, &input, editor)?;
-    Ok(Some((edited, content_type)))
+    Ok(Some(super::RequestBodyPayload::from_bytes(
+        edited,
+        content_type,
+    )))
 }
 
 fn edit_bytes_with_editor(
@@ -308,6 +312,8 @@ fn absolute_path(path: PathBuf) -> Result<PathBuf, FetchError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::http::RequestBodyPayload;
+
     use super::*;
     use reqwest::header::HeaderValue;
 
@@ -464,7 +470,7 @@ printf '%s' '{"edited":true}' > "$1"
 
         let body = edit_request_body_with_editor(
             &headers,
-            Some((
+            Some(RequestBodyPayload::from_bytes(
                 br#"{"template":true}"#.to_vec(),
                 Some("application/json".to_string()),
             )),
@@ -473,6 +479,7 @@ printf '%s' '{"edited":true}' > "$1"
         .unwrap()
         .unwrap();
 
+        let body = request_body_into_bytes(Some(body)).unwrap().unwrap();
         assert_eq!(body.0, br#"{"edited":true}"#);
         assert_eq!(body.1.as_deref(), Some("application/json"));
     }
@@ -484,7 +491,7 @@ printf '%s' '{"edited":true}' > "$1"
         let editor = write_script(dir.path(), "editor", "#!/bin/sh\n: > \"$1\"\n");
         let err = edit_request_body_with_editor(
             &HeaderMap::new(),
-            Some((b"template".to_vec(), None)),
+            Some(RequestBodyPayload::from_bytes(b"template".to_vec(), None)),
             vec![editor.to_string_lossy().into_owned()],
         )
         .unwrap_err()
@@ -503,7 +510,7 @@ printf '%s' '{"edited":true}' > "$1"
         let editor = write_script(dir.path(), "editor", "#!/bin/sh\nexit 7\n");
         let err = edit_request_body_with_editor(
             &HeaderMap::new(),
-            Some((b"template".to_vec(), None)),
+            Some(RequestBodyPayload::from_bytes(b"template".to_vec(), None)),
             vec![editor.to_string_lossy().into_owned()],
         )
         .unwrap_err()

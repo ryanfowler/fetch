@@ -1,6 +1,12 @@
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
+use bytes::Bytes;
+use futures_util::Stream;
 use thiserror::Error;
+use tokio::io::{AsyncRead, ReadBuf};
 
 #[derive(Debug, Error)]
 pub enum MultipartError {
@@ -66,46 +72,63 @@ impl Multipart {
 
     pub fn open(&self) -> Result<Vec<u8>, MultipartError> {
         let mut out = Vec::new();
+        self.write_to(&mut out)?;
+        Ok(out)
+    }
+
+    pub fn write_to<W: Write>(&self, mut out: W) -> Result<(), MultipartError> {
         for field in &self.fields {
-            out.extend_from_slice(b"--");
-            out.extend_from_slice(self.boundary.as_bytes());
-            out.extend_from_slice(b"\r\n");
+            out.write_all(b"--")?;
+            out.write_all(self.boundary.as_bytes())?;
+            out.write_all(b"\r\n")?;
 
             match &field.value {
                 FieldValue::Text(value) => {
-                    out.extend_from_slice(b"Content-Disposition: form-data; name=\"");
-                    out.extend_from_slice(escape_multipart_string(&field.name).as_bytes());
-                    out.extend_from_slice(b"\"\r\n\r\n");
-                    out.extend_from_slice(value.as_bytes());
-                    out.extend_from_slice(b"\r\n");
+                    out.write_all(text_header(&field.name).as_bytes())?;
+                    out.write_all(value.as_bytes())?;
+                    out.write_all(b"\r\n")?;
                 }
                 FieldValue::File(path) => {
-                    let filename = path
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    validate_multipart_disposition_value("filename", &filename)?;
-                    let bytes = std::fs::read(path)?;
-                    let content_type = detect_content_type(path, &bytes);
-
-                    out.extend_from_slice(b"Content-Disposition: form-data; name=\"");
-                    out.extend_from_slice(escape_multipart_string(&field.name).as_bytes());
-                    out.extend_from_slice(b"\"; filename=\"");
-                    out.extend_from_slice(escape_multipart_string(&filename).as_bytes());
-                    out.extend_from_slice(b"\"\r\n");
-                    out.extend_from_slice(b"Content-Type: ");
-                    out.extend_from_slice(content_type.as_bytes());
-                    out.extend_from_slice(b"\r\n\r\n");
-                    out.extend_from_slice(&bytes);
-                    out.extend_from_slice(b"\r\n");
+                    out.write_all(file_header(&field.name, path)?.as_bytes())?;
+                    let mut file = std::fs::File::open(path)?;
+                    std::io::copy(&mut file, &mut out)?;
+                    out.write_all(b"\r\n")?;
                 }
             }
         }
 
-        out.extend_from_slice(b"--");
-        out.extend_from_slice(self.boundary.as_bytes());
-        out.extend_from_slice(b"--\r\n");
-        Ok(out)
+        out.write_all(b"--")?;
+        out.write_all(self.boundary.as_bytes())?;
+        out.write_all(b"--\r\n")?;
+        Ok(())
+    }
+
+    pub fn content_len(&self) -> Result<u64, MultipartError> {
+        let mut len = 0_u64;
+        for field in &self.fields {
+            len += 2 + self.boundary.len() as u64 + 2;
+            match &field.value {
+                FieldValue::Text(value) => {
+                    len += text_header(&field.name).len() as u64;
+                    len += value.len() as u64;
+                }
+                FieldValue::File(path) => {
+                    len += file_header(&field.name, path)?.len() as u64;
+                    len += std::fs::metadata(path)?.len();
+                }
+            }
+            len += 2;
+        }
+        len += 2 + self.boundary.len() as u64 + 4;
+        Ok(len)
+    }
+
+    pub fn stream(&self) -> MultipartStream {
+        MultipartStream {
+            multipart: self.clone(),
+            index: 0,
+            state: MultipartStreamState::Field,
+        }
     }
 }
 
@@ -140,6 +163,29 @@ fn escape_multipart_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn text_header(name: &str) -> String {
+    format!(
+        "Content-Disposition: form-data; name=\"{}\"\r\n\r\n",
+        escape_multipart_string(name)
+    )
+}
+
+fn file_header(name: &str, path: &Path) -> Result<String, MultipartError> {
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    validate_multipart_disposition_value("filename", &filename)?;
+    let content_type = detect_content_type(path)?;
+
+    Ok(format!(
+        "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
+        escape_multipart_string(name),
+        escape_multipart_string(&filename),
+        content_type,
+    ))
+}
+
 fn validate_multipart_disposition_value(
     kind: &'static str,
     value: &str,
@@ -150,11 +196,14 @@ fn validate_multipart_disposition_value(
     Ok(())
 }
 
-fn detect_content_type(path: &Path, bytes: &[u8]) -> &'static str {
+fn detect_content_type(path: &Path) -> Result<&'static str, MultipartError> {
     if let Some(content_type) = detect_type_by_extension(path) {
-        return content_type;
+        return Ok(content_type);
     }
-    sniff_content_type(bytes)
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = [0_u8; 512];
+    let len = file.read(&mut bytes)?;
+    Ok(sniff_content_type(&bytes[..len]))
 }
 
 fn detect_type_by_extension(path: &Path) -> Option<&'static str> {
@@ -198,6 +247,91 @@ fn sniff_content_type(bytes: &[u8]) -> &'static str {
         "application/pdf"
     } else {
         "application/octet-stream"
+    }
+}
+
+pub struct MultipartStream {
+    multipart: Multipart,
+    index: usize,
+    state: MultipartStreamState,
+}
+
+enum MultipartStreamState {
+    Field,
+    File(tokio::fs::File),
+    FileCrlf,
+    Done,
+}
+
+impl Stream for MultipartStream {
+    type Item = Result<Bytes, MultipartError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match &mut self.state {
+                MultipartStreamState::Field => {
+                    if self.index >= self.multipart.fields.len() {
+                        self.state = MultipartStreamState::Done;
+                        let closing = format!("--{}--\r\n", self.multipart.boundary);
+                        return Poll::Ready(Some(Ok(Bytes::from(closing))));
+                    }
+
+                    let field = &self.multipart.fields[self.index];
+                    match &field.value {
+                        FieldValue::Text(value) => {
+                            let mut chunk = Vec::new();
+                            chunk.extend_from_slice(b"--");
+                            chunk.extend_from_slice(self.multipart.boundary.as_bytes());
+                            chunk.extend_from_slice(b"\r\n");
+                            chunk.extend_from_slice(text_header(&field.name).as_bytes());
+                            chunk.extend_from_slice(value.as_bytes());
+                            chunk.extend_from_slice(b"\r\n");
+                            self.index += 1;
+                            return Poll::Ready(Some(Ok(Bytes::from(chunk))));
+                        }
+                        FieldValue::File(path) => {
+                            let header = match file_header(&field.name, path) {
+                                Ok(header) => header,
+                                Err(err) => return Poll::Ready(Some(Err(err))),
+                            };
+                            let file = match std::fs::File::open(path) {
+                                Ok(file) => tokio::fs::File::from_std(file),
+                                Err(err) => return Poll::Ready(Some(Err(err.into()))),
+                            };
+                            let mut chunk = Vec::new();
+                            chunk.extend_from_slice(b"--");
+                            chunk.extend_from_slice(self.multipart.boundary.as_bytes());
+                            chunk.extend_from_slice(b"\r\n");
+                            chunk.extend_from_slice(header.as_bytes());
+                            self.state = MultipartStreamState::File(file);
+                            return Poll::Ready(Some(Ok(Bytes::from(chunk))));
+                        }
+                    }
+                }
+                MultipartStreamState::File(file) => {
+                    let mut bytes = [0_u8; 8192];
+                    let mut read_buf = ReadBuf::new(&mut bytes);
+                    match Pin::new(file).poll_read(cx, &mut read_buf) {
+                        Poll::Ready(Ok(())) if read_buf.filled().is_empty() => {
+                            self.state = MultipartStreamState::FileCrlf;
+                        }
+                        Poll::Ready(Ok(())) => {
+                            return Poll::Ready(Some(Ok(Bytes::copy_from_slice(
+                                read_buf.filled(),
+                            ))));
+                        }
+                        Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err.into()))),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                MultipartStreamState::FileCrlf => {
+                    self.index += 1;
+                    self.state = MultipartStreamState::Field;
+                    return Poll::Ready(Some(Ok(Bytes::from_static(b"\r\n"))));
+                }
+                MultipartStreamState::Done => return Poll::Ready(None),
+            }
+        }
     }
 }
 

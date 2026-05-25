@@ -188,30 +188,35 @@ pub fn method_for_url(schema: &Schema, url: &url::Url) -> Result<MethodDescripto
         .map_err(|err| FetchError::Message(err.to_string()))
 }
 
-pub fn grpc_request_body(
+pub(crate) fn grpc_request_body(
     body: crate::http::RequestBody,
     method: Option<&MethodDescriptor>,
 ) -> Result<crate::http::RequestBody, FetchError> {
     let Some(method) = method else {
-        return Ok(frame_raw_body(body));
+        return frame_raw_body(body);
     };
 
     if method.is_client_streaming() {
-        let Some((bytes, _)) = body else {
+        let Some((bytes, _)) = crate::http::request_body_into_bytes(body)? else {
             return Ok(None);
         };
         return stream_json_to_grpc_frames(&bytes, &method.input())
-            .map(|bytes| Some((bytes, Some(grpc_content_type()))))
+            .map(|bytes| {
+                Some(crate::http::RequestBodyPayload::from_bytes(
+                    bytes,
+                    Some(grpc_content_type()),
+                ))
+            })
             .map_err(|err| FetchError::Message(err.to_string()));
     }
 
-    let raw = if let Some((bytes, _)) = body {
+    let raw = if let Some((bytes, _)) = crate::http::request_body_into_bytes(body)? {
         json_to_protobuf(&bytes, &method.input())
             .map_err(|err| FetchError::Message(err.to_string()))?
     } else {
         Vec::new()
     };
-    Ok(Some((
+    Ok(Some(crate::http::RequestBodyPayload::from_bytes(
         framing::frame(&raw, false),
         Some(grpc_content_type()),
     )))
@@ -359,12 +364,14 @@ fn field_type(field: &FieldDescriptor) -> String {
     }
 }
 
-fn frame_raw_body(body: crate::http::RequestBody) -> crate::http::RequestBody {
-    let raw = body
-        .as_ref()
-        .map(|(bytes, _)| bytes.as_slice())
+fn frame_raw_body(body: crate::http::RequestBody) -> Result<crate::http::RequestBody, FetchError> {
+    let raw = crate::http::request_body_into_bytes(body)?
+        .map(|(bytes, _)| bytes)
         .unwrap_or_default();
-    Some((framing::frame(raw, false), Some(grpc_content_type())))
+    Ok(Some(crate::http::RequestBodyPayload::from_bytes(
+        framing::frame(&raw, false),
+        Some(grpc_content_type()),
+    )))
 }
 
 pub fn json_to_protobuf(json: &[u8], desc: &MessageDescriptor) -> Result<Vec<u8>, ProtoError> {

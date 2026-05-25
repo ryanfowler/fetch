@@ -23,13 +23,14 @@ use flate2::read::GzDecoder;
 use futures_util::stream;
 use http_body_util::BodyExt;
 use reqwest::header::{
-    ACCEPT, ACCEPT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RANGE, RETRY_AFTER,
-    USER_AGENT, WWW_AUTHENTICATE,
+    ACCEPT, ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
+    LOCATION, RANGE, RETRY_AFTER, USER_AGENT, WWW_AUTHENTICATE,
 };
 use reqwest::redirect;
-use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
+use reqwest::{Body, Client, Method, RequestBuilder, Response, StatusCode};
+use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio_util::io::StreamReader;
+use tokio_util::io::{ReaderStream, StreamReader};
 use tower::{Layer, Service};
 use url::Url;
 
@@ -59,8 +60,32 @@ use crate::timing::{self, AttemptTiming, DnsTiming, ResponseTiming};
 mod edit;
 pub mod multipart;
 
-pub(crate) type RequestBody = Option<(Vec<u8>, Option<String>)>;
+pub(crate) type RequestBody = Option<RequestBodyPayload>;
+pub(crate) type MaterializedRequestBody = Option<(Vec<u8>, Option<String>)>;
 type AsyncReadBox = Pin<Box<dyn AsyncRead + Send>>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct RequestBodyPayload {
+    source: RequestBodySource,
+    content_type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum RequestBodySource {
+    Bytes(Bytes),
+    File { path: String, len: u64 },
+    Stdin,
+    Multipart(multipart::Multipart),
+}
+
+impl RequestBodyPayload {
+    pub(crate) fn from_bytes(bytes: Vec<u8>, content_type: Option<String>) -> Self {
+        Self {
+            source: RequestBodySource::Bytes(Bytes::from(bytes)),
+            content_type,
+        }
+    }
+}
 
 const MAX_BUFFERED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DISCARDED_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -126,14 +151,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     if let Some(session) = &session {
         builder = builder.cookie_provider(session.cookie_provider());
     }
-    let redirect_history = RedirectHistory::default();
-    builder = builder.redirect(redirect_policy_with_history(
-        cli.redirects,
-        cli.verbose,
-        cli.silent,
-        redirect_history.clone(),
-        cli.color.clone(),
-    ));
+    builder = builder.redirect(redirect::Policy::none());
     let client = builder.build()?;
     if cli.grpc && grpc_method.is_none() && grpc_request_requires_schema(cli) {
         let schema = crate::grpc::reflection::schema_for_call(cli, &url, &client).await?;
@@ -176,16 +194,14 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     if cli.dry_run {
         let mut dry_run_headers = headers.clone();
         if let Some(config) = &aws_config {
-            aws_sigv4::sign(
+            apply_aws_sigv4(
+                cli,
                 method.as_str(),
                 &url,
                 &mut dry_run_headers,
-                request_body_bytes(&body),
+                &body,
                 config,
-                time::OffsetDateTime::now_utc(),
-                aws_unsigned_payload(cli, config),
-            )
-            .map_err(|err| FetchError::Message(err.to_string()))?;
+            )?;
         }
         apply_builder_authorization_headers(&mut dry_run_headers, cli, None)?;
         print_request_metadata(cli, &method, &url, &dry_run_headers, &body, http_version);
@@ -198,67 +214,98 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let total_attempts = retry_count + 1;
     let mut attempt = 0;
     let result = loop {
-        let mut attempt_headers = headers.clone();
-        if cli.verbose >= 2 && !cli.silent {
-            print_request_metadata(cli, &method, &url, &attempt_headers, &body, http_version);
-        }
-        if cli.verbose >= 3
-            && !cli.silent
-            && let Some(dns) = dns_resolution
-                .as_ref()
-                .and_then(|resolution| resolution.timing.as_ref())
-        {
-            print_dns_debug(cli, dns);
-        }
-        if let Some(config) = &aws_config {
-            aws_sigv4::sign(
-                method.as_str(),
-                &url,
-                &mut attempt_headers,
-                request_body_bytes(&body),
-                config,
-                time::OffsetDateTime::now_utc(),
-                aws_unsigned_payload(cli, config),
-            )
-            .map_err(|err| FetchError::Message(err.to_string()))?;
-        }
-
-        redirect_history.clear();
-        let req = build_request(
-            &client,
-            method.clone(),
-            url.clone(),
-            attempt_headers,
-            body.clone(),
-            cli,
-            None,
-        )?;
+        let mut request_method = method.clone();
+        let mut request_url = url.clone();
+        let mut request_body = body.clone();
+        let mut redirect_statuses = Vec::new();
+        let mut redirect_count = 0_usize;
         let mut timing = AttemptTiming::start();
-        timing.set_dns(
-            dns_resolution
-                .as_ref()
-                .and_then(|resolution| resolution.timing.as_ref())
-                .map(|dns| dns.duration),
-        );
-        connect_timing.clear();
-        match req.send().await {
+        let attempt_result = loop {
+            let mut attempt_headers = headers.clone();
+            if cli.verbose >= 2 && !cli.silent {
+                print_request_metadata(
+                    cli,
+                    &request_method,
+                    &request_url,
+                    &attempt_headers,
+                    &request_body,
+                    http_version,
+                );
+            }
+            if cli.verbose >= 3
+                && !cli.silent
+                && let Some(dns) = dns_resolution
+                    .as_ref()
+                    .and_then(|resolution| resolution.timing.as_ref())
+            {
+                print_dns_debug(cli, dns);
+            }
+            if let Some(config) = &aws_config {
+                apply_aws_sigv4(
+                    cli,
+                    request_method.as_str(),
+                    &request_url,
+                    &mut attempt_headers,
+                    &request_body,
+                    config,
+                )?;
+            }
+
+            let req = build_request(
+                &client,
+                request_method.clone(),
+                request_url.clone(),
+                attempt_headers,
+                request_body.clone(),
+                cli,
+                None,
+            )?;
+            timing.set_dns(
+                dns_resolution
+                    .as_ref()
+                    .and_then(|resolution| resolution.timing.as_ref())
+                    .map(|dns| dns.duration),
+            );
+            connect_timing.clear();
+            match req.send().await {
+                Ok(response) => {
+                    if let Some(redirect) = redirect_target(cli, &response, redirect_count)? {
+                        timing.mark_response_headers();
+                        timing.set_connect(connect_timing.duration());
+                        print_redirect_status(cli, response.status());
+                        redirect_statuses.push(response.status());
+                        let (next_method, next_body) =
+                            redirected_request(request_method, request_body, response.status())?;
+                        drain_response_body_bounded(response).await;
+                        request_method = next_method;
+                        request_url = redirect;
+                        request_body = next_body;
+                        redirect_count += 1;
+                        continue;
+                    }
+                    break Ok(response);
+                }
+                Err(err) => break Err(err),
+            }
+        };
+        match attempt_result {
             Ok(response) => {
                 timing.mark_response_headers();
                 timing.set_connect(connect_timing.duration());
                 if cli.verbose >= 3 && !cli.silent {
                     let connect_target =
-                        connect_debug_target(&response, &url, dns_resolution.as_ref());
+                        connect_debug_target(&response, &request_url, dns_resolution.as_ref());
                     timing::print_debug_lines(&timing, &connect_target, cli.color.as_deref());
                 }
                 let response = apply_digest_challenge(
                     response,
                     DigestRetryContext {
                         client: &client,
-                        method: method.clone(),
+                        method: request_method,
                         headers: headers.clone(),
-                        body: body.clone(),
+                        body: request_body,
                         cli,
-                        redirect_statuses: redirect_history.statuses(),
+                        redirect_statuses,
                     },
                     digest_credentials.as_ref(),
                 )
@@ -730,8 +777,8 @@ fn print_request_metadata(
     printer.push_str("\n");
     let mut lines = header_lines(headers);
     lines.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
-    if let Some((bytes, _)) = body {
-        lines.push(("content-length".to_string(), bytes.len().to_string()));
+    if let Some(len) = request_body_content_len(body) {
+        lines.push(("content-length".to_string(), len.to_string()));
     }
     let host = headers
         .get(reqwest::header::HOST)
@@ -767,12 +814,29 @@ fn print_request_metadata(
 }
 
 fn print_dry_run_body(cli: &Cli, body: &RequestBody) -> Result<(), FetchError> {
-    let Some((bytes, _)) = body else {
+    let Some(body) = body else {
         return Ok(());
     };
     if cli.verbose < 2 {
         eprintln!();
     }
+    if matches!(body.source, RequestBodySource::Stdin) {
+        let mut bytes = Vec::new();
+        std::io::stdin().read_to_end(&mut bytes)?;
+        return print_dry_run_bytes(cli, &bytes);
+    }
+    let preview = request_body_preview(body)?;
+    if is_printable(&preview) {
+        write_request_body_to_stderr(body)?;
+    } else {
+        let mut printer = core::Printer::stderr(cli.color.as_deref());
+        core::write_warning_msg_no_flush(&mut printer, "the request body appears to be binary");
+        flush_stderr(printer);
+    }
+    Ok(())
+}
+
+fn print_dry_run_bytes(cli: &Cli, bytes: &[u8]) -> Result<(), FetchError> {
     if is_printable(bytes) {
         std::io::stderr().write_all(bytes)?;
     } else {
@@ -1516,18 +1580,27 @@ fn build_request(
     client: &Client,
     method: Method,
     url: Url,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: RequestBody,
     cli: &Cli,
     authorization: Option<&str>,
 ) -> Result<RequestBuilder, FetchError> {
+    if let Some(len) = request_body_content_len(&body)
+        && !headers.contains_key(CONTENT_LENGTH)
+    {
+        headers.insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&len.to_string())
+                .expect("content length is a valid header value"),
+        );
+    }
     let mut req = client.request(method, url).headers(headers);
     if let Some(version) = reqwest_request_version_for_cli(cli)? {
         req = req.version(version);
     }
 
-    if let Some((body, _content_type)) = body {
-        req = req.body(body);
+    if let Some(body) = body {
+        req = req.body(request_body_to_reqwest_body(body)?);
     }
 
     let mut authorization_headers = HeaderMap::new();
@@ -1679,12 +1752,222 @@ fn aws_unsigned_payload(cli: &Cli, config: &aws_sigv4::Config) -> bool {
     config.service == "s3" && cli.data.as_deref() == Some("@-") && !cli.data_is_literal
 }
 
+fn apply_aws_sigv4(
+    cli: &Cli,
+    method: &str,
+    url: &Url,
+    headers: &mut HeaderMap,
+    body: &RequestBody,
+    config: &aws_sigv4::Config,
+) -> Result<(), FetchError> {
+    let unsigned_payload = aws_unsigned_payload(cli, config);
+    let body_bytes = request_body_bytes(body);
+    let content_sha256 = HeaderName::from_static("x-amz-content-sha256");
+    if body_bytes.is_none() && !unsigned_payload && !headers.contains_key(&content_sha256) {
+        let hash = request_body_sha256_hex(body)?;
+        headers.insert(
+            content_sha256,
+            HeaderValue::from_str(&hash)
+                .map_err(|err| FetchError::Message(format!("invalid AWS payload hash: {err}")))?,
+        );
+    }
+    aws_sigv4::sign(
+        method,
+        url,
+        headers,
+        body_bytes,
+        config,
+        time::OffsetDateTime::now_utc(),
+        unsigned_payload,
+    )
+    .map_err(|err| FetchError::Message(err.to_string()))
+}
+
+fn request_body_sha256_hex(body: &RequestBody) -> Result<String, FetchError> {
+    let Some(body) = body else {
+        return hex_sha256_stream(std::io::empty());
+    };
+    let mut hasher = Sha256::new();
+    match &body.source {
+        RequestBodySource::Bytes(bytes) => hasher.update(bytes),
+        RequestBodySource::File { path, .. } => {
+            hash_reader(&mut hasher, std::fs::File::open(path)?)?;
+        }
+        RequestBodySource::Multipart(multipart) => {
+            let mut writer = Sha256Writer(&mut hasher);
+            multipart
+                .write_to(&mut writer)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+        }
+        RequestBodySource::Stdin => {
+            return Err(FetchError::Message(
+                "AWS SigV4 cannot sign a streaming stdin request body unless x-amz-content-sha256 is set or S3 unsigned payload is used".to_string(),
+            ));
+        }
+    }
+    Ok(hex_encode(hasher.finalize().as_slice()))
+}
+
+fn hash_reader(hasher: &mut Sha256, mut reader: impl Read) -> Result<(), FetchError> {
+    let mut buf = [0_u8; 8192];
+    loop {
+        let len = reader.read(&mut buf)?;
+        if len == 0 {
+            return Ok(());
+        }
+        hasher.update(&buf[..len]);
+    }
+}
+
+fn hex_sha256_stream(reader: impl Read) -> Result<String, FetchError> {
+    let mut hasher = Sha256::new();
+    hash_reader(&mut hasher, reader)?;
+    Ok(hex_encode(hasher.finalize().as_slice()))
+}
+
+struct Sha256Writer<'a>(&'a mut Sha256);
+
+impl Write for Sha256Writer<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
 fn request_body_bytes(body: &RequestBody) -> Option<&[u8]> {
-    body.as_ref().map(|(bytes, _)| bytes.as_slice())
+    match body.as_ref().map(|body| &body.source) {
+        Some(RequestBodySource::Bytes(bytes)) => Some(bytes.as_ref()),
+        _ => None,
+    }
+}
+
+fn request_body_content_len(body: &RequestBody) -> Option<u64> {
+    match body.as_ref()? {
+        RequestBodyPayload {
+            source: RequestBodySource::Bytes(bytes),
+            ..
+        } => Some(bytes.len() as u64),
+        RequestBodyPayload {
+            source: RequestBodySource::File { len, .. },
+            ..
+        } => Some(*len),
+        RequestBodyPayload {
+            source: RequestBodySource::Multipart(multipart),
+            ..
+        } => multipart.content_len().ok(),
+        RequestBodyPayload {
+            source: RequestBodySource::Stdin,
+            ..
+        } => None,
+    }
+}
+
+fn request_body_to_reqwest_body(body: RequestBodyPayload) -> Result<Body, FetchError> {
+    match body.source {
+        RequestBodySource::Bytes(bytes) => Ok(Body::from(bytes)),
+        RequestBodySource::File { path, .. } => {
+            let file = std::fs::File::open(&path)?;
+            Ok(Body::from(tokio::fs::File::from_std(file)))
+        }
+        RequestBodySource::Stdin => Ok(Body::wrap_stream(ReaderStream::new(tokio::io::stdin()))),
+        RequestBodySource::Multipart(multipart) => Ok(Body::wrap_stream(multipart.stream())),
+    }
+}
+
+pub(crate) fn request_body_into_bytes(
+    body: RequestBody,
+) -> Result<MaterializedRequestBody, FetchError> {
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let content_type = body.content_type.clone();
+    let bytes = match body.source {
+        RequestBodySource::Bytes(bytes) => bytes.to_vec(),
+        RequestBodySource::File { path, .. } => std::fs::read(path)?,
+        RequestBodySource::Stdin => {
+            let mut buf = Vec::new();
+            std::io::stdin().read_to_end(&mut buf)?;
+            buf
+        }
+        RequestBodySource::Multipart(multipart) => multipart
+            .open()
+            .map_err(|err| FetchError::Message(err.to_string()))?,
+    };
+    Ok(Some((bytes, content_type)))
+}
+
+fn request_body_preview(body: &RequestBodyPayload) -> Result<Vec<u8>, FetchError> {
+    match &body.source {
+        RequestBodySource::Bytes(bytes) => Ok(bytes.slice(..bytes.len().min(1024)).to_vec()),
+        RequestBodySource::File { path, .. } => read_file_prefix(path, 1024),
+        RequestBodySource::Stdin => Ok(Vec::new()),
+        RequestBodySource::Multipart(multipart) => {
+            let mut out = Vec::new();
+            let mut writer = PrefixWriter {
+                out: &mut out,
+                limit: 1024,
+            };
+            multipart
+                .write_to(&mut writer)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            Ok(out)
+        }
+    }
+}
+
+fn write_request_body_to_stderr(body: &RequestBodyPayload) -> Result<(), FetchError> {
+    let mut stderr = std::io::stderr();
+    match &body.source {
+        RequestBodySource::Bytes(bytes) => stderr.write_all(bytes)?,
+        RequestBodySource::File { path, .. } => {
+            let mut file = std::fs::File::open(path)?;
+            std::io::copy(&mut file, &mut stderr)?;
+        }
+        RequestBodySource::Stdin => {}
+        RequestBodySource::Multipart(multipart) => multipart
+            .write_to(&mut stderr)
+            .map_err(|err| FetchError::Message(err.to_string()))?,
+    }
+    Ok(())
+}
+
+struct PrefixWriter<'a> {
+    out: &'a mut Vec<u8>,
+    limit: usize,
+}
+
+impl Write for PrefixWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.limit.saturating_sub(self.out.len());
+        self.out.extend_from_slice(&buf[..buf.len().min(remaining)]);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn apply_body_content_type(headers: &mut HeaderMap, body: &RequestBody) {
-    let Some((_bytes, Some(content_type))) = body.as_ref() else {
+    let Some(RequestBodyPayload {
+        content_type: Some(content_type),
+        ..
+    }) = body.as_ref()
+    else {
         return;
     };
     if !headers.contains_key(CONTENT_TYPE)
@@ -2004,45 +2287,99 @@ impl fmt::Display for RedirectLimitError {
 
 impl StdError for RedirectLimitError {}
 
-fn redirect_policy_with_history(
-    redirect_limit: Option<usize>,
-    verbose: u8,
-    silent: bool,
-    history: RedirectHistory,
-    color: Option<String>,
-) -> redirect::Policy {
-    let max = redirect_limit.unwrap_or(10);
-    if redirect_limit == Some(0) {
-        return redirect::Policy::none();
+fn redirect_target(
+    cli: &Cli,
+    response: &Response,
+    redirect_count: usize,
+) -> Result<Option<Url>, FetchError> {
+    if cli.redirects == Some(0) || !is_redirect_status(response.status()) {
+        return Ok(None);
     }
+    let Some(location) = response.headers().get(LOCATION) else {
+        return Ok(None);
+    };
+    let location = location
+        .to_str()
+        .map_err(|err| FetchError::Runtime(format!("invalid redirect location: {err}")))?;
+    let max = cli.redirects.unwrap_or(10);
+    if redirect_count >= max {
+        return Err(FetchError::Runtime(RedirectLimitError { max }.to_string()));
+    }
+    let url = response
+        .url()
+        .join(location)
+        .map_err(|err| FetchError::Runtime(format!("invalid redirect location: {err}")))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err(FetchError::Runtime(format!(
+            "unsupported redirect scheme '{}'",
+            url.scheme()
+        )));
+    }
+    Ok(Some(url))
+}
 
-    redirect::Policy::custom(move |attempt| {
-        history.record(attempt.status());
-        if verbose >= 2 && !silent {
-            let status = attempt.status();
-            let mut printer = core::Printer::stderr(color.as_deref());
-            printer.write_response_prefix();
-            printer.write_styled("HTTP/1.1", &[core::Sequence::Dim]);
-            printer.push_str(" ");
-            let status_color = color_for_status(status.as_u16());
-            printer.write_styled(
-                &status.as_u16().to_string(),
-                &[status_color, core::Sequence::Bold],
-            );
-            let reason = status.canonical_reason().unwrap_or("");
-            if !reason.is_empty() {
-                printer.push_str(" ");
-                printer.write_styled(reason, &[status_color]);
+fn is_redirect_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    )
+}
+
+fn redirected_request(
+    mut method: Method,
+    mut body: RequestBody,
+    status: StatusCode,
+) -> Result<(Method, RequestBody), FetchError> {
+    match status {
+        StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND | StatusCode::SEE_OTHER => {
+            if method != Method::GET && method != Method::HEAD {
+                method = Method::GET;
             }
-            printer.push_str("\n");
-            flush_stderr(printer);
+            body = None;
         }
-        if attempt.previous().len() > max {
-            attempt.error(RedirectLimitError { max })
-        } else {
-            attempt.follow()
+        StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT
+            if !request_body_replayable(&body) =>
+        {
+            return Err(FetchError::Runtime(
+                "request body from stdin cannot be replayed for redirect".to_string(),
+            ));
         }
-    })
+        _ => {}
+    }
+    Ok((method, body))
+}
+
+fn request_body_replayable(body: &RequestBody) -> bool {
+    !matches!(
+        body.as_ref().map(|body| &body.source),
+        Some(RequestBodySource::Stdin)
+    )
+}
+
+fn print_redirect_status(cli: &Cli, status: StatusCode) {
+    if cli.verbose < 2 || cli.silent {
+        return;
+    }
+    let mut printer = core::Printer::stderr(cli.color.as_deref());
+    printer.write_response_prefix();
+    printer.write_styled("HTTP/1.1", &[core::Sequence::Dim]);
+    printer.push_str(" ");
+    let status_color = color_for_status(status.as_u16());
+    printer.write_styled(
+        &status.as_u16().to_string(),
+        &[status_color, core::Sequence::Bold],
+    );
+    let reason = status.canonical_reason().unwrap_or("");
+    if !reason.is_empty() {
+        printer.push_str(" ");
+        printer.write_styled(reason, &[status_color]);
+    }
+    printer.push_str("\n");
+    flush_stderr(printer);
 }
 
 fn flush_stderr(mut printer: core::Printer) {
@@ -2055,32 +2392,6 @@ fn color_for_status(code: u16) -> core::Sequence {
         200..=299 => core::Sequence::Green,
         300..=399 => core::Sequence::Yellow,
         _ => core::Sequence::Red,
-    }
-}
-
-#[derive(Clone, Default)]
-struct RedirectHistory {
-    statuses: Arc<Mutex<Vec<StatusCode>>>,
-}
-
-impl RedirectHistory {
-    fn record(&self, status: StatusCode) {
-        if let Ok(mut statuses) = self.statuses.lock() {
-            statuses.push(status);
-        }
-    }
-
-    fn clear(&self) {
-        if let Ok(mut statuses) = self.statuses.lock() {
-            statuses.clear();
-        }
-    }
-
-    fn statuses(&self) -> Vec<StatusCode> {
-        self.statuses
-            .lock()
-            .map(|statuses| statuses.clone())
-            .unwrap_or_default()
     }
 }
 
@@ -2562,33 +2873,47 @@ pub(crate) fn request_body(cli: &Cli) -> Result<RequestBody, FetchError> {
         let multipart = multipart::Multipart::from_cli_fields(&cli.multipart)
             .map_err(|err| FetchError::Message(err.to_string()))?
             .expect("non-empty multipart input creates multipart body");
-        let body = multipart
-            .open()
+        multipart
+            .content_len()
             .map_err(|err| FetchError::Message(err.to_string()))?;
-        return Ok(Some((body, Some(multipart.content_type()))));
+        let content_type = multipart.content_type();
+        return Ok(Some(RequestBodyPayload {
+            source: RequestBodySource::Multipart(multipart),
+            content_type: Some(content_type),
+        }));
     }
     if let Some(value) = cli.data.as_deref() {
         if let Some(bytes) = &cli.data_literal_bytes {
-            return Ok(Some((bytes.clone(), None)));
+            return Ok(Some(RequestBodyPayload {
+                source: RequestBodySource::Bytes(Bytes::copy_from_slice(bytes)),
+                content_type: None,
+            }));
         }
         if cli.data_is_literal {
-            return Ok(Some((value.as_bytes().to_vec(), None)));
+            return Ok(Some(RequestBodyPayload {
+                source: RequestBodySource::Bytes(Bytes::copy_from_slice(value.as_bytes())),
+                content_type: None,
+            }));
         }
-        let (body, path) = read_body_value(value)?;
-        let content_type = detect_body_content_type(&body, path.as_deref());
-        return Ok(Some((body, Some(content_type))));
+        let (source, content_type) = body_value_source(value, true)?;
+        return Ok(Some(RequestBodyPayload {
+            source,
+            content_type,
+        }));
     }
     if let Some(value) = cli.json.as_deref() {
-        return Ok(Some((
-            read_body_value(value)?.0,
-            Some("application/json".to_string()),
-        )));
+        let (source, _) = body_value_source(value, false)?;
+        return Ok(Some(RequestBodyPayload {
+            source,
+            content_type: Some("application/json".to_string()),
+        }));
     }
     if let Some(value) = cli.xml.as_deref() {
-        return Ok(Some((
-            read_body_value(value)?.0,
-            Some("application/xml".to_string()),
-        )));
+        let (source, _) = body_value_source(value, false)?;
+        return Ok(Some(RequestBodyPayload {
+            source,
+            content_type: Some("application/xml".to_string()),
+        }));
     }
     if !cli.form.is_empty() {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
@@ -2596,19 +2921,23 @@ pub(crate) fn request_body(cli: &Cli) -> Result<RequestBody, FetchError> {
             let (key, val) = raw.split_once('=').unwrap_or((raw, ""));
             serializer.append_pair(key.trim(), val.trim());
         }
-        return Ok(Some((
-            serializer.finish().into_bytes(),
-            Some("application/x-www-form-urlencoded".to_string()),
-        )));
+        return Ok(Some(RequestBodyPayload {
+            source: RequestBodySource::Bytes(Bytes::from(serializer.finish().into_bytes())),
+            content_type: Some("application/x-www-form-urlencoded".to_string()),
+        }));
     }
     Ok(None)
 }
 
-fn read_body_value(value: &str) -> Result<(Vec<u8>, Option<String>), FetchError> {
+fn body_value_source(
+    value: &str,
+    detect_content_type: bool,
+) -> Result<(RequestBodySource, Option<String>), FetchError> {
     if value == "@-" {
-        let mut buf = Vec::new();
-        std::io::stdin().read_to_end(&mut buf)?;
-        return Ok((buf, None));
+        return Ok((
+            RequestBodySource::Stdin,
+            detect_content_type.then(|| "application/octet-stream".to_string()),
+        ));
     }
     if let Some(path) = value.strip_prefix('@') {
         let expanded = expand_home(path);
@@ -2622,9 +2951,23 @@ fn read_body_value(value: &str) -> Result<(Vec<u8>, Option<String>), FetchError>
         if metadata.is_dir() {
             return Err(format!("file '{path}' is a directory").into());
         }
-        return Ok((std::fs::read(&expanded)?, Some(expanded)));
+        let content_type = if detect_content_type {
+            Some(detect_body_file_content_type(&expanded)?)
+        } else {
+            None
+        };
+        return Ok((
+            RequestBodySource::File {
+                path: expanded,
+                len: metadata.len(),
+            },
+            content_type,
+        ));
     }
-    Ok((value.as_bytes().to_vec(), None))
+    Ok((
+        RequestBodySource::Bytes(Bytes::copy_from_slice(value.as_bytes())),
+        detect_content_type.then(|| sniff_content_type_like_go(value.as_bytes())),
+    ))
 }
 
 fn expand_home(path: &str) -> String {
@@ -2636,13 +2979,19 @@ fn expand_home(path: &str) -> String {
     path.to_string()
 }
 
-fn detect_body_content_type(body: &[u8], path: Option<&str>) -> String {
-    if let Some(path) = path
-        && let Some(content_type) = detect_type_by_extension(path)
-    {
-        return content_type.to_string();
+fn detect_body_file_content_type(path: &str) -> Result<String, FetchError> {
+    if let Some(content_type) = detect_type_by_extension(path) {
+        return Ok(content_type.to_string());
     }
-    sniff_content_type_like_go(body)
+    Ok(sniff_content_type_like_go(&read_file_prefix(path, 512)?))
+}
+
+fn read_file_prefix(path: &str, limit: usize) -> Result<Vec<u8>, FetchError> {
+    let mut file = std::fs::File::open(path)?;
+    let mut out = vec![0_u8; limit];
+    let len = file.read(&mut out)?;
+    out.truncate(len);
+    Ok(out)
 }
 
 fn detect_type_by_extension(path: &str) -> Option<&'static str> {
@@ -3018,7 +3367,9 @@ mod tests {
     #[test]
     fn request_body_data_detects_go_style_content_type() {
         let cli = Cli::try_parse_from(["fetch", "--data", "hello", "https://example.com"]).unwrap();
-        let body = request_body(&cli).unwrap().unwrap();
+        let body = request_body_into_bytes(request_body(&cli).unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(body.0, b"hello");
         assert_eq!(body.1.as_deref(), Some("text/plain; charset=utf-8"));
 
@@ -3032,7 +3383,9 @@ mod tests {
             "https://example.com",
         ])
         .unwrap();
-        let body = request_body(&cli).unwrap().unwrap();
+        let body = request_body_into_bytes(request_body(&cli).unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(body.0, br#"{"ok":true}"#);
         assert_eq!(body.1.as_deref(), Some("application/json"));
     }
@@ -3539,7 +3892,10 @@ mod tests {
 
     #[test]
     fn digest_challenge_after_redirect_uses_go_redirect_method_and_body() {
-        let original_body = Some((b"payload".to_vec(), Some("text/plain".to_string())));
+        let original_body = Some(RequestBodyPayload::from_bytes(
+            b"payload".to_vec(),
+            Some("text/plain".to_string()),
+        ));
 
         let (method, body) = digest_challenged_request(
             Method::POST,
@@ -3667,7 +4023,10 @@ mod tests {
 
     #[test]
     fn owned_request_body_clone_replays_without_go_temp_spool() {
-        let body = Some((b"hello".to_vec(), Some("text/plain".to_string())));
+        let body = Some(RequestBodyPayload::from_bytes(
+            b"hello".to_vec(),
+            Some("text/plain".to_string()),
+        ));
         let first = request_body_bytes(&body).unwrap().to_vec();
         let replay = body.clone();
 
@@ -3835,13 +4194,17 @@ mod tests {
 
     #[test]
     fn grpc_request_body_frames_empty_and_raw_bodies() {
-        let empty = proto::grpc_request_body(None, None).unwrap().unwrap();
+        let empty = proto::grpc_request_body(None, None).unwrap();
+        let empty = request_body_into_bytes(empty).unwrap().unwrap();
         assert_eq!(empty.0, crate::grpc::framing::frame(&[], false));
         assert_eq!(empty.1.as_deref(), Some("application/grpc+proto"));
 
-        let framed = proto::grpc_request_body(Some((b"hello".to_vec(), None)), None)
-            .unwrap()
-            .unwrap();
+        let framed = proto::grpc_request_body(
+            Some(RequestBodyPayload::from_bytes(b"hello".to_vec(), None)),
+            None,
+        )
+        .unwrap();
+        let framed = request_body_into_bytes(framed).unwrap().unwrap();
         assert_eq!(framed.0, crate::grpc::framing::frame(b"hello", false));
     }
 
