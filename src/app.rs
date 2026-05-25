@@ -163,7 +163,7 @@ fn invalid_value_from_clap_message(msg: &str) -> Option<(String, String, &'stati
     let (_, rest) = rest.split_once(" for '")?;
     let (spec, _) = rest.split_once('\'')?;
     let flag = flag_name_from_spec(spec);
-    if flag == "--ws-interactive" {
+    if flag == "--pager" || flag == "--ws-interactive" {
         return Some((flag, value.to_string(), "must be one of [auto, on, off]"));
     }
     if flag == "--color" || flag == "--format" {
@@ -993,6 +993,11 @@ mod tests {
                 Cli::try_parse_from(["fetch", "--format", "pretty", "https://example.com"])
                     .unwrap_err(),
                 "invalid value 'pretty' for option '--format': must be one of [auto, off, on]",
+            ),
+            (
+                Cli::try_parse_from(["fetch", "--pager", "always", "https://example.com"])
+                    .unwrap_err(),
+                "invalid value 'always' for option '--pager': must be one of [auto, on, off]",
             ),
             (
                 Cli::try_parse_from(["fetch", "--retry", "bad", "https://example.com"])

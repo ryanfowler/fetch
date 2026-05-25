@@ -25,7 +25,7 @@ struct ConfigValues {
     key: Option<String>,
     max_tls: Option<String>,
     min_tls: Option<String>,
-    no_pager: Option<bool>,
+    pager: Option<String>,
     proxy: Option<String>,
     query: Vec<String>,
     redirects: Option<usize>,
@@ -51,7 +51,7 @@ struct CliConfigSources {
     copy: bool,
     ignore_status: bool,
     insecure: bool,
-    no_pager: bool,
+    pager: bool,
     silent: bool,
     timing: bool,
     verbosity: bool,
@@ -64,7 +64,7 @@ impl CliConfigSources {
             copy: cli.copy,
             ignore_status: cli.ignore_status,
             insecure: cli.insecure,
-            no_pager: cli.no_pager,
+            pager: cli.pager.is_some(),
             silent: cli.silent,
             timing: cli.timing,
             verbosity: cli.verbose > 0,
@@ -104,6 +104,9 @@ pub fn validate(cli: &Cli) -> Result<(), FetchError> {
     }
     if let Some(value) = cli.compress.as_deref() {
         validate_cli_choice("compress", value, crate::cli::CompressionMode::VALUES)?;
+    }
+    if let Some(value) = cli.pager.as_deref() {
+        validate_cli_choice("pager", value, crate::cli::PagerMode::VALUES)?;
     }
     if let Some(value) = cli.proxy.as_deref() {
         validate_proxy_value(value).map_err(|usage| {
@@ -219,8 +222,8 @@ fn apply_file(cli: &mut Cli, file: &ConfigFile, sources: CliConfigSources) {
     if cli.min_tls.is_none() && cli.tls.is_none() {
         cli.min_tls = values.min_tls;
     }
-    if !sources.no_pager {
-        cli.no_pager = values.no_pager.unwrap_or(false);
+    if !sources.pager {
+        cli.pager = values.pager;
     }
     if cli.proxy.is_none() {
         cli.proxy = values.proxy;
@@ -426,7 +429,18 @@ fn set_value(
             config.compress = Some(if no_encode { "off" } else { "auto" }.to_string());
         }
         "no-pager" => {
-            config.no_pager = Some(parse_bool_value(path, line_num, "no-pager", value)?);
+            let no_pager = parse_bool_value(path, line_num, "no-pager", value)?;
+            config.pager = Some(if no_pager { "off" } else { "auto" }.to_string());
+        }
+        "pager" => {
+            validate_choice(
+                path,
+                line_num,
+                "pager",
+                value,
+                crate::cli::PagerMode::VALUES,
+            )?;
+            config.pager = Some(value.to_string());
         }
         "proxy" => {
             validate_proxy(path, line_num, value)?;
@@ -934,7 +948,7 @@ impl ConfigValues {
         choose(&mut self.key, &higher.key);
         choose(&mut self.max_tls, &higher.max_tls);
         choose(&mut self.min_tls, &higher.min_tls);
-        choose(&mut self.no_pager, &higher.no_pager);
+        choose(&mut self.pager, &higher.pager);
         choose(&mut self.proxy, &higher.proxy);
         self.query.extend(higher.query.iter().cloned());
         choose(&mut self.redirects, &higher.redirects);
@@ -1089,7 +1103,7 @@ mod tests {
               query = q
               http = 2
               ignore-status = true
-              no-pager = true
+              pager = off
               insecure = true
               session = abc_123
               verbosity = 3
@@ -1107,7 +1121,7 @@ mod tests {
         assert_eq!(file.global.query, vec!["q="]);
         assert_eq!(file.global.http.as_deref(), Some("2"));
         assert_eq!(file.global.ignore_status, Some(true));
-        assert_eq!(file.global.no_pager, Some(true));
+        assert_eq!(file.global.pager.as_deref(), Some("off"));
         assert_eq!(file.global.insecure, Some(true));
         assert_eq!(file.global.session.as_deref(), Some("abc_123"));
         assert_eq!(file.global.verbosity, Some(3));
@@ -1522,7 +1536,7 @@ mod tests {
               ignore-status = false
               insecure = false
               no-encode = false
-              no-pager = false
+              pager = auto
               silent = false
               timing = false
               verbosity = 0
@@ -1535,7 +1549,8 @@ mod tests {
             "--ignore-status",
             "--insecure",
             "--no-encode",
-            "--no-pager",
+            "--pager",
+            "off",
             "--silent",
             "--timing",
             "-vv",
@@ -1550,7 +1565,7 @@ mod tests {
         assert!(cli.ignore_status);
         assert!(cli.insecure);
         assert!(cli.no_encode);
-        assert!(cli.no_pager);
+        assert_eq!(cli.pager.as_deref(), Some("off"));
         assert!(cli.silent);
         assert!(cli.timing);
         assert_eq!(cli.verbose, 2);

@@ -86,6 +86,20 @@ const FORMAT_VALUES: &[FlagValue] = &[
         value: "Enable output formatting",
     },
 ];
+const PAGER_VALUES: &[FlagValue] = &[
+    FlagValue {
+        key: "auto",
+        value: "Use pager when stdout is a terminal",
+    },
+    FlagValue {
+        key: "on",
+        value: "Force pager use",
+    },
+    FlagValue {
+        key: "off",
+        value: "Disable pager",
+    },
+];
 const HTTP_VALUES: &[FlagValue] = &[
     FlagValue {
         key: "1",
@@ -302,12 +316,14 @@ const FLAGS: &[Flag] = &[
         "NAME=[@]VALUE",
         "Send a multipart form body",
     ),
-    flag(
-        None,
-        "no-pager",
-        "",
-        "Do not pipe terminal output through a pager",
-    ),
+    Flag {
+        short: None,
+        long: "pager",
+        args: "MODE",
+        description: "Control pager use",
+        aliases: &[],
+        values: PAGER_VALUES,
+    },
     flag(
         Some('o'),
         "output",
@@ -957,6 +973,10 @@ mod tests {
         assert_eq!(
             Shell::Bash.complete(&complete(&["fetch".into(), "--color=o".into()])),
             "--color=off \n--color=on \n"
+        );
+        assert_eq!(
+            Shell::Bash.complete(&complete(&["fetch".into(), "--pager=o".into()])),
+            "--pager=on \n--pager=off \n"
         );
         assert_eq!(
             Shell::Bash.complete(&complete(&["fetch".into(), "-X".into()])),

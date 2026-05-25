@@ -327,12 +327,14 @@ fetch -o output.json --clobber example.com/data
 
 ## Pager
 
-When stdout is a terminal, `fetch` pipes response body output through `less` for easier navigation. Image responses bypass the pager so native terminal image protocols are interpreted by the terminal. The `-F` flag makes `less` exit immediately when the output fits on one screen.
+By default, when stdout is a terminal, `fetch` pipes response body output through `less` for easier navigation. Image responses bypass the pager so native terminal image protocols are interpreted by the terminal. The `-F` flag makes `less` exit immediately when the output fits on one screen.
 
-### Disable Pager
+### Pager Mode
+
+Use `--pager auto` to page terminal stdout, `--pager on` to force the pager, or `--pager off` to disable it.
 
 ```sh
-fetch --no-pager example.com/large-response
+fetch --pager off example.com/large-response
 ```
 
 ### Pager Environment
@@ -370,7 +372,7 @@ format = on
 color = off
 
 # Disable pager
-no-pager = true
+pager = off
 ```
 
 ## Examples

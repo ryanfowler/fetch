@@ -259,12 +259,16 @@ fetch --image external example.com/photo.avif
 fetch --image off example.com/photo.jpg
 ```
 
-### `--no-pager`
+### `--pager MODE`
 
-Disable piping terminal output to a pager (`less -FIRX`).
+Control piping response body output to a pager (`less -FIRX`). Values:
+
+- `auto` - Use the pager when stdout is a terminal (default)
+- `on` - Force pager use
+- `off` - Disable the pager
 
 ```sh
-fetch --no-pager example.com
+fetch --pager off example.com
 ```
 
 ## Sessions
@@ -604,7 +608,7 @@ fetch --config ~/.config/fetch/custom.conf example.com
 
 Execute a curl command using fetch. Parses a curl command string and translates its flags into the equivalent fetch options. The `curl` prefix is optional.
 
-Cannot be combined with other request-specifying flags (URL, `--method`, `--header`, `--data`, auth flags, etc.). Meta flags like `--dry-run`, `--color`, `--format`, `--no-pager`, and `--timing` can still be used.
+Cannot be combined with other request-specifying flags (URL, `--method`, `--header`, `--data`, auth flags, etc.). Meta flags like `--dry-run`, `--color`, `--format`, `--pager`, and `--timing` can still be used.
 
 ```sh
 # Basic GET

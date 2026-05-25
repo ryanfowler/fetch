@@ -1018,7 +1018,13 @@ fn should_page_stdout(
     content_type: ContentType,
     stdout_is_terminal: bool,
 ) -> bool {
-    !cli.no_pager && !bytes.is_empty() && stdout_is_terminal && content_type != ContentType::Image
+    let pager_allowed = !bytes.is_empty() && content_type != ContentType::Image;
+    pager_allowed
+        && match crate::cli::PagerMode::from_cli(cli) {
+            crate::cli::PagerMode::Auto => stdout_is_terminal,
+            crate::cli::PagerMode::On => true,
+            crate::cli::PagerMode::Off => false,
+        }
 }
 
 fn write_stdout_bytes_with_pager(bytes: &[u8]) -> Result<(), FetchError> {
@@ -2825,7 +2831,7 @@ mod tests {
     }
 
     #[test]
-    fn image_responses_skip_stdout_pager() {
+    fn pager_auto_uses_stdout_terminal_and_skips_images() {
         let cli = Cli::try_parse_from(["fetch", "https://example.com"]).unwrap();
         assert!(!should_page_stdout(
             &cli,
@@ -2834,6 +2840,34 @@ mod tests {
             true,
         ));
         assert!(should_page_stdout(
+            &cli,
+            b"{\"ok\":true}\n",
+            ContentType::Json,
+            true,
+        ));
+        assert!(!should_page_stdout(
+            &cli,
+            b"{\"ok\":true}\n",
+            ContentType::Json,
+            false,
+        ));
+    }
+
+    #[test]
+    fn pager_on_forces_pager_for_non_terminal_stdout() {
+        let cli = Cli::try_parse_from(["fetch", "--pager", "on", "https://example.com"]).unwrap();
+        assert!(should_page_stdout(
+            &cli,
+            b"{\"ok\":true}\n",
+            ContentType::Json,
+            false,
+        ));
+    }
+
+    #[test]
+    fn pager_off_disables_pager_for_terminal_stdout() {
+        let cli = Cli::try_parse_from(["fetch", "--pager", "off", "https://example.com"]).unwrap();
+        assert!(!should_page_stdout(
             &cli,
             b"{\"ok\":true}\n",
             ContentType::Json,

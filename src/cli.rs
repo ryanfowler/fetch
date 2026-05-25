@@ -68,6 +68,31 @@ impl CompressionMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PagerMode {
+    Auto,
+    On,
+    Off,
+}
+
+impl PagerMode {
+    pub const VALUES: &[&str] = &["auto", "on", "off"];
+
+    pub fn from_cli(cli: &Cli) -> Self {
+        Self::from_value(cli.pager.as_deref().unwrap_or("auto"))
+            .expect("pager mode is validated by clap/config")
+    }
+
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "fetch",
@@ -320,10 +345,13 @@ pub struct Cli {
     pub no_encode: bool,
 
     #[arg(
-        long = "no-pager",
-        help = "Do not pipe terminal output through a pager"
+        long,
+        value_name = "MODE",
+        value_parser = ["auto", "on", "off"],
+        hide_possible_values = true,
+        help = "Control pager use [auto, on, off]"
     )]
-    pub no_pager: bool,
+    pub pager: Option<String>,
 
     #[arg(
         short = 'o',
@@ -575,6 +603,7 @@ mod tests {
                 "--format <OPTION>             Enable/disable formatting [auto, off, on]"
             )
         );
+        assert!(help.contains("--pager <MODE>                Control pager use [auto, on, off]"));
         assert!(
             help.contains("-m, --method <METHOD>             HTTP method to use [default: GET]")
         );
