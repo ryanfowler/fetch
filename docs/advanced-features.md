@@ -279,12 +279,15 @@ insecure = true
 
 ## Compression
 
-### `--no-encode`
+### `--compress MODE`
 
-Disable automatic compression negotiation:
+Control automatic compression negotiation:
 
 ```sh
-fetch --no-encode example.com
+fetch --compress auto example.com
+fetch --compress gzip example.com
+fetch --compress zstd example.com
+fetch --compress off example.com
 ```
 
 By default, `fetch`:
@@ -292,7 +295,14 @@ By default, `fetch`:
 - Sends `Accept-Encoding: gzip, zstd` header
 - Automatically decompresses responses
 
-Disabling is useful when:
+Compression modes:
+
+- `auto` requests gzip or zstd and decompresses either response encoding
+- `gzip` requests and decompresses gzip only
+- `zstd` requests and decompresses zstd only
+- `off` sends no automatic `Accept-Encoding` header and leaves compressed response bodies untouched
+
+Using `off` is useful when:
 
 - Testing compression behavior
 - Server has compression bugs

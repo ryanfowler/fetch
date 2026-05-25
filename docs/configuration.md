@@ -452,19 +452,23 @@ ca-cert = /path/to/api-ca.crt
 - If the private key cannot be found, an error will be displayed
 - Encrypted private keys are not supported
 
-#### `no-encode`
+#### `compress`
 
-**Type**: Boolean
-**Default**: `false`
+**Type**: String
+**Default**: `auto`
 
-Disable automatic gzip and zstd compression for requests and responses.
+Control automatic compression negotiation and decompression.
 
 ```ini
-# Disable compression
-no-encode = true
+# Request gzip or zstd compression (default)
+compress = auto
 
-# Enable compression (default)
-no-encode = false
+# Request one algorithm only
+compress = gzip
+compress = zstd
+
+# Disable compression negotiation
+compress = off
 ```
 
 ### Session Options

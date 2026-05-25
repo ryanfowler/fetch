@@ -27,7 +27,7 @@ use url::Url;
 
 use crate::auth::aws_sigv4;
 use crate::auth::digest;
-use crate::cli::{Cli, HttpVersion};
+use crate::cli::{Cli, CompressionMode, HttpVersion};
 use crate::core;
 use crate::error::{FetchError, write_error_with_color, write_warning_with_color};
 use crate::format::content_type::{self, ContentType};
@@ -145,7 +145,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         apply_headers(&mut headers, &cli.headers)?;
     }
     apply_ranges(&mut headers, &cli.ranges);
-    let encoding_requested = apply_accept_encoding(&mut headers, cli, &method);
+    let compression = apply_accept_encoding(&mut headers, cli, &method);
     let mut body = request_body(cli)?;
     apply_body_content_type(&mut headers, &body);
     if cli.edit {
@@ -268,7 +268,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 break finish_response(
                     cli,
                     response,
-                    encoding_requested,
+                    compression,
                     Some(timing),
                     grpc_method.as_ref(),
                 )
@@ -900,7 +900,7 @@ fn validate_proxy_for_http_version(
 async fn finish_response(
     cli: &Cli,
     response: Response,
-    encoding_requested: bool,
+    compression: CompressionMode,
     timing: Option<AttemptTiming>,
     grpc_method: Option<&prost_reflect::MethodDescriptor>,
 ) -> Result<i32, FetchError> {
@@ -911,18 +911,15 @@ async fn finish_response(
     let response_content_length = response
         .content_length()
         .and_then(|len| i64::try_from(len).ok());
-    let output_progress_total = output_progress_total_bytes(
-        encoding_requested,
-        &response_headers,
-        response_content_length,
-    );
+    let output_progress_total =
+        output_progress_total_bytes(compression, &response_headers, response_content_length);
     let method_is_head = cli.method().eq_ignore_ascii_case("HEAD");
     let response_timing = timing.and_then(AttemptTiming::response_timing);
     if cli.discard {
         let body_start = Instant::now();
         let (bytes, trailers) = read_response_body(response).await?;
         let body_duration = body_duration(method_is_head, bytes.as_ref(), body_start);
-        let _ = decode_response_bytes(encoding_requested, &response_headers, bytes.as_ref())?;
+        let _ = decode_response_bytes(compression, &response_headers, bytes.as_ref())?;
         print_timing(cli, response_timing, body_duration);
         let code = exit_code(status.as_u16(), cli.ignore_status);
         return Ok(check_grpc_status(cli, &response_headers, &trailers, code));
@@ -952,7 +949,7 @@ async fn finish_response(
         let streamed = stream_response_to_output(
             response,
             response_headers.clone(),
-            encoding_requested,
+            compression,
             path,
             cli.clobber,
             progress,
@@ -978,7 +975,7 @@ async fn finish_response(
         let body_start = Instant::now();
         let (bytes, trailers) = read_response_body(response).await?;
         let body_duration = body_duration(method_is_head, bytes.as_ref(), body_start);
-        let bytes = decode_response_bytes(encoding_requested, &response_headers, bytes.as_ref())?;
+        let bytes = decode_response_bytes(compression, &response_headers, bytes.as_ref())?;
         if cli.copy {
             handle_clipboard_outcome(cli, clipboard::copy_bytes(&bytes));
         }
@@ -1072,7 +1069,7 @@ struct StreamedOutput {
 async fn stream_response_to_output(
     response: Response,
     response_headers: HeaderMap,
-    encoding_requested: bool,
+    compression: CompressionMode,
     path: String,
     clobber: bool,
     progress: output::WriteProgress,
@@ -1090,7 +1087,7 @@ async fn stream_response_to_output(
     };
 
     let result = tokio::task::spawn_blocking(move || -> Result<StreamedOutput, FetchError> {
-        let mut reader = decoded_response_reader(reader, encoding_requested, &response_headers)?;
+        let mut reader = decoded_response_reader(reader, compression, &response_headers)?;
         let mut capture = copy.then(clipboard::Capture::default);
         let bytes_written = if let Some(capture) = capture.as_mut() {
             let mut reader = ClipboardTeeReader { reader, capture };
@@ -2178,24 +2175,28 @@ fn apply_ranges(headers: &mut HeaderMap, ranges: &[String]) {
     );
 }
 
-fn apply_accept_encoding(headers: &mut HeaderMap, cli: &Cli, method: &Method) -> bool {
-    if cli.no_encode || method == Method::HEAD || headers.contains_key(ACCEPT_ENCODING) {
-        return false;
+fn apply_accept_encoding(headers: &mut HeaderMap, cli: &Cli, method: &Method) -> CompressionMode {
+    let compression = CompressionMode::from_cli(cli);
+    let Some(accept_encoding) = compression.accept_encoding() else {
+        return CompressionMode::Off;
+    };
+    if method == Method::HEAD || headers.contains_key(ACCEPT_ENCODING) {
+        return CompressionMode::Off;
     }
-    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, zstd"));
-    true
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static(accept_encoding));
+    compression
 }
 
 fn decode_response_bytes(
-    encoding_requested: bool,
+    compression: CompressionMode,
     headers: &HeaderMap,
     bytes: &[u8],
 ) -> Result<Vec<u8>, FetchError> {
-    if !encoding_requested {
+    if compression == CompressionMode::Off {
         return Ok(bytes.to_vec());
     }
 
-    let Some(encodings) = content_encoding_decoders(headers) else {
+    let Some(encodings) = content_encoding_decoders(headers, compression) else {
         return Ok(bytes.to_vec());
     };
 
@@ -2213,18 +2214,18 @@ fn decode_response_bytes(
 
 fn decoded_response_reader<R>(
     reader: R,
-    encoding_requested: bool,
+    compression: CompressionMode,
     headers: &HeaderMap,
 ) -> Result<Box<dyn Read + Send>, FetchError>
 where
     R: Read + Send + 'static,
 {
     let mut reader: Box<dyn Read + Send> = Box::new(reader);
-    if !encoding_requested {
+    if compression == CompressionMode::Off {
         return Ok(reader);
     }
 
-    let Some(encodings) = content_encoding_decoders(headers) else {
+    let Some(encodings) = content_encoding_decoders(headers, compression) else {
         return Ok(reader);
     };
 
@@ -2250,12 +2251,13 @@ where
 }
 
 fn output_progress_total_bytes(
-    encoding_requested: bool,
+    compression: CompressionMode,
     headers: &HeaderMap,
     content_length: Option<i64>,
 ) -> Option<i64> {
-    if encoding_requested
-        && content_encoding_decoders(headers).is_some_and(|decoders| !decoders.is_empty())
+    if compression != CompressionMode::Off
+        && content_encoding_decoders(headers, compression)
+            .is_some_and(|decoders| !decoders.is_empty())
     {
         None
     } else {
@@ -2276,13 +2278,17 @@ impl<R: Read> Read for PrefixedReadError<R> {
     }
 }
 
-fn content_encoding_decoders(headers: &HeaderMap) -> Option<Vec<String>> {
+fn content_encoding_decoders(
+    headers: &HeaderMap,
+    compression: CompressionMode,
+) -> Option<Vec<String>> {
     let encodings = content_encodings(headers);
     let mut decoders = Vec::with_capacity(encodings.len());
     for encoding in encodings.into_iter().rev() {
-        match encoding.as_str() {
-            "gzip" | "zstd" | "aws-chunked" => decoders.push(encoding),
-            _ => return None,
+        if compression.decodes(&encoding) {
+            decoders.push(encoding);
+        } else {
+            return None;
         }
     }
     Some(decoders)
@@ -3555,6 +3561,63 @@ mod tests {
     }
 
     #[test]
+    fn apply_accept_encoding_uses_requested_compression_mode() {
+        for (args, expected_mode, expected_header) in [
+            (
+                vec!["fetch", "https://example.com"],
+                CompressionMode::Auto,
+                Some("gzip, zstd"),
+            ),
+            (
+                vec!["fetch", "--compress", "gzip", "https://example.com"],
+                CompressionMode::Gzip,
+                Some("gzip"),
+            ),
+            (
+                vec!["fetch", "--compress", "zstd", "https://example.com"],
+                CompressionMode::Zstd,
+                Some("zstd"),
+            ),
+            (
+                vec!["fetch", "--compress", "off", "https://example.com"],
+                CompressionMode::Off,
+                None,
+            ),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let mut headers = HeaderMap::new();
+
+            let mode = apply_accept_encoding(&mut headers, &cli, &Method::GET);
+
+            assert_eq!(mode, expected_mode);
+            assert_eq!(
+                headers
+                    .get(ACCEPT_ENCODING)
+                    .and_then(|value| value.to_str().ok()),
+                expected_header
+            );
+        }
+    }
+
+    #[test]
+    fn apply_accept_encoding_skips_head_and_custom_header() {
+        let cli = Cli::try_parse_from(["fetch", "https://example.com"]).unwrap();
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            apply_accept_encoding(&mut headers, &cli, &Method::HEAD),
+            CompressionMode::Off
+        );
+        assert!(!headers.contains_key(ACCEPT_ENCODING));
+
+        headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("br"));
+        assert_eq!(
+            apply_accept_encoding(&mut headers, &cli, &Method::GET),
+            CompressionMode::Off
+        );
+        assert_eq!(headers.get(ACCEPT_ENCODING).unwrap(), "br");
+    }
+
+    #[test]
     fn decodes_stacked_content_encoding_in_reverse_order() {
         let data = b"this is stacked encoded data";
         let body = zstd_encode(&gzip_encode(data));
@@ -3564,7 +3627,7 @@ mod tests {
             HeaderValue::from_static("gzip, zstd"),
         );
 
-        let decoded = decode_response_bytes(true, &headers, &body).unwrap();
+        let decoded = decode_response_bytes(CompressionMode::Auto, &headers, &body).unwrap();
 
         assert_eq!(decoded, data);
     }
@@ -3579,9 +3642,26 @@ mod tests {
             HeaderValue::from_static("aws-chunked, gzip"),
         );
 
-        let decoded = decode_response_bytes(true, &headers, &body).unwrap();
+        let decoded = decode_response_bytes(CompressionMode::Auto, &headers, &body).unwrap();
 
         assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn compression_mode_only_decodes_requested_algorithm() {
+        let data = b"this is gzip encoded data";
+        let body = gzip_encode(data);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+
+        let decoded = decode_response_bytes(CompressionMode::Gzip, &headers, &body).unwrap();
+        assert_eq!(decoded, data);
+
+        let decoded = decode_response_bytes(CompressionMode::Zstd, &headers, &body).unwrap();
+        assert_eq!(decoded, body);
     }
 
     #[test]
@@ -3593,7 +3673,7 @@ mod tests {
             HeaderValue::from_static("br, gzip"),
         );
 
-        let decoded = decode_response_bytes(true, &headers, body).unwrap();
+        let decoded = decode_response_bytes(CompressionMode::Auto, &headers, body).unwrap();
 
         assert_eq!(decoded, body);
     }
@@ -3608,7 +3688,7 @@ mod tests {
             HeaderValue::from_static("gzip"),
         );
 
-        let decoded = decode_response_bytes(false, &headers, &body).unwrap();
+        let decoded = decode_response_bytes(CompressionMode::Off, &headers, &body).unwrap();
 
         assert_eq!(decoded, body);
     }
@@ -3621,14 +3701,17 @@ mod tests {
             HeaderValue::from_static("gzip"),
         );
 
-        assert_eq!(output_progress_total_bytes(true, &headers, Some(10)), None);
+        assert_eq!(
+            output_progress_total_bytes(CompressionMode::Auto, &headers, Some(10)),
+            None
+        );
     }
 
     #[test]
     fn output_progress_keeps_total_when_written_length_matches_wire_length() {
         let content_length = Some(10);
         assert_eq!(
-            output_progress_total_bytes(true, &HeaderMap::new(), content_length),
+            output_progress_total_bytes(CompressionMode::Auto, &HeaderMap::new(), content_length),
             content_length
         );
 
@@ -3638,7 +3721,7 @@ mod tests {
             HeaderValue::from_static("gzip"),
         );
         assert_eq!(
-            output_progress_total_bytes(false, &compressed_headers, content_length),
+            output_progress_total_bytes(CompressionMode::Off, &compressed_headers, content_length),
             content_length
         );
 
@@ -3648,7 +3731,11 @@ mod tests {
             HeaderValue::from_static("br"),
         );
         assert_eq!(
-            output_progress_total_bytes(true, &unsupported_headers, content_length),
+            output_progress_total_bytes(
+                CompressionMode::Auto,
+                &unsupported_headers,
+                content_length
+            ),
             content_length
         );
     }
@@ -3661,7 +3748,7 @@ mod tests {
             HeaderValue::from_static("gzip"),
         );
 
-        let err = decode_response_bytes(true, &headers, b"not gzip").unwrap_err();
+        let err = decode_response_bytes(CompressionMode::Auto, &headers, b"not gzip").unwrap_err();
 
         assert!(err.to_string().contains("gzip:"));
     }

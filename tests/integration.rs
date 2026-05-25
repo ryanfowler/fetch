@@ -3161,15 +3161,20 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     gzip.write_all(b"this is the test data").unwrap();
     let gzip_body = gzip.finish().unwrap();
     let zstd_body = zstd::encode_all(&b"this is the test data"[..], 0).unwrap();
-    let compressed = TestServer::start(move |req| {
-        if req.header("accept-encoding") != "gzip, zstd" {
-            return TestResponse::ok("this is the test data");
-        }
-        if req.path == "/zstd" {
+    let compressed = TestServer::start(move |req| match req.header("accept-encoding").as_str() {
+        "gzip, zstd" if req.path == "/zstd" => {
             TestResponse::ok(zstd_body.clone()).header("Content-Encoding", "zstd")
-        } else {
+        }
+        "gzip, zstd" | "gzip" => {
             TestResponse::ok(gzip_body.clone()).header("Content-Encoding", "gzip")
         }
+        "zstd" => TestResponse::ok(zstd_body.clone()).header("Content-Encoding", "zstd"),
+        "" => TestResponse::ok("this is the test data"),
+        other => TestResponse::status(
+            400,
+            "Bad Request",
+            format!("unexpected accept-encoding: {other}"),
+        ),
     });
     let res = run_fetch(&[&compressed.url, "-v"]);
     assert_exit(&res, 0);
@@ -3179,10 +3184,27 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "this is the test data");
     assert!(res.stderr.contains("zstd"));
-    let res = run_fetch(&[&compressed.url, "-v", "--no-encode"]);
+    let res = run_fetch(&[&compressed.url, "-v", "--compress", "gzip"]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "this is the test data");
+    assert!(res.stderr.contains("gzip"));
+    let res = run_fetch(&[
+        &format!("{}/zstd", compressed.url),
+        "-v",
+        "--compress",
+        "zstd",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "this is the test data");
+    assert!(res.stderr.contains("zstd"));
+    let res = run_fetch(&[&compressed.url, "-v", "--compress", "off"]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "this is the test data");
     assert!(!res.stderr.contains("gzip"));
+    assert!(!res.stderr.contains("zstd"));
+    let res = run_fetch(&[&compressed.url, "--compress", "bad"]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("invalid value 'bad'"));
 }
 
 #[cfg(unix)]

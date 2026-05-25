@@ -102,6 +102,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - Rust default config discovery on Windows honors `XDG_CONFIG_HOME/fetch/config` and `HOME/.config/fetch/config` before falling back to `AppData/fetch/config`; Windows mTLS integration fixtures use RSA test certificates to stay compatible with reqwest/rustls platform verification.
 - `--copy` tees decoded response bodies to the system clipboard for both stdout and output-file responses, using platform clipboard commands (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or `clip.exe`) and skipping clipboard writes when the decoded body exceeds 1 MiB.
 - Image rendering defaults (`auto`) use built-in Rust decoders only; external adapters (`vips`, `magick`, `ffmpeg`) require `--image external` or `image = external` and run with bounded stdin/stdout/stderr and timeout handling.
+- Response compression negotiation is controlled by `--compress auto|gzip|zstd|off` or `compress = ...`; `auto` requests and decodes gzip/zstd, single-algorithm modes only request/decode that algorithm, and `off` leaves compressed bodies untouched.
 
 Retryable requests use replayable request bodies so retries and 307/308 redirects can resend data without holding unrelated state.
 Multipart `-F` request bodies are produced with a stable boundary so redirected requests preserve the original body shape.
