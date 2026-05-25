@@ -3256,6 +3256,11 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
     gzip.write_all(b"this is the test data").unwrap();
     let gzip_body = gzip.finish().unwrap();
+    let mut huge_gzip = GzEncoder::new(Vec::new(), Compression::default());
+    huge_gzip
+        .write_all(&vec![b' '; 16 * 1024 * 1024 + 1])
+        .unwrap();
+    let huge_gzip_body = huge_gzip.finish().unwrap();
     let mut brotli_body = Vec::new();
     {
         let mut brotli = brotli::CompressorWriter::new(&mut brotli_body, 4096, 5, 22);
@@ -3268,6 +3273,9 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
         }
         "gzip, br, zstd" if req.path == "/zstd" => {
             TestResponse::ok(zstd_body.clone()).header("Content-Encoding", "zstd")
+        }
+        "gzip, br, zstd" if req.path == "/too-large" => {
+            TestResponse::ok(huge_gzip_body.clone()).header("Content-Encoding", "gzip")
         }
         "gzip, br, zstd" | "gzip" => {
             TestResponse::ok(gzip_body.clone()).header("Content-Encoding", "gzip")
@@ -3285,6 +3293,14 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "this is the test data");
     assert!(res.stderr.contains("gzip"));
+    let res = run_fetch(&[&compressed.url, "--discard"]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(res.stderr.contains("200 OK"));
+    let res = run_fetch(&[&format!("{}/too-large", compressed.url), "--format", "on"]);
+    assert_exit(&res, 1);
+    assert!(res.stdout.is_empty());
+    assert!(res.stderr.contains("cannot be buffered"));
     let res = run_fetch(&[&format!("{}/zstd", compressed.url), "-v"]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "this is the test data");

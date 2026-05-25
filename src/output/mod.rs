@@ -5,11 +5,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{CONTENT_DISPOSITION, HeaderMap};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use url::Url;
 
 use crate::fileutil;
 use crate::output::progress::{
-    Bar, ProgressPrinter, Spinner, emit_native_progress, write_final_progress,
+    Bar, BarCounter, ProgressPrinter, Spinner, SpinnerCounter, emit_native_progress,
+    write_final_progress,
 };
 
 pub mod clipboard;
@@ -190,6 +192,67 @@ pub fn write_output_reader<R: Read>(
     }
 }
 
+pub async fn write_output_async_reader<R: AsyncRead + Unpin>(
+    path: &str,
+    reader: &mut R,
+    clobber: bool,
+    progress: WriteProgress,
+) -> Result<i64, OutputError> {
+    let target = Path::new(path);
+    if !clobber {
+        check_output_file(target)?;
+    }
+
+    let absolute_target = absolute_path(target)?;
+    let (temp_path, temp_file) = create_download_temp(&absolute_target)?;
+    let mut temp_file = tokio::fs::File::from_std(temp_file);
+
+    let progress_summary = match write_temp_body_async(
+        &mut temp_file,
+        reader,
+        &progress,
+        absolute_target.to_string_lossy().as_ref(),
+    )
+    .await
+    {
+        Ok(summary) => summary,
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(err);
+        }
+    };
+    if let Err(err) = temp_file.sync_all().await {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(OutputError::Io(err));
+    }
+    drop(temp_file);
+
+    let install_result = if clobber {
+        fileutil::atomic_replace_file(&temp_path, &absolute_target)
+    } else {
+        fileutil::atomic_write_new_file(&temp_path, &absolute_target)
+    };
+    match install_result {
+        Ok(()) => {
+            if let Some(summary) = progress_summary.summary {
+                summary.finish();
+            }
+            Ok(progress_summary.bytes_written)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(OutputError::FileExists(path.to_string()))
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp_path);
+            Err(OutputError::FileCheck {
+                path: path.to_string(),
+                source: err,
+            })
+        }
+    }
+}
+
 fn check_output_file(path: &Path) -> Result<(), OutputError> {
     match std::fs::metadata(path) {
         Ok(_) => Err(OutputError::FileExists(path.to_string_lossy().into_owned())),
@@ -286,6 +349,44 @@ fn write_temp_body<R: Read>(
     })
 }
 
+async fn write_temp_body_async<R: AsyncRead + Unpin>(
+    file: &mut tokio::fs::File,
+    reader: &mut R,
+    progress: &WriteProgress,
+    display_path: &str,
+) -> Result<WriteOutcome, OutputError> {
+    let Some(printer) = progress.printer.clone() else {
+        let bytes_written = tokio::io::copy(reader, file).await?;
+        file.flush().await?;
+        return Ok(WriteOutcome {
+            bytes_written: i64::try_from(bytes_written).unwrap_or(i64::MAX),
+            summary: None,
+        });
+    };
+
+    let start = Instant::now();
+    let summary = if progress.stderr_is_terminal {
+        write_with_terminal_progress_async(file, reader, progress, &printer, display_path).await?
+    } else {
+        let bytes_written = tokio::io::copy(reader, file).await?;
+        let bytes_written = i64::try_from(bytes_written).unwrap_or(i64::MAX);
+        ProgressSummary {
+            printer,
+            bytes_read: bytes_written,
+            elapsed: start.elapsed(),
+            to_clear: -1,
+            display_path: display_path.to_string(),
+            clear_native: false,
+        }
+    };
+    let bytes_written = summary.bytes_read;
+    file.flush().await?;
+    Ok(WriteOutcome {
+        bytes_written,
+        summary: Some(summary),
+    })
+}
+
 struct ProgressSummary {
     printer: ProgressPrinter,
     bytes_read: i64,
@@ -312,6 +413,82 @@ impl ProgressSummary {
             self.to_clear,
             &self.display_path,
         );
+    }
+}
+
+async fn write_with_terminal_progress_async<R: AsyncRead + Unpin>(
+    file: &mut tokio::fs::File,
+    reader: &mut R,
+    progress: &WriteProgress,
+    printer: &ProgressPrinter,
+    display_path: &str,
+) -> Result<ProgressSummary, OutputError> {
+    if progress.total_bytes.unwrap_or(-1) > 0 {
+        let native_printer = printer.clone();
+        let stdout_is_terminal = progress.stdout_is_terminal;
+        let mut counter = BarCounter::new_with_on_render(
+            printer.clone(),
+            progress.total_bytes.unwrap_or(-1),
+            Some(move |percent| {
+                if stdout_is_terminal {
+                    emit_native_progress(&native_printer, 1, percent);
+                }
+            }),
+        );
+        copy_async_with_progress(reader, file, |bytes| counter.add(bytes)).await?;
+        let (bytes_read, elapsed) = counter.stop();
+        Ok(ProgressSummary {
+            printer: printer.clone(),
+            bytes_read,
+            elapsed,
+            to_clear: 32,
+            display_path: display_path.to_string(),
+            clear_native: progress.stdout_is_terminal,
+        })
+    } else {
+        let native_printer = printer.clone();
+        let stdout_is_terminal = progress.stdout_is_terminal;
+        let mut counter = SpinnerCounter::new_with_on_start(
+            printer.clone(),
+            Some(move || {
+                if stdout_is_terminal {
+                    emit_native_progress(&native_printer, 3, 0);
+                }
+            }),
+        );
+        copy_async_with_progress(reader, file, |bytes| counter.add(bytes)).await?;
+        let (bytes_read, elapsed) = counter.stop();
+        Ok(ProgressSummary {
+            printer: printer.clone(),
+            bytes_read,
+            elapsed,
+            to_clear: 20,
+            display_path: display_path.to_string(),
+            clear_native: progress.stdout_is_terminal,
+        })
+    }
+}
+
+async fn copy_async_with_progress<R, W, F>(
+    reader: &mut R,
+    writer: &mut W,
+    mut on_chunk: F,
+) -> std::io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnMut(i64),
+{
+    let mut buf = vec![0; 16 * 1024];
+    let mut written = 0u64;
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(written);
+        }
+        writer.write_all(&buf[..n]).await?;
+        written = written.saturating_add(n as u64);
+        on_chunk(i64::try_from(n).unwrap_or(i64::MAX));
     }
 }
 
