@@ -2227,7 +2227,7 @@ fn dry_run_prints_effective_request_without_network() {
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
     assert!(res.stderr.contains("GET / HTTP/1.1\n"));
-    assert!(res.stderr.contains("accept: application/json"));
+    assert!(res.stderr.contains("accept: application/json, */*;q=0.5"));
     assert!(res.stderr.contains("accept-encoding: gzip, br, zstd\n"));
     assert!(res.stderr.contains("content-length: 14\n"));
     assert!(res.stderr.contains("content-type: application/json\n"));
@@ -2245,7 +2245,10 @@ fn dry_run_prints_effective_request_without_network() {
         "--sort-headers",
     ]);
     assert_exit(&res, 0);
-    let accept = res.stderr.find("accept: application/json").unwrap();
+    let accept = res
+        .stderr
+        .find("accept: application/json, */*;q=0.5")
+        .unwrap();
     let accept_encoding = res.stderr.find("accept-encoding: gzip, br, zstd").unwrap();
     let content_length = res.stderr.find("content-length: 14").unwrap();
     let content_type = res.stderr.find("content-type: application/json").unwrap();

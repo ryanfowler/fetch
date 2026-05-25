@@ -233,10 +233,7 @@ fn update_get(client: &reqwest::Client, url: impl reqwest::IntoUrl) -> reqwest::
     client
         .get(url)
         .header(USER_AGENT, core::user_agent())
-        .header(
-            ACCEPT,
-            "application/json,application/vnd.msgpack,application/xml,image/webp,*/*",
-        )
+        .header(ACCEPT, core::DEFAULT_ACCEPT_HEADER)
 }
 
 enum UpdateDownloadProgress {
@@ -1118,7 +1115,7 @@ mod tests {
         );
         assert_eq!(
             request.headers().get(ACCEPT).and_then(|v| v.to_str().ok()),
-            Some("application/json,application/vnd.msgpack,application/xml,image/webp,*/*")
+            Some(core::DEFAULT_ACCEPT_HEADER)
         );
     }
 

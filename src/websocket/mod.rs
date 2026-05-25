@@ -198,9 +198,7 @@ fn handshake_headers(cli: &Cli, url: &Url) -> Result<HeaderMap, FetchError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         ACCEPT,
-        HeaderValue::from_static(
-            "application/json,application/vnd.msgpack,application/xml,image/webp,*/*",
-        ),
+        HeaderValue::from_static(core::DEFAULT_ACCEPT_HEADER),
     );
     headers.insert(
         USER_AGENT,
@@ -362,6 +360,10 @@ mod tests {
         let cli = Cli::try_parse_from(["fetch", "--bearer", "token", "ws://example.com"]).unwrap();
         let headers = handshake_headers(&cli, &Url::parse("ws://example.com").unwrap()).unwrap();
 
+        assert_eq!(
+            headers.get(ACCEPT).and_then(|value| value.to_str().ok()),
+            Some(core::DEFAULT_ACCEPT_HEADER)
+        );
         assert_eq!(
             headers
                 .get(AUTHORIZATION)

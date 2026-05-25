@@ -1,6 +1,8 @@
 use std::fmt;
 use std::io::IsTerminal;
 
+pub const DEFAULT_ACCEPT_HEADER: &str = "application/json, */*;q=0.5";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     Unknown,
