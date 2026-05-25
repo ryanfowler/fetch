@@ -73,7 +73,17 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     };
     let session = load_session(cli)?;
 
-    let dns_resolution = resolve_dns_for_client(cli, &url, http_version).await?;
+    let request_start = Instant::now();
+    let request_timeout = cli
+        .timeout
+        .map(|seconds| duration_from_seconds("timeout", seconds))
+        .transpose()?;
+    let connect_timeout = cli
+        .connect_timeout
+        .map(|seconds| duration_from_seconds("connect-timeout", seconds))
+        .transpose()?;
+    let dns_timeout = dns_resolution_timeout(request_timeout, connect_timeout, request_start)?;
+    let dns_resolution = resolve_dns_for_client(cli, &url, http_version, dns_timeout).await?;
 
     crate::tls::install_default_crypto_provider();
 
@@ -91,11 +101,11 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     if cli.insecure {
         builder = builder.danger_accept_invalid_certs(true);
     }
-    if let Some(seconds) = cli.timeout {
-        builder = builder.timeout(duration_from_seconds("timeout", seconds)?);
+    if let Some(timeout) = remaining_request_timeout(request_timeout, request_start)? {
+        builder = builder.timeout(timeout);
     }
-    if let Some(seconds) = cli.connect_timeout {
-        builder = builder.connect_timeout(duration_from_seconds("connect-timeout", seconds)?);
+    if let Some(timeout) = connect_timeout {
+        builder = builder.connect_timeout(timeout);
     }
     if let Some(session) = &session {
         builder = builder.cookie_provider(session.cookie_provider());
@@ -365,10 +375,61 @@ struct DnsResolution {
     timing: Option<DnsTiming>,
 }
 
+fn dns_resolution_timeout(
+    request_timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+    start: Instant,
+) -> Result<Option<Duration>, FetchError> {
+    let remaining = remaining_request_timeout(request_timeout, start)?;
+    Ok(match (connect_timeout, remaining) {
+        (Some(connect), Some(remaining)) => Some(connect.min(remaining)),
+        (Some(connect), None) => Some(connect),
+        (None, remaining) => remaining,
+    })
+}
+
+fn remaining_request_timeout(
+    timeout: Option<Duration>,
+    start: Instant,
+) -> Result<Option<Duration>, FetchError> {
+    let Some(timeout) = timeout else {
+        return Ok(None);
+    };
+    let elapsed = start.elapsed();
+    if elapsed >= timeout {
+        return Err(FetchError::Runtime(format!(
+            "request timed out after {}",
+            format_go_duration(timeout)
+        )));
+    }
+    Ok(Some(timeout - elapsed))
+}
+
 async fn resolve_dns_for_client(
     cli: &Cli,
     url: &Url,
     http_version: Option<HttpVersion>,
+    timeout: Option<Duration>,
+) -> Result<Option<DnsResolution>, FetchError> {
+    let resolve = resolve_dns_for_client_inner(cli, url, http_version, timeout);
+    if let Some(timeout) = timeout {
+        match tokio::time::timeout(timeout, resolve).await {
+            Ok(result) => result,
+            Err(_) => Err(FetchError::Runtime(format!(
+                "request timed out after {}",
+                format_go_duration(timeout)
+            ))),
+        }
+    } else {
+        resolve.await
+    }
+}
+
+async fn resolve_dns_for_client_inner(
+    cli: &Cli,
+    url: &Url,
+    http_version: Option<HttpVersion>,
+    timeout: Option<Duration>,
 ) -> Result<Option<DnsResolution>, FetchError> {
     let Some(host) = url.host_str() else {
         return Ok(None);
@@ -386,7 +447,7 @@ async fn resolve_dns_for_client(
             let server_url = Url::parse(dns_server).map_err(|err| {
                 FetchError::Message(format!("invalid dns-server '{dns_server}': {err}"))
             })?;
-            crate::dns::doh::lookup_doh(&server_url, host)
+            crate::dns::doh::lookup_doh(&server_url, host, timeout)
                 .await
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
         } else {

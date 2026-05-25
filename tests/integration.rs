@@ -840,6 +840,16 @@ fn start_udp_dns_server(host: &'static str, ip: Ipv4Addr) -> String {
     addr
 }
 
+fn start_unresponsive_udp_dns_server() -> String {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while socket.recv_from(&mut buf).is_ok() {}
+    });
+    addr
+}
+
 fn start_tls_server(
     handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static,
 ) -> TlsTestServer {
@@ -3879,6 +3889,18 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert!(res.stderr.contains("DNS"));
     assert!(res.stderr.contains("TCP"));
     assert!(res.stderr.contains("TTFB"));
+
+    let unresponsive_dns_addr = start_unresponsive_udp_dns_server();
+    let res = run_fetch(&[
+        "--dns-server",
+        &unresponsive_dns_addr,
+        "--connect-timeout",
+        "0.05",
+        &format!("http://fetch-dns-timeout.test:{target_port}"),
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("request timed out after 50ms"));
+    assert!(!res.stderr.contains("For more information"));
 }
 
 #[test]
