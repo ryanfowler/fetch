@@ -309,22 +309,29 @@ fn canonical_uri_path(url: &Url) -> String {
 }
 
 fn canonical_query(url: &Url) -> String {
-    let mut params: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (key, value) in url.query_pairs() {
-        params
-            .entry(key.into_owned())
-            .or_default()
-            .push(value.into_owned());
-    }
     let mut pairs = Vec::new();
-    for (key, values) in params {
-        for value in values {
-            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-            serializer.append_pair(&key, &value);
-            pairs.push(serializer.finish().replace('+', "%20"));
+    for (key, value) in url.query_pairs() {
+        pairs.push(format!(
+            "{}={}",
+            aws_percent_encode(key.as_bytes()),
+            aws_percent_encode(value.as_bytes())
+        ));
+    }
+    pairs.sort();
+    pairs.join("&")
+}
+
+fn aws_percent_encode(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for &byte in bytes {
+        if valid_query_byte(byte) {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push_str(&hex_encode_upper(&[byte]));
         }
     }
-    pairs.join("&")
+    out
 }
 
 fn build_string_to_sign(
@@ -376,6 +383,10 @@ fn format_datetime(now: OffsetDateTime) -> String {
 
 fn valid_uri_byte(byte: u8) -> bool {
     matches!(byte, b'-' | b'.' | b'/' | b'0'..=b'9' | b'A'..=b'Z' | b'_' | b'a'..=b'z' | b'~')
+}
+
+fn valid_query_byte(byte: u8) -> bool {
+    matches!(byte, b'-' | b'.' | b'0'..=b'9' | b'A'..=b'Z' | b'_' | b'a'..=b'z' | b'~')
 }
 
 fn is_hex(byte: u8) -> bool {
@@ -565,6 +576,26 @@ mod tests {
             let path = canonical.lines().nth(1).unwrap();
             assert_eq!(path, want);
         }
+    }
+
+    #[test]
+    fn test_canonical_query_sorts_duplicate_values() {
+        let url = Url::parse("https://example.com/?z=last&a=b&a=a&a=A").unwrap();
+
+        assert_eq!(canonical_query(&url), "a=A&a=a&a=b&z=last");
+    }
+
+    #[test]
+    fn test_canonical_query_sorts_percent_encoded_pairs() {
+        let url = Url::parse(
+            "https://example.com/?z=last&%C3%A9=first&space=two%20words&space=bang!&slash=/",
+        )
+        .unwrap();
+
+        assert_eq!(
+            canonical_query(&url),
+            "%C3%A9=first&slash=%2F&space=bang%21&space=two%20words&z=last"
+        );
     }
 
     #[test]
