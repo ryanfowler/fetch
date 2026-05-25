@@ -104,6 +104,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - Image rendering defaults (`auto`) use built-in Rust decoders only; external adapters (`vips`, `magick`, `ffmpeg`) require `--image external` or `image = external` and run with bounded stdin/stdout/stderr and timeout handling.
 - Response compression negotiation is controlled by `--compress auto|br|gzip|zstd|off` or `compress = ...`; `brotli` is accepted as an alias for `br`, `auto` requests and decodes gzip/brotli/zstd, single-algorithm modes only request/decode that algorithm, and `off` leaves compressed bodies untouched.
 - `--sort-headers` or `sort-headers = true` sorts displayed request/response headers alphabetically by name in verbose output without changing the actual request header order.
+- Default HTTP requests send `Accept: application/json, */*;q=0.5`, preferring JSON while allowing any other response type as a lower-priority fallback.
 
 Retryable requests use replayable request bodies so retries and 307/308 redirects can resend data without holding unrelated state.
 Multipart `-F` request bodies are produced with a stable boundary so redirected requests preserve the original body shape.

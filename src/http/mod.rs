@@ -142,9 +142,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     } else {
         headers.insert(
             ACCEPT,
-            HeaderValue::from_static(
-                "application/json,application/vnd.msgpack,application/xml,image/webp,*/*",
-            ),
+            HeaderValue::from_static(core::DEFAULT_ACCEPT_HEADER),
         );
         apply_headers(&mut headers, &cli.headers)?;
     }
