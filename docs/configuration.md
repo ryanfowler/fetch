@@ -135,19 +135,22 @@ image = external
 image = off
 ```
 
-#### `no-pager`
+#### `pager`
 
-**Type**: Boolean
-**Default**: `false`
+**Type**: String
+**Values**: `auto`, `on`, `off`
+**Default**: `auto`
 
-Disable piping terminal output through the `less -FIRX` pager.
+Control piping response body output through the `less -FIRX` pager. `auto` uses
+the pager when stdout is a terminal, `on` forces pager use, and `off` disables
+the pager.
 
 ```ini
 # Disable pager
-no-pager = true
+pager = off
 
-# Enable pager (default)
-no-pager = false
+# Force pager
+pager = on
 ```
 
 #### `silent`

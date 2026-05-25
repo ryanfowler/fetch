@@ -1813,7 +1813,7 @@ fn run_image_render_pty(env: Vec<(String, String)>) -> String {
     });
     let pty = open_pty(24, 80, 800, 480);
     let mut cmd = Command::new(fetch_bin());
-    cmd.args([server.url.as_str(), "--format", "on", "--no-pager"]);
+    cmd.args([server.url.as_str(), "--format", "on", "--pager", "off"]);
     cmd.env("HTTP_PROXY", "");
     cmd.env("HTTPS_PROXY", "");
     cmd.env("ALL_PROXY", "");
@@ -1980,6 +1980,46 @@ fn run_image_pty_with_fake_less(
 }
 
 #[cfg(unix)]
+fn run_fetch_with_fake_less(extra_args: &[&str]) -> (FetchOutput, Option<String>, Option<String>) {
+    let server = TestServer::start(|_| TestResponse::ok("pager body\n"));
+    let dir = TempDir::new().unwrap();
+    install_fake_less(dir.path());
+    let less_args = dir.path().join("less.args");
+    let less_input = dir.path().join("less.input");
+    let path = env::join_paths(
+        std::iter::once(dir.path().to_path_buf()).chain(
+            env::var_os("PATH")
+                .map(|path| env::split_paths(&path).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+    )
+    .unwrap();
+    let path_string = path.to_string_lossy().into_owned();
+    let less_args_string = less_args.to_string_lossy().into_owned();
+    let less_input_string = less_input.to_string_lossy().into_owned();
+    let mut args = vec![server.url.as_str()];
+    args.extend_from_slice(extra_args);
+
+    let output = run_fetch_opts(
+        FetchOpts {
+            env: vec![
+                ("PATH".to_string(), path_string),
+                ("FETCH_TEST_LESS_ARGS".to_string(), less_args_string),
+                ("FETCH_TEST_LESS_INPUT".to_string(), less_input_string),
+            ],
+            ..Default::default()
+        },
+        &args,
+    );
+
+    (
+        output,
+        fs::read_to_string(less_args).ok(),
+        fs::read_to_string(less_input).ok(),
+    )
+}
+
+#[cfg(unix)]
 #[test]
 fn terminal_stdout_uses_less_pager_by_default() {
     let (output, less_args, less_input) = run_fetch_pty_with_fake_less(&[]);
@@ -1991,12 +2031,23 @@ fn terminal_stdout_uses_less_pager_by_default() {
 
 #[cfg(unix)]
 #[test]
-fn no_pager_writes_terminal_stdout_directly() {
-    let (output, less_args, less_input) = run_fetch_pty_with_fake_less(&["--no-pager"]);
+fn pager_off_writes_terminal_stdout_directly() {
+    let (output, less_args, less_input) = run_fetch_pty_with_fake_less(&["--pager", "off"]);
 
     assert!(output.contains("pager body"), "{output:?}");
     assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
     assert!(less_input.is_none(), "pager received input: {less_input:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn pager_on_uses_less_when_stdout_is_not_terminal() {
+    let (res, less_args, less_input) = run_fetch_with_fake_less(&["--pager", "on"]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "pager body\n");
+    assert_eq!(less_args.as_deref(), Some("-FIRX\n"));
+    assert_eq!(less_input.as_deref(), Some("pager body\n"));
 }
 
 #[cfg(unix)]
@@ -4502,7 +4553,8 @@ fn websocket_interactive_pty_go_case() {
         "on",
         "--format",
         "off",
-        "--no-pager",
+        "--pager",
+        "off",
     ]);
     cmd.env("TERM", "xterm-256color");
     cmd.env("HTTP_PROXY", "");
@@ -4558,7 +4610,7 @@ fn request_ctrl_c_reports_signal_go_case() {
     });
 
     let mut cmd = Command::new(fetch_bin());
-    cmd.args([server.url.as_str(), "--no-pager"]);
+    cmd.args([server.url.as_str(), "--pager", "off"]);
     cmd.env("HTTP_PROXY", "");
     cmd.env("HTTPS_PROXY", "");
     cmd.env("ALL_PROXY", "");
