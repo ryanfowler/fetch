@@ -242,20 +242,36 @@ pub fn is_valid_name(name: &str) -> bool {
 pub fn sessions_dir() -> Result<PathBuf, SessionError> {
     #[cfg(test)]
     if let Some(dir) = test_sessions_dir() {
-        std::fs::create_dir_all(&dir)?;
+        create_sessions_dir(&dir)?;
         return Ok(dir);
     }
 
     if let Some(dir) = std::env::var_os("FETCH_INTERNAL_SESSIONS_DIR") {
         let dir = PathBuf::from(dir);
-        std::fs::create_dir_all(&dir)?;
+        create_sessions_dir(&dir)?;
         return Ok(dir);
     }
 
     let base = default_cache_dir()?;
     let dir = base.join("fetch").join("sessions");
-    std::fs::create_dir_all(&dir)?;
+    create_sessions_dir(&dir)?;
     Ok(dir)
+}
+
+#[cfg(unix)]
+fn create_sessions_dir(dir: &Path) -> Result<(), SessionError> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700).create(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_sessions_dir(dir: &Path) -> Result<(), SessionError> {
+    std::fs::create_dir_all(dir)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -394,19 +410,43 @@ fn format_rfc3339(value: OffsetDateTime) -> Result<String, time::error::Format> 
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<(), SessionError> {
+    use std::io::Write;
+
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir)?;
+    create_sessions_dir(dir)?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let tmp = dir.join(format!(".session-{}-{nanos}.tmp", std::process::id()));
-    std::fs::write(&tmp, data)?;
+    let mut file = create_session_temp_file(&tmp)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    drop(file);
     if let Err(err) = crate::fileutil::atomic_replace_file(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err.into());
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_session_temp_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_session_temp_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 fn is_false(value: &bool) -> bool {
@@ -512,6 +552,43 @@ mod tests {
         let cookies = reloaded.session.cookies();
         assert_eq!(cookies.len(), 2);
         assert!(!cookies.iter().any(|cookie| cookie.name == "expired"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_sessions_dir_excludes_group_and_other_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir(&sessions).unwrap();
+        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o777)).unwrap();
+        set_sessions_dir(&sessions);
+
+        let resolved = sessions_dir().unwrap();
+
+        let mode = std::fs::metadata(resolved).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_saved_session_file_is_user_readable_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        set_sessions_dir(dir.path());
+        let session = Session::load("secure-file").unwrap().session;
+        session.save().unwrap();
+
+        let mode = std::fs::metadata(dir.path().join("secure-file.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]
