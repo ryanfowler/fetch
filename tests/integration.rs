@@ -335,7 +335,7 @@ impl PartialBodyReplayServer {
                             }
                             let _ = write!(
                                 stream,
-                                "Content-Length: 1073741824\r\nConnection: keep-alive\r\n\r\n"
+                                "Content-Length: 1073741824\r\nConnection: close\r\n\r\n"
                             );
                             let chunk = vec![b'x'; 16 * 1024];
                             for _ in 0..128 {

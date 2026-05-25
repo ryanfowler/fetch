@@ -126,11 +126,13 @@ async fn invoke(
     url.set_path(path);
     url.set_query(None);
     url.set_fragment(None);
+    let request_body =
+        framing::frame(&payload, false).map_err(|err| FetchError::Message(err.to_string()))?;
 
     let response = client
         .post(url)
         .headers(reflection_headers(cli)?)
-        .body(framing::frame(&payload, false))
+        .body(request_body)
         .send()
         .await?;
     let status_code = response.status();
@@ -145,24 +147,49 @@ async fn invoke(
 
     let headers = response.headers().clone();
     let response: http::Response<reqwest::Body> = response.into();
-    let collected = response.into_body().collect().await?;
-    let trailers = collected.trailers().cloned().unwrap_or_default();
+    let (out, trailers) = read_reflection_frames(response.into_body()).await?;
     if let Some(grpc_status) =
         grpc_status_from_headers(&trailers).or_else(|| grpc_status_from_headers(&headers))
     {
         return Err(grpc_status.to_string().into());
     }
 
-    let frames = framing::read_frames(&collected.to_bytes())
-        .map_err(|err| FetchError::Message(err.to_string()))?;
-    let mut out = Vec::with_capacity(frames.len());
-    for frame in frames {
-        if frame.compressed {
-            return Err("compressed gRPC messages are not supported".into());
-        }
-        out.push(frame.data);
-    }
     Ok(out)
+}
+
+async fn read_reflection_frames(
+    mut body: reqwest::Body,
+) -> Result<(Vec<Vec<u8>>, HeaderMap), FetchError> {
+    let mut decoder = framing::FrameDecoder::new();
+    let mut out = Vec::new();
+    let mut trailers = HeaderMap::new();
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame?;
+        match frame.into_data() {
+            Ok(data) => {
+                for frame in decoder
+                    .push(&data)
+                    .map_err(|err| FetchError::Message(err.to_string()))?
+                {
+                    if frame.compressed {
+                        return Err("compressed gRPC messages are not supported".into());
+                    }
+                    out.push(frame.data);
+                }
+            }
+            Err(frame) => {
+                if let Ok(frame_trailers) = frame.into_trailers() {
+                    trailers = frame_trailers;
+                }
+            }
+        }
+    }
+
+    decoder
+        .finish()
+        .map_err(|err| FetchError::Message(err.to_string()))?;
+    Ok((out, trailers))
 }
 
 fn reflection_client(cli: &Cli) -> Result<Client, FetchError> {
@@ -509,5 +536,17 @@ mod tests {
             normalize_reflection_symbol("grpc.health.v1.Health/Check"),
             "grpc.health.v1.Health.Check"
         );
+    }
+
+    #[tokio::test]
+    async fn reflection_reader_rejects_oversized_message_from_header() {
+        let body =
+            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+                bytes::Bytes::from_static(&[0x00, 0x04, 0x00, 0x00, 0x01]),
+            )]));
+
+        let err = read_reflection_frames(body).await.unwrap_err();
+
+        assert!(err.to_string().contains("gRPC message too large"));
     }
 }

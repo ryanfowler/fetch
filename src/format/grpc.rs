@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn test_format_grpc_stream_single_frame() {
         let proto_data = append_bytes(append_varint(Vec::new(), 1, 42), 2, b"hello");
-        let output = format_grpc_stream(&frame(&proto_data, false)).unwrap();
+        let output = format_grpc_stream(&frame(&proto_data, false).unwrap()).unwrap();
         assert!(output.contains("1:"));
         assert!(output.contains("42"));
         assert!(output.contains("2:"));
@@ -52,9 +52,9 @@ mod tests {
 
     #[test]
     fn test_format_grpc_stream_multiple_frames() {
-        let frame1 = frame(&append_varint(Vec::new(), 1, 100), false);
-        let frame2 = frame(&append_varint(Vec::new(), 1, 200), false);
-        let frame3 = frame(&append_varint(Vec::new(), 1, 300), false);
+        let frame1 = frame(&append_varint(Vec::new(), 1, 100), false).unwrap();
+        let frame2 = frame(&append_varint(Vec::new(), 1, 200), false).unwrap();
+        let frame3 = frame(&append_varint(Vec::new(), 1, 300), false).unwrap();
 
         let mut stream = Vec::new();
         stream.extend_from_slice(&frame1);
@@ -70,12 +70,12 @@ mod tests {
     #[test]
     fn test_format_grpc_stream_empty_stream_and_message() {
         assert_eq!(format_grpc_stream(&[]).unwrap(), "");
-        assert_eq!(format_grpc_stream(&frame(&[], false)).unwrap(), "");
+        assert_eq!(format_grpc_stream(&frame(&[], false).unwrap()).unwrap(), "");
     }
 
     #[test]
     fn test_format_grpc_stream_compressed_frame() {
-        let err = format_grpc_stream(&frame(b"compressed payload", true)).unwrap_err();
+        let err = format_grpc_stream(&frame(b"compressed payload", true).unwrap()).unwrap_err();
         assert!(
             err.to_string()
                 .contains("compressed gRPC messages are not supported")
@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn test_format_grpc_stream_error_mid_stream() {
-        let mut stream = frame(&append_varint(Vec::new(), 1, 42), false);
+        let mut stream = frame(&append_varint(Vec::new(), 1, 42), false).unwrap();
         stream.extend_from_slice(&[0x00, 0x00]);
         assert!(format_grpc_stream(&stream).is_err());
     }
@@ -95,8 +95,8 @@ mod tests {
         let msg2 = append_bytes(append_varint(Vec::new(), 1, 20), 2, b"second");
 
         let mut stream = Vec::new();
-        stream.extend_from_slice(&frame(&msg1, false));
-        stream.extend_from_slice(&frame(&msg2, false));
+        stream.extend_from_slice(&frame(&msg1, false).unwrap());
+        stream.extend_from_slice(&frame(&msg2, false).unwrap());
 
         let output = format_grpc_stream(&stream).unwrap();
         assert!(output.contains("10"));
