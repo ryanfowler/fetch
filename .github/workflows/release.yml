@@ -152,6 +152,7 @@ jobs:
 
       - name: Upload release archive
         if: github.event_name == 'release' || inputs.upload_release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$RELEASE_VERSION" "$ASSET" "$ASSET.sha256" --clobber
