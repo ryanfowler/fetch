@@ -453,7 +453,7 @@ async fn resolve_dns_for_client_inner(
         } else {
             let server_addr = crate::dns::resolver::normalize_udp_dns_server(dns_server)
                 .map_err(|err| FetchError::Message(err.to_string()))?;
-            crate::dns::resolver::lookup_udp(&server_addr, host)
+            crate::dns::resolver::lookup_udp(&server_addr, host, timeout)
                 .await
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
         };
