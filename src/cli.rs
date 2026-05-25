@@ -261,7 +261,10 @@ pub struct Cli {
     #[arg(long = "no-encode", help = "Avoid requesting gzip/zstd encoding")]
     pub no_encode: bool,
 
-    #[arg(long = "no-pager", help = "Avoid using a pager for the output")]
+    #[arg(
+        long = "no-pager",
+        help = "Do not pipe terminal output through a pager"
+    )]
     pub no_pager: bool,
 
     #[arg(

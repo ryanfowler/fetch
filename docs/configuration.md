@@ -140,7 +140,7 @@ image = off
 **Type**: Boolean
 **Default**: `false`
 
-Disable piping output through a pager like `less`.
+Disable piping terminal output through the `less -FIRX` pager.
 
 ```ini
 # Disable pager

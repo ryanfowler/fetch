@@ -3,10 +3,11 @@ use std::env;
 use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{ErrorKind, IsTerminal, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
@@ -921,12 +922,57 @@ async fn finish_response(
             &bytes,
             grpc_method.map(|method| method.output()),
         )?;
-        std::io::stdout().write_all(&bytes)?;
+        write_stdout_bytes(cli, &bytes)?;
         print_timing(cli, response_timing, body_duration);
 
         let code = exit_code(status.as_u16(), cli.ignore_status);
         Ok(check_grpc_status(cli, &response_headers, &trailers, code))
     }
+}
+
+fn write_stdout_bytes(cli: &Cli, bytes: &[u8]) -> Result<(), FetchError> {
+    if should_page_stdout(cli, bytes) {
+        return write_stdout_bytes_with_pager(bytes);
+    }
+
+    std::io::stdout().write_all(bytes)?;
+    Ok(())
+}
+
+fn should_page_stdout(cli: &Cli, bytes: &[u8]) -> bool {
+    !cli.no_pager && !bytes.is_empty() && std::io::stdout().is_terminal()
+}
+
+fn write_stdout_bytes_with_pager(bytes: &[u8]) -> Result<(), FetchError> {
+    let mut child = match std::process::Command::new("less")
+        .arg("-FIRX")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            std::io::stdout().write_all(bytes)?;
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        match stdin.write_all(bytes) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::BrokenPipe => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(FetchError::Runtime(format!("pager exited with {status}")));
+    }
+
+    Ok(())
 }
 
 async fn read_response_body(response: Response) -> Result<(Vec<u8>, HeaderMap), FetchError> {

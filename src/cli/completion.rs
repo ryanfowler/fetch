@@ -277,7 +277,12 @@ const FLAGS: &[Flag] = &[
         "Send a multipart form body",
     ),
     flag(None, "no-encode", "", "Avoid requesting gzip/zstd encoding"),
-    flag(None, "no-pager", "", "Avoid using a pager for the output"),
+    flag(
+        None,
+        "no-pager",
+        "",
+        "Do not pipe terminal output through a pager",
+    ),
     flag(
         Some('o'),
         "output",
