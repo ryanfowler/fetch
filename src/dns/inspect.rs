@@ -682,11 +682,11 @@ fn render_ip_literal_with_color(
     let mut printer = Printer::new(use_color);
     write_dns_title(&mut printer, host, resolver);
     printer.write_info_prefix();
-    printer.push_str("  IP literal: ");
+    printer.push_str("IP literal: ");
     printer.write_styled(&ip.to_string(), &[Sequence::Green]);
     printer.push_str(" (no DNS query needed)\n");
     printer.write_info_prefix();
-    printer.push_str("  Duration: ");
+    printer.push_str("Duration: ");
     printer.write_styled(&format_duration(duration), &[Sequence::Dim]);
     printer.push_str("\n");
     printer
@@ -713,17 +713,17 @@ fn render_with_color(result: &Inspection, use_color: bool) -> String {
     render_other_sections(&mut out, &result.records);
 
     out.write_info_prefix();
-    out.push_str("  Addresses: ");
+    out.push_str("Addresses: ");
     let address_count = result.records.get("A").map_or(0, Vec::len)
         + result.records.get("AAAA").map_or(0, Vec::len);
     out.write_styled(&address_count.to_string(), &[Sequence::Bold]);
     out.push_str("\n");
     out.write_info_prefix();
-    out.push_str("  Records: ");
+    out.push_str("Records: ");
     out.write_styled(&record_count(result).to_string(), &[Sequence::Bold]);
     out.push_str("\n");
     out.write_info_prefix();
-    out.push_str("  Duration: ");
+    out.push_str("Duration: ");
     out.write_styled(&format_duration(result.duration), &[Sequence::Dim]);
     out.push_str("\n");
     out.into_string().expect("DNS inspection output is UTF-8")
@@ -770,7 +770,7 @@ fn render_section(out: &mut Printer, name: &str, records: Option<&Vec<Record>>) 
     records.sort_by(|a, b| a.value.cmp(&b.value).then(a.ttl.cmp(&b.ttl)));
 
     out.write_info_prefix();
-    out.write_styled(&format!("  {name}"), &[Sequence::Bold]);
+    out.write_styled(name, &[Sequence::Bold]);
     out.push_str("\n");
     for (idx, record) in records.iter().enumerate() {
         let marker = if idx == records.len() - 1 {
@@ -779,7 +779,7 @@ fn render_section(out: &mut Printer, name: &str, records: Option<&Vec<Record>>) 
             "├─"
         };
         out.write_info_prefix();
-        out.push_str(&format!("  {marker} "));
+        out.push_str(&format!("{marker} "));
         out.write_styled(&record.value, &[Sequence::Green]);
         if record.has_ttl {
             out.push_str(" ");
@@ -1326,6 +1326,7 @@ mod tests {
             .unwrap();
 
         assert!(out.contains("IP literal: 127.0.0.1 (no DNS query needed)"));
+        assert!(out.contains("* Duration:"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1508,7 +1509,11 @@ mod tests {
 
         assert!(out.starts_with("\x1b[2m* \x1b[0m\x1b[1m\x1b[36mDNS lookup\x1b[0m"));
         assert!(out.contains("\x1b[3msystem\x1b[0m"));
-        assert!(out.contains("\x1b[1m  A\x1b[0m"));
+        assert!(out.contains("\x1b[2m* \x1b[0m\x1b[1mA\x1b[0m"));
+        assert!(out.contains("\x1b[2m* \x1b[0m└─ \x1b[32m192.0.2.1\x1b[0m"));
+        assert!(out.contains("\x1b[2m* \x1b[0mAddresses: \x1b[1m1\x1b[0m"));
+        assert!(out.contains("\x1b[2m* \x1b[0mRecords: \x1b[1m1\x1b[0m"));
+        assert!(out.contains("\x1b[2m* \x1b[0mDuration: \x1b[2m0ns\x1b[0m"));
         assert!(out.contains("\x1b[32m192.0.2.1\x1b[0m"));
         assert!(out.contains("\x1b[2m(TTL 1m)\x1b[0m"));
     }
