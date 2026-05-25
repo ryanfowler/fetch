@@ -695,7 +695,7 @@ fn render_ocsp_status(out: &mut Printer, raw_ocsp: &[u8]) {
         return;
     };
     out.write_info_prefix();
-    out.push_str("  OCSP: ");
+    out.push_str("OCSP: ");
     out.write_styled(status.label(), &[status.color()]);
     out.push_str(" (stapled)\n");
 }
@@ -1806,7 +1806,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         let mut out = Printer::new(false);
         render_ocsp_status(&mut out, &test_ocsp_response(0x80));
 
-        assert_eq!(out.into_string().unwrap(), "*   OCSP: good (stapled)\n");
+        assert_eq!(out.into_string().unwrap(), "* OCSP: good (stapled)\n");
 
         let mut out = Printer::new(false);
         render_ocsp_status(&mut out, b"malformed");
