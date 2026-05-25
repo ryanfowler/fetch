@@ -977,13 +977,13 @@ async fn finish_response(
         if cli.copy {
             handle_clipboard_outcome(cli, clipboard::copy_bytes(&bytes));
         }
-        let bytes = format_stdout_bytes(
+        let stdout_body = format_stdout_bytes(
             cli,
             &response_headers,
             &bytes,
             grpc_method.map(|method| method.output()),
         )?;
-        write_stdout_bytes(cli, &bytes)?;
+        write_stdout_bytes(cli, &stdout_body)?;
         print_timing(cli, response_timing, body_duration);
 
         let code = exit_code(status.as_u16(), cli.ignore_status);
@@ -991,17 +991,32 @@ async fn finish_response(
     }
 }
 
-fn write_stdout_bytes(cli: &Cli, bytes: &[u8]) -> Result<(), FetchError> {
-    if should_page_stdout(cli, bytes) {
-        return write_stdout_bytes_with_pager(bytes);
+struct StdoutBody {
+    bytes: Vec<u8>,
+    content_type: ContentType,
+}
+
+fn write_stdout_bytes(cli: &Cli, body: &StdoutBody) -> Result<(), FetchError> {
+    if should_page_stdout(
+        cli,
+        &body.bytes,
+        body.content_type,
+        std::io::stdout().is_terminal(),
+    ) {
+        return write_stdout_bytes_with_pager(&body.bytes);
     }
 
-    std::io::stdout().write_all(bytes)?;
+    std::io::stdout().write_all(&body.bytes)?;
     Ok(())
 }
 
-fn should_page_stdout(cli: &Cli, bytes: &[u8]) -> bool {
-    !cli.no_pager && !bytes.is_empty() && std::io::stdout().is_terminal()
+fn should_page_stdout(
+    cli: &Cli,
+    bytes: &[u8],
+    content_type: ContentType,
+    stdout_is_terminal: bool,
+) -> bool {
+    !cli.no_pager && !bytes.is_empty() && stdout_is_terminal && content_type != ContentType::Image
 }
 
 fn write_stdout_bytes_with_pager(bytes: &[u8]) -> Result<(), FetchError> {
@@ -1547,7 +1562,7 @@ fn format_stdout_bytes(
     headers: &HeaderMap,
     bytes: &[u8],
     grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
-) -> Result<Vec<u8>, FetchError> {
+) -> Result<StdoutBody, FetchError> {
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let terminal_cols = if stdout_is_terminal {
         core::terminal_cols()
@@ -1571,12 +1586,7 @@ fn format_stdout_bytes_with_terminal(
     grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
     stdout_is_terminal: bool,
     terminal_cols: usize,
-) -> Result<Vec<u8>, FetchError> {
-    if !format_enabled(cli.format.as_deref(), stdout_is_terminal) {
-        return Ok(bytes.to_vec());
-    }
-
-    let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
+) -> Result<StdoutBody, FetchError> {
     let content_type = headers
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
@@ -1584,8 +1594,16 @@ fn format_stdout_bytes_with_terminal(
     if content_type == ContentType::Unknown {
         content_type = content_type::sniff_content_type(bytes);
     }
+    if !format_enabled(cli.format.as_deref(), stdout_is_terminal) {
+        return Ok(StdoutBody {
+            bytes: bytes.to_vec(),
+            content_type,
+        });
+    }
+
+    let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
     let bytes = transcode_format_bytes(bytes, &charset, content_type);
-    match content_type {
+    let bytes = match content_type {
         ContentType::Json => {
             Ok(json::format_json(&bytes, use_color).unwrap_or_else(|_| bytes.to_vec()))
         }
@@ -1620,13 +1638,15 @@ fn format_stdout_bytes_with_terminal(
         ContentType::Protobuf => {
             if let Some(desc) = grpc_response_desc {
                 if let Ok(json_bytes) = proto::protobuf_to_json(&bytes, &desc) {
-                    return Ok(json::format_json(&json_bytes, use_color).unwrap_or(json_bytes));
+                    Ok(json::format_json(&json_bytes, use_color).unwrap_or(json_bytes))
+                } else {
+                    Ok(bytes.to_vec())
                 }
-                return Ok(bytes.to_vec());
+            } else {
+                Ok(protobuf::format_protobuf(&bytes)
+                    .map(|formatted| formatted.into_bytes())
+                    .unwrap_or_else(|_| bytes.to_vec()))
             }
-            Ok(protobuf::format_protobuf(&bytes)
-                .map(|formatted| formatted.into_bytes())
-                .unwrap_or_else(|_| bytes.to_vec()))
         }
         ContentType::Image => {
             if cli.image.as_deref() == Some("off") {
@@ -1656,7 +1676,11 @@ fn format_stdout_bytes_with_terminal(
             .map(|formatted| formatted.into_bytes())
             .map_err(|err| FetchError::Message(err.to_string())),
         _ => Ok(bytes.to_vec()),
-    }
+    }?;
+    Ok(StdoutBody {
+        bytes,
+        content_type,
+    })
 }
 
 fn format_enabled(setting: Option<&str>, stdout_is_terminal: bool) -> bool {
@@ -2771,7 +2795,25 @@ mod tests {
         .unwrap();
 
         let out = format_stdout_bytes(&cli, &headers, b"not decoded", None).unwrap();
-        assert_eq!(out, b"not decoded");
+        assert_eq!(out.bytes, b"not decoded");
+        assert_eq!(out.content_type, ContentType::Image);
+    }
+
+    #[test]
+    fn image_responses_skip_stdout_pager() {
+        let cli = Cli::try_parse_from(["fetch", "https://example.com"]).unwrap();
+        assert!(!should_page_stdout(
+            &cli,
+            b"\x1b_Gq=2,f=100,a=T,t=d,s=1,v=1,m=0;AAAA\x1b\\\n",
+            ContentType::Image,
+            true,
+        ));
+        assert!(should_page_stdout(
+            &cli,
+            b"{\"ok\":true}\n",
+            ContentType::Json,
+            true,
+        ));
     }
 
     #[test]
@@ -2863,7 +2905,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            String::from_utf8(out).unwrap(),
+            String::from_utf8(out.bytes).unwrap(),
             "{\n  \"word\": \"café\"\n}\n"
         );
     }
@@ -2893,12 +2935,12 @@ mod tests {
         let out =
             format_stdout_bytes_with_terminal(&cli, &headers, br#"{"ok":"yes"}"#, None, false, 0)
                 .unwrap();
-        assert!(!String::from_utf8(out).unwrap().contains("\x1b["));
+        assert!(!String::from_utf8(out.bytes).unwrap().contains("\x1b["));
 
         let out =
             format_stdout_bytes_with_terminal(&cli, &headers, br#"{"ok":"yes"}"#, None, true, 80)
                 .unwrap();
-        assert!(String::from_utf8(out).unwrap().contains("\x1b["));
+        assert!(String::from_utf8(out.bytes).unwrap().contains("\x1b["));
 
         let cli = Cli::try_parse_from([
             "fetch",
@@ -2912,7 +2954,7 @@ mod tests {
         let out =
             format_stdout_bytes_with_terminal(&cli, &headers, br#"{"ok":"yes"}"#, None, true, 80)
                 .unwrap();
-        assert!(!String::from_utf8(out).unwrap().contains("\x1b["));
+        assert!(!String::from_utf8(out.bytes).unwrap().contains("\x1b["));
 
         let cli = Cli::try_parse_from([
             "fetch",
@@ -2926,7 +2968,7 @@ mod tests {
         let out =
             format_stdout_bytes_with_terminal(&cli, &headers, br#"{"ok":"yes"}"#, None, false, 0)
                 .unwrap();
-        assert!(String::from_utf8(out).unwrap().contains("\x1b["));
+        assert!(String::from_utf8(out.bytes).unwrap().contains("\x1b["));
     }
 
     #[test]
@@ -2948,7 +2990,7 @@ mod tests {
                 0,
             )
             .unwrap();
-            assert_eq!(String::from_utf8(out).unwrap(), r#"{"ok":"yes"}"#);
+            assert_eq!(String::from_utf8(out.bytes).unwrap(), r#"{"ok":"yes"}"#);
 
             let out = format_stdout_bytes_with_terminal(
                 &cli,
@@ -2959,7 +3001,7 @@ mod tests {
                 80,
             )
             .unwrap();
-            let out = String::from_utf8(out).unwrap();
+            let out = String::from_utf8(out.bytes).unwrap();
             assert!(out.starts_with("{\n  \""));
             assert!(out.contains("\x1b[34m\x1b[1mok\x1b[0m"));
             assert!(out.contains("\x1b[32myes\x1b[0m"));
@@ -2969,7 +3011,7 @@ mod tests {
         let out =
             format_stdout_bytes_with_terminal(&cli, &headers, br#"{"ok":"yes"}"#, None, true, 80)
                 .unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), r#"{"ok":"yes"}"#);
+        assert_eq!(String::from_utf8(out.bytes).unwrap(), r#"{"ok":"yes"}"#);
     }
 
     #[test]
@@ -2995,7 +3037,7 @@ mod tests {
             5,
         )
         .unwrap();
-        let out = String::from_utf8(out).unwrap();
+        let out = String::from_utf8(out.bytes).unwrap();
 
         assert!(out.contains("--- Row 1 ---"));
         assert!(out.contains("name: Alice"));
@@ -3045,7 +3087,7 @@ mod tests {
         let out =
             format_stdout_bytes(&cli, &headers, raw, Some(test_response_descriptor())).unwrap();
 
-        assert_eq!(out, raw);
+        assert_eq!(out.bytes, raw);
     }
 
     fn test_response_descriptor() -> prost_reflect::MessageDescriptor {
