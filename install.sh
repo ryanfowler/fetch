@@ -118,17 +118,15 @@ if ! curl -fsSL "$DOWNLOAD_URL" -o "$BINARY_PATH.tar.gz"; then
   exit 1
 fi
 
-if ! tar -xzf "$BINARY_PATH.tar.gz" -C "$TMP_DIR"; then
-  error "failed to extract archive"
-  exit 1
-fi
-
-if [ ! -f "$BINARY_PATH" ]; then
+EXTRACTED="${TMP_DIR}/fetch.new"
+if ! tar -xOf "$BINARY_PATH.tar.gz" fetch > "$EXTRACTED" 2>/dev/null &&
+   ! tar -xOf "$BINARY_PATH.tar.gz" ./fetch > "$EXTRACTED" 2>/dev/null; then
   error "binary not found in archive"
   exit 1
 fi
 
-chmod +x "$BINARY_PATH"
+mv "$EXTRACTED" "$BINARY_PATH"
+chmod 755 "$BINARY_PATH"
 
 # Determine installation directory.
 if [ -w "/usr/local/bin" ]; then
