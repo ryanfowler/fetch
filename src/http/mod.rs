@@ -12,9 +12,15 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
+use async_compression::tokio::bufread::{
+    BrotliDecoder as AsyncBrotliDecoder, GzipDecoder as AsyncGzipDecoder,
+    ZstdDecoder as AsyncZstdDecoder,
+};
 use base64::Engine;
 use bytes::Bytes;
+#[cfg(test)]
 use flate2::read::GzDecoder;
+use futures_util::stream;
 use http_body_util::BodyExt;
 use reqwest::header::{
     ACCEPT, ACCEPT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RANGE, RETRY_AFTER,
@@ -22,6 +28,8 @@ use reqwest::header::{
 };
 use reqwest::redirect;
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio_util::io::StreamReader;
 use tower::{Layer, Service};
 use url::Url;
 
@@ -52,6 +60,9 @@ mod edit;
 pub mod multipart;
 
 pub(crate) type RequestBody = Option<(Vec<u8>, Option<String>)>;
+type AsyncReadBox = Pin<Box<dyn AsyncRead + Send>>;
+
+const MAX_BUFFERED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let http_version =
@@ -917,12 +928,18 @@ async fn finish_response(
     let response_timing = timing.and_then(AttemptTiming::response_timing);
     if cli.discard {
         let body_start = Instant::now();
-        let (bytes, trailers) = read_response_body(response).await?;
-        let body_duration = body_duration(method_is_head, bytes.as_ref(), body_start);
-        let _ = decode_response_bytes(compression, &response_headers, bytes.as_ref())?;
+        let streamed =
+            stream_response_to_discard(response, response_headers.clone(), compression).await?;
+        let body_duration =
+            body_duration_from_len(method_is_head, streamed.bytes_written, body_start);
         print_timing(cli, response_timing, body_duration);
         let code = exit_code(status.as_u16(), cli.ignore_status);
-        return Ok(check_grpc_status(cli, &response_headers, &trailers, code));
+        return Ok(check_grpc_status(
+            cli,
+            &response_headers,
+            &streamed.trailers,
+            code,
+        ));
     }
 
     let output_path = output::resolve_output_path(
@@ -973,9 +990,34 @@ async fn finish_response(
         ))
     } else {
         let body_start = Instant::now();
-        let (bytes, trailers) = read_response_body(response).await?;
+        let stdout_is_terminal = std::io::stdout().is_terminal();
+        if let Some(target) = stdout_stream_target(cli, &response_headers, stdout_is_terminal) {
+            let streamed = stream_response_to_stdout(
+                response,
+                response_headers.clone(),
+                compression,
+                cli.copy,
+                target,
+            )
+            .await?;
+            handle_optional_clipboard_outcome(cli, streamed.clipboard);
+            let body_duration =
+                body_duration_from_len(method_is_head, streamed.bytes_written, body_start);
+            print_timing(cli, response_timing, body_duration);
+
+            let code = exit_code(status.as_u16(), cli.ignore_status);
+            return Ok(check_grpc_status(
+                cli,
+                &response_headers,
+                &streamed.trailers,
+                code,
+            ));
+        }
+
+        let (bytes, trailers) =
+            read_decoded_response_body_limited(response, response_headers.clone(), compression)
+                .await?;
         let body_duration = body_duration(method_is_head, bytes.as_ref(), body_start);
-        let bytes = decode_response_bytes(compression, &response_headers, bytes.as_ref())?;
         if cli.copy {
             handle_clipboard_outcome(cli, clipboard::copy_bytes(&bytes));
         }
@@ -1059,17 +1101,123 @@ fn write_stdout_bytes_with_pager(bytes: &[u8]) -> Result<(), FetchError> {
     Ok(())
 }
 
-async fn read_response_body(response: Response) -> Result<(Vec<u8>, HeaderMap), FetchError> {
-    let response: http::Response<reqwest::Body> = response.into();
-    let collected = response.into_body().collect().await?;
-    let trailers = collected.trailers().cloned().unwrap_or_default();
-    Ok((collected.to_bytes().to_vec(), trailers))
+#[derive(Clone, Copy)]
+enum StdoutStreamTarget {
+    Direct,
+    Pager,
+}
+
+fn stdout_stream_target(
+    cli: &Cli,
+    headers: &HeaderMap,
+    stdout_is_terminal: bool,
+) -> Option<StdoutStreamTarget> {
+    if format_enabled(cli.format.as_deref(), stdout_is_terminal) {
+        return None;
+    }
+
+    let is_image = response_header_content_type(headers) == ContentType::Image;
+    match crate::cli::PagerMode::from_cli(cli) {
+        crate::cli::PagerMode::Auto if stdout_is_terminal && !is_image => {
+            Some(StdoutStreamTarget::Pager)
+        }
+        crate::cli::PagerMode::On if !is_image => Some(StdoutStreamTarget::Pager),
+        crate::cli::PagerMode::Auto | crate::cli::PagerMode::Off | crate::cli::PagerMode::On => {
+            Some(StdoutStreamTarget::Direct)
+        }
+    }
+}
+
+fn response_header_content_type(headers: &HeaderMap) -> ContentType {
+    let content_type = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    content_type::get_content_type(content_type).0
+}
+
+async fn read_decoded_response_body_limited(
+    response: Response,
+    response_headers: HeaderMap,
+    compression: CompressionMode,
+) -> Result<(Vec<u8>, HeaderMap), FetchError> {
+    let (reader, trailers) = async_response_reader(response);
+    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let mut bytes = Vec::new();
+    let mut buf = vec![0; 16 * 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            let trailers = trailers
+                .lock()
+                .map(|trailers| trailers.clone())
+                .unwrap_or_default();
+            return Ok((bytes, trailers));
+        }
+        if bytes.len().saturating_add(n) > MAX_BUFFERED_RESPONSE_BYTES {
+            return Err(FetchError::Message(format!(
+                "response body exceeds {} bytes and cannot be buffered; use '--format off' or write to a file to stream it",
+                MAX_BUFFERED_RESPONSE_BYTES
+            )));
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
 }
 
 struct StreamedOutput {
     trailers: HeaderMap,
     bytes_written: i64,
     clipboard: Option<clipboard::CopyOutcome>,
+}
+
+async fn stream_response_to_discard(
+    response: Response,
+    response_headers: HeaderMap,
+    compression: CompressionMode,
+) -> Result<StreamedOutput, FetchError> {
+    let (reader, trailers) = async_response_reader(response);
+    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let mut sink = tokio::io::sink();
+    let bytes_written = copy_async_reader_to_writer(&mut reader, &mut sink, None).await?;
+    let trailers = trailers
+        .lock()
+        .map(|trailers| trailers.clone())
+        .unwrap_or_default();
+    Ok(StreamedOutput {
+        trailers,
+        bytes_written,
+        clipboard: None,
+    })
+}
+
+async fn stream_response_to_stdout(
+    response: Response,
+    response_headers: HeaderMap,
+    compression: CompressionMode,
+    copy: bool,
+    target: StdoutStreamTarget,
+) -> Result<StreamedOutput, FetchError> {
+    let (reader, trailers) = async_response_reader(response);
+    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let mut capture = copy.then(clipboard::Capture::default);
+    let bytes_written = match target {
+        StdoutStreamTarget::Direct => {
+            let mut stdout = tokio::io::stdout();
+            copy_async_reader_to_writer(&mut reader, &mut stdout, capture.as_mut()).await?
+        }
+        StdoutStreamTarget::Pager => {
+            stream_async_reader_to_pager(&mut reader, capture.as_mut()).await?
+        }
+    };
+    let clipboard = capture.map(clipboard::Capture::copy);
+    let trailers = trailers
+        .lock()
+        .map(|trailers| trailers.clone())
+        .unwrap_or_default();
+    Ok(StreamedOutput {
+        trailers,
+        bytes_written,
+        clipboard,
+    })
 }
 
 async fn stream_response_to_output(
@@ -1081,56 +1229,146 @@ async fn stream_response_to_output(
     progress: output::WriteProgress,
     copy: bool,
 ) -> Result<StreamedOutput, FetchError> {
-    let response: http::Response<reqwest::Body> = response.into();
-    let body = response.into_body();
-    let trailers = Arc::new(Mutex::new(HeaderMap::new()));
-    let reader = BlockingBodyReader {
-        body,
-        buffer: Bytes::new(),
-        trailers: trailers.clone(),
-        handle: tokio::runtime::Handle::current(),
-        done: false,
+    let (reader, trailers) = async_response_reader(response);
+    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let mut capture = copy.then(clipboard::Capture::default);
+    let bytes_written = if let Some(capture) = capture.as_mut() {
+        let mut reader = AsyncClipboardTeeReader { reader, capture };
+        output::write_output_async_reader(&path, &mut reader, clobber, progress)
+            .await
+            .map_err(|err| FetchError::Message(err.to_string()))?
+    } else {
+        output::write_output_async_reader(&path, &mut reader, clobber, progress)
+            .await
+            .map_err(|err| FetchError::Message(err.to_string()))?
     };
-
-    let result = tokio::task::spawn_blocking(move || -> Result<StreamedOutput, FetchError> {
-        let mut reader = decoded_response_reader(reader, compression, &response_headers)?;
-        let mut capture = copy.then(clipboard::Capture::default);
-        let bytes_written = if let Some(capture) = capture.as_mut() {
-            let mut reader = ClipboardTeeReader { reader, capture };
-            output::write_output_reader(&path, &mut reader, clobber, progress)
-                .map_err(|err| FetchError::Message(err.to_string()))?
-        } else {
-            output::write_output_reader(&path, &mut reader, clobber, progress)
-                .map_err(|err| FetchError::Message(err.to_string()))?
-        };
-        let clipboard = capture.map(clipboard::Capture::copy);
-        let trailers = trailers
-            .lock()
-            .map(|trailers| trailers.clone())
-            .unwrap_or_default();
-        Ok(StreamedOutput {
-            trailers,
-            bytes_written,
-            clipboard,
-        })
+    let clipboard = capture.map(clipboard::Capture::copy);
+    let trailers = trailers
+        .lock()
+        .map(|trailers| trailers.clone())
+        .unwrap_or_default();
+    Ok(StreamedOutput {
+        trailers,
+        bytes_written,
+        clipboard,
     })
-    .await
-    .map_err(|err| FetchError::Message(err.to_string()))??;
-
-    Ok(result)
 }
 
-struct ClipboardTeeReader<'a> {
-    reader: Box<dyn Read + Send>,
+struct AsyncClipboardTeeReader<'a> {
+    reader: AsyncReadBox,
     capture: &'a mut clipboard::Capture,
 }
 
-impl Read for ClipboardTeeReader<'_> {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.reader.read(out)?;
-        self.capture.push(&out[..n]);
-        Ok(n)
+impl AsyncRead for AsyncClipboardTeeReader<'_> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let filled_before = buf.filled().len();
+        match self.reader.as_mut().poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                let filled = buf.filled();
+                self.capture.push(&filled[filled_before..]);
+                Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
     }
+}
+
+fn async_response_reader(response: Response) -> (AsyncReadBox, Arc<Mutex<HeaderMap>>) {
+    let response: http::Response<reqwest::Body> = response.into();
+    let body = response.into_body();
+    let trailers = Arc::new(Mutex::new(HeaderMap::new()));
+    let stream_trailers = trailers.clone();
+    let stream = stream::try_unfold(body, move |mut body| {
+        let stream_trailers = stream_trailers.clone();
+        async move {
+            loop {
+                let Some(frame) = body.frame().await else {
+                    return Ok::<Option<(Bytes, reqwest::Body)>, std::io::Error>(None);
+                };
+                let frame = frame.map_err(|err| std::io::Error::other(err.to_string()))?;
+                match frame.into_data() {
+                    Ok(data) => {
+                        if data.is_empty() {
+                            continue;
+                        }
+                        return Ok(Some((data, body)));
+                    }
+                    Err(frame) => {
+                        if let Ok(trailers) = frame.into_trailers()
+                            && let Ok(mut stored) = stream_trailers.lock()
+                        {
+                            *stored = trailers;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    (Box::pin(StreamReader::new(stream)), trailers)
+}
+
+async fn copy_async_reader_to_writer<W>(
+    reader: &mut AsyncReadBox,
+    writer: &mut W,
+    mut capture: Option<&mut clipboard::Capture>,
+) -> std::io::Result<i64>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = vec![0; 16 * 1024];
+    let mut written = 0i64;
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            writer.flush().await?;
+            return Ok(written);
+        }
+        if let Some(capture) = capture.as_mut() {
+            capture.push(&buf[..n]);
+        }
+        writer.write_all(&buf[..n]).await?;
+        written = written.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
+    }
+}
+
+async fn stream_async_reader_to_pager(
+    reader: &mut AsyncReadBox,
+    capture: Option<&mut clipboard::Capture>,
+) -> Result<i64, FetchError> {
+    let mut child = match tokio::process::Command::new("less")
+        .arg("-FIRX")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let mut stdout = tokio::io::stdout();
+            return Ok(copy_async_reader_to_writer(reader, &mut stdout, capture).await?);
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut bytes_written = 0;
+    if let Some(mut stdin) = child.stdin.take() {
+        match copy_async_reader_to_writer(reader, &mut stdin, capture).await {
+            Ok(n) => bytes_written = n,
+            Err(err) if err.kind() == ErrorKind::BrokenPipe => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    let status = child.wait().await?;
+    if !status.success() {
+        return Err(FetchError::Runtime(format!("pager exited with {status}")));
+    }
+
+    Ok(bytes_written)
 }
 
 fn handle_optional_clipboard_outcome(cli: &Cli, outcome: Option<clipboard::CopyOutcome>) {
@@ -1146,54 +1384,16 @@ fn handle_clipboard_outcome(cli: &Cli, outcome: clipboard::CopyOutcome) {
     }
 }
 
-struct BlockingBodyReader {
-    body: reqwest::Body,
-    buffer: Bytes,
-    trailers: Arc<Mutex<HeaderMap>>,
-    handle: tokio::runtime::Handle,
-    done: bool,
-}
-
-impl Read for BlockingBodyReader {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        loop {
-            if !self.buffer.is_empty() {
-                let n = out.len().min(self.buffer.len());
-                out[..n].copy_from_slice(&self.buffer[..n]);
-                let _ = self.buffer.split_to(n);
-                return Ok(n);
-            }
-            if self.done {
-                return Ok(0);
-            }
-
-            let next = self.handle.block_on(async { self.body.frame().await });
-            let Some(frame) = next else {
-                self.done = true;
-                return Ok(0);
-            };
-            let frame = frame.map_err(|err| std::io::Error::other(err.to_string()))?;
-            match frame.into_data() {
-                Ok(data) => {
-                    if data.is_empty() {
-                        continue;
-                    }
-                    self.buffer = data;
-                }
-                Err(frame) => {
-                    if let Ok(trailers) = frame.into_trailers()
-                        && let Ok(mut stored) = self.trailers.lock()
-                    {
-                        *stored = trailers;
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn body_duration(method_is_head: bool, bytes: &[u8], start: Instant) -> Option<Duration> {
-    if method_is_head || bytes.is_empty() {
+    body_duration_from_len(
+        method_is_head,
+        i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+        start,
+    )
+}
+
+fn body_duration_from_len(method_is_head: bool, len: i64, start: Instant) -> Option<Duration> {
+    if method_is_head || len == 0 {
         None
     } else {
         Some(start.elapsed())
@@ -2197,6 +2397,7 @@ fn apply_accept_encoding(headers: &mut HeaderMap, cli: &Cli, method: &Method) ->
     compression
 }
 
+#[cfg(test)]
 fn decode_response_bytes(
     compression: CompressionMode,
     headers: &HeaderMap,
@@ -2223,15 +2424,11 @@ fn decode_response_bytes(
     Ok(decoded)
 }
 
-fn decoded_response_reader<R>(
-    reader: R,
+fn decoded_async_response_reader(
+    mut reader: AsyncReadBox,
     compression: CompressionMode,
     headers: &HeaderMap,
-) -> Result<Box<dyn Read + Send>, FetchError>
-where
-    R: Read + Send + 'static,
-{
-    let mut reader: Box<dyn Read + Send> = Box::new(reader);
+) -> Result<AsyncReadBox, FetchError> {
     if compression == CompressionMode::Off {
         return Ok(reader);
     }
@@ -2242,22 +2439,18 @@ where
 
     for encoding in encodings {
         reader = match encoding.as_str() {
-            "br" => Box::new(PrefixedReadError {
+            "br" => Box::pin(AsyncPrefixedReadError {
                 prefix: "br",
-                inner: brotli::Decompressor::new(reader, 4096),
+                inner: AsyncBrotliDecoder::new(tokio::io::BufReader::new(reader)),
             }),
-            "gzip" => Box::new(PrefixedReadError {
+            "gzip" => Box::pin(AsyncPrefixedReadError {
                 prefix: "gzip",
-                inner: GzDecoder::new(reader),
+                inner: AsyncGzipDecoder::new(tokio::io::BufReader::new(reader)),
             }),
-            "zstd" => {
-                let decoder = zstd::stream::read::Decoder::new(reader)
-                    .map_err(|err| FetchError::Message(format!("zstd: {err}")))?;
-                Box::new(PrefixedReadError {
-                    prefix: "zstd",
-                    inner: decoder,
-                })
-            }
+            "zstd" => Box::pin(AsyncPrefixedReadError {
+                prefix: "zstd",
+                inner: AsyncZstdDecoder::new(tokio::io::BufReader::new(reader)),
+            }),
             "aws-chunked" => reader,
             _ => unreachable!("unsupported encodings are filtered"),
         };
@@ -2280,16 +2473,21 @@ fn output_progress_total_bytes(
     }
 }
 
-struct PrefixedReadError<R> {
+struct AsyncPrefixedReadError<R> {
     prefix: &'static str,
     inner: R,
 }
 
-impl<R: Read> Read for PrefixedReadError<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.inner
-            .read(buf)
-            .map_err(|err| std::io::Error::new(err.kind(), format!("{}: {err}", self.prefix)))
+impl<R: AsyncRead + Unpin> AsyncRead for AsyncPrefixedReadError<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let prefix = self.prefix;
+        Pin::new(&mut self.inner)
+            .poll_read(cx, buf)
+            .map_err(|err| std::io::Error::new(err.kind(), format!("{prefix}: {err}")))
     }
 }
 
@@ -2321,6 +2519,7 @@ fn content_encodings(headers: &HeaderMap) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn decode_gzip(bytes: &[u8]) -> Result<Vec<u8>, FetchError> {
     let mut decoder = GzDecoder::new(bytes);
     let mut decoded = Vec::new();
@@ -2330,6 +2529,7 @@ fn decode_gzip(bytes: &[u8]) -> Result<Vec<u8>, FetchError> {
     Ok(decoded)
 }
 
+#[cfg(test)]
 fn decode_brotli(bytes: &[u8]) -> Result<Vec<u8>, FetchError> {
     let mut decoder = brotli::Decompressor::new(bytes, 4096);
     let mut decoded = Vec::new();
@@ -2339,6 +2539,7 @@ fn decode_brotli(bytes: &[u8]) -> Result<Vec<u8>, FetchError> {
     Ok(decoded)
 }
 
+#[cfg(test)]
 fn decode_zstd(bytes: &[u8]) -> Result<Vec<u8>, FetchError> {
     zstd::stream::decode_all(bytes).map_err(|err| FetchError::Message(format!("zstd: {err}")))
 }
@@ -2912,6 +3113,66 @@ mod tests {
             b"{\"ok\":true}\n",
             ContentType::Json,
             true,
+        ));
+    }
+
+    #[test]
+    fn stdout_streaming_follows_format_and_pager_modes() {
+        let headers = HeaderMap::new();
+        let cli = Cli::try_parse_from(["fetch", "https://example.com"]).unwrap();
+        assert!(matches!(
+            stdout_stream_target(&cli, &headers, false),
+            Some(StdoutStreamTarget::Direct)
+        ));
+        assert!(stdout_stream_target(&cli, &headers, true).is_none());
+
+        let cli = Cli::try_parse_from(["fetch", "--format", "off", "https://example.com"]).unwrap();
+        assert!(matches!(
+            stdout_stream_target(&cli, &headers, false),
+            Some(StdoutStreamTarget::Direct)
+        ));
+        assert!(matches!(
+            stdout_stream_target(&cli, &headers, true),
+            Some(StdoutStreamTarget::Pager)
+        ));
+
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "--format",
+            "off",
+            "--pager",
+            "off",
+            "https://example.com",
+        ])
+        .unwrap();
+        assert!(matches!(
+            stdout_stream_target(&cli, &headers, true),
+            Some(StdoutStreamTarget::Direct)
+        ));
+
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "--format",
+            "off",
+            "--pager",
+            "on",
+            "https://example.com",
+        ])
+        .unwrap();
+        assert!(matches!(
+            stdout_stream_target(&cli, &headers, false),
+            Some(StdoutStreamTarget::Pager)
+        ));
+
+        let cli = Cli::try_parse_from(["fetch", "--format", "on", "https://example.com"]).unwrap();
+        assert!(stdout_stream_target(&cli, &headers, false).is_none());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/png"));
+        let cli = Cli::try_parse_from(["fetch", "--format", "off", "https://example.com"]).unwrap();
+        assert!(matches!(
+            stdout_stream_target(&cli, &headers, true),
+            Some(StdoutStreamTarget::Direct)
         ));
     }
 

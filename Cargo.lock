@@ -673,6 +673,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "async-compression",
  "base64",
  "brotli",
  "bytes",
@@ -718,6 +719,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "tokio-util",
  "tower",
  "url",
  "webpki-roots 1.0.7",
