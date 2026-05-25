@@ -12,6 +12,7 @@ struct ConfigValues {
     ca_cert: Vec<String>,
     cert: Option<String>,
     color: Option<String>,
+    compress: Option<String>,
     connect_timeout: Option<f64>,
     copy: Option<bool>,
     dns_server: Option<String>,
@@ -24,7 +25,6 @@ struct ConfigValues {
     key: Option<String>,
     max_tls: Option<String>,
     min_tls: Option<String>,
-    no_encode: Option<bool>,
     no_pager: Option<bool>,
     proxy: Option<String>,
     query: Vec<String>,
@@ -47,10 +47,10 @@ struct ConfigFile {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CliConfigSources {
+    compress: bool,
     copy: bool,
     ignore_status: bool,
     insecure: bool,
-    no_encode: bool,
     no_pager: bool,
     silent: bool,
     timing: bool,
@@ -60,10 +60,10 @@ struct CliConfigSources {
 impl CliConfigSources {
     fn capture(cli: &Cli) -> Self {
         Self {
+            compress: cli.compress.is_some() || cli.no_encode,
             copy: cli.copy,
             ignore_status: cli.ignore_status,
             insecure: cli.insecure,
-            no_encode: cli.no_encode,
             no_pager: cli.no_pager,
             silent: cli.silent,
             timing: cli.timing,
@@ -101,6 +101,9 @@ pub fn validate(cli: &Cli) -> Result<(), FetchError> {
     }
     if let Some(value) = cli.image.as_deref() {
         validate_cli_choice("image", value, &["auto", "external", "off"])?;
+    }
+    if let Some(value) = cli.compress.as_deref() {
+        validate_cli_choice("compress", value, crate::cli::CompressionMode::VALUES)?;
     }
     if let Some(value) = cli.proxy.as_deref() {
         validate_proxy_value(value).map_err(|usage| {
@@ -179,6 +182,9 @@ fn apply_file(cli: &mut Cli, file: &ConfigFile, sources: CliConfigSources) {
     if cli.color.is_none() {
         cli.color = values.color;
     }
+    if cli.compress.is_none() && !sources.compress {
+        cli.compress = values.compress;
+    }
     if cli.connect_timeout.is_none() {
         cli.connect_timeout = values.connect_timeout;
     }
@@ -212,9 +218,6 @@ fn apply_file(cli: &mut Cli, file: &ConfigFile, sources: CliConfigSources) {
     }
     if cli.min_tls.is_none() && cli.tls.is_none() {
         cli.min_tls = values.min_tls;
-    }
-    if !sources.no_encode {
-        cli.no_encode = values.no_encode.unwrap_or(false);
     }
     if !sources.no_pager {
         cli.no_pager = values.no_pager.unwrap_or(false);
@@ -341,6 +344,16 @@ fn set_value(
             validate_choice(path, line_num, "color", value, &["auto", "off", "on"])?;
             config.color = Some(value.to_string());
         }
+        "compress" => {
+            validate_choice(
+                path,
+                line_num,
+                "compress",
+                value,
+                crate::cli::CompressionMode::VALUES,
+            )?;
+            config.compress = Some(value.to_string());
+        }
         "connect-timeout" => {
             config.connect_timeout = Some(parse_duration_seconds(
                 path,
@@ -409,7 +422,8 @@ fn set_value(
             config.min_tls = Some(value.to_string());
         }
         "no-encode" => {
-            config.no_encode = Some(parse_bool_value(path, line_num, "no-encode", value)?);
+            let no_encode = parse_bool_value(path, line_num, "no-encode", value)?;
+            config.compress = Some(if no_encode { "off" } else { "auto" }.to_string());
         }
         "no-pager" => {
             config.no_pager = Some(parse_bool_value(path, line_num, "no-pager", value)?);
@@ -907,6 +921,7 @@ impl ConfigValues {
         self.ca_cert.extend(higher.ca_cert.iter().cloned());
         choose(&mut self.cert, &higher.cert);
         choose(&mut self.color, &higher.color);
+        choose(&mut self.compress, &higher.compress);
         choose(&mut self.connect_timeout, &higher.connect_timeout);
         choose(&mut self.copy, &higher.copy);
         choose(&mut self.dns_server, &higher.dns_server);
@@ -919,7 +934,6 @@ impl ConfigValues {
         choose(&mut self.key, &higher.key);
         choose(&mut self.max_tls, &higher.max_tls);
         choose(&mut self.min_tls, &higher.min_tls);
-        choose(&mut self.no_encode, &higher.no_encode);
         choose(&mut self.no_pager, &higher.no_pager);
         choose(&mut self.proxy, &higher.proxy);
         self.query.extend(higher.query.iter().cloned());
@@ -1066,6 +1080,7 @@ mod tests {
             &path,
             "
               timeout = 10
+              compress = zstd
               connect-timeout = 0.5
               retry = 2
               retry-delay = 0
@@ -1083,6 +1098,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(file.global.timeout, Some(10.0));
+        assert_eq!(file.global.compress.as_deref(), Some("zstd"));
         assert_eq!(file.global.connect_timeout, Some(0.5));
         assert_eq!(file.global.retry, Some(2));
         assert_eq!(file.global.retry_delay, Some(0.0));
@@ -1135,6 +1151,26 @@ mod tests {
 
         assert!(err.contains("line 1"));
         assert!(err.contains("invalid value 'nope' for option 'format'"));
+    }
+
+    #[test]
+    fn parse_file_rejects_invalid_compress_value() {
+        let path = PathBuf::from("test/config");
+        let err = parse_file(&path, "compress = brotli\n").unwrap_err();
+
+        assert!(err.contains("line 1"));
+        assert!(err.contains("invalid value 'brotli' for option 'compress'"));
+        assert!(err.contains("must be one of [auto, gzip, zstd, off]"));
+    }
+
+    #[test]
+    fn parse_file_maps_legacy_no_encode_to_compress_mode() {
+        let path = PathBuf::from("test/config");
+        let file = parse_file(&path, "no-encode = true\n").unwrap();
+        assert_eq!(file.global.compress.as_deref(), Some("off"));
+
+        let file = parse_file(&path, "no-encode = false\n").unwrap();
+        assert_eq!(file.global.compress.as_deref(), Some("auto"));
     }
 
     #[test]
@@ -1443,6 +1479,7 @@ mod tests {
             &path,
             "
               color = on
+              compress = zstd
               format = on
               retry = 2
               retry-delay = 0.5
@@ -1453,6 +1490,8 @@ mod tests {
             "fetch",
             "--color",
             "off",
+            "--compress",
+            "gzip",
             "--format",
             "off",
             "--retry",
@@ -1467,6 +1506,7 @@ mod tests {
         apply_file(&mut cli, &file, sources);
 
         assert_eq!(cli.color.as_deref(), Some("off"));
+        assert_eq!(cli.compress.as_deref(), Some("gzip"));
         assert_eq!(cli.format.as_deref(), Some("off"));
         assert_eq!(cli.retry, Some(0));
         assert_eq!(cli.retry_delay, Some(1.0));

@@ -20,6 +20,54 @@ impl HttpVersion {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompressionMode {
+    Auto,
+    Gzip,
+    Zstd,
+    Off,
+}
+
+impl CompressionMode {
+    pub const VALUES: &[&str] = &["auto", "gzip", "zstd", "off"];
+
+    pub fn from_cli(cli: &Cli) -> Self {
+        if cli.no_encode {
+            return Self::Off;
+        }
+        Self::from_value(cli.compress.as_deref().unwrap_or("auto"))
+            .expect("compression mode is validated by clap/config")
+    }
+
+    pub fn from_value(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "gzip" => Some(Self::Gzip),
+            "zstd" => Some(Self::Zstd),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    pub fn accept_encoding(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => Some("gzip, zstd"),
+            Self::Gzip => Some("gzip"),
+            Self::Zstd => Some("zstd"),
+            Self::Off => None,
+        }
+    }
+
+    pub fn decodes(self, encoding: &str) -> bool {
+        matches!(
+            (self, encoding),
+            (Self::Auto, "gzip" | "zstd" | "aws-chunked")
+                | (Self::Gzip, "gzip" | "aws-chunked")
+                | (Self::Zstd, "zstd" | "aws-chunked")
+        )
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "fetch",
@@ -85,6 +133,16 @@ pub struct Cli {
 
     #[arg(long, value_name = "SHELL", help = "Output shell completion")]
     pub complete: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MODE",
+        value_parser = ["auto", "gzip", "zstd", "off"],
+        hide_possible_values = true,
+        conflicts_with = "no_encode",
+        help = "Compression mode [auto, gzip, zstd, off]"
+    )]
+    pub compress: Option<String>,
 
     #[arg(short = 'c', long, value_name = "PATH", help = "Path to config file")]
     pub config: Option<String>,
@@ -258,7 +316,7 @@ pub struct Cli {
     )]
     pub multipart: Vec<String>,
 
-    #[arg(long = "no-encode", help = "Avoid requesting gzip/zstd encoding")]
+    #[arg(long = "no-encode", hide = true)]
     pub no_encode: bool,
 
     #[arg(

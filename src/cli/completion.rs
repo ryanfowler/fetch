@@ -54,6 +54,24 @@ const COMPLETE_VALUES: &[FlagValue] = &[
         value: "",
     },
 ];
+const COMPRESS_VALUES: &[FlagValue] = &[
+    FlagValue {
+        key: "auto",
+        value: "Request gzip or zstd",
+    },
+    FlagValue {
+        key: "gzip",
+        value: "Request gzip compression",
+    },
+    FlagValue {
+        key: "zstd",
+        value: "Request zstd compression",
+    },
+    FlagValue {
+        key: "off",
+        value: "Disable compression negotiation",
+    },
+];
 const FORMAT_VALUES: &[FlagValue] = &[
     FlagValue {
         key: "auto",
@@ -154,6 +172,14 @@ const FLAGS: &[Flag] = &[
         description: "Output shell completion",
         aliases: &[],
         values: COMPLETE_VALUES,
+    },
+    Flag {
+        short: None,
+        long: "compress",
+        args: "MODE",
+        description: "Control compression negotiation",
+        aliases: &[],
+        values: COMPRESS_VALUES,
     },
     flag(Some('c'), "config", "PATH", "Path to config file"),
     flag(
@@ -276,7 +302,6 @@ const FLAGS: &[Flag] = &[
         "NAME=[@]VALUE",
         "Send a multipart form body",
     ),
-    flag(None, "no-encode", "", "Avoid requesting gzip/zstd encoding"),
     flag(
         None,
         "no-pager",
