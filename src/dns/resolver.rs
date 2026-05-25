@@ -1,8 +1,10 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use tokio::net::UdpSocket;
+
+use crate::dns::util::{dns_query_id, udp_dns_timeout};
 
 const DNS_TYPE_A: u16 = 1;
 const DNS_TYPE_AAAA: u16 = 28;
@@ -25,13 +27,18 @@ pub struct DnsRecord {
     pub ttl: Option<u32>,
 }
 
-pub async fn lookup_udp(server_addr: &str, host: &str) -> Result<Vec<IpAddr>, ResolverError> {
+pub async fn lookup_udp(
+    server_addr: &str,
+    host: &str,
+    timeout: Option<Duration>,
+) -> Result<Vec<IpAddr>, ResolverError> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![ip]);
     }
 
-    let a = lookup_udp_type(server_addr, host, DNS_TYPE_A).await;
-    let aaaa = lookup_udp_type(server_addr, host, DNS_TYPE_AAAA).await;
+    let timeout = udp_dns_timeout(timeout);
+    let a = lookup_udp_type(server_addr, host, DNS_TYPE_A, timeout).await;
+    let aaaa = lookup_udp_type(server_addr, host, DNS_TYPE_AAAA, timeout).await;
 
     let mut addrs = Vec::new();
     if let Ok(records) = &a {
@@ -53,6 +60,7 @@ pub async fn lookup_udp_type(
     server_addr: &str,
     host: &str,
     dns_type: u16,
+    timeout: Duration,
 ) -> Result<Vec<DnsRecord>, ResolverError> {
     let id = dns_query_id();
     let raw = build_dns_query(id, host, dns_type)?;
@@ -74,10 +82,11 @@ pub async fn lookup_udp_type(
         .map_err(|err| ResolverError(err.to_string()))?;
 
     let mut buf = vec![0u8; 4096];
-    let n = socket
-        .recv(&mut buf)
-        .await
-        .map_err(|err| ResolverError(err.to_string()))?;
+    let n = match tokio::time::timeout(timeout, socket.recv(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(err)) => return Err(ResolverError(err.to_string())),
+        Err(_) => return Err(ResolverError("DNS lookup timed out".to_string())),
+    };
     parse_dns_response(&buf[..n], id)
 }
 
@@ -101,13 +110,6 @@ fn dns_server_value_error(server: &str) -> ResolverError {
     ResolverError(format!(
         "invalid value '{server}' for option '--dns-server': must be in the format <IP[:PORT]>"
     ))
-}
-
-fn dns_query_id() -> u16 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.subsec_nanos() as u16)
-        .unwrap_or_default()
 }
 
 fn build_dns_query(id: u16, host: &str, dns_type: u16) -> Result<Vec<u8>, ResolverError> {
@@ -298,7 +300,7 @@ mod tests {
     async fn lookup_udp_returns_a_and_aaaa() {
         let (addr, stop) = start_udp_server(DnsServerMode::Success);
 
-        let addrs = lookup_udp(&addr, "example.com").await.unwrap();
+        let addrs = lookup_udp(&addr, "example.com", None).await.unwrap();
 
         assert_eq!(
             addrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -311,7 +313,7 @@ mod tests {
     async fn lookup_udp_type_returns_ttl() {
         let (addr, stop) = start_udp_server(DnsServerMode::Success);
 
-        let records = lookup_udp_type(&addr, "example.com", DNS_TYPE_A)
+        let records = lookup_udp_type(&addr, "example.com", DNS_TYPE_A, Duration::from_secs(1))
             .await
             .unwrap();
 
@@ -323,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_udp_ip_literal_skips_server() {
-        let addrs = lookup_udp("127.0.0.1:9", "127.0.0.1").await.unwrap();
+        let addrs = lookup_udp("127.0.0.1:9", "127.0.0.1", None).await.unwrap();
 
         assert_eq!(addrs, ["127.0.0.1".parse::<IpAddr>().unwrap()]);
     }
@@ -332,10 +334,25 @@ mod tests {
     async fn lookup_udp_nxdomain_mentions_rcode() {
         let (addr, stop) = start_udp_server(DnsServerMode::NxDomain);
 
-        let err = lookup_udp(&addr, "missing.example").await.unwrap_err();
+        let err = lookup_udp(&addr, "missing.example", None)
+            .await
+            .unwrap_err();
 
         assert!(err.to_string().contains("NXDomain"));
         stop();
+    }
+
+    #[tokio::test]
+    async fn lookup_udp_type_times_out_waiting_for_response() {
+        let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = socket.local_addr().unwrap().to_string();
+
+        let err = lookup_udp_type(&addr, "example.com", DNS_TYPE_A, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "DNS lookup timed out");
+        drop(socket);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
 use reqwest::header::{ACCEPT, USER_AGENT};
@@ -11,6 +11,7 @@ use url::Url;
 
 use crate::cli::Cli;
 use crate::core::{self, Printer, Sequence};
+use crate::dns::util::{dns_query_id, udp_dns_timeout};
 use crate::error::{FetchError, write_error_with_color, write_warning_with_color};
 
 const DNS_TYPE_A: u16 = 1;
@@ -132,7 +133,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let inspected = if let Some(timeout) = timeout {
         match tokio::time::timeout(
             timeout,
-            inspect_with_color(&url, cli.dns_server.as_deref(), use_color),
+            inspect_with_color(&url, cli.dns_server.as_deref(), use_color, Some(timeout)),
         )
         .await
         {
@@ -143,7 +144,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             ))),
         }
     } else {
-        inspect_with_color(&url, cli.dns_server.as_deref(), use_color).await
+        inspect_with_color(&url, cli.dns_server.as_deref(), use_color, None).await
     };
 
     match inspected {
@@ -160,13 +161,14 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
 #[cfg(test)]
 async fn inspect(url: &Url, dns_server: Option<&str>) -> Result<String, FetchError> {
-    inspect_with_color(url, dns_server, false).await
+    inspect_with_color(url, dns_server, false, None).await
 }
 
 async fn inspect_with_color(
     url: &Url,
     dns_server: Option<&str>,
     use_color: bool,
+    timeout: Option<Duration>,
 ) -> Result<String, FetchError> {
     let host = url
         .host_str()
@@ -185,7 +187,7 @@ async fn inspect_with_color(
         ));
     }
 
-    let result = lookup(host, target, start).await?;
+    let result = lookup(host, target, start, timeout).await?;
     Ok(render_with_color(&result, use_color))
 }
 
@@ -193,6 +195,7 @@ async fn lookup(
     host: &str,
     target: ResolverTarget,
     start: Instant,
+    timeout: Option<Duration>,
 ) -> Result<Inspection, FetchError> {
     let mut out = Inspection {
         host: host.to_string(),
@@ -216,13 +219,14 @@ async fn lookup(
         return Ok(out);
     }
 
+    let udp_timeout = udp_dns_timeout(timeout);
     let futures = INSPECT_TYPES.iter().copied().map(|query_type| {
         let target = target.clone();
         async move {
             match target {
                 ResolverTarget::Doh { url, .. } => lookup_doh_records(&url, host, query_type).await,
                 ResolverTarget::Udp { addr, .. } => {
-                    lookup_udp_records(&addr, host, query_type).await
+                    lookup_udp_records(&addr, host, query_type, udp_timeout).await
                 }
                 ResolverTarget::Default { .. } => unreachable!("default resolver handled earlier"),
             }
@@ -345,6 +349,7 @@ async fn lookup_udp_records(
     server_addr: &str,
     host: &str,
     query_type: QueryType,
+    timeout: Duration,
 ) -> Result<Vec<Record>, FetchError> {
     let id = dns_query_id();
     let raw = build_dns_query(id, host, query_type.dns_type)?;
@@ -358,15 +363,12 @@ async fn lookup_udp_records(
     socket.send(&raw).await?;
 
     let mut buf = vec![0u8; 4096];
-    let n = socket.recv(&mut buf).await?;
+    let n = match tokio::time::timeout(timeout, socket.recv(&mut buf)).await {
+        Ok(Ok(n)) => n,
+        Ok(Err(err)) => return Err(err.into()),
+        Err(_) => return Err("DNS lookup timed out".into()),
+    };
     parse_dns_response(&buf[..n], id)
-}
-
-fn dns_query_id() -> u16 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.subsec_nanos() as u16)
-        .unwrap_or_default()
 }
 
 fn build_dns_query(id: u16, host: &str, dns_type: u16) -> Result<Vec<u8>, FetchError> {
@@ -1361,6 +1363,7 @@ mod tests {
                 url: server_url,
             },
             Instant::now(),
+            None,
         )
         .await
         .unwrap();
@@ -1400,6 +1403,7 @@ mod tests {
                 url: server_url,
             },
             Instant::now(),
+            None,
         )
         .await
         .unwrap();
@@ -1422,6 +1426,7 @@ mod tests {
                 doh_type: "A",
                 dns_type: DNS_TYPE_A,
             },
+            Duration::from_secs(1),
         )
         .await
         .unwrap();
