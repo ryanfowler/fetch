@@ -8,6 +8,8 @@ pub enum MultipartError {
     FileDoesNotExist(String),
     #[error("file is a directory: '{0}'")]
     FileIsDirectory(String),
+    #[error("invalid multipart {kind}: value contains ASCII control character")]
+    InvalidDispositionValue { kind: &'static str },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -40,6 +42,7 @@ impl Multipart {
         for raw in values {
             let (name, value) = raw.split_once('=').unwrap_or((raw, ""));
             let name = name.trim().to_string();
+            validate_multipart_disposition_value("field name", &name)?;
             let value = value.trim();
             let value = if let Some(path) = value.strip_prefix('@') {
                 let path = expand_home(path);
@@ -77,11 +80,12 @@ impl Multipart {
                     out.extend_from_slice(b"\r\n");
                 }
                 FieldValue::File(path) => {
-                    let bytes = std::fs::read(path)?;
                     let filename = path
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                         .unwrap_or_default();
+                    validate_multipart_disposition_value("filename", &filename)?;
+                    let bytes = std::fs::read(path)?;
                     let content_type = detect_content_type(path, &bytes);
 
                     out.extend_from_slice(b"Content-Disposition: form-data; name=\"");
@@ -134,6 +138,16 @@ fn expand_home(path: &str) -> String {
 
 fn escape_multipart_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn validate_multipart_disposition_value(
+    kind: &'static str,
+    value: &str,
+) -> Result<(), MultipartError> {
+    if value.chars().any(|ch| ch.is_ascii_control()) {
+        return Err(MultipartError::InvalidDispositionValue { kind });
+    }
+    Ok(())
 }
 
 fn detect_content_type(path: &Path, bytes: &[u8]) -> &'static str {
@@ -269,5 +283,27 @@ mod tests {
         let err =
             Multipart::from_cli_fields(&[format!("file=@{}", dir.path().display())]).unwrap_err();
         assert!(err.to_string().contains("file is a directory"));
+    }
+
+    #[test]
+    fn multipart_rejects_control_characters_in_field_names() {
+        let err = Multipart::from_cli_fields(&["name\r\nX-Evil: 1=value".to_string()]).unwrap_err();
+
+        assert!(err.to_string().contains("invalid multipart field name"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multipart_rejects_control_characters_in_filenames() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evil\nname.txt");
+        std::fs::write(&path, b"payload").unwrap();
+        let multipart = Multipart::from_cli_fields(&[format!("file=@{}", path.display())])
+            .unwrap()
+            .unwrap();
+
+        let err = multipart.open().unwrap_err();
+
+        assert!(err.to_string().contains("invalid multipart filename"));
     }
 }
