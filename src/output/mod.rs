@@ -416,7 +416,7 @@ fn parse_content_disposition_filename(value: &str) -> Option<String> {
         }
     }
 
-    filename.or(filename_star)
+    filename_star.or(filename)
 }
 
 fn split_parameters(value: &str) -> Vec<&str> {
@@ -671,6 +671,16 @@ mod tests {
         assert_eq!(
             parse_content_disposition_filename(r#"attachment; filename*=UTF-8''space%20name.txt"#),
             Some("space name.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn content_disposition_filename_prefers_extended_value() {
+        assert_eq!(
+            parse_content_disposition_filename(
+                r#"attachment; filename="legacy.txt"; filename*=UTF-8''extended.txt"#
+            ),
+            Some("extended.txt".to_string())
         );
     }
 
