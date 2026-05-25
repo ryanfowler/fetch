@@ -2160,6 +2160,24 @@ fn verbosity_and_color_output() {
     assert!(res.stderr.contains("> user-agent"));
     assert!(res.stderr.contains("< x-custom-header"));
 
+    let sort_server = TestServer::start(|_| {
+        TestResponse::ok("sorted")
+            .header("X-Zeta", "last")
+            .header("Accept-Ranges", "bytes")
+            .header("X-Zeta", "duplicate")
+    });
+    let res = run_fetch(&[&sort_server.url, "-v", "--sort-headers"]);
+    assert_exit(&res, 0);
+    let accept = res.stderr.find("accept-ranges: bytes").unwrap();
+    let connection = res.stderr.find("connection: keep-alive").unwrap();
+    let content_length = res.stderr.find("content-length: 6").unwrap();
+    let zeta = res.stderr.find("x-zeta: last").unwrap();
+    let duplicate_zeta = res.stderr.find("x-zeta: duplicate").unwrap();
+    assert!(accept < connection);
+    assert!(connection < content_length);
+    assert!(content_length < zeta);
+    assert!(zeta < duplicate_zeta);
+
     let res = run_fetch(&[&server.url, "-vv", "--color", "on"]);
     assert_exit(&res, 0);
     assert!(res.stderr.contains("\x1b[1m\x1b[33mGET\x1b[0m"));
@@ -2216,6 +2234,30 @@ fn dry_run_prints_effective_request_without_network() {
     assert!(res.stderr.contains("host: localhost:3000\n"));
     assert!(res.stderr.contains("\n\n{\"key\":\"val1\"}"));
     assert!(!res.stderr.contains("> GET"));
+
+    let res = run_fetch(&[
+        "-j",
+        r#"{"key":"val1"}"#,
+        "-H",
+        "X-Zeta: last",
+        "localhost:3000",
+        "--dry-run",
+        "--sort-headers",
+    ]);
+    assert_exit(&res, 0);
+    let accept = res.stderr.find("accept: application/json").unwrap();
+    let accept_encoding = res.stderr.find("accept-encoding: gzip, zstd").unwrap();
+    let content_length = res.stderr.find("content-length: 14").unwrap();
+    let content_type = res.stderr.find("content-type: application/json").unwrap();
+    let host = res.stderr.find("host: localhost:3000").unwrap();
+    let user_agent = res.stderr.find("user-agent: fetch/").unwrap();
+    let zeta = res.stderr.find("x-zeta: last").unwrap();
+    assert!(accept < accept_encoding);
+    assert!(accept_encoding < content_length);
+    assert!(content_length < content_type);
+    assert!(content_type < host);
+    assert!(host < user_agent);
+    assert!(user_agent < zeta);
 }
 
 #[test]

@@ -489,9 +489,11 @@ Increase output verbosity. Can be stacked.
 - `-v` - Show response headers
 - `-vv` - Show request and response headers with `> ` / `< ` prefixes
 - `-vvv` - Show DNS and TLS details with `> ` / `< ` / `* ` prefixes
+- `--sort-headers` - Sort displayed request/response headers alphabetically by name
 
 ```sh
 fetch -v example.com
+fetch -vv --sort-headers example.com
 fetch -vvv example.com
 ```
 

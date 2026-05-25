@@ -528,6 +528,7 @@ timing = true
 ```sh
 fetch -v example.com    # Response headers
 fetch -vv example.com   # Request + response headers with direction prefixes
+fetch -vv --sort-headers example.com  # Sort displayed headers by name
 fetch -vvv example.com  # DNS + TLS details with direction prefixes
 ```
 

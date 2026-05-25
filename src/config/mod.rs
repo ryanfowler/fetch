@@ -33,6 +33,7 @@ struct ConfigValues {
     retry_delay: Option<f64>,
     session: Option<String>,
     silent: Option<bool>,
+    sort_headers: Option<bool>,
     timeout: Option<f64>,
     timing: Option<bool>,
     verbosity: Option<u8>,
@@ -53,6 +54,7 @@ struct CliConfigSources {
     insecure: bool,
     pager: bool,
     silent: bool,
+    sort_headers: bool,
     timing: bool,
     verbosity: bool,
 }
@@ -66,6 +68,7 @@ impl CliConfigSources {
             insecure: cli.insecure,
             pager: cli.pager.is_some(),
             silent: cli.silent,
+            sort_headers: cli.sort_headers,
             timing: cli.timing,
             verbosity: cli.verbose > 0,
         }
@@ -243,6 +246,9 @@ fn apply_file(cli: &mut Cli, file: &ConfigFile, sources: CliConfigSources) {
     }
     if !sources.silent {
         cli.silent = values.silent.unwrap_or(false);
+    }
+    if !sources.sort_headers {
+        cli.sort_headers = values.sort_headers.unwrap_or(false);
     }
     if cli.timeout.is_none() {
         cli.timeout = values.timeout;
@@ -473,6 +479,9 @@ fn set_value(
             config.session = Some(value.to_string());
         }
         "silent" => config.silent = Some(parse_bool_value(path, line_num, "silent", value)?),
+        "sort-headers" => {
+            config.sort_headers = Some(parse_bool_value(path, line_num, "sort-headers", value)?);
+        }
         "timeout" => {
             config.timeout = Some(parse_duration_seconds(
                 path,
@@ -956,6 +965,7 @@ impl ConfigValues {
         choose(&mut self.retry_delay, &higher.retry_delay);
         choose(&mut self.session, &higher.session);
         choose(&mut self.silent, &higher.silent);
+        choose(&mut self.sort_headers, &higher.sort_headers);
         choose(&mut self.timeout, &higher.timeout);
         choose(&mut self.timing, &higher.timing);
         choose(&mut self.verbosity, &higher.verbosity);
@@ -1106,6 +1116,7 @@ mod tests {
               pager = off
               insecure = true
               session = abc_123
+              sort-headers = true
               verbosity = 3
             ",
         )
@@ -1124,6 +1135,7 @@ mod tests {
         assert_eq!(file.global.pager.as_deref(), Some("off"));
         assert_eq!(file.global.insecure, Some(true));
         assert_eq!(file.global.session.as_deref(), Some("abc_123"));
+        assert_eq!(file.global.sort_headers, Some(true));
         assert_eq!(file.global.verbosity, Some(3));
     }
 
@@ -1538,6 +1550,7 @@ mod tests {
               no-encode = false
               pager = auto
               silent = false
+              sort-headers = false
               timing = false
               verbosity = 0
             ",
@@ -1552,6 +1565,7 @@ mod tests {
             "--pager",
             "off",
             "--silent",
+            "--sort-headers",
             "--timing",
             "-vv",
             "http://example.com",
@@ -1567,6 +1581,7 @@ mod tests {
         assert!(cli.no_encode);
         assert_eq!(cli.pager.as_deref(), Some("off"));
         assert!(cli.silent);
+        assert!(cli.sort_headers);
         assert!(cli.timing);
         assert_eq!(cli.verbose, 2);
     }

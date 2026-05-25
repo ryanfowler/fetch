@@ -714,29 +714,10 @@ fn print_request_metadata(
     printer.push_str(" ");
     printer.write_styled(request_protocol_label(http_version), &[core::Sequence::Dim]);
     printer.push_str("\n");
-    for (name, value) in header_lines(headers) {
-        if name.eq_ignore_ascii_case("host") {
-            continue;
-        }
-        if debug {
-            printer.write_request_prefix();
-        }
-        printer.write_styled(&name, &[core::Sequence::Bold, core::Sequence::Blue]);
-        printer.push_str(": ");
-        printer.push_str(&value);
-        printer.push_str("\n");
-    }
+    let mut lines = header_lines(headers);
+    lines.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
     if let Some((bytes, _)) = body {
-        if debug {
-            printer.write_request_prefix();
-        }
-        printer.write_styled(
-            "content-length",
-            &[core::Sequence::Bold, core::Sequence::Blue],
-        );
-        printer.push_str(": ");
-        printer.push_str(&bytes.len().to_string());
-        printer.push_str("\n");
+        lines.push(("content-length".to_string(), bytes.len().to_string()));
     }
     let host = headers
         .get(reqwest::header::HOST)
@@ -749,12 +730,19 @@ fn print_request_metadata(
             })
         });
     if let Some(host) = host {
+        lines.push(("host".to_string(), host));
+    }
+    if cli.sort_headers {
+        sort_header_lines(&mut lines);
+    }
+
+    for (name, value) in lines {
         if debug {
             printer.write_request_prefix();
         }
-        printer.write_styled("host", &[core::Sequence::Bold, core::Sequence::Blue]);
+        printer.write_styled(&name, &[core::Sequence::Bold, core::Sequence::Blue]);
         printer.push_str(": ");
-        printer.push_str(host.as_str());
+        printer.push_str(&value);
         printer.push_str("\n");
     }
     if debug {
@@ -853,6 +841,16 @@ fn header_lines(headers: &HeaderMap) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+fn sort_header_lines(lines: &mut [(String, String)]) {
+    lines.sort_by(
+        |(left, _), (right, _)| match (left.starts_with(':'), right.starts_with(':')) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => left.cmp(right),
+        },
+    );
 }
 
 fn configure_http_version(
@@ -1548,7 +1546,11 @@ fn print_response_metadata(cli: &Cli, response: &Response) {
     printer.push_str("\n");
 
     if cli.verbose > 0 {
-        for (name, value) in header_lines(response.headers()) {
+        let mut lines = header_lines(response.headers());
+        if cli.sort_headers {
+            sort_header_lines(&mut lines);
+        }
+        for (name, value) in lines {
             if cli.verbose >= 2 {
                 printer.write_response_prefix();
             }
@@ -2749,6 +2751,28 @@ mod tests {
                 ("x-zeta".to_string(), "first".to_string()),
                 ("x-zeta".to_string(), "third".to_string()),
                 ("accept".to_string(), "second".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_header_lines_orders_by_name_and_preserves_duplicates() {
+        let mut lines = vec![
+            ("x-zeta".to_string(), "first".to_string()),
+            ("accept".to_string(), "second".to_string()),
+            ("x-zeta".to_string(), "third".to_string()),
+            ("content-type".to_string(), "fourth".to_string()),
+        ];
+
+        sort_header_lines(&mut lines);
+
+        assert_eq!(
+            lines,
+            [
+                ("accept".to_string(), "second".to_string()),
+                ("content-type".to_string(), "fourth".to_string()),
+                ("x-zeta".to_string(), "first".to_string()),
+                ("x-zeta".to_string(), "third".to_string()),
             ]
         );
     }
