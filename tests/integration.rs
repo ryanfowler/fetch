@@ -631,6 +631,20 @@ fn make_update_artifact(version: &str) -> Vec<u8> {
 }
 
 #[cfg(not(windows))]
+fn update_artifact_checksum_line(name: &str, artifact: &[u8]) -> String {
+    use sha2::{Digest as Sha2Digest, Sha256};
+
+    let digest = Sha256::digest(artifact);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push(HEX[(byte >> 4) as usize] as char);
+        hex.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    format!("{hex}  {name}\n")
+}
+
+#[cfg(not(windows))]
 fn install_update_launcher(path: &Path) {
     let source = fetch_bin();
     if fs::hard_link(&source, path).is_err() {
@@ -4547,13 +4561,17 @@ fn self_update_go_harness_cases() {
     let server = TestServer::start(move |req| {
         requests_for_handler.fetch_add(1, Ordering::SeqCst);
         let version = latest_for_handler.lock().unwrap().clone();
-        if req.path.starts_with("/artifact") {
+        let artifact_name = update_artifact_name(&version);
+        if req.path == "/artifact" {
             return TestResponse::ok(make_update_artifact(&version));
+        }
+        if req.path == "/artifact.sha256" {
+            let artifact = make_update_artifact(&version);
+            return TestResponse::ok(update_artifact_checksum_line(&artifact_name, &artifact));
         }
         let base = server_url_for_handler.lock().unwrap().clone();
         let body = format!(
-            r#"{{"tag_name":"{version}","assets":[{{"name":"{}","browser_download_url":"{base}/artifact"}}]}}"#,
-            update_artifact_name(&version)
+            r#"{{"tag_name":"{version}","assets":[{{"name":"{artifact_name}","browser_download_url":"{base}/artifact"}},{{"name":"{artifact_name}.sha256","browser_download_url":"{base}/artifact.sha256"}}]}}"#
         );
         TestResponse::ok(body).header("Content-Type", "application/json")
     });
