@@ -119,17 +119,17 @@ format = on
 #### `image`
 
 **Type**: String
-**Values**: `auto`, `native`, `off`
+**Values**: `auto`, `external`, `off`
 **Default**: `auto`
 
 Control image rendering in the terminal.
 
 ```ini
-# Try optimal protocol, fallback to external tools
+# Try optimal terminal protocol with built-in decoders
 image = auto
 
-# Use only built-in decoders (jpeg, png, tiff, webp)
-image = native
+# Allow external adapters for additional formats
+image = external
 
 # Disable image rendering
 image = off

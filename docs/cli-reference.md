@@ -248,14 +248,14 @@ fetch --color off example.com
 
 ### `--image OPTION`
 
-Control image rendering. Values: `auto`, `native`, `off`.
+Control image rendering. Values: `auto`, `external`, `off`.
 
-- `auto` - Try optimal protocol, fallback to external tools
-- `native` - Use only built-in decoders (JPEG, PNG, TIFF, WebP)
+- `auto` - Try optimal terminal protocol with built-in decoders
+- `external` - Allow external adapters for additional formats
 - `off` - Disable image rendering
 
 ```sh
-fetch --image native example.com/image.png
+fetch --image external example.com/photo.avif
 fetch --image off example.com/photo.jpg
 ```
 

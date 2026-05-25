@@ -256,16 +256,17 @@ fetch --grpc --proto-file service.proto \
 1. **Check terminal support**:
    - Use Kitty, iTerm2, WezTerm, or Ghostty for best results
 
-2. **Force native decoding**:
+2. **Use default built-in decoding**:
 
    ```sh
-   fetch --image native example.com/image.png
+   fetch --image auto example.com/image.png
    ```
 
-3. **Install image adapters**:
+3. **Install and opt in to image adapters**:
 
    ```sh
    brew install vips imagemagick ffmpeg
+   fetch --image external example.com/image.avif
    ```
 
 4. **Disable image rendering**:

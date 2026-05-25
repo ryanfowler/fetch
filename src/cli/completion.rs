@@ -88,8 +88,8 @@ const IMAGE_VALUES: &[FlagValue] = &[
         value: "Automatically decide image display",
     },
     FlagValue {
-        key: "native",
-        value: "Only use builtin decoders",
+        key: "external",
+        value: "Allow external image decoders",
     },
     FlagValue {
         key: "off",

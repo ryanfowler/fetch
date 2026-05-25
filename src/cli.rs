@@ -201,7 +201,7 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "OPTION",
-        help = "Image rendering [auto, native, off]"
+        help = "Image rendering [auto,external,off]"
     )]
     pub image: Option<String>,
 

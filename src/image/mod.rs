@@ -2,8 +2,9 @@ use std::env;
 use std::fmt;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ::image::codecs::png::PngEncoder;
 use ::image::imageops::FilterType;
@@ -76,7 +77,13 @@ struct RenderOptions {
     true_color: bool,
 }
 
-pub fn render(bytes: &[u8], native_only: bool) -> Result<Vec<u8>, ImageError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeMode {
+    BuiltIn,
+    External,
+}
+
+pub fn render(bytes: &[u8], decode_mode: DecodeMode) -> Result<Vec<u8>, ImageError> {
     let size = terminal_size()?;
     let protocol = if size.width_px == 0 || size.height_px == 0 {
         Protocol::Block
@@ -88,15 +95,15 @@ pub fn render(bytes: &[u8], native_only: bool) -> Result<Vec<u8>, ImageError> {
         protocol,
         true_color: supports_true_color(),
     };
-    render_with_options(bytes, native_only, options)
+    render_with_options(bytes, decode_mode, options)
 }
 
 fn render_with_options(
     bytes: &[u8],
-    native_only: bool,
+    decode_mode: DecodeMode,
     options: RenderOptions,
 ) -> Result<Vec<u8>, ImageError> {
-    let img = orient_image(bytes, decode_image(bytes, native_only)?);
+    let img = orient_image(bytes, decode_image(bytes, decode_mode)?);
     if img.width() == 0 || img.height() == 0 {
         return Ok(Vec::new());
     }
@@ -112,10 +119,10 @@ fn render_with_options(
     }
 }
 
-fn decode_image(bytes: &[u8], native_only: bool) -> Result<DynamicImage, ImageError> {
+fn decode_image(bytes: &[u8], decode_mode: DecodeMode) -> Result<DynamicImage, ImageError> {
     match decode_image_std(bytes) {
         Ok(img) => Ok(img),
-        Err(err) if native_only => Err(err),
+        Err(err) if decode_mode == DecodeMode::BuiltIn => Err(err),
         Err(err) => decode_with_adaptors(bytes).or(Err(err)),
     }
 }
@@ -140,6 +147,8 @@ struct Adaptor {
 }
 
 const IMAGE_PATH_ARG: &str = "IMAGE_PATH";
+const ADAPTOR_TIMEOUT: Duration = Duration::from_secs(10);
+const ADAPTOR_STDOUT_CAP: usize = 64 * 1024 * 1024;
 const ADAPTORS: &[Adaptor] = &[
     Adaptor {
         name: "vips",
@@ -154,8 +163,16 @@ const ADAPTORS: &[Adaptor] = &[
     Adaptor {
         name: "ffmpeg",
         args: &[
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe",
             "-i",
             IMAGE_PATH_ARG,
+            "-frames:v",
+            "1",
             "-f",
             "image2pipe",
             "-vcodec",
@@ -191,14 +208,85 @@ fn decode_adaptor(path: &std::path::Path, adaptor: Adaptor) -> Result<DynamicIma
     for (key, value) in adaptor.env {
         cmd.env(key, value);
     }
-    let output = cmd.output()?;
+    let output = run_adaptor(cmd, adaptor.name)?;
     if !output.status.success() {
         return Err(ImageError::Message(format!(
             "{} exited with {}",
             adaptor.name, output.status
         )));
     }
+    if output.stdout_truncated {
+        return Err(ImageError::Message(format!(
+            "{} produced more than {} bytes",
+            adaptor.name, ADAPTOR_STDOUT_CAP
+        )));
+    }
     decode_image_std(&output.stdout)
+}
+
+struct AdaptorOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stdout_truncated: bool,
+}
+
+fn run_adaptor(mut cmd: Command, name: &str) -> Result<AdaptorOutput, ImageError> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ImageError::Message(format!("{name} stdout unavailable")))?;
+    let stdout_reader = thread::spawn(move || read_capped(stdout, ADAPTOR_STDOUT_CAP));
+    let deadline = Instant::now() + ADAPTOR_TIMEOUT;
+
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            return Err(ImageError::Message(format!(
+                "{name} timed out after {} seconds",
+                ADAPTOR_TIMEOUT.as_secs()
+            )));
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    let (stdout, stdout_truncated) = stdout_reader
+        .join()
+        .map_err(|_| ImageError::Message(format!("{name} stdout reader panicked")))??;
+    Ok(AdaptorOutput {
+        status,
+        stdout,
+        stdout_truncated,
+    })
+}
+
+fn read_capped<R: Read>(mut reader: R, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut out = Vec::new();
+    let mut truncated = false;
+    let mut buf = [0; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        let remaining = cap.saturating_sub(out.len());
+        if remaining > 0 {
+            let keep = remaining.min(n);
+            out.extend_from_slice(&buf[..keep]);
+        }
+        if n > remaining {
+            truncated = true;
+        }
+    }
+    Ok((out, truncated))
 }
 
 struct TempImageDir {
@@ -885,7 +973,7 @@ mod tests {
         let bytes = png_bytes(&img_1x2());
         let out = render_with_options(
             &bytes,
-            true,
+            DecodeMode::BuiltIn,
             RenderOptions {
                 size: TerminalSize {
                     cols: 1,
@@ -902,6 +990,23 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "\x1b[48;2;255;0;0m\x1b[38;2;0;0;255m▄\x1b[0m\n\x1b[0m"
         );
+    }
+
+    #[test]
+    fn builtin_decode_mode_rejects_unsupported_bytes_without_external_adaptors() {
+        let err = decode_image(b"not an image", DecodeMode::BuiltIn).unwrap_err();
+        assert!(matches!(err, ImageError::Decode(_)));
+    }
+
+    #[test]
+    fn capped_reader_preserves_limit_and_drains_input() {
+        let (out, truncated) = read_capped(Cursor::new(b"abcdef"), 4).unwrap();
+        assert_eq!(out, b"abcd");
+        assert!(truncated);
+
+        let (out, truncated) = read_capped(Cursor::new(b"abc"), 4).unwrap();
+        assert_eq!(out, b"abc");
+        assert!(!truncated);
     }
 
     #[test]

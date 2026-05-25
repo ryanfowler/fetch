@@ -1632,7 +1632,12 @@ fn format_stdout_bytes_with_terminal(
             if cli.image.as_deref() == Some("off") {
                 Ok(bytes.to_vec())
             } else {
-                crate::image::render(&bytes, cli.image.as_deref() == Some("native"))
+                let decode_mode = if cli.image.as_deref() == Some("external") {
+                    crate::image::DecodeMode::External
+                } else {
+                    crate::image::DecodeMode::BuiltIn
+                };
+                crate::image::render(&bytes, decode_mode)
                     .map_err(|err| FetchError::Message(err.to_string()))
             }
         }
