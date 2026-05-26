@@ -1,7 +1,7 @@
 use std::env;
 use std::fmt;
-use std::io::{Cursor, Read};
-use std::path::PathBuf;
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -199,7 +199,7 @@ const ADAPTORS: &[Adaptor] = &[
 fn decode_with_adaptors(bytes: &[u8]) -> Result<DynamicImage, ImageError> {
     let dir = TempImageDir::create()?;
     let image_path = dir.path.join("fetch-temp-image");
-    std::fs::write(&image_path, bytes)?;
+    write_temp_image_file(&image_path, bytes)?;
 
     for adaptor in ADAPTORS {
         if let Ok(img) = decode_adaptor(&image_path, *adaptor) {
@@ -209,7 +209,7 @@ fn decode_with_adaptors(bytes: &[u8]) -> Result<DynamicImage, ImageError> {
     Err(ImageError::Message("unable to decode image".to_string()))
 }
 
-fn decode_adaptor(path: &std::path::Path, adaptor: Adaptor) -> Result<DynamicImage, ImageError> {
+fn decode_adaptor(path: &Path, adaptor: Adaptor) -> Result<DynamicImage, ImageError> {
     let mut cmd = Command::new(adaptor.name);
     for arg in adaptor.args {
         if *arg == IMAGE_PATH_ARG {
@@ -313,7 +313,7 @@ impl TempImageDir {
             .unwrap_or_default()
             .as_nanos();
         let path = env::temp_dir().join(format!("fetch-image-{}-{stamp}", std::process::id()));
-        std::fs::create_dir(&path)?;
+        create_temp_image_dir(&path)?;
         Ok(Self { path })
     }
 }
@@ -322,6 +322,37 @@ impl Drop for TempImageDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+#[cfg(unix)]
+fn create_temp_image_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    std::fs::DirBuilder::new().mode(0o700).create(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn create_temp_image_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
+}
+
+#[cfg(unix)]
+fn write_temp_image_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_temp_image_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
 }
 
 fn write_blocks(
@@ -1020,6 +1051,23 @@ mod tests {
     fn builtin_decode_mode_rejects_unsupported_bytes_without_external_adaptors() {
         let err = decode_image(b"not an image", DecodeMode::BuiltIn).unwrap_err();
         assert!(matches!(err, ImageError::Decode(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_decode_temp_paths_use_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempImageDir::create().unwrap();
+        let dir_mode = std::fs::metadata(&dir.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+
+        let image_path = dir.path.join("fetch-temp-image");
+        write_temp_image_file(&image_path, b"secret image bytes").unwrap();
+
+        let file_mode = std::fs::metadata(&image_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600);
+        assert_eq!(std::fs::read(&image_path).unwrap(), b"secret image bytes");
     }
 
     #[test]
