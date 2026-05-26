@@ -132,10 +132,17 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         connect_timing: Some(&connect_timing),
     };
     let mut initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
-    if cli.grpc && grpc_method.is_none() && grpc_request_requires_schema(cli) {
-        let schema =
-            crate::grpc::reflection::schema_for_call(cli, &url, &initial_client.client).await?;
-        grpc_method = Some(proto::method_for_url(&schema, &url)?);
+    if cli.grpc && grpc_method.is_none() {
+        let request_requires_schema = grpc_request_requires_schema(cli);
+        match crate::grpc::reflection::schema_for_call(cli, &url, &initial_client.client).await {
+            Ok(schema) => match proto::method_for_url(&schema, &url) {
+                Ok(method) => grpc_method = Some(method),
+                Err(err) if request_requires_schema => return Err(err),
+                Err(_) => {}
+            },
+            Err(err) if request_requires_schema => return Err(err),
+            Err(_) => {}
+        }
     }
     let method_name = effective_method(cli);
     let method = Method::from_bytes(method_name.as_bytes())
