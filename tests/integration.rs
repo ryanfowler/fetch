@@ -343,7 +343,22 @@ impl PartialBodyReplayServer {
                             let _ = stream.write_all(&body);
                             let _ = stream.flush();
                             thread::spawn(move || {
-                                thread::sleep(Duration::from_secs(5));
+                                let deadline = Instant::now() + Duration::from_secs(5);
+                                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                                let mut buf = [0_u8; 1024];
+                                while Instant::now() < deadline {
+                                    match stream.read(&mut buf) {
+                                        Ok(0) => break,
+                                        Ok(_) => {}
+                                        Err(err)
+                                            if matches!(
+                                                err.kind(),
+                                                std::io::ErrorKind::WouldBlock
+                                                    | std::io::ErrorKind::TimedOut
+                                            ) => {}
+                                        Err(_) => break,
+                                    }
+                                }
                                 let _ = stream.shutdown(Shutdown::Both);
                             });
                         } else {
@@ -3035,6 +3050,8 @@ fn response_formatting_json_ndjson_xml_yaml_html_csv_css_and_sniffing() {
             .header("Content-Type", "text/html"),
         "/csv" => TestResponse::ok("name,value\none,1\n").header("Content-Type", "text/csv"),
         "/css" => TestResponse::ok("body{color:red}").header("Content-Type", "text/css"),
+        "/sse" => TestResponse::ok("data: {\"one\":1}\n\nevent: done\ndata: two\n\n")
+            .header("Content-Type", "text/event-stream"),
         "/sniff-json" => TestResponse::ok(r#"{"sniff":true}"#),
         "/sniff-xml" => TestResponse::ok("<root/>"),
         "/plain" => TestResponse::ok("just text"),
@@ -3052,6 +3069,10 @@ fn response_formatting_json_ndjson_xml_yaml_html_csv_css_and_sniffing() {
         ),
         ("/csv", "name  value\none   1\n"),
         ("/css", "body {\n  color: red;\n}\n"),
+        (
+            "/sse",
+            "event: message\ndata: { \"one\": 1 }\n\nevent: done\ndata: two\n\n",
+        ),
         ("/sniff-json", "{\n  \"sniff\": true\n}\n"),
         ("/sniff-xml", "<root></root>\n"),
         ("/plain", "just text"),
@@ -3062,6 +3083,180 @@ fn response_formatting_json_ndjson_xml_yaml_html_csv_css_and_sniffing() {
         assert_exit(&res, 0);
         assert_eq!(res.stdout, expected, "path {path}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn formatted_sse_outputs_events_before_stream_ends() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind streaming sse server");
+    let url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let (close_tx, close_rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept streaming sse request");
+        let reader_stream = stream.try_clone().expect("clone streaming sse stream");
+        let mut reader = BufReader::new(reader_stream);
+        let _ = read_request(&mut reader).expect("read streaming sse request");
+
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let first = b"data: {\"one\":1}\n\n";
+        write!(stream, "{:x}\r\n", first.len()).unwrap();
+        stream.write_all(first).unwrap();
+        stream.write_all(b"\r\n").unwrap();
+        stream.flush().unwrap();
+
+        let _ = close_rx.recv_timeout(Duration::from_secs(5));
+        let second = b"event: done\ndata: two\n\n";
+        write!(stream, "{:x}\r\n", second.len()).unwrap();
+        stream.write_all(second).unwrap();
+        stream.write_all(b"\r\n0\r\n\r\n").unwrap();
+        let _ = stream.flush();
+        let _ = stream.shutdown(Shutdown::Both);
+    });
+
+    let pty = open_pty(24, 80, 800, 480);
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([url.as_str(), "--format", "on", "--pager", "off"]);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+    configure_pty_child(&mut cmd, &pty.slave);
+    let mut child = cmd.spawn().expect("spawn streaming sse fetch under PTY");
+    drop(pty.slave);
+    let capture = start_pty_capture(&pty.master);
+
+    capture.wait_for("\"one\"", Duration::from_secs(5));
+    assert!(
+        wait_child(&mut child, Duration::from_millis(100)).is_none(),
+        "fetch exited before the SSE stream closed; PTY output:\n{}",
+        capture.output()
+    );
+    close_tx.send(()).unwrap();
+
+    let status = wait_child(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            panic!(
+                "fetch did not exit after SSE stream closed; PTY output:\n{}",
+                capture.output()
+            )
+        })
+        .expect("wait streaming sse fetch");
+    assert!(
+        status.success(),
+        "fetch exited with {status}; PTY output:\n{}",
+        capture.output()
+    );
+    let output = capture.output();
+    assert!(output.contains("\x1b[1m\x1b[36mevent\x1b[0m: done"));
+    assert!(output.contains("two"));
+    drop(pty.master);
+    capture.close();
+    join.join().unwrap();
+}
+
+#[test]
+fn sse_explicit_request_timeout_aborts_stream_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind explicit sse timeout server");
+    let url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let join = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept explicit sse timeout");
+        let reader_stream = stream
+            .try_clone()
+            .expect("clone explicit sse timeout stream");
+        let mut reader = BufReader::new(reader_stream);
+        let _ = read_request(&mut reader).expect("read explicit sse timeout request");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let _ = stream.shutdown(Shutdown::Both);
+    });
+
+    let res = run_fetch(&[&url, "--format", "on", "--timeout", "0.1"]);
+
+    join.join().unwrap();
+    assert_exit(&res, 1);
+    assert!(res.stdout.is_empty(), "stdout:\n{}", res.stdout);
+    assert!(
+        res.stderr
+            .contains("response body error: operation timed out"),
+        "stderr:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn sse_config_request_timeout_aborts_stream_body() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind config sse timeout server");
+    let url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let join = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept config sse timeout");
+        let reader_stream = stream.try_clone().expect("clone config sse timeout stream");
+        let mut reader = BufReader::new(reader_stream);
+        let _ = read_request(&mut reader).expect("read config sse timeout request");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let _ = stream.shutdown(Shutdown::Both);
+    });
+
+    let dir = TempDir::new().unwrap();
+    let config = dir.path().join("config");
+    fs::write(&config, "timeout = 0.1\n").unwrap();
+    let res = run_fetch(&["--config", config.to_str().unwrap(), &url, "--format", "on"]);
+
+    join.join().unwrap();
+    assert_exit(&res, 1);
+    assert!(res.stdout.is_empty(), "stdout:\n{}", res.stdout);
+    assert!(
+        res.stderr
+            .contains("response body error: operation timed out"),
+        "stderr:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn response_body_errors_include_response_context() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind partial response server");
+    let url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let join = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept partial response request");
+        let reader_stream = stream.try_clone().expect("clone partial response stream");
+        let mut reader = BufReader::new(reader_stream);
+        let _ = read_request(&mut reader).expect("read partial response request");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\nshort"
+        )
+        .unwrap();
+        let _ = stream.flush();
+        let _ = stream.shutdown(Shutdown::Both);
+    });
+
+    let res = run_fetch(&[&url]);
+
+    join.join().unwrap();
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("response body error"), "{}", res.stderr);
+    assert!(
+        !res.stderr.contains("request or response body error"),
+        "{}",
+        res.stderr
+    );
 }
 
 #[test]
@@ -3746,8 +3941,20 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     assert_exit(&res, 0);
     assert_eq!(
         res.stdout,
-        "[message]\n{ \"key\": \"val\" }\n\n[ev1]\nthis is my data\n"
+        "event: message\ndata: { \"key\": \"val\" }\n\nevent: ev1\ndata: this is my data\n\n"
     );
+    let res = run_fetch(&[
+        &format!("{}/sse", server.url),
+        "--format",
+        "on",
+        "--color",
+        "on",
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains("\x1b[1m\x1b[36mevent\x1b[0m: message"));
+    assert!(res.stdout.contains("\x1b[1m\x1b[36mdata\x1b[0m: {"));
+    assert!(res.stdout.contains("\x1b[34m\x1b[1m\"key\"\x1b[0m"));
+    assert!(res.stdout.contains("\x1b[32m\"val\"\x1b[0m"));
 
     let res = run_fetch(&[&format!("{}/charset-json", server.url), "--format", "on"]);
     assert_exit(&res, 0);
@@ -3780,6 +3987,9 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
     gzip.write_all(b"this is the test data").unwrap();
     let gzip_body = gzip.finish().unwrap();
+    let mut gzip_sse = GzEncoder::new(Vec::new(), Compression::default());
+    gzip_sse.write_all(b"data: compressed\n\n").unwrap();
+    let gzip_sse_body = gzip_sse.finish().unwrap();
     let mut huge_gzip = GzEncoder::new(Vec::new(), Compression::default());
     huge_gzip
         .write_all(&vec![b' '; 16 * 1024 * 1024 + 1])
@@ -3801,11 +4011,17 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
         "gzip, br, zstd" if req.path == "/too-large" => {
             TestResponse::ok(huge_gzip_body.clone()).header("Content-Encoding", "gzip")
         }
+        "gzip, br, zstd" if req.path == "/sse" => TestResponse::ok(gzip_sse_body.clone())
+            .header("Content-Type", "text/event-stream")
+            .header("Content-Encoding", "gzip"),
         "gzip, br, zstd" | "gzip" => {
             TestResponse::ok(gzip_body.clone()).header("Content-Encoding", "gzip")
         }
         "br" => TestResponse::ok(brotli_body.clone()).header("Content-Encoding", "br"),
         "zstd" => TestResponse::ok(zstd_body.clone()).header("Content-Encoding", "zstd"),
+        "" if req.path == "/sse" => {
+            TestResponse::ok("data: uncompressed\n\n").header("Content-Type", "text/event-stream")
+        }
         "" => TestResponse::ok("this is the test data"),
         other => TestResponse::status(
             400,
@@ -3817,6 +4033,12 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "this is the test data");
     assert!(res.stderr.contains("gzip"));
+    let res = run_fetch(&[&format!("{}/sse", compressed.url), "--format", "on"]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "event: message\ndata: uncompressed\n\n");
+    let requests = wait_for_requests(&compressed, 3);
+    assert_eq!(requests[1].header("accept-encoding"), "gzip, br, zstd");
+    assert_eq!(requests[2].header("accept-encoding"), "");
     let res = run_fetch(&[&compressed.url, "--discard"]);
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());

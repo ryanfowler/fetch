@@ -293,7 +293,9 @@ connect-timeout = 2.5
 **Type**: Number (seconds)
 **Default**: None (no timeout)
 
-Set a timeout for HTTP requests. Accepts decimal values.
+Set a timeout for HTTP requests. Accepts decimal values. This timeout covers the
+full request, including streamed response bodies such as SSE, NDJSON, and gRPC
+streams.
 
 ```ini
 # 30 second timeout
@@ -490,6 +492,9 @@ compress = zstd
 # Disable compression negotiation
 compress = off
 ```
+
+When `compress = auto`, compressed SSE (`text/event-stream`) responses are
+retried without `Accept-Encoding` so events can be displayed as they arrive.
 
 ### Session Options
 

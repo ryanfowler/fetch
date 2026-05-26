@@ -109,7 +109,7 @@ fetch httpbin.org/json | jq '.slideshow.title'
 - **YAML** - Syntax highlighted
 - **Images** - Rendered directly in supported terminals
 - **Protobuf / msgpack** - Decoded and displayed as JSON
-- **SSE / NDJSON** - Streamed line-by-line
+- **SSE / NDJSON** - Streamed as events or lines arrive
 
 See [Output Formatting](output-formatting.md) for details.
 

@@ -304,6 +304,10 @@ Compression modes:
 - `zstd` requests and decompresses zstd only
 - `off` sends no automatic `Accept-Encoding` header and leaves compressed response bodies untouched
 
+For SSE (`text/event-stream`) responses in `auto` mode, `fetch` retries without
+`Accept-Encoding` when the server replies with compressed content. This avoids
+common buffering behavior that prevents events from appearing as they arrive.
+
 Using `off` is useful when:
 
 - Testing compression behavior
@@ -385,6 +389,11 @@ The timeout covers:
 - Connection establishment
 - TLS handshake
 - Request/response transfer
+- Streamed response bodies such as SSE, NDJSON, and gRPC streams
+
+Timeouts from CLI flags, `--from-curl`, and configuration files are enforced for
+streaming responses. Omit `--timeout` or use a larger value for long-lived event
+streams.
 
 ### `--connect-timeout SECONDS`
 

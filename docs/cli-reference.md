@@ -307,7 +307,9 @@ fetch --connect-timeout 5 --timeout 30 example.com
 
 ### `-t, --timeout SECONDS`
 
-Request timeout in seconds. Accepts decimal values.
+Request timeout in seconds. Accepts decimal values. The timeout covers the full
+request, including response body streaming; it is also enforced for SSE, NDJSON,
+and gRPC streams.
 
 ```sh
 fetch --timeout 30 example.com
@@ -464,6 +466,10 @@ Control response compression negotiation. Values: `auto`, `br`/`brotli`, `gzip`,
 - `gzip` - request gzip compression only
 - `zstd` - request zstd compression only
 - `off` - disable automatic compression negotiation and decompression
+
+In `auto` mode, compressed SSE (`text/event-stream`) responses are retried
+without `Accept-Encoding` so streaming events can be delivered promptly instead
+of being buffered by compression.
 
 ```sh
 fetch --compress br example.com
