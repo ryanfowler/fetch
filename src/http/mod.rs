@@ -4278,22 +4278,25 @@ mod tests {
     }
 
     #[test]
-    fn regular_http_rejects_legacy_tls_only_range_on_rustls_path() {
-        let cli = Cli::try_parse_from([
-            "fetch",
-            "--min-tls",
-            "1.0",
-            "--max-tls",
-            "1.1",
-            "https://example.com",
-        ])
-        .unwrap();
+    fn regular_http_rejects_legacy_tls_versions_on_rustls_path() {
+        let cli =
+            Cli::try_parse_from(["fetch", "--min-tls", "1.0", "https://example.com"]).unwrap();
 
         let err = configure_tls(Client::builder().use_rustls_tls(), &cli).unwrap_err();
 
         assert_eq!(
             err.to_string(),
-            "TLS versions 1.0 and 1.1 are not supported"
+            "invalid value '1.0' for option '--min-tls': must be one of [1.2, 1.3]"
+        );
+
+        let cli =
+            Cli::try_parse_from(["fetch", "--max-tls", "1.1", "https://example.com"]).unwrap();
+
+        let err = configure_tls(Client::builder().use_rustls_tls(), &cli).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid value '1.1' for option '--max-tls': must be one of [1.2, 1.3]"
         );
     }
 

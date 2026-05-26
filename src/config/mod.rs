@@ -1036,8 +1036,6 @@ fn url_hostname(raw: &str) -> Option<String> {
 
 fn tls_order(value: &str) -> Option<u8> {
     match value {
-        "1.0" => Some(10),
-        "1.1" => Some(11),
         "1.2" => Some(12),
         "1.3" => Some(13),
         _ => None,
@@ -1149,6 +1147,22 @@ mod tests {
         assert!(err.contains("line 1"));
         assert!(err.contains("invalid value 'deflate' for option 'compress'"));
         assert!(err.contains("must be one of [auto, br, brotli, gzip, zstd, off]"));
+    }
+
+    #[test]
+    fn parse_file_rejects_legacy_tls_versions() {
+        let path = PathBuf::from("test/config");
+        let err = parse_file(&path, "min-tls = 1.0\n").unwrap_err();
+
+        assert!(err.contains("line 1"));
+        assert!(err.contains("invalid value '1.0' for option 'min-tls'"));
+        assert!(err.contains("must be one of [1.2, 1.3]"));
+
+        let err = parse_file(&path, "max-tls = 1.1\n").unwrap_err();
+
+        assert!(err.contains("line 1"));
+        assert!(err.contains("invalid value '1.1' for option 'max-tls'"));
+        assert!(err.contains("must be one of [1.2, 1.3]"));
     }
 
     #[test]
@@ -1422,6 +1436,22 @@ mod tests {
         let err = validate(&cli).unwrap_err();
         assert!(err.to_string().contains("invalid value '1.4'"));
         assert!(err.to_string().contains("--min-tls"));
+
+        let cli =
+            Cli::try_parse_from(["fetch", "--min-tls", "1.0", "https://example.com"]).unwrap();
+        let err = validate(&cli).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid value '1.0' for option '--min-tls': must be one of [1.2, 1.3]"
+        );
+
+        let cli =
+            Cli::try_parse_from(["fetch", "--max-tls", "1.1", "https://example.com"]).unwrap();
+        let err = validate(&cli).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid value '1.1' for option '--max-tls': must be one of [1.2, 1.3]"
+        );
     }
 
     #[test]

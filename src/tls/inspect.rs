@@ -1483,7 +1483,23 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     }
 
     #[test]
-    fn inspection_protocol_versions_document_rustls_legacy_limit() {
+    fn inspection_protocol_versions_reject_legacy_tls_versions() {
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "--inspect-tls",
+            "--min-tls",
+            "1.0",
+            "https://example.com",
+        ])
+        .unwrap();
+
+        let err = inspection_protocol_versions(&cli).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid value '1.0' for option '--min-tls': must be one of [1.2, 1.3]"
+        );
+
         let cli = Cli::try_parse_from([
             "fetch",
             "--inspect-tls",
@@ -1495,7 +1511,10 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
 
         let err = inspection_protocol_versions(&cli).unwrap_err();
 
-        assert_eq!(err.to_string(), "TLS version 1.1 is not supported");
+        assert_eq!(
+            err.to_string(),
+            "invalid value '1.1' for option '--max-tls': must be one of [1.2, 1.3]"
+        );
     }
 
     #[test]
