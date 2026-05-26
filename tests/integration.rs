@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream, UdpSocket};
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const FAST_RETRY_DELAY: &str = "0.000001";
+const PARTIAL_REPLAY_BODY_PREFIX_BYTES: usize = 1024 * 1024;
 
 #[cfg(unix)]
 use image::ImageEncoder;
@@ -330,26 +331,27 @@ impl PartialBodyReplayServer {
                         if first {
                             first = false;
                             let headers = headers.clone();
+                            let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\n");
+                            for (name, value) in &headers {
+                                let _ = write!(stream, "{name}: {value}\r\n");
+                            }
+                            let _ = write!(
+                                stream,
+                                "Content-Length: 1073741824\r\nConnection: close\r\n\r\n"
+                            );
+                            let body = vec![b'x'; PARTIAL_REPLAY_BODY_PREFIX_BYTES];
+                            let _ = stream.write_all(&body);
+                            let _ = stream.flush();
                             thread::spawn(move || {
-                                let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\n");
-                                for (name, value) in &headers {
-                                    let _ = write!(stream, "{name}: {value}\r\n");
-                                }
-                                let _ = write!(
-                                    stream,
-                                    "Content-Length: 1073741824\r\nConnection: close\r\n\r\n"
-                                );
-                                let chunk = vec![b'x'; 16 * 1024];
-                                for _ in 0..128 {
-                                    if stream.write_all(&chunk).is_err() {
-                                        break;
-                                    }
-                                }
-                                let _ = stream.flush();
                                 thread::sleep(Duration::from_secs(5));
+                                let _ = stream.shutdown(Shutdown::Both);
                             });
                         } else {
-                            write_response(&mut stream, TestResponse::ok(final_body));
+                            write_response(
+                                &mut stream,
+                                TestResponse::ok(final_body).header("Connection", "close"),
+                            );
+                            let _ = stream.shutdown(Shutdown::Both);
                             break;
                         }
                     }
