@@ -675,10 +675,6 @@ fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
         Some("remote-header-name")
     } else if cli.remote_name {
         Some("remote-name")
-    } else if cli.dns_server.is_some() {
-        Some("dns-server")
-    } else if cli.proxy.is_some() {
-        Some("proxy")
     } else if cli.retry() > 0 {
         Some("retry")
     } else if cli.retry_delay.is_some() {
@@ -1238,24 +1234,14 @@ mod tests {
     }
 
     #[test]
-    fn websocket_rejects_unimplemented_network_options() {
+    fn websocket_allows_network_options() {
         let cli =
             Cli::try_parse_from(["fetch", "wss://example.com", "--proxy", "http://proxy"]).unwrap();
-        let err = validate_websocket_exclusives(&cli).unwrap_err().to_string();
-
-        assert_eq!(
-            err,
-            "'wss://' scheme and '--proxy' flag cannot be used together"
-        );
+        validate_websocket_exclusives(&cli).unwrap();
 
         let cli =
             Cli::try_parse_from(["fetch", "wss://example.com", "--dns-server", "1.1.1.1"]).unwrap();
-        let err = validate_websocket_exclusives(&cli).unwrap_err().to_string();
-
-        assert_eq!(
-            err,
-            "'wss://' scheme and '--dns-server' flag cannot be used together"
-        );
+        validate_websocket_exclusives(&cli).unwrap();
     }
 
     #[test]

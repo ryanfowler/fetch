@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+use url::Url;
 
 const FAST_RETRY_DELAY: &str = "0.000001";
 const PARTIAL_REPLAY_BODY_PREFIX_BYTES: usize = 1024 * 1024;
@@ -894,6 +895,11 @@ fn host_port(url: &str) -> &str {
         .trim_start_matches("https://")
 }
 
+fn url_host_port(url: &str) -> String {
+    let url = Url::parse(url).unwrap();
+    format!("{}:{}", url.host_str().unwrap(), url.port().unwrap())
+}
+
 fn fake_editor(dir: &Path, body: &str, code: i32) -> PathBuf {
     #[cfg(unix)]
     {
@@ -1695,10 +1701,71 @@ fn handle_socks5_conn(mut conn: TcpStream, target_addr: &str, seen: mpsc::Sender
     let _ = std::io::copy(&mut target, &mut conn);
 }
 
+fn start_http_connect_proxy(target_addr: String) -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP CONNECT proxy");
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    let (seen_tx, seen_rx) = mpsc::channel();
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(conn) = conn else {
+                break;
+            };
+            let target_addr = target_addr.clone();
+            let seen_tx = seen_tx.clone();
+            thread::spawn(move || handle_http_connect_proxy_conn(conn, &target_addr, seen_tx));
+        }
+    });
+    (proxy_url, seen_rx)
+}
+
+fn handle_http_connect_proxy_conn(
+    mut conn: TcpStream,
+    target_addr: &str,
+    seen: mpsc::Sender<String>,
+) {
+    let mut reader = BufReader::new(conn.try_clone().expect("clone proxy stream"));
+    let Some(req) = read_request(&mut reader) else {
+        return;
+    };
+    if req.method != "CONNECT" {
+        write_response(
+            &mut conn,
+            TestResponse::status(405, "Method Not Allowed", ""),
+        );
+        return;
+    }
+    let _ = seen.send(req.path);
+    let Ok(mut target) = TcpStream::connect(target_addr) else {
+        write_response(&mut conn, TestResponse::status(502, "Bad Gateway", ""));
+        return;
+    };
+    if conn
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .is_err()
+    {
+        return;
+    }
+    let mut conn_to_target = conn.try_clone().ok();
+    let mut target_to_conn = target.try_clone().ok();
+    if let (Some(mut c), Some(mut t)) = (conn_to_target.take(), target_to_conn.take()) {
+        thread::spawn(move || {
+            let _ = std::io::copy(&mut c, &mut t);
+        });
+    }
+    let _ = std::io::copy(&mut target, &mut conn);
+}
+
 fn assert_socks_seen(seen: &mpsc::Receiver<String>, want: &str) {
     let got = seen
         .recv_timeout(Duration::from_secs(2))
         .expect("SOCKS proxy was not used");
+    assert_eq!(got, want);
+}
+
+fn assert_proxy_seen(seen: &mpsc::Receiver<String>, want: &str) {
+    let got = seen
+        .recv_timeout(Duration::from_secs(2))
+        .expect("proxy was not used");
     assert_eq!(got, want);
 }
 
@@ -5891,6 +5958,80 @@ fn websocket_wss_trusts_custom_ca_go_case() {
         "secure websocket"
     );
     assert!(res.stdout.contains("echo: secure websocket"));
+}
+
+#[test]
+fn websocket_custom_dns_and_proxy_cases() {
+    let (dns_url, dns_seen) = start_ws_echo_server(|req| {
+        if req.header("host").starts_with("ws-dns.test:") {
+            Ok(())
+        } else {
+            Err(format!("unexpected host: {}", req.header("host")))
+        }
+    });
+    let dns_port = Url::parse(&dns_url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server("ws-dns.test.", Ipv4Addr::new(127, 0, 0, 1));
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        &format!("ws://ws-dns.test:{dns_port}"),
+        "-d",
+        "custom dns websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(
+        dns_seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "custom dns websocket"
+    );
+    assert!(res.stdout.contains("echo: custom dns websocket"));
+
+    let (proxy_target_url, proxy_seen_ws) = start_ws_echo_server(|_| Ok(()));
+    let proxy_target_addr = url_host_port(&proxy_target_url);
+    let (proxy_url, proxy_seen) = start_http_connect_proxy(proxy_target_addr.clone());
+    let res = run_fetch(&[
+        "--proxy",
+        &proxy_url,
+        &proxy_target_url,
+        "-d",
+        "proxied websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 0);
+    assert_proxy_seen(&proxy_seen, &proxy_target_addr);
+    assert_eq!(
+        proxy_seen_ws.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "proxied websocket"
+    );
+    assert!(res.stdout.contains("echo: proxied websocket"));
+
+    let (socks_target_url, socks_seen_ws) = start_ws_echo_server(|_| Ok(()));
+    let socks_target_addr = url_host_port(&socks_target_url);
+    let (socks_url, socks_seen) = start_socks5_proxy(socks_target_addr.clone());
+    let res = run_fetch(&[
+        "--proxy",
+        &socks_url,
+        &socks_target_url,
+        "-d",
+        "socks websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 0);
+    assert_socks_seen(&socks_seen, &socks_target_addr);
+    assert_eq!(
+        socks_seen_ws.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "socks websocket"
+    );
+    assert!(res.stdout.contains("echo: socks websocket"));
 }
 
 #[test]

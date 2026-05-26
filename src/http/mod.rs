@@ -1014,6 +1014,10 @@ async fn read_decoded_response_body_limited(
 }
 
 async fn drain_response_body_bounded(mut response: Response) {
+    drain_response_body_bounded_mut(&mut response).await;
+}
+
+async fn drain_response_body_bounded_mut(response: &mut Response) {
     let mut discarded = 0usize;
     while discarded < MAX_DISCARDED_RESPONSE_BYTES {
         match response.chunk().await {
@@ -1534,7 +1538,7 @@ struct DigestRetryContext<'a> {
 }
 
 async fn apply_digest_challenge(
-    response: Response,
+    mut response: Response,
     context: DigestRetryContext<'_>,
     credentials: Option<&(String, String)>,
 ) -> Result<Response, FetchError> {
@@ -1591,10 +1595,16 @@ async fn apply_digest_challenge(
         RequestAuthorization::Digest(&auth),
     )?;
 
-    if digest_retry_before_drain(&response) {
+    if response_body_exceeds_discard_bound(&response) {
+        drain_response_body_bounded_mut(&mut response).await;
         let retry_response: Result<Response, FetchError> =
             retry_request.send().await.map_err(Into::into);
-        drain_response_body_bounded(response).await;
+        drop(response);
+        retry_response
+    } else if digest_retry_before_drain(&response) {
+        let retry_response: Result<Response, FetchError> =
+            retry_request.send().await.map_err(Into::into);
+        drop(response);
         retry_response
     } else {
         drain_response_body_bounded(response).await;
