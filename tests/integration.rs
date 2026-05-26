@@ -2149,6 +2149,62 @@ fn run_fetch_pty_with_fake_less(extra_args: &[&str]) -> (String, Option<String>,
 }
 
 #[cfg(unix)]
+fn run_binary_pty_with_fake_less(extra_args: &[&str]) -> (String, Option<String>, Option<String>) {
+    let server = TestServer::start(|_| TestResponse::ok(b"abc\0def".to_vec()));
+    let dir = TempDir::new().unwrap();
+    install_fake_less(dir.path());
+    let less_args = dir.path().join("less.args");
+    let less_input = dir.path().join("less.input");
+    let path = env::join_paths(
+        std::iter::once(dir.path().to_path_buf()).chain(
+            env::var_os("PATH")
+                .map(|path| env::split_paths(&path).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        ),
+    )
+    .unwrap();
+
+    let pty = open_pty(24, 80, 800, 480);
+    let mut cmd = Command::new(fetch_bin());
+    cmd.arg(server.url.as_str());
+    cmd.args(extra_args);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("PATH", path);
+    cmd.env("FETCH_TEST_LESS_ARGS", &less_args);
+    cmd.env("FETCH_TEST_LESS_INPUT", &less_input);
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+    configure_pty_child(&mut cmd, &pty.slave);
+    let mut child = cmd.spawn().expect("spawn fetch under PTY");
+    drop(pty.slave);
+    let capture = start_pty_capture(&pty.master);
+    let status = wait_child(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            panic!(
+                "fetch did not exit after binary response; PTY output:\n{}",
+                capture.output()
+            )
+        })
+        .expect("wait fetch under PTY");
+    assert!(
+        status.success(),
+        "fetch exited with {status}; PTY output:\n{}",
+        capture.output()
+    );
+    let output = capture.output();
+    drop(pty.master);
+    capture.close();
+    (
+        output,
+        fs::read_to_string(less_args).ok(),
+        fs::read_to_string(less_input).ok(),
+    )
+}
+
+#[cfg(unix)]
 fn run_image_pty_with_fake_less(
     env_overrides: Vec<(String, String)>,
 ) -> (String, Option<String>, Option<String>) {
@@ -2266,6 +2322,50 @@ fn pager_off_writes_terminal_stdout_directly() {
     let (output, less_args, less_input) = run_fetch_pty_with_fake_less(&["--pager", "off"]);
 
     assert!(output.contains("pager body"), "{output:?}");
+    assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
+    assert!(less_input.is_none(), "pager received input: {less_input:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_stdout_warns_instead_of_printing_binary_response() {
+    let (output, less_args, less_input) = run_binary_pty_with_fake_less(&[]);
+
+    assert!(
+        output.contains("the response body appears to be binary"),
+        "{output:?}"
+    );
+    assert!(
+        output.contains("\x1b[1m\x1b[33mwarning\x1b[0m: "),
+        "{output:?}"
+    );
+    assert!(
+        output.contains("To output to the terminal anyway, use '--output -'"),
+        "{output:?}"
+    );
+    assert!(!output.contains("abc\0def"), "{output:?}");
+    assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
+    assert!(less_input.is_none(), "pager received input: {less_input:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_stdout_format_off_warns_instead_of_streaming_binary_response() {
+    let (output, less_args, less_input) = run_binary_pty_with_fake_less(&["--format", "off"]);
+
+    assert!(
+        output.contains("the response body appears to be binary"),
+        "{output:?}"
+    );
+    assert!(
+        output.contains("\x1b[1m\x1b[33mwarning\x1b[0m: "),
+        "{output:?}"
+    );
+    assert!(
+        output.contains("To output to the terminal anyway, use '--output -'"),
+        "{output:?}"
+    );
+    assert!(!output.contains("abc\0def"), "{output:?}");
     assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
     assert!(less_input.is_none(), "pager received input: {less_input:?}");
 }
