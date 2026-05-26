@@ -475,7 +475,7 @@ async fn build_client_for_url(
             builder.connector_layer(ConnectionTimingLayer::new(context.connect_timing.clone()));
     }
     builder = configure_tls(builder, cli)?;
-    builder = configure_proxy(builder, cli.proxy.as_deref())?;
+    builder = configure_proxy(builder, cli.proxy.as_deref(), context.http_version, url)?;
     if cli.insecure {
         builder = builder.danger_accept_invalid_certs(true);
     }
@@ -778,11 +778,22 @@ fn configure_tls(
 fn configure_proxy(
     builder: reqwest::ClientBuilder,
     proxy: Option<&str>,
+    version: Option<HttpVersion>,
+    url: &Url,
 ) -> Result<reqwest::ClientBuilder, FetchError> {
+    validate_proxy_for_http_version(proxy, version)?;
+
     if let Some(proxy) = proxy {
         let proxy_config = reqwest::Proxy::all(proxy)
             .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?;
         return Ok(builder.proxy(proxy_config));
+    }
+
+    if matches!(version, Some(HttpVersion::Http2 | HttpVersion::Http3)) {
+        if environment_proxy_for_url(url).is_some() {
+            return Err(proxy_http_version_error());
+        }
+        return Ok(builder);
     }
 
     configure_environment_proxies(builder)
@@ -834,6 +845,51 @@ fn env_proxy_value(keys: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn environment_proxy_for_url(url: &Url) -> Option<String> {
+    if no_proxy_matches_url(url, env_no_proxy_value().as_deref()) {
+        return None;
+    }
+
+    match url.scheme() {
+        "http" => env_proxy_value(&["HTTP_PROXY", "http_proxy"])
+            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"])),
+        "https" => env_proxy_value(&["HTTPS_PROXY", "https_proxy"])
+            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"])),
+        _ => env_proxy_value(&["ALL_PROXY", "all_proxy"]),
+    }
+}
+
+fn env_no_proxy_value() -> Option<String> {
+    env::var("NO_PROXY").or_else(|_| env::var("no_proxy")).ok()
+}
+
+fn no_proxy_matches_url(url: &Url, no_proxy: Option<&str>) -> bool {
+    let Some(no_proxy) = no_proxy else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    no_proxy.split(',').any(|entry| {
+        let entry = entry.trim();
+        if entry == "*" {
+            return true;
+        }
+        if entry.is_empty() {
+            return false;
+        }
+        let entry = entry.trim_start_matches('.').to_ascii_lowercase();
+        host == entry
+            || host
+                .strip_suffix(&entry)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
 }
 
 fn print_request_metadata(
@@ -1051,9 +1107,13 @@ fn validate_proxy_for_http_version(
     version: Option<HttpVersion>,
 ) -> Result<(), FetchError> {
     if proxy.is_some() && matches!(version, Some(HttpVersion::Http2 | HttpVersion::Http3)) {
-        return Err("a proxy can only be used with HTTP/1.1".into());
+        return Err(proxy_http_version_error());
     }
     Ok(())
+}
+
+fn proxy_http_version_error() -> FetchError {
+    "a proxy can only be used with HTTP/1.1".into()
 }
 
 async fn finish_response(
@@ -4263,6 +4323,23 @@ mod tests {
             Some(HttpVersion::Http1),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn no_proxy_matching_for_env_proxy_guard() {
+        let url = Url::parse("https://api.example.com:443/path").unwrap();
+
+        assert!(no_proxy_matches_url(&url, Some("*")));
+        assert!(no_proxy_matches_url(&url, Some("example.com")));
+        assert!(no_proxy_matches_url(&url, Some(".example.com")));
+        assert!(no_proxy_matches_url(&url, Some("EXAMPLE.COM")));
+        assert!(no_proxy_matches_url(
+            &url,
+            Some("localhost, api.example.com")
+        ));
+        assert!(!no_proxy_matches_url(&url, Some("notexample.com")));
+        assert!(!no_proxy_matches_url(&url, Some("")));
+        assert!(!no_proxy_matches_url(&url, None));
     }
 
     #[test]
