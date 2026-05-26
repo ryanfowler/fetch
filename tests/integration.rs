@@ -329,27 +329,25 @@ impl PartialBodyReplayServer {
                         request_log.lock().unwrap().push(req);
                         if first {
                             first = false;
-                            let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\n");
-                            for (name, value) in &headers {
-                                let _ = write!(stream, "{name}: {value}\r\n");
-                            }
-                            let _ = write!(
-                                stream,
-                                "Content-Length: 1073741824\r\nConnection: close\r\n\r\n"
-                            );
-                            let chunk = vec![b'x'; 16 * 1024];
-                            for _ in 0..128 {
-                                if stream.write_all(&chunk).is_err() {
-                                    break;
+                            let headers = headers.clone();
+                            thread::spawn(move || {
+                                let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\n");
+                                for (name, value) in &headers {
+                                    let _ = write!(stream, "{name}: {value}\r\n");
                                 }
-                            }
-                            let _ = stream.flush();
-                            if let Ok(hold_stream) = stream.try_clone() {
-                                thread::spawn(move || {
-                                    let _hold_stream = hold_stream;
-                                    thread::sleep(Duration::from_secs(5));
-                                });
-                            }
+                                let _ = write!(
+                                    stream,
+                                    "Content-Length: 1073741824\r\nConnection: close\r\n\r\n"
+                                );
+                                let chunk = vec![b'x'; 16 * 1024];
+                                for _ in 0..128 {
+                                    if stream.write_all(&chunk).is_err() {
+                                        break;
+                                    }
+                                }
+                                let _ = stream.flush();
+                                thread::sleep(Duration::from_secs(5));
+                            });
                         } else {
                             write_response(&mut stream, TestResponse::ok(final_body));
                             break;
@@ -1300,6 +1298,16 @@ fn start_reflection_grpc_h2c_server(enable_reflection: bool) -> ReflectionGrpcSe
 }
 
 fn start_reflection_grpc_tls_server(enable_reflection: bool) -> ReflectionGrpcServer {
+    start_reflection_grpc_tls_server_with_versions(
+        enable_reflection,
+        &[&rustls::version::TLS13, &rustls::version::TLS12],
+    )
+}
+
+fn start_reflection_grpc_tls_server_with_versions(
+    enable_reflection: bool,
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> ReflectionGrpcServer {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let certified =
         rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()])
@@ -1311,7 +1319,7 @@ fn start_reflection_grpc_tls_server(enable_reflection: bool) -> ReflectionGrpcSe
     let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
         rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
     );
-    let mut config = rustls::ServerConfig::builder()
+    let mut config = rustls::ServerConfig::builder_with_protocol_versions(versions)
         .with_no_client_auth()
         .with_single_cert(vec![cert_der], key_der)
         .unwrap();
@@ -5432,6 +5440,67 @@ fn grpc_reflection_h2c_go_cases() {
     ]);
     assert_exit(&res, 0);
     assert!(res.stdout.contains("\"status\": \"SERVING\""));
+
+    let tls13 = start_reflection_grpc_tls_server_with_versions(true, &[&rustls::version::TLS13]);
+    let tls13_ca_cert = tls13.ca_cert_path.as_ref().unwrap().to_str().unwrap();
+    let res = run_fetch(&[
+        "--grpc-list",
+        "--ca-cert",
+        tls13_ca_cert,
+        "--min-tls",
+        "1.3",
+        "--max-tls",
+        "1.3",
+        &tls13.url,
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains("grpc.health.v1.Health"));
+
+    let res = run_fetch(&[
+        "--grpc-list",
+        "--ca-cert",
+        tls13_ca_cert,
+        "--max-tls",
+        "1.2",
+        &tls13.url,
+    ]);
+    assert_exit(&res, 1);
+    assert!(!res.stderr.is_empty());
+
+    let res = run_fetch(&[
+        "--grpc-list",
+        "--proxy",
+        "http://proxy.example:8080",
+        &server.url,
+    ]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("a proxy can only be used with HTTP/1.1")
+    );
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: vec![
+                (
+                    "HTTP_PROXY".to_string(),
+                    "http://proxy.example:8080".to_string(),
+                ),
+                ("NO_PROXY".to_string(), "127.0.0.1".to_string()),
+            ],
+            ..Default::default()
+        },
+        &["--grpc-list", &server.url],
+    );
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains("grpc.health.v1.Health"));
+
+    let port = server.url.rsplit_once(':').unwrap().1;
+    let dns_url = format!("http://fetch-grpc-dns.test:{port}");
+    let dns_addr = start_udp_dns_server("fetch-grpc-dns.test.", Ipv4Addr::new(127, 0, 0, 1));
+    let res = run_fetch(&["--grpc-list", "--dns-server", &dns_addr, &dns_url]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains("grpc.health.v1.Health"));
 
     let unavailable = start_reflection_grpc_h2c_server(false);
     let res = run_fetch(&["--grpc-list", &unavailable.url]);

@@ -1,10 +1,7 @@
 use std::collections::BTreeMap;
-use std::env;
 use std::error::Error as StdError;
 use std::fmt;
-use std::future::Future;
 use std::io::{ErrorKind, IsTerminal, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
@@ -26,12 +23,10 @@ use reqwest::header::{
     ACCEPT, ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
     LOCATION, RANGE, RETRY_AFTER, USER_AGENT, WWW_AUTHENTICATE,
 };
-use reqwest::redirect;
 use reqwest::{Body, Client, Method, RequestBuilder, Response, StatusCode};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_util::io::{ReaderStream, StreamReader};
-use tower::{Layer, Service};
 use url::Url;
 
 use crate::auth::aws_sigv4;
@@ -52,11 +47,13 @@ use crate::format::sse;
 use crate::format::xml;
 use crate::format::yaml;
 use crate::grpc::status as grpc_status;
+use crate::http::client::DnsResolution;
 use crate::output;
 use crate::output::clipboard;
 use crate::proto;
 use crate::timing::{self, AttemptTiming, DnsTiming, ResponseTiming};
 
+pub(crate) mod client;
 mod edit;
 pub mod multipart;
 
@@ -96,7 +93,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let http_version = effective_http_version(cli, http_version);
     let mut url = normalize_url(cli.url.as_deref().expect("URL checked by app"))?;
     apply_query(&mut url, &cli.query);
-    validate_proxy_for_http_version(cli.proxy.as_deref(), http_version)?;
+    client::validate_proxy_for_http_version(cli.proxy.as_deref(), http_version)?;
     validate_http_version_options(http_version, &url, cli.grpc, cli.unix.as_deref())?;
     let grpc_schema = if cli.grpc {
         proto::load_local_schema(cli)?
@@ -121,16 +118,16 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         .transpose()?;
     crate::tls::install_default_crypto_provider();
 
-    let connect_timing = ConnectionTiming::default();
-    let client_build = ClientBuildContext {
-        http_version,
+    let connect_timing = client::ConnectionTiming::default();
+    let client_build = client::ClientBuildContext {
+        mode: client::ClientMode::Request(http_version),
         request_timeout,
         connect_timeout,
         request_start,
         session: session.as_ref(),
-        connect_timing: &connect_timing,
+        connect_timing: Some(&connect_timing),
     };
-    let initial_client = build_client_for_url(cli, &url, &client_build).await?;
+    let initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
     if cli.grpc && grpc_method.is_none() && grpc_request_requires_schema(cli) {
         let schema =
             crate::grpc::reflection::schema_for_call(cli, &url, &initial_client.client).await?;
@@ -270,7 +267,8 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         request_body = next_body;
                         if refresh_client {
                             request_client =
-                                build_client_for_url(cli, &request_url, &client_build).await?;
+                                client::build_client_for_url(cli, &request_url, &client_build)
+                                    .await?;
                         }
                         redirect_count += 1;
                         continue;
@@ -358,7 +356,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     result
 }
 
-fn load_session(cli: &Cli) -> Result<Option<crate::session::Session>, FetchError> {
+pub(crate) fn load_session(cli: &Cli) -> Result<Option<crate::session::Session>, FetchError> {
     let Some(name) = cli.session.as_deref() else {
         return Ok(None);
     };
@@ -407,96 +405,6 @@ fn effective_http_version(cli: &Cli, version: Option<HttpVersion>) -> Option<Htt
     }
 }
 
-fn configure_unix_socket(
-    builder: reqwest::ClientBuilder,
-    path: Option<&str>,
-) -> Result<reqwest::ClientBuilder, FetchError> {
-    let Some(path) = path else {
-        return Ok(builder);
-    };
-
-    #[cfg(unix)]
-    {
-        Ok(builder.unix_socket(path))
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        Err("--unix is not supported on this platform".into())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DnsResolution {
-    socket_addrs: Vec<SocketAddr>,
-    timing: Option<DnsTiming>,
-}
-
-#[derive(Clone)]
-struct UrlClient {
-    client: Client,
-    dns_resolution: Option<DnsResolution>,
-}
-
-struct ClientBuildContext<'a> {
-    http_version: Option<HttpVersion>,
-    request_timeout: Option<Duration>,
-    connect_timeout: Option<Duration>,
-    request_start: Instant,
-    session: Option<&'a crate::session::Session>,
-    connect_timing: &'a ConnectionTiming,
-}
-
-async fn build_client_for_url(
-    cli: &Cli,
-    url: &Url,
-    context: &ClientBuildContext<'_>,
-) -> Result<UrlClient, FetchError> {
-    let dns_timeout = dns_resolution_timeout(
-        context.request_timeout,
-        context.connect_timeout,
-        context.request_start,
-    )?;
-    let dns_resolution =
-        resolve_dns_for_client(cli, url, context.http_version, dns_timeout).await?;
-    let mut builder = Client::builder()
-        .use_rustls_tls()
-        .no_brotli()
-        .no_gzip()
-        .no_zstd();
-    builder = configure_http_version(builder, context.http_version);
-    builder = configure_unix_socket(builder, cli.unix.as_deref())?;
-    builder =
-        configure_http3_local_address(builder, context.http_version, url, dns_resolution.as_ref());
-    builder = configure_dns_resolution(builder, url.host_str(), dns_resolution.as_ref());
-    if cli.timing || (cli.verbose >= 3 && !cli.silent) {
-        builder =
-            builder.connector_layer(ConnectionTimingLayer::new(context.connect_timing.clone()));
-    }
-    builder = configure_tls(builder, cli)?;
-    builder = configure_proxy(builder, cli.proxy.as_deref(), context.http_version, url)?;
-    if cli.insecure {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    if let Some(timeout) =
-        remaining_request_timeout(context.request_timeout, context.request_start)?
-    {
-        builder = builder.timeout(timeout);
-    }
-    if let Some(timeout) = context.connect_timeout {
-        builder = builder.connect_timeout(timeout);
-    }
-    if let Some(session) = context.session {
-        builder = builder.cookie_provider(session.cookie_provider());
-    }
-    builder = builder.redirect(redirect::Policy::none());
-    Ok(UrlClient {
-        client: builder.build()?,
-        dns_resolution,
-    })
-}
-
 fn redirect_requires_client_refresh(
     cli: &Cli,
     http_version: Option<HttpVersion>,
@@ -517,191 +425,6 @@ fn redirect_requires_client_refresh(
 
 fn url_client_endpoint(url: &Url) -> Option<(&str, &str, Option<u16>)> {
     Some((url.scheme(), url.host_str()?, url.port_or_known_default()))
-}
-
-fn dns_resolution_timeout(
-    request_timeout: Option<Duration>,
-    connect_timeout: Option<Duration>,
-    start: Instant,
-) -> Result<Option<Duration>, FetchError> {
-    let remaining = remaining_request_timeout(request_timeout, start)?;
-    Ok(match (connect_timeout, remaining) {
-        (Some(connect), Some(remaining)) => Some(connect.min(remaining)),
-        (Some(connect), None) => Some(connect),
-        (None, remaining) => remaining,
-    })
-}
-
-fn remaining_request_timeout(
-    timeout: Option<Duration>,
-    start: Instant,
-) -> Result<Option<Duration>, FetchError> {
-    let Some(timeout) = timeout else {
-        return Ok(None);
-    };
-    let elapsed = start.elapsed();
-    if elapsed >= timeout {
-        return Err(FetchError::Runtime(format!(
-            "request timed out after {}",
-            format_go_duration(timeout)
-        )));
-    }
-    Ok(Some(timeout - elapsed))
-}
-
-async fn resolve_dns_for_client(
-    cli: &Cli,
-    url: &Url,
-    http_version: Option<HttpVersion>,
-    timeout: Option<Duration>,
-) -> Result<Option<DnsResolution>, FetchError> {
-    let resolve = resolve_dns_for_client_inner(cli, url, http_version, timeout);
-    if let Some(timeout) = timeout {
-        match tokio::time::timeout(timeout, resolve).await {
-            Ok(result) => result,
-            Err(_) => Err(FetchError::Runtime(format!(
-                "request timed out after {}",
-                format_go_duration(timeout)
-            ))),
-        }
-    } else {
-        resolve.await
-    }
-}
-
-async fn resolve_dns_for_client_inner(
-    cli: &Cli,
-    url: &Url,
-    http_version: Option<HttpVersion>,
-    timeout: Option<Duration>,
-) -> Result<Option<DnsResolution>, FetchError> {
-    let Some(host) = url.host_str() else {
-        return Ok(None);
-    };
-    if host.parse::<IpAddr>().is_ok() || cli.proxy.is_some() || cli.unix.is_some() {
-        return Ok(None);
-    }
-
-    let debug_dns = (cli.timing || (cli.verbose >= 3 && !cli.silent))
-        && !matches!(http_version, Some(HttpVersion::Http3));
-
-    if let Some(dns_server) = cli.dns_server.as_deref() {
-        let start = Instant::now();
-        let addrs = if dns_server.starts_with("http://") || dns_server.starts_with("https://") {
-            let server_url = Url::parse(dns_server).map_err(|err| {
-                FetchError::Message(format!("invalid dns-server '{dns_server}': {err}"))
-            })?;
-            crate::dns::doh::lookup_doh(&server_url, host, timeout)
-                .await
-                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-        } else {
-            let server_addr = crate::dns::resolver::normalize_udp_dns_server(dns_server)
-                .map_err(|err| FetchError::Message(err.to_string()))?;
-            crate::dns::resolver::lookup_udp(&server_addr, host, timeout)
-                .await
-                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-        };
-        let addrs = sorted_unique_ips(addrs);
-        return Ok(Some(DnsResolution {
-            socket_addrs: crate::dns::doh::socket_addrs_for_override(&addrs),
-            timing: debug_dns.then(|| DnsTiming {
-                host: host.to_string(),
-                addrs,
-                duration: start.elapsed(),
-            }),
-        }));
-    }
-
-    if !debug_dns {
-        return Ok(None);
-    }
-
-    let port = url.port_or_known_default().unwrap_or_else(|| {
-        if url.scheme().eq_ignore_ascii_case("https") {
-            443
-        } else {
-            80
-        }
-    });
-    let start = Instant::now();
-    let mut socket_addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-        .collect::<Vec<_>>();
-    sort_socket_addrs(&mut socket_addrs);
-    let addrs = sorted_unique_ips(socket_addrs.iter().map(|addr| addr.ip()).collect());
-    Ok(Some(DnsResolution {
-        socket_addrs,
-        timing: Some(DnsTiming {
-            host: host.to_string(),
-            addrs,
-            duration: start.elapsed(),
-        }),
-    }))
-}
-
-fn configure_dns_resolution(
-    builder: reqwest::ClientBuilder,
-    host: Option<&str>,
-    resolution: Option<&DnsResolution>,
-) -> reqwest::ClientBuilder {
-    match (host, resolution) {
-        (Some(host), Some(resolution)) if !resolution.socket_addrs.is_empty() => {
-            builder.resolve_to_addrs(host, &resolution.socket_addrs)
-        }
-        _ => builder,
-    }
-}
-
-fn configure_http3_local_address(
-    builder: reqwest::ClientBuilder,
-    version: Option<HttpVersion>,
-    url: &Url,
-    resolution: Option<&DnsResolution>,
-) -> reqwest::ClientBuilder {
-    if !matches!(version, Some(HttpVersion::Http3)) {
-        return builder;
-    }
-
-    match http3_local_address(url, resolution) {
-        Some(addr) => builder.local_address(addr),
-        None => builder,
-    }
-}
-
-fn http3_local_address(url: &Url, resolution: Option<&DnsResolution>) -> Option<IpAddr> {
-    let destination_ip = url
-        .host_str()
-        .map(|host| host.trim_start_matches('[').trim_end_matches(']'))
-        .and_then(|host| host.parse::<IpAddr>().ok())
-        .or_else(|| resolution?.socket_addrs.first().map(SocketAddr::ip));
-
-    match destination_ip {
-        Some(IpAddr::V4(_)) => Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
-        Some(IpAddr::V6(_)) => Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
-        None => None,
-    }
-}
-
-fn sorted_unique_ips(mut addrs: Vec<IpAddr>) -> Vec<IpAddr> {
-    addrs.sort_by(compare_ip_addrs);
-    addrs.dedup();
-    addrs
-}
-
-fn sort_socket_addrs(addrs: &mut [SocketAddr]) {
-    addrs.sort_by(|left, right| {
-        compare_ip_addrs(&left.ip(), &right.ip()).then_with(|| left.port().cmp(&right.port()))
-    });
-}
-
-fn compare_ip_addrs(left: &IpAddr, right: &IpAddr) -> std::cmp::Ordering {
-    match (left, right) {
-        (IpAddr::V4(left), IpAddr::V4(right)) => left.octets().cmp(&right.octets()),
-        (IpAddr::V6(left), IpAddr::V6(right)) => left.octets().cmp(&right.octets()),
-        (IpAddr::V4(_), IpAddr::V6(_)) => std::cmp::Ordering::Less,
-        (IpAddr::V6(_), IpAddr::V4(_)) => std::cmp::Ordering::Greater,
-    }
 }
 
 fn print_dns_debug(cli: &Cli, dns: &DnsTiming) {
@@ -734,162 +457,6 @@ fn connect_debug_target(
             }
         })
         .unwrap_or_default()
-}
-
-fn configure_tls(
-    mut builder: reqwest::ClientBuilder,
-    cli: &Cli,
-) -> Result<reqwest::ClientBuilder, FetchError> {
-    let min_tls = cli.min_tls.as_deref().or(cli.tls.as_deref());
-    crate::tls::ensure_rustls_supported_range(
-        min_tls.map(|value| {
-            if cli.min_tls.is_some() {
-                ("min-tls", value)
-            } else {
-                ("tls", value)
-            }
-        }),
-        cli.max_tls.as_deref(),
-    )?;
-    let min_version = match min_tls {
-        Some(value) => crate::tls::reqwest_tls_version(
-            if cli.min_tls.is_some() {
-                "min-tls"
-            } else {
-                "tls"
-            },
-            value,
-        )?,
-        None => crate::tls::default_min_tls_version(),
-    };
-    builder = builder.min_tls_version(min_version);
-    if let Some(value) = cli.max_tls.as_deref() {
-        builder = builder.max_tls_version(crate::tls::reqwest_tls_version("max-tls", value)?);
-    }
-    for cert in crate::tls::ca_certificates(&cli.ca_cert)? {
-        builder = builder.add_root_certificate(cert);
-    }
-    if let Some(identity) = crate::tls::client_identity(cli.cert.as_deref(), cli.key.as_deref())? {
-        builder = builder.identity(identity);
-    }
-    Ok(builder)
-}
-
-fn configure_proxy(
-    builder: reqwest::ClientBuilder,
-    proxy: Option<&str>,
-    version: Option<HttpVersion>,
-    url: &Url,
-) -> Result<reqwest::ClientBuilder, FetchError> {
-    validate_proxy_for_http_version(proxy, version)?;
-
-    if let Some(proxy) = proxy {
-        let proxy_config = reqwest::Proxy::all(proxy)
-            .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?;
-        return Ok(builder.proxy(proxy_config));
-    }
-
-    if matches!(version, Some(HttpVersion::Http2 | HttpVersion::Http3)) {
-        if environment_proxy_for_url(url).is_some() {
-            return Err(proxy_http_version_error());
-        }
-        return Ok(builder);
-    }
-
-    configure_environment_proxies(builder)
-}
-
-fn configure_environment_proxies(
-    mut builder: reqwest::ClientBuilder,
-) -> Result<reqwest::ClientBuilder, FetchError> {
-    let no_proxy = reqwest::NoProxy::from_env();
-
-    if let Some(proxy) = env_proxy_value(&["HTTP_PROXY", "http_proxy"]) {
-        let proxy_config = reqwest::Proxy::http(&proxy)
-            .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?
-            .no_proxy(no_proxy.clone());
-        builder = builder.proxy(proxy_config);
-    }
-
-    if let Some(proxy) = env_proxy_value(&["HTTPS_PROXY", "https_proxy"]) {
-        let proxy_config = reqwest::Proxy::https(&proxy)
-            .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?
-            .no_proxy(no_proxy.clone());
-        builder = builder.proxy(proxy_config);
-    }
-
-    if let Some(proxy) = env_proxy_value(&["ALL_PROXY", "all_proxy"]) {
-        let proxy_config = reqwest::Proxy::all(&proxy)
-            .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?
-            .no_proxy(no_proxy);
-        builder = builder.proxy(proxy_config);
-    }
-
-    Ok(builder)
-}
-
-fn env_proxy_value(keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if *key == "HTTP_PROXY"
-            && env::var("REQUEST_METHOD")
-                .map(|value| !value.is_empty())
-                .unwrap_or(false)
-        {
-            continue;
-        }
-        let Ok(value) = env::var(key) else {
-            continue;
-        };
-        if !value.trim().is_empty() {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn environment_proxy_for_url(url: &Url) -> Option<String> {
-    if no_proxy_matches_url(url, env_no_proxy_value().as_deref()) {
-        return None;
-    }
-
-    match url.scheme() {
-        "http" => env_proxy_value(&["HTTP_PROXY", "http_proxy"])
-            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"])),
-        "https" => env_proxy_value(&["HTTPS_PROXY", "https_proxy"])
-            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"])),
-        _ => env_proxy_value(&["ALL_PROXY", "all_proxy"]),
-    }
-}
-
-fn env_no_proxy_value() -> Option<String> {
-    env::var("NO_PROXY").or_else(|_| env::var("no_proxy")).ok()
-}
-
-fn no_proxy_matches_url(url: &Url, no_proxy: Option<&str>) -> bool {
-    let Some(no_proxy) = no_proxy else {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let host = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
-    no_proxy.split(',').any(|entry| {
-        let entry = entry.trim();
-        if entry == "*" {
-            return true;
-        }
-        if entry.is_empty() {
-            return false;
-        }
-        let entry = entry.trim_start_matches('.').to_ascii_lowercase();
-        host == entry
-            || host
-                .strip_suffix(&entry)
-                .is_some_and(|prefix| prefix.ends_with('.'))
-    })
 }
 
 fn print_request_metadata(
@@ -1070,18 +637,6 @@ fn sort_header_lines(lines: &mut [(String, String)]) {
     );
 }
 
-fn configure_http_version(
-    builder: reqwest::ClientBuilder,
-    version: Option<HttpVersion>,
-) -> reqwest::ClientBuilder {
-    match version {
-        Some(HttpVersion::Http1) => builder.http1_only(),
-        Some(HttpVersion::Http2) => builder.http2_prior_knowledge(),
-        Some(HttpVersion::Http3) => builder.http3_prior_knowledge(),
-        None => builder,
-    }
-}
-
 fn validate_http_version_options(
     version: Option<HttpVersion>,
     url: &Url,
@@ -1100,20 +655,6 @@ fn validate_http_version_options(
         }
         _ => Ok(()),
     }
-}
-
-fn validate_proxy_for_http_version(
-    proxy: Option<&str>,
-    version: Option<HttpVersion>,
-) -> Result<(), FetchError> {
-    if proxy.is_some() && matches!(version, Some(HttpVersion::Http2 | HttpVersion::Http3)) {
-        return Err(proxy_http_version_error());
-    }
-    Ok(())
-}
-
-fn proxy_http_version_error() -> FetchError {
-    "a proxy can only be used with HTTP/1.1".into()
 }
 
 async fn finish_response(
@@ -1635,88 +1176,6 @@ fn print_timing(cli: &Cli, timing: Option<ResponseTiming>, body: Option<Duration
             core::color_enabled(cli.color.as_deref(), std::io::stderr().is_terminal())
         )
     );
-}
-
-#[derive(Clone, Default)]
-struct ConnectionTiming {
-    duration: Arc<Mutex<Option<Duration>>>,
-}
-
-impl ConnectionTiming {
-    fn clear(&self) {
-        if let Ok(mut duration) = self.duration.lock() {
-            *duration = None;
-        }
-    }
-
-    fn set(&self, value: Duration) {
-        if let Ok(mut duration) = self.duration.lock() {
-            *duration = Some(value);
-        }
-    }
-
-    fn duration(&self) -> Option<Duration> {
-        self.duration.lock().ok().and_then(|duration| *duration)
-    }
-}
-
-#[derive(Clone)]
-struct ConnectionTimingLayer {
-    timing: ConnectionTiming,
-}
-
-impl ConnectionTimingLayer {
-    fn new(timing: ConnectionTiming) -> Self {
-        Self { timing }
-    }
-}
-
-impl<S> Layer<S> for ConnectionTimingLayer {
-    type Service = ConnectionTimingService<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        ConnectionTimingService {
-            inner,
-            timing: self.timing.clone(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ConnectionTimingService<S> {
-    inner: S,
-    timing: ConnectionTiming,
-}
-
-impl<S, Request> Service<Request> for ConnectionTimingService<S>
-where
-    S: Service<Request> + Clone + Send + Sync + 'static,
-    S::Future: Send + 'static,
-    S::Response: Send + 'static,
-    S::Error: Send + 'static,
-    Request: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, request: Request) -> Self::Future {
-        let mut inner = self.inner.clone();
-        let timing = self.timing.clone();
-        Box::pin(async move {
-            let start = Instant::now();
-            let result = inner.call(request).await;
-            if result.is_ok() {
-                timing.set(start.elapsed());
-            }
-            result
-        })
-    }
 }
 
 fn build_request(
@@ -2635,7 +2094,7 @@ fn is_certificate_validation_message(message: &str) -> bool {
                 || lower.contains("hostname")))
 }
 
-fn format_go_duration(duration: Duration) -> String {
+pub(crate) fn format_go_duration(duration: Duration) -> String {
     let nanos = duration.as_nanos();
     if nanos < 1_000 {
         return format!("{nanos}ns");
@@ -3341,6 +2800,10 @@ fn exit_code(status: u16, ignore_status: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::client::{
+        configure_tls, configure_unix_socket, http3_local_address, no_proxy_matches_url,
+        validate_proxy_for_http_version,
+    };
     use clap::Parser;
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -3352,6 +2815,7 @@ mod tests {
         field_descriptor_proto::{Label, Type},
     };
     use std::io::Write;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn default_scheme_loopback_is_http() {

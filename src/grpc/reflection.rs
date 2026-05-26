@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use http_body_util::BodyExt;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use reqwest::{Client, StatusCode};
@@ -26,7 +28,29 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
         )
     })?;
     let url = crate::http::normalize_url(raw_url)?;
-    let client = reflection_client(cli)?;
+    let session = crate::http::load_session(cli)?;
+    let request_start = Instant::now();
+    let request_timeout = cli
+        .timeout
+        .map(|seconds| crate::http::duration_from_seconds("timeout", seconds))
+        .transpose()?;
+    let connect_timeout = cli
+        .connect_timeout
+        .map(|seconds| crate::http::duration_from_seconds("connect-timeout", seconds))
+        .transpose()?;
+    crate::tls::install_default_crypto_provider();
+    let connect_timing = crate::http::client::ConnectionTiming::default();
+    let client_build = crate::http::client::ClientBuildContext {
+        mode: crate::http::client::ClientMode::GrpcReflection,
+        request_timeout,
+        connect_timeout,
+        request_start,
+        session: session.as_ref(),
+        connect_timing: Some(&connect_timing),
+    };
+    let client = crate::http::client::build_client_for_url(cli, &url, &client_build)
+        .await?
+        .client;
 
     if cli.grpc_list {
         for service in list_services(cli, &url, &client).await? {
@@ -190,35 +214,6 @@ async fn read_reflection_frames(
         .finish()
         .map_err(|err| FetchError::Message(err.to_string()))?;
     Ok((out, trailers))
-}
-
-fn reflection_client(cli: &Cli) -> Result<Client, FetchError> {
-    let mut builder = Client::builder()
-        .use_rustls_tls()
-        .no_brotli()
-        .no_gzip()
-        .no_zstd()
-        .http2_prior_knowledge()
-        .redirect(reqwest::redirect::Policy::none());
-    for cert in crate::tls::ca_certificates(&cli.ca_cert)? {
-        builder = builder.add_root_certificate(cert);
-    }
-    if let Some(identity) = crate::tls::client_identity(cli.cert.as_deref(), cli.key.as_deref())? {
-        builder = builder.identity(identity);
-    }
-    if cli.insecure {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    if let Some(seconds) = cli.timeout {
-        builder = builder.timeout(crate::http::duration_from_seconds("timeout", seconds)?);
-    }
-    if let Some(seconds) = cli.connect_timeout {
-        builder = builder.connect_timeout(crate::http::duration_from_seconds(
-            "connect-timeout",
-            seconds,
-        )?);
-    }
-    Ok(builder.build()?)
 }
 
 fn reflection_headers(cli: &Cli) -> Result<HeaderMap, FetchError> {
