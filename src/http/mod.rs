@@ -155,7 +155,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         apply_headers(&mut headers, &cli.headers)?;
     }
     apply_ranges(&mut headers, &cli.ranges);
-    let compression = apply_accept_encoding(&mut headers, cli, &method);
+    let mut compression = apply_accept_encoding(&mut headers, cli, &method);
     let mut body = request_body(cli)?;
     apply_body_content_type(&mut headers, &body);
     if cli.edit {
@@ -315,6 +315,14 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 )
                 .await?;
                 let status = response.status();
+                let retry_sse_uncompressed =
+                    should_retry_sse_without_compression(&response, compression);
+                if retry_sse_uncompressed {
+                    ensure_request_body_replayable(&request_body, "retry SSE without compression")?;
+                    headers.remove(ACCEPT_ENCODING);
+                    compression = CompressionMode::Off;
+                    continue;
+                }
                 if attempt < retry_count && should_retry_status(status) {
                     ensure_request_body_replayable(&request_body, "retry")?;
                     let delay =
@@ -761,6 +769,29 @@ async fn finish_response(
     } else {
         let body_start = Instant::now();
         let stdout_is_terminal = std::io::stdout().is_terminal();
+        if should_stream_formatted_sse_stdout(cli, &response_headers, stdout_is_terminal) {
+            let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
+            let streamed = stream_response_to_formatted_sse_stdout(
+                response,
+                response_headers.clone(),
+                compression,
+                cli.copy,
+                use_color,
+            )
+            .await?;
+            handle_optional_clipboard_outcome(cli, streamed.clipboard);
+            let body_duration =
+                body_duration_from_len(method_is_head, streamed.bytes_written, body_start);
+            print_timing(cli, response_timing, body_duration);
+
+            let code = exit_code(status.as_u16(), cli.ignore_status);
+            return Ok(check_grpc_status(
+                cli,
+                &response_headers,
+                &streamed.trailers,
+                code,
+            ));
+        }
         if let Some(target) = stdout_stream_target(cli, &response_headers, stdout_is_terminal) {
             let streamed = stream_response_to_stdout(
                 response,
@@ -905,6 +936,25 @@ fn response_header_content_type(headers: &HeaderMap) -> ContentType {
     content_type::get_content_type(content_type).0
 }
 
+fn should_stream_formatted_sse_stdout(
+    cli: &Cli,
+    headers: &HeaderMap,
+    stdout_is_terminal: bool,
+) -> bool {
+    response_header_content_type(headers) == ContentType::Sse
+        && format_enabled(cli.format.as_deref(), stdout_is_terminal)
+}
+
+fn should_retry_sse_without_compression(response: &Response, compression: CompressionMode) -> bool {
+    compression == CompressionMode::Auto
+        && response_header_content_type(response.headers()) == ContentType::Sse
+        && content_encoding_decoders(response.headers(), compression).is_some_and(|decoders| {
+            decoders
+                .iter()
+                .any(|encoding| encoding.as_str() != "aws-chunked")
+        })
+}
+
 async fn read_decoded_response_body_limited(
     response: Response,
     response_headers: HeaderMap,
@@ -1002,6 +1052,94 @@ async fn stream_response_to_stdout(
     })
 }
 
+async fn stream_response_to_formatted_sse_stdout(
+    response: Response,
+    response_headers: HeaderMap,
+    compression: CompressionMode,
+    copy: bool,
+    use_color: bool,
+) -> Result<StreamedOutput, FetchError> {
+    let (reader, trailers) = async_response_reader(response);
+    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let mut stdout = tokio::io::stdout();
+    let mut capture = copy.then(clipboard::Capture::default);
+    let mut formatter = sse::EventStreamFormatter::new(use_color);
+    let mut pending = Vec::new();
+    let mut buf = vec![0; 16 * 1024];
+    let mut bytes_read = 0i64;
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            let formatted =
+                finish_sse_stream_formatter(&mut pending, &mut formatter).map_err(|err| {
+                    FetchError::Message(format!("invalid UTF-8 in event stream: {err}"))
+                })?;
+            if !formatted.is_empty() {
+                stdout.write_all(formatted.as_bytes()).await?;
+            }
+            stdout.flush().await?;
+            let clipboard = capture.map(clipboard::Capture::copy);
+            let trailers = trailers
+                .lock()
+                .map(|trailers| trailers.clone())
+                .unwrap_or_default();
+            return Ok(StreamedOutput {
+                trailers,
+                bytes_written: bytes_read,
+                clipboard,
+            });
+        }
+
+        if let Some(capture) = capture.as_mut() {
+            capture.push(&buf[..n]);
+        }
+        bytes_read = bytes_read.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
+        pending.extend_from_slice(&buf[..n]);
+        let formatted = push_sse_stream_bytes(&mut pending, &mut formatter)
+            .map_err(|err| FetchError::Message(format!("invalid UTF-8 in event stream: {err}")))?;
+        if !formatted.is_empty() {
+            stdout.write_all(formatted.as_bytes()).await?;
+            stdout.flush().await?;
+        }
+    }
+}
+
+fn push_sse_stream_bytes(
+    pending: &mut Vec<u8>,
+    formatter: &mut sse::EventStreamFormatter,
+) -> Result<String, std::str::Utf8Error> {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(input) => {
+                formatter.push_str(input, &mut out);
+                pending.clear();
+                return Ok(out);
+            }
+            Err(err) if err.error_len().is_none() => {
+                let valid_up_to = err.valid_up_to();
+                if valid_up_to == 0 {
+                    return Ok(out);
+                }
+                let input = std::str::from_utf8(&pending[..valid_up_to])?.to_string();
+                formatter.push_str(&input, &mut out);
+                pending.drain(..valid_up_to);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn finish_sse_stream_formatter(
+    pending: &mut Vec<u8>,
+    formatter: &mut sse::EventStreamFormatter,
+) -> Result<String, std::str::Utf8Error> {
+    let mut out = push_sse_stream_bytes(pending, formatter)?;
+    formatter.finish(&mut out);
+    Ok(out)
+}
+
 async fn stream_response_to_output(
     response: Response,
     response_headers: HeaderMap,
@@ -1071,7 +1209,9 @@ fn async_response_reader(response: Response) -> (AsyncReadBox, Arc<Mutex<HeaderM
                 let Some(frame) = body.frame().await else {
                     return Ok::<Option<(Bytes, reqwest::Body)>, std::io::Error>(None);
                 };
-                let frame = frame.map_err(|err| std::io::Error::other(err.to_string()))?;
+                let frame = frame.map_err(|err| {
+                    std::io::Error::other(reqwest_response_body_error_message(&err))
+                })?;
                 match frame.into_data() {
                     Ok(data) => {
                         if data.is_empty() {
@@ -1113,6 +1253,7 @@ where
             capture.push(&buf[..n]);
         }
         writer.write_all(&buf[..n]).await?;
+        writer.flush().await?;
         written = written.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
     }
 }
@@ -1336,8 +1477,7 @@ async fn apply_digest_challenge(
         Err(_) => return Ok(response),
     };
 
-    drain_response_body_bounded(response).await;
-    build_request(
+    let retry_request = build_request(
         context.client,
         challenged_method,
         challenged_url,
@@ -1345,10 +1485,21 @@ async fn apply_digest_challenge(
         challenged_body,
         context.cli,
         RequestAuthorization::Digest(&auth),
-    )?
-    .send()
-    .await
-    .map_err(Into::into)
+    )?;
+
+    #[cfg(windows)]
+    {
+        let retry_response: Result<Response, FetchError> =
+            retry_request.send().await.map_err(Into::into);
+        drain_response_body_bounded(response).await;
+        retry_response
+    }
+
+    #[cfg(not(windows))]
+    {
+        drain_response_body_bounded(response).await;
+        retry_request.send().await.map_err(Into::into)
+    }
 }
 
 fn digest_challenged_request(
@@ -1824,7 +1975,7 @@ fn format_stdout_bytes_with_terminal(
                     .map_err(|err| FetchError::Message(err.to_string()))
             }
         }
-        ContentType::Sse => sse::format_event_stream(&bytes)
+        ContentType::Sse => sse::format_event_stream(&bytes, use_color)
             .map(|formatted| formatted.into_bytes())
             .map_err(|err| FetchError::Message(err.to_string())),
         _ => Ok(bytes.to_vec()),
@@ -2102,6 +2253,32 @@ fn reqwest_request_error_message(err: &reqwest::Error) -> String {
         source = err.source();
     }
     message
+}
+
+fn reqwest_response_body_error_message(err: &reqwest::Error) -> String {
+    let mut details = Vec::new();
+    let mut source = err.source();
+    while let Some(err) = source {
+        let source_message = go_style_reqwest_source_message(&err.to_string());
+        if !source_message.is_empty()
+            && source_message != "request or response body error"
+            && !details.contains(&source_message)
+        {
+            details.push(source_message);
+        }
+        source = err.source();
+    }
+
+    let reqwest_message = err.to_string();
+    if details.is_empty() && reqwest_message != "request or response body error" {
+        details.push(reqwest_message);
+    }
+
+    if details.is_empty() {
+        "response body error".to_string()
+    } else {
+        format!("response body error: {}", details.join(": "))
+    }
 }
 
 fn go_style_reqwest_source_message(message: &str) -> String {
@@ -3221,6 +3398,22 @@ mod tests {
             stdout_stream_target(&cli, &headers, true),
             Some(StdoutStreamTarget::Direct)
         ));
+    }
+
+    #[test]
+    fn formatted_sse_uses_dedicated_streaming_path() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+
+        let cli = Cli::try_parse_from(["fetch", "https://example.com"]).unwrap();
+        assert!(!should_stream_formatted_sse_stdout(&cli, &headers, false));
+        assert!(should_stream_formatted_sse_stdout(&cli, &headers, true));
+
+        let cli = Cli::try_parse_from(["fetch", "--format", "on", "https://example.com"]).unwrap();
+        assert!(should_stream_formatted_sse_stdout(&cli, &headers, false));
+
+        let cli = Cli::try_parse_from(["fetch", "--format", "off", "https://example.com"]).unwrap();
+        assert!(!should_stream_formatted_sse_stdout(&cli, &headers, true));
     }
 
     #[test]

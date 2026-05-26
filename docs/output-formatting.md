@@ -236,7 +236,9 @@ See [gRPC documentation](grpc.md) for schema-aware formatting.
 Features:
 
 - Streaming output as events arrive
-- Event type and data parsing
+- SSE-shaped `event:` and `data:` output
+- JSON `data:` payloads are formatted and syntax-highlighted
+- Request timeouts still apply to long-running event streams
 
 ```sh
 fetch example.com/events
@@ -246,11 +248,16 @@ Output:
 
 ```
 event: message
-data: {"user": "john", "text": "Hello!"}
+data: { "text": "Hello!", "user": "john" }
 
 event: message
-data: {"user": "jane", "text": "Hi there!"}
+data: { "text": "Hi there!", "user": "jane" }
 ```
+
+When color is enabled, `event` and `data` labels are highlighted, and JSON values
+inside `data:` use the same syntax highlighting as JSON responses. In automatic
+compression mode, compressed SSE responses are retried without `Accept-Encoding`
+so proxies and servers are less likely to buffer events before delivery.
 
 ### NDJSON / JSON Lines
 
