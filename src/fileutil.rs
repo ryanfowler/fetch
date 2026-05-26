@@ -27,7 +27,8 @@ pub fn atomic_write_new_file(
 
 #[cfg(not(windows))]
 fn atomic_replace_file_impl(temp_path: &Path, target_path: &Path) -> io::Result<()> {
-    std::fs::rename(temp_path, target_path)
+    std::fs::rename(temp_path, target_path)?;
+    sync_parent_dir(target_path)
 }
 
 #[cfg(windows)]
@@ -42,8 +43,9 @@ fn atomic_replace_file_impl(temp_path: &Path, target_path: &Path) -> io::Result<
 #[cfg(not(windows))]
 fn atomic_write_new_file_impl(temp_path: &Path, target_path: &Path) -> io::Result<()> {
     std::fs::hard_link(temp_path, target_path)?;
+    sync_parent_dir(target_path)?;
     let _ = std::fs::remove_file(temp_path);
-    Ok(())
+    sync_parent_dir(temp_path)
 }
 
 #[cfg(windows)]
@@ -71,6 +73,12 @@ fn to_wide(path: &Path) -> Vec<u16> {
         .encode_wide()
         .chain(iter::once(0))
         .collect()
+}
+
+#[cfg(not(windows))]
+fn sync_parent_dir(path: &Path) -> io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(test)]
