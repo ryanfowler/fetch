@@ -21,8 +21,6 @@ pub fn default_min_tls_version() -> Version {
 
 pub fn reqwest_tls_version(option: &str, value: &str) -> Result<Version, FetchError> {
     match value {
-        "1.0" => Ok(Version::TLS_1_0),
-        "1.1" => Ok(Version::TLS_1_1),
         "1.2" => Ok(Version::TLS_1_2),
         "1.3" => Ok(Version::TLS_1_3),
         _ => Err(format!(
@@ -112,8 +110,6 @@ pub fn rustls_client_config(
 
 pub(crate) fn tls_order(option: &str, value: &str) -> Result<u8, FetchError> {
     match value {
-        "1.0" => Ok(10),
-        "1.1" => Ok(11),
         "1.2" => Ok(12),
         "1.3" => Ok(13),
         _ => Err(format!(
@@ -516,7 +512,6 @@ mod tests {
     #[test]
     fn tls_version_bounds_match_go_defaults_and_supported_values() {
         assert_eq!(default_min_tls_version(), Version::TLS_1_2);
-        assert_eq!(reqwest_tls_version("tls", "1.0").unwrap(), Version::TLS_1_0);
         assert_eq!(
             reqwest_tls_version("min-tls", "1.2").unwrap(),
             Version::TLS_1_2
@@ -532,17 +527,23 @@ mod tests {
     }
 
     #[test]
-    fn rustls_supported_range_documents_legacy_tls_limit() {
-        ensure_rustls_supported_range(Some(("min-tls", "1.0")), None).unwrap();
-        ensure_rustls_supported_range(Some(("min-tls", "1.1")), Some("1.2")).unwrap();
-
-        let err = ensure_rustls_supported_range(Some(("min-tls", "1.0")), Some("1.1")).unwrap_err();
+    fn tls_version_bounds_reject_legacy_tls_versions() {
+        let err = reqwest_tls_version("tls", "1.0").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "TLS versions 1.0 and 1.1 are not supported"
+            "invalid value '1.0' for option '--tls': must be one of [1.2, 1.3]"
+        );
+
+        let err = ensure_rustls_supported_range(Some(("min-tls", "1.1")), Some("1.2")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid value '1.1' for option '--min-tls': must be one of [1.2, 1.3]"
         );
 
         let err = ensure_rustls_supported_range(None, Some("1.1")).unwrap_err();
-        assert_eq!(err.to_string(), "TLS version 1.1 is not supported");
+        assert_eq!(
+            err.to_string(),
+            "invalid value '1.1' for option '--max-tls': must be one of [1.2, 1.3]"
+        );
     }
 }
