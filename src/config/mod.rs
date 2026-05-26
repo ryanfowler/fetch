@@ -615,7 +615,7 @@ fn parse_bool_go(value: &str) -> Option<bool> {
 }
 
 fn validate_auto_update(path: &Path, line_num: usize, value: &str) -> Result<String, String> {
-    if parse_bool_go(value).is_some() || is_go_duration(value) {
+    if parse_bool_go(value).is_some() || crate::duration::parse_duration_interval(value).is_some() {
         Ok(value.to_string())
     } else {
         Err(value_error(
@@ -626,46 +626,6 @@ fn validate_auto_update(path: &Path, line_num: usize, value: &str) -> Result<Str
             "must be either a boolean or interval",
         ))
     }
-}
-
-fn is_go_duration(value: &str) -> bool {
-    let rest = value.strip_prefix(['+', '-']).unwrap_or(value);
-    if rest.is_empty() {
-        return false;
-    }
-
-    let mut rest = rest;
-    while !rest.is_empty() {
-        let before_digits = rest.len();
-        let digits = rest
-            .bytes()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count();
-        rest = &rest[digits..];
-        let mut saw_digit = digits > 0;
-
-        if let Some(after_dot) = rest.strip_prefix('.') {
-            let frac_digits = after_dot
-                .bytes()
-                .take_while(|byte| byte.is_ascii_digit())
-                .count();
-            saw_digit |= frac_digits > 0;
-            rest = &after_dot[frac_digits..];
-        }
-
-        if !saw_digit || rest.len() == before_digits {
-            return false;
-        }
-
-        let Some(unit) = ["ns", "us", "\u{00B5}s", "\u{03BC}s", "ms", "s", "m", "h"]
-            .iter()
-            .find(|unit| rest.starts_with(**unit))
-        else {
-            return false;
-        };
-        rest = &rest[unit.len()..];
-    }
-    true
 }
 
 fn parse_duration_seconds(
@@ -1312,6 +1272,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn auto_update_validation_matches_duration_parser() {
+        let path = PathBuf::from("test/config");
+        for value in ["1.5h", "+30m", "1d"] {
+            assert_eq!(
+                parse_file(&path, &format!("auto-update = {value}\n"))
+                    .unwrap()
+                    .global
+                    .auto_update,
+                Some(value.to_string())
+            );
+        }
+
+        let err = parse_file(&path, "auto-update = -1h\n").unwrap_err();
+        assert!(err.contains("invalid value"), "{err}");
+        assert!(
+            err.contains("must be either a boolean or interval"),
+            "{err}"
+        );
     }
 
     #[test]
