@@ -1812,6 +1812,103 @@ fn start_ws_echo_server(
     (url, seen_rx)
 }
 
+fn start_wss_echo_server(
+    validate: impl Fn(&TestRequest) -> Result<(), String> + Send + Sync + 'static,
+) -> (TlsTestServer, mpsc::Receiver<String>) {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()])
+            .unwrap();
+    let dir = TempDir::new().unwrap().keep();
+    let ca_cert_path = dir.join("ca.pem");
+    fs::write(&ca_cert_path, certified.cert.pem()).unwrap();
+    let cert_der = certified.cert.der().clone();
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
+    );
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .unwrap();
+    let config = Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind wss websocket server");
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("wss://localhost:{port}");
+    let validate = Arc::new(validate);
+    let (seen_tx, seen_rx) = mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        loop {
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let config = Arc::clone(&config);
+                    let validate = Arc::clone(&validate);
+                    let seen_tx = seen_tx.clone();
+                    thread::spawn(move || {
+                        let Ok(conn) = rustls::ServerConnection::new(config) else {
+                            return;
+                        };
+                        let mut tls = rustls::StreamOwned::new(conn, stream);
+                        let _ = tls.sock.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut reader = BufReader::new(&mut tls);
+                        let Some(req) = read_request(&mut reader) else {
+                            return;
+                        };
+                        if let Err(err) = validate(&req) {
+                            write_response(
+                                reader.into_inner(),
+                                TestResponse::status(400, "Bad Request", err),
+                            );
+                            return;
+                        }
+                        let key = req.header("sec-websocket-key");
+                        let mut sha = Sha1::new();
+                        sha.update(key.as_bytes());
+                        sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                        let accept =
+                            base64::engine::general_purpose::STANDARD.encode(sha.finalize());
+                        let response = format!(
+                            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                        );
+                        let tls = reader.into_inner();
+                        if tls.write_all(response.as_bytes()).is_err() {
+                            return;
+                        }
+                        let msg = read_ws_text(tls);
+                        let _ = seen_tx.send(msg.clone());
+                        let reply = if msg.trim().starts_with('{') {
+                            msg
+                        } else {
+                            format!("echo: {msg}")
+                        };
+                        let _ = tls.write_all(&ws_text_frame(reply.as_bytes()));
+                        let _ = tls.write_all(&ws_close_frame(b"done"));
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    (
+        TlsTestServer {
+            url,
+            ca_cert_path,
+            shutdown: Some(shutdown_tx),
+            join: Some(join),
+        },
+        seen_rx,
+    )
+}
+
 fn start_ws_multi_echo_server(messages: usize) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket server");
     listener.set_nonblocking(true).unwrap();
@@ -4948,6 +5045,34 @@ fn websocket_noninteractive_go_cases() {
     ]);
     assert_exit(&res, 0);
     assert!(res.stderr.contains("GET") || res.stderr.contains("method"));
+}
+
+#[test]
+fn websocket_wss_trusts_custom_ca_go_case() {
+    let (wss, seen) = start_wss_echo_server(|req| {
+        if req.header("host").starts_with("localhost:") {
+            Ok(())
+        } else {
+            Err("missing host".to_string())
+        }
+    });
+    let res = run_fetch(&[
+        &wss.url,
+        "--ca-cert",
+        wss.ca_cert_path.to_str().unwrap(),
+        "-d",
+        "secure websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "secure websocket"
+    );
+    assert!(res.stdout.contains("echo: secure websocket"));
 }
 
 #[test]
