@@ -1843,13 +1843,30 @@ fn write_stream_descriptor_set(dir: &Path) -> PathBuf {
             ],
             service: vec![ServiceDescriptorProto {
                 name: Some("StreamService".to_string()),
-                method: vec![MethodDescriptorProto {
-                    name: Some("ClientStream".to_string()),
-                    input_type: Some(".streampkg.StreamRequest".to_string()),
-                    output_type: Some(".streampkg.StreamResponse".to_string()),
-                    client_streaming: Some(true),
-                    ..Default::default()
-                }],
+                method: vec![
+                    MethodDescriptorProto {
+                        name: Some("ClientStream".to_string()),
+                        input_type: Some(".streampkg.StreamRequest".to_string()),
+                        output_type: Some(".streampkg.StreamResponse".to_string()),
+                        client_streaming: Some(true),
+                        ..Default::default()
+                    },
+                    MethodDescriptorProto {
+                        name: Some("ServerStream".to_string()),
+                        input_type: Some(".streampkg.StreamRequest".to_string()),
+                        output_type: Some(".streampkg.StreamResponse".to_string()),
+                        server_streaming: Some(true),
+                        ..Default::default()
+                    },
+                    MethodDescriptorProto {
+                        name: Some("Bidi".to_string()),
+                        input_type: Some(".streampkg.StreamRequest".to_string()),
+                        output_type: Some(".streampkg.StreamResponse".to_string()),
+                        client_streaming: Some(true),
+                        server_streaming: Some(true),
+                        ..Default::default()
+                    },
+                ],
                 ..Default::default()
             }],
             ..Default::default()
@@ -6010,6 +6027,11 @@ fn grpc_schema_descriptor_and_client_streaming_cases() {
     assert!(res.stdout.contains("SERVING"));
 
     let stream_server = TestServer::start(|req| {
+        if req.path == "/streampkg.StreamService/ServerStream" {
+            let mut body = grpc_frame(&proto_field_varint(1, 1));
+            body.extend(grpc_frame(&proto_field_varint(1, 2)));
+            return TestResponse::ok(body).header("Content-Type", "application/grpc+proto");
+        }
         let mut body = &req.body[..];
         let mut count = 0_u64;
         while body.len() >= 5 {
@@ -6054,6 +6076,22 @@ fn grpc_schema_descriptor_and_client_streaming_cases() {
     assert!(res.stdout.contains("1"));
 
     let res = run_fetch(&[
+        &format!("{}/streampkg.StreamService/ServerStream", stream_server.url),
+        "--grpc",
+        "--proto-desc",
+        stream_desc.to_str().unwrap(),
+        "-d",
+        r#"{"value":"seed"}"#,
+        "--http",
+        "1",
+        "--format",
+        "on",
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains("\"count\": \"1\""));
+    assert!(res.stdout.contains("\"count\": \"2\""));
+
+    let res = run_fetch(&[
         &format!("{}/streampkg.StreamService/ClientStream", stream_server.url),
         "--grpc",
         "--proto-desc",
@@ -6064,6 +6102,19 @@ fn grpc_schema_descriptor_and_client_streaming_cases() {
         "on",
     ]);
     assert_exit(&res, 0);
+
+    let res = run_fetch(&[
+        &format!("{}/streampkg.StreamService/ClientStream", stream_server.url),
+        "--grpc",
+        "--proto-desc",
+        stream_desc.to_str().unwrap(),
+        "-d",
+        r#"{"value":"one"}{"value":"#,
+        "--http",
+        "1",
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("failed to decode JSON message"));
 
     if Command::new("protoc").arg("--version").output().is_ok() {
         let proto_file = temp_file(
@@ -6106,6 +6157,65 @@ service StreamService {
         assert_exit(&res, 0);
         assert!(res.stdout.contains("2"));
     }
+
+    let header_server = TestServer::start(|_| {
+        TestResponse::ok(proto_field_varint(1, 1)).header("Content-Type", "application/protobuf")
+    });
+    let res = run_fetch(&[
+        &format!("{}/grpc.health.v1.Health/Check", header_server.url),
+        "--grpc",
+        "--proto-desc",
+        health_desc.to_str().unwrap(),
+        "-j",
+        r#"{"service":"svc"}"#,
+        "--http",
+        "1",
+        "--basic",
+        "user:pass",
+        "-H",
+        "X-Test: yes",
+        "--format",
+        "on",
+    ]);
+    assert_exit(&res, 0);
+    let requests = header_server.requests.lock().unwrap();
+    let request = requests.last().expect("gRPC request captured");
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.header("content-type"), "application/grpc+proto");
+    assert_eq!(request.header("te"), "trailers");
+    assert_eq!(request.header("x-test"), "yes");
+    assert!(request.header("authorization").starts_with("Basic "));
+    assert_eq!(request.body, grpc_frame(&proto_field_string(1, "svc")));
+    drop(requests);
+
+    let res = run_fetch(&[
+        &format!("{}/grpc.health.v1.Health/Missing", header_server.url),
+        "--grpc",
+        "--proto-desc",
+        health_desc.to_str().unwrap(),
+        "--http",
+        "1",
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("method Missing not found"));
+
+    let header_status_server = TestServer::start(|_| {
+        TestResponse::ok("")
+            .header("Content-Type", "application/grpc+proto")
+            .header("grpc-status", "16")
+            .header("grpc-message", "bad%20token")
+    });
+    let res = run_fetch(&[
+        &format!("{}/test.Auth/Check", header_status_server.url),
+        "--grpc",
+        "--http",
+        "1",
+        "--format",
+        "off",
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("UNAUTHENTICATED"));
+    assert!(res.stderr.contains("bad token"));
 
     let res = run_fetch(&[
         "http://example.com/svc/Method",
