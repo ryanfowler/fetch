@@ -1,13 +1,14 @@
 use std::io::{self, IsTerminal, Read};
+use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{
     HeaderName as WsHeaderName, HeaderValue as WsHeaderValue,
 };
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+use tokio_tungstenite::{Connector, connect_async_tls_with_config};
 use url::Url;
 
 use crate::auth::aws_sigv4;
@@ -41,6 +42,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     let initial_message = websocket_initial_message(cli)?;
     let request = build_handshake_request(cli, &url)?;
+    let connector = websocket_connector(cli, &url)?;
     if cli.dry_run {
         print_request_metadata(cli, method, &url, Some(request.headers()));
         return Ok(0);
@@ -55,7 +57,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         print_request_metadata(cli, method, &url, Some(request.headers()));
     }
 
-    let connect = connect_async(request);
+    let connect = connect_async_tls_with_config(request, None, false, connector);
     let (mut stream, response) = if let Some(seconds) = cli.timeout {
         let timeout = crate::http::duration_from_seconds("timeout", seconds)?;
         tokio::time::timeout(timeout, connect)
@@ -125,6 +127,29 @@ fn websocket_url(raw: &str) -> Result<Url, FetchError> {
 
 fn effective_method(_cli: &Cli) -> &'static str {
     "GET"
+}
+
+fn websocket_connector(cli: &Cli, url: &Url) -> Result<Option<Connector>, FetchError> {
+    if url.scheme() != "wss" {
+        return Ok(None);
+    }
+
+    let min_tls = cli.min_tls.as_deref().or(cli.tls.as_deref()).map(|value| {
+        if cli.min_tls.is_some() {
+            ("min-tls", value)
+        } else {
+            ("tls", value)
+        }
+    });
+    let config = crate::tls::rustls_client_config(
+        &cli.ca_cert,
+        cli.cert.as_deref(),
+        cli.key.as_deref(),
+        cli.insecure,
+        min_tls,
+        cli.max_tls.as_deref(),
+    )?;
+    Ok(Some(Connector::Rustls(Arc::new(config))))
 }
 
 fn write_warning(cli: &Cli, message: &str) {

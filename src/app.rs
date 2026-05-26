@@ -645,6 +645,12 @@ fn validate_from_curl_exclusives(cli: &Cli) -> Result<(), FetchError> {
 }
 
 fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
+    let scheme = cli
+        .url
+        .as_deref()
+        .and_then(|url| url.split_once("://").map(|(scheme, _)| scheme))
+        .unwrap_or("ws")
+        .to_ascii_lowercase();
     let conflicting_flag = if cli.clobber {
         Some("clobber")
     } else if cli.copy {
@@ -669,23 +675,35 @@ fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
         Some("remote-header-name")
     } else if cli.remote_name {
         Some("remote-name")
+    } else if cli.dns_server.is_some() {
+        Some("dns-server")
+    } else if cli.proxy.is_some() {
+        Some("proxy")
     } else if cli.retry() > 0 {
         Some("retry")
     } else if cli.retry_delay.is_some() {
         Some("retry-delay")
     } else if cli.xml.is_some() {
         Some("xml")
+    } else if scheme == "ws" && cli.insecure {
+        Some("insecure")
+    } else if scheme == "ws" && cli.max_tls.is_some() {
+        Some("max-tls")
+    } else if scheme == "ws" && cli.min_tls.is_some() {
+        Some("min-tls")
+    } else if scheme == "ws" && cli.tls.is_some() {
+        Some("tls")
+    } else if scheme == "ws" && cli.cert.is_some() {
+        Some("cert")
+    } else if scheme == "ws" && cli.key.is_some() {
+        Some("key")
+    } else if scheme == "ws" && !cli.ca_cert.is_empty() {
+        Some("ca-cert")
     } else {
         None
     };
 
     if let Some(flag) = conflicting_flag {
-        let scheme = cli
-            .url
-            .as_deref()
-            .and_then(|url| url.split_once("://").map(|(scheme, _)| scheme))
-            .unwrap_or("ws")
-            .to_ascii_lowercase();
         return Err(
             format!("'{scheme}://' scheme and '--{flag}' flag cannot be used together").into(),
         );
@@ -1207,6 +1225,38 @@ mod tests {
         assert_eq!(
             err,
             "'ws://' scheme and '--copy' flag cannot be used together"
+        );
+    }
+
+    #[test]
+    fn websocket_rejects_unimplemented_network_options() {
+        let cli =
+            Cli::try_parse_from(["fetch", "wss://example.com", "--proxy", "http://proxy"]).unwrap();
+        let err = validate_websocket_exclusives(&cli).unwrap_err().to_string();
+
+        assert_eq!(
+            err,
+            "'wss://' scheme and '--proxy' flag cannot be used together"
+        );
+
+        let cli =
+            Cli::try_parse_from(["fetch", "wss://example.com", "--dns-server", "1.1.1.1"]).unwrap();
+        let err = validate_websocket_exclusives(&cli).unwrap_err().to_string();
+
+        assert_eq!(
+            err,
+            "'wss://' scheme and '--dns-server' flag cannot be used together"
+        );
+    }
+
+    #[test]
+    fn plain_websocket_rejects_tls_options() {
+        let cli = Cli::try_parse_from(["fetch", "ws://example.com", "--insecure"]).unwrap();
+        let err = validate_websocket_exclusives(&cli).unwrap_err().to_string();
+
+        assert_eq!(
+            err,
+            "'ws://' scheme and '--insecure' flag cannot be used together"
         );
     }
 
