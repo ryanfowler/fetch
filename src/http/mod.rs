@@ -207,6 +207,16 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             if !auth_allowed {
                 strip_cross_origin_sensitive_headers(&mut attempt_headers);
             }
+            if auth_allowed && let Some(config) = &aws_config {
+                apply_aws_sigv4(
+                    cli,
+                    request_method.as_str(),
+                    &request_url,
+                    &mut attempt_headers,
+                    &request_body,
+                    config,
+                )?;
+            }
             if cli.verbose >= 2 && !cli.silent {
                 print_request_metadata(
                     cli,
@@ -225,16 +235,6 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     .and_then(|resolution| resolution.timing.as_ref())
             {
                 print_dns_debug(cli, dns);
-            }
-            if auth_allowed && let Some(config) = &aws_config {
-                apply_aws_sigv4(
-                    cli,
-                    request_method.as_str(),
-                    &request_url,
-                    &mut attempt_headers,
-                    &request_body,
-                    config,
-                )?;
             }
 
             let req = build_request(
