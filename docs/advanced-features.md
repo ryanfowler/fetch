@@ -97,10 +97,12 @@ fetch --proxy http://user:password@proxy.example.com:8080 example.com
 ```sh
 export HTTP_PROXY="http://proxy.example.com:8080"
 export HTTPS_PROXY="http://proxy.example.com:8080"
-export NO_PROXY="localhost,127.0.0.1,.internal.com"
+export NO_PROXY="localhost,127.0.0.1,192.168.0.0/16,.internal.com"
 
 fetch example.com  # Uses proxy from environment
 ```
+
+`NO_PROXY` entries may be hosts, domains, IP addresses, CIDR ranges, or `*`.
 
 ### Configuration File
 

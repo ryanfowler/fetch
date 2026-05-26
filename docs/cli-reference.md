@@ -709,7 +709,7 @@ fetch --update --dry-run
 | `VISUAL` / `EDITOR`     | Editor for `--edit` option                                |
 | `HTTPS_PROXY`           | HTTPS proxy URL                                           |
 | `HTTP_PROXY`            | HTTP proxy URL                                            |
-| `NO_PROXY`              | Hosts to bypass proxy                                     |
+| `NO_PROXY`              | Hosts, domains, IPs, or CIDR ranges to bypass proxy       |
 
 ## File References
 

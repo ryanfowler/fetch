@@ -5848,7 +5848,7 @@ fn grpc_reflection_h2c_go_cases() {
                     "HTTP_PROXY".to_string(),
                     "http://proxy.example:8080".to_string(),
                 ),
-                ("NO_PROXY".to_string(), "127.0.0.1".to_string()),
+                ("NO_PROXY".to_string(), "127.0.0.0/8".to_string()),
             ],
             ..Default::default()
         },
