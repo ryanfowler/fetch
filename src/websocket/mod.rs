@@ -90,6 +90,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             stream,
             initial_message.as_deref(),
             should_format_for_interactive(cli),
+            use_color(cli, io::stdout().is_terminal()),
             size.rows,
             size.cols,
         )
@@ -305,9 +306,12 @@ async fn read_messages<S>(cli: &Cli, stream: &mut S) -> Result<(), FetchError>
 where
     S: futures_util::Stream<Item = Result<Message, WsError>> + Unpin,
 {
+    let stdout_is_terminal = io::stdout().is_terminal();
     while let Some(message) = stream.next().await {
         match message.map_err(websocket_error)? {
-            Message::Text(text) => write_text_message(cli, text.as_str().as_bytes())?,
+            Message::Text(text) => {
+                write_text_message(cli, text.as_str().as_bytes(), stdout_is_terminal)?
+            }
             Message::Binary(bytes) => write_binary_indicator(cli, bytes.len()),
             Message::Close(_) => return Ok(()),
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
@@ -316,9 +320,9 @@ where
     Ok(())
 }
 
-fn write_text_message(cli: &Cli, bytes: &[u8]) -> Result<(), FetchError> {
-    if should_format(cli)
-        && let Ok(formatted) = json::format_json_line(bytes, use_color(cli))
+fn write_text_message(cli: &Cli, bytes: &[u8], stdout_is_terminal: bool) -> Result<(), FetchError> {
+    if should_format(cli, stdout_is_terminal)
+        && let Ok(formatted) = json::format_json_line(bytes, use_color(cli, stdout_is_terminal))
     {
         print!("{}", String::from_utf8_lossy(&formatted));
         return Ok(());
@@ -327,11 +331,11 @@ fn write_text_message(cli: &Cli, bytes: &[u8]) -> Result<(), FetchError> {
     Ok(())
 }
 
-fn should_format(cli: &Cli) -> bool {
+fn should_format(cli: &Cli, stdout_is_terminal: bool) -> bool {
     match cli.format.as_deref() {
         Some("off") => false,
         Some("on") => true,
-        _ => io::stdout().is_terminal(),
+        _ => stdout_is_terminal,
     }
 }
 
@@ -339,8 +343,8 @@ fn should_format_for_interactive(cli: &Cli) -> bool {
     !matches!(cli.format.as_deref(), Some("off"))
 }
 
-fn use_color(cli: &Cli) -> bool {
-    cli.color.as_deref() == Some("on")
+fn use_color(cli: &Cli, stdout_is_terminal: bool) -> bool {
+    core::color_enabled(cli.color.as_deref(), stdout_is_terminal)
 }
 
 fn write_binary_indicator(cli: &Cli, len: usize) {
@@ -421,5 +425,18 @@ mod tests {
             err.to_string(),
             "--ws-interactive on requires stdin, stdout, and stderr to be terminals"
         );
+    }
+
+    #[test]
+    fn websocket_json_color_matches_core_auto_policy() {
+        let default_cli = Cli::try_parse_from(["fetch", "ws://example.com"]).unwrap();
+        assert!(use_color(&default_cli, true));
+        assert!(!use_color(&default_cli, false));
+
+        let on_cli = Cli::try_parse_from(["fetch", "--color", "on", "ws://example.com"]).unwrap();
+        assert!(use_color(&on_cli, false));
+
+        let off_cli = Cli::try_parse_from(["fetch", "--color", "off", "ws://example.com"]).unwrap();
+        assert!(!use_color(&off_cli, true));
     }
 }
