@@ -87,6 +87,7 @@ impl RequestBodyPayload {
 
 const MAX_BUFFERED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DISCARDED_RESPONSE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_DURATION_SECONDS: f64 = i64::MAX as f64 / 1_000_000_000_f64;
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let http_version =
@@ -128,7 +129,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         session: session.as_ref(),
         connect_timing: Some(&connect_timing),
     };
-    let initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
+    let mut initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
     if cli.grpc && grpc_method.is_none() && grpc_request_requires_schema(cli) {
         let schema =
             crate::grpc::reflection::schema_for_call(cli, &url, &initial_client.client).await?;
@@ -188,7 +189,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     let retry_count = cli.retry();
     let retry_delay = duration_from_seconds("retry-delay", cli.retry_delay())?;
-    let total_attempts = retry_count + 1;
+    let total_attempts = total_attempts_for_retry(retry_count)?;
     let mut attempt = 0;
     let result = loop {
         let mut request_method = method.clone();
@@ -327,6 +328,16 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     );
                     drain_response_body_bounded(response).await;
                     tokio::time::sleep(delay).await;
+                    let retry_client_build = client::ClientBuildContext {
+                        mode: client_build.mode,
+                        request_timeout,
+                        connect_timeout,
+                        request_start: Instant::now(),
+                        session: session.as_ref(),
+                        connect_timing: Some(&connect_timing),
+                    };
+                    initial_client =
+                        client::build_client_for_url(cli, &url, &retry_client_build).await?;
                     attempt += 1;
                     continue;
                 }
@@ -2246,10 +2257,20 @@ pub(crate) fn request_target(url: &Url) -> String {
 }
 
 pub(crate) fn duration_from_seconds(flag: &str, seconds: f64) -> Result<Duration, FetchError> {
-    if !seconds.is_finite() || seconds < 0.0 {
+    if !seconds.is_finite() || !(0.0..=MAX_DURATION_SECONDS).contains(&seconds) {
         return Err(format!("{flag} must be a non-negative number").into());
     }
     Ok(Duration::from_secs_f64(seconds))
+}
+
+pub(crate) fn total_attempts_for_retry(retry_count: usize) -> Result<usize, FetchError> {
+    retry_count.checked_add(1).ok_or_else(|| {
+        FetchError::invalid_value(
+            "--retry",
+            retry_count.to_string(),
+            "must be less than the maximum usize value",
+        )
+    })
 }
 
 pub(crate) fn normalize_url(raw: &str) -> Result<Url, FetchError> {
@@ -3632,6 +3653,34 @@ mod tests {
         assert_eq!(format_delay(Duration::from_millis(250)), "250ms");
         assert_eq!(format_delay(Duration::from_millis(2500)), "2.5s");
         assert_eq!(format_delay(Duration::from_secs(1)), "1.0s");
+    }
+
+    #[test]
+    fn duration_from_seconds_rejects_values_outside_supported_range() {
+        assert_eq!(
+            duration_from_seconds("timeout", 1.5).unwrap(),
+            Duration::from_millis(1500)
+        );
+
+        for seconds in [-1.0, f64::NAN, f64::INFINITY, 1e100] {
+            let err = duration_from_seconds("timeout", seconds).unwrap_err();
+            assert_eq!(err.to_string(), "timeout must be a non-negative number");
+        }
+    }
+
+    #[test]
+    fn total_attempts_for_retry_rejects_overflow() {
+        assert_eq!(total_attempts_for_retry(0).unwrap(), 1);
+        assert_eq!(total_attempts_for_retry(3).unwrap(), 4);
+
+        let err = total_attempts_for_retry(usize::MAX).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid value '{}' for option '--retry': must be less than the maximum usize value",
+                usize::MAX
+            )
+        );
     }
 
     #[test]
