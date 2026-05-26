@@ -124,6 +124,9 @@ pub fn validate(cli: &Cli) -> Result<(), FetchError> {
     {
         return Err("min-tls must be less than or equal to max-tls".into());
     }
+    if let Some(retry_count) = cli.retry {
+        crate::http::total_attempts_for_retry(retry_count)?;
+    }
     Ok(())
 }
 
@@ -672,11 +675,10 @@ fn parse_duration_seconds(
     value: &str,
     usage: &str,
 ) -> Result<f64, String> {
-    const MAX_SECONDS: f64 = i64::MAX as f64 / 1_000_000_000_f64;
     let seconds = value
         .parse::<f64>()
         .map_err(|_| value_error(path, line_num, option, value, usage))?;
-    if !seconds.is_finite() || !(0.0..=MAX_SECONDS).contains(&seconds) {
+    if !seconds.is_finite() || !(0.0..=crate::http::MAX_DURATION_SECONDS).contains(&seconds) {
         return Err(value_error(path, line_num, option, value, usage));
     }
     Ok(seconds)
@@ -1257,6 +1259,29 @@ mod tests {
             assert!(err.contains("invalid value"));
             assert!(err.contains("must be a non-negative integer"));
         }
+    }
+
+    #[test]
+    fn validate_rejects_retry_count_that_cannot_add_initial_attempt() {
+        let mut cli = Cli::try_parse_from([
+            "fetch",
+            "--retry",
+            &usize::MAX.to_string(),
+            "https://example.com",
+        ])
+        .unwrap();
+
+        let err = validate(&cli).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "invalid value '{}' for option '--retry': must be less than the maximum usize value",
+                usize::MAX
+            )
+        );
+        cli.retry = Some(usize::MAX - 1);
+        validate(&cli).unwrap();
     }
 
     #[test]
