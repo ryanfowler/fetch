@@ -6303,6 +6303,15 @@ fn grpc_reflection_h2c_go_cases() {
     assert_exit(&res, 0);
     assert!(res.stdout.contains("\"status\": \"SERVING\""));
 
+    let res = run_fetch(&[
+        &format!("{}/grpc.health.v1.Health/Check", server.url),
+        "--grpc",
+        "--format",
+        "on",
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains("\"status\": \"SERVING\""));
+
     let tls = start_reflection_grpc_tls_server(true);
     let ca_cert = tls.ca_cert_path.as_ref().unwrap().to_str().unwrap();
     let res = run_fetch(&["--grpc-list", "--ca-cert", ca_cert, &tls.url]);
