@@ -526,6 +526,38 @@ mod tests {
     }
 
     #[test]
+    fn parses_reflection_error_responses() {
+        let mut error = Vec::new();
+        append_string(&mut error, 2, "symbol missing");
+        let mut response = Vec::new();
+        append_bytes(&mut response, 7, &error);
+
+        let list_err = parse_reflection_list_response(&response).unwrap_err();
+        assert_eq!(list_err.to_string(), "symbol missing");
+
+        let file_err = parse_reflection_file_descriptor_response(&response).unwrap_err();
+        assert_eq!(file_err.to_string(), "symbol missing");
+    }
+
+    #[test]
+    fn parses_reflection_descriptor_lists_and_missing_fields() {
+        let mut descriptors = Vec::new();
+        append_bytes(&mut descriptors, 1, b"first descriptor");
+        append_bytes(&mut descriptors, 1, b"second descriptor");
+        let mut response = Vec::new();
+        append_bytes(&mut response, 4, &descriptors);
+
+        let files = parse_reflection_file_descriptor_response(&response).unwrap();
+        assert_eq!(
+            files,
+            [b"first descriptor".to_vec(), b"second descriptor".to_vec()]
+        );
+
+        assert!(parse_reflection_list_response(&[]).is_err());
+        assert!(parse_reflection_file_descriptor_response(&[]).is_err());
+    }
+
+    #[test]
     fn normalize_reflection_symbol_replaces_method_slash() {
         assert_eq!(
             normalize_reflection_symbol("grpc.health.v1.Health/Check"),

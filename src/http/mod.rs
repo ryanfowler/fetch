@@ -1577,10 +1577,15 @@ async fn apply_digest_challenge(
 
     #[cfg(windows)]
     {
-        let retry_response: Result<Response, FetchError> =
-            retry_request.send().await.map_err(Into::into);
-        drain_response_body_bounded(response).await;
-        retry_response
+        if response_connection_close(&response) {
+            drain_response_body_bounded(response).await;
+            retry_request.send().await.map_err(Into::into)
+        } else {
+            let retry_response: Result<Response, FetchError> =
+                retry_request.send().await.map_err(Into::into);
+            drain_response_body_bounded(response).await;
+            retry_response
+        }
     }
 
     #[cfg(not(windows))]
@@ -1588,6 +1593,17 @@ async fn apply_digest_challenge(
         drain_response_body_bounded(response).await;
         retry_request.send().await.map_err(Into::into)
     }
+}
+
+#[cfg(windows)]
+fn response_connection_close(response: &Response) -> bool {
+    response
+        .headers()
+        .get_all(reqwest::header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|token| token.trim().eq_ignore_ascii_case("close"))
 }
 
 fn digest_challenged_request(

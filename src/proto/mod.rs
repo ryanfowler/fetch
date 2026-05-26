@@ -646,8 +646,9 @@ pub enum ProtoError {
 mod tests {
     use super::*;
     use prost_types::{
-        DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
-        MethodDescriptorProto, ServiceDescriptorProto,
+        DescriptorProto, EnumDescriptorProto, EnumValueDescriptorProto, FieldDescriptorProto,
+        FileDescriptorProto, FileDescriptorSet, MessageOptions, MethodDescriptorProto,
+        OneofDescriptorProto, ServiceDescriptorProto,
         field_descriptor_proto::{Label, Type},
     };
     use std::path::Path;
@@ -806,6 +807,159 @@ mod tests {
                         ..Default::default()
                     },
                 ],
+                ..Default::default()
+            }],
+        };
+        fds.encode_to_vec()
+    }
+
+    fn edge_descriptor_set() -> Vec<u8> {
+        let fds = FileDescriptorSet {
+            file: vec![FileDescriptorProto {
+                name: Some("edge.proto".to_string()),
+                package: Some("edgepkg".to_string()),
+                syntax: Some("proto3".to_string()),
+                enum_type: vec![EnumDescriptorProto {
+                    name: Some("State".to_string()),
+                    value: vec![
+                        EnumValueDescriptorProto {
+                            name: Some("STATE_UNKNOWN".to_string()),
+                            number: Some(0),
+                            ..Default::default()
+                        },
+                        EnumValueDescriptorProto {
+                            name: Some("STATE_READY".to_string()),
+                            number: Some(1),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                message_type: vec![
+                    DescriptorProto {
+                        name: Some("LabelsEntry".to_string()),
+                        field: vec![
+                            FieldDescriptorProto {
+                                name: Some("key".to_string()),
+                                number: Some(1),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::String as i32),
+                                ..Default::default()
+                            },
+                            FieldDescriptorProto {
+                                name: Some("value".to_string()),
+                                number: Some(2),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::Int32 as i32),
+                                ..Default::default()
+                            },
+                        ],
+                        options: Some(MessageOptions {
+                            map_entry: Some(true),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    DescriptorProto {
+                        name: Some("EdgeMessage".to_string()),
+                        field: vec![
+                            FieldDescriptorProto {
+                                name: Some("flag".to_string()),
+                                number: Some(1),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::Bool as i32),
+                                ..Default::default()
+                            },
+                            FieldDescriptorProto {
+                                name: Some("blob".to_string()),
+                                number: Some(2),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::Bytes as i32),
+                                ..Default::default()
+                            },
+                            FieldDescriptorProto {
+                                name: Some("state".to_string()),
+                                number: Some(3),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::Enum as i32),
+                                type_name: Some(".edgepkg.State".to_string()),
+                                ..Default::default()
+                            },
+                            FieldDescriptorProto {
+                                name: Some("scores".to_string()),
+                                number: Some(4),
+                                label: Some(Label::Repeated as i32),
+                                r#type: Some(Type::Sint32 as i32),
+                                ..Default::default()
+                            },
+                            FieldDescriptorProto {
+                                name: Some("labels".to_string()),
+                                number: Some(5),
+                                label: Some(Label::Repeated as i32),
+                                r#type: Some(Type::Message as i32),
+                                type_name: Some(".edgepkg.LabelsEntry".to_string()),
+                                ..Default::default()
+                            },
+                            FieldDescriptorProto {
+                                name: Some("choice_text".to_string()),
+                                number: Some(6),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::String as i32),
+                                oneof_index: Some(0),
+                                ..Default::default()
+                            },
+                            FieldDescriptorProto {
+                                name: Some("choice_count".to_string()),
+                                number: Some(7),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::Int64 as i32),
+                                oneof_index: Some(0),
+                                ..Default::default()
+                            },
+                            FieldDescriptorProto {
+                                name: Some("maybe".to_string()),
+                                number: Some(8),
+                                label: Some(Label::Optional as i32),
+                                r#type: Some(Type::String as i32),
+                                proto3_optional: Some(true),
+                                oneof_index: Some(1),
+                                ..Default::default()
+                            },
+                        ],
+                        oneof_decl: vec![
+                            OneofDescriptorProto {
+                                name: Some("choice".to_string()),
+                                ..Default::default()
+                            },
+                            OneofDescriptorProto {
+                                name: Some("_maybe".to_string()),
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ],
+                service: vec![ServiceDescriptorProto {
+                    name: Some("EdgeService".to_string()),
+                    method: vec![
+                        MethodDescriptorProto {
+                            name: Some("ServerStream".to_string()),
+                            input_type: Some(".edgepkg.EdgeMessage".to_string()),
+                            output_type: Some(".edgepkg.EdgeMessage".to_string()),
+                            server_streaming: Some(true),
+                            ..Default::default()
+                        },
+                        MethodDescriptorProto {
+                            name: Some("Bidi".to_string()),
+                            input_type: Some(".edgepkg.EdgeMessage".to_string()),
+                            output_type: Some(".edgepkg.EdgeMessage".to_string()),
+                            client_streaming: Some(true),
+                            server_streaming: Some(true),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
         };
@@ -1303,6 +1457,70 @@ mod tests {
             result.get("count").and_then(|value| value.as_i64()),
             Some(5)
         );
+    }
+
+    #[test]
+    fn json_to_protobuf_handles_repeated_maps_oneofs_bytes_and_enums() {
+        let schema = Schema::from_descriptor_set(&edge_descriptor_set()).unwrap();
+        let desc = schema.find_message("edgepkg.EdgeMessage").unwrap();
+
+        let proto_data = json_to_protobuf(
+            br#"{
+                "flag": true,
+                "blob": "aGVsbG8=",
+                "state": "STATE_READY",
+                "scores": [-1, 0, 7],
+                "labels": {"low": 1, "high": 9},
+                "choice_text": "selected",
+                "maybe": "present"
+            }"#,
+            &desc,
+        )
+        .unwrap();
+        let json = protobuf_to_json(&proto_data, &desc).unwrap();
+        let result = serde_json::from_slice::<serde_json::Value>(&json).unwrap();
+
+        assert_eq!(result["flag"], true);
+        assert_eq!(result["blob"], "aGVsbG8=");
+        assert_eq!(result["state"], "STATE_READY");
+        assert_eq!(result["scores"], serde_json::json!([-1, 0, 7]));
+        assert_eq!(result["labels"]["low"], 1);
+        assert_eq!(result["labels"]["high"], 9);
+        assert_eq!(result["choice_text"], "selected");
+        assert_eq!(result["maybe"], "present");
+        assert!(result.get("choiceText").is_none());
+    }
+
+    #[test]
+    fn json_to_protobuf_rejects_invalid_edge_shapes() {
+        let schema = Schema::from_descriptor_set(&edge_descriptor_set()).unwrap();
+        let desc = schema.find_message("edgepkg.EdgeMessage").unwrap();
+
+        let cases: &[(&str, &[u8])] = &[
+            ("invalid base64 bytes", br#"{"blob":"not base64!"}"#),
+            ("wrong repeated shape", br#"{"scores": 1}"#),
+            ("wrong map shape", br#"{"labels": [{"key":"a","value":1}]}"#),
+            (
+                "oneof conflict",
+                br#"{"choice_text":"text","choice_count":"2"}"#,
+            ),
+            ("trailing JSON", br#"{"flag":true} garbage"#),
+        ];
+
+        for (name, json) in cases {
+            assert!(json_to_protobuf(json, &desc).is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn describe_symbol_reports_streaming_method_shapes() {
+        let schema = Schema::from_descriptor_set(&edge_descriptor_set()).unwrap();
+
+        let server_stream = describe_symbol(&schema, "edgepkg.EdgeService/ServerStream").unwrap();
+        assert!(server_stream.contains("rpc: server-stream"));
+
+        let bidi = describe_symbol(&schema, "edgepkg.EdgeService/Bidi").unwrap();
+        assert!(bidi.contains("rpc: bidi-stream"));
     }
 
     #[test]
