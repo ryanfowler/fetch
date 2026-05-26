@@ -3220,6 +3220,39 @@ fn redirects_range_status_and_timeouts() {
 }
 
 #[test]
+fn post_to_get_redirect_strips_entity_headers() {
+    let server = TestServer::start(|req| match req.path.as_str() {
+        "/start" => TestResponse::status(302, "Found", "")
+            .header("Location", "/final")
+            .header("Connection", "keep-alive"),
+        "/final" => {
+            if !req.header("content-type").is_empty()
+                || !req.header("content-length").is_empty()
+                || !req.header("transfer-encoding").is_empty()
+            {
+                return TestResponse::status(400, "Bad Request", "entity header retained");
+            }
+            assert_eq!(req.method, "GET");
+            assert!(req.body.is_empty());
+            TestResponse::ok("clean")
+        }
+        _ => TestResponse::status(404, "Not Found", "missing"),
+    });
+
+    let res = run_fetch(&[
+        &format!("{}/start", server.url),
+        "--data",
+        "payload",
+        "--header",
+        "Content-Length: 7",
+        "--header",
+        "Transfer-Encoding: identity",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "clean");
+}
+
+#[test]
 fn retry_statuses_and_request_body_replay() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let attempts_for_handler = Arc::clone(&attempts);
