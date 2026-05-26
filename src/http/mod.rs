@@ -2831,11 +2831,10 @@ pub(crate) fn basic_header(value: Option<&str>) -> Result<Option<String>, FetchE
     let Some(value) = value else {
         return Ok(None);
     };
-    let Some((username, password)) = value.split_once(':') else {
+    if !value.contains(':') {
         return Err("basic format must be <USERNAME:PASSWORD>".into());
-    };
-    let normalized = format!("{}:{}", username.trim(), password.trim());
-    let encoded = base64::engine::general_purpose::STANDARD.encode(normalized.as_bytes());
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(value.as_bytes());
     Ok(Some(format!("Basic {encoded}")))
 }
 
@@ -3568,6 +3567,10 @@ mod tests {
             digest_credentials(Some("user:pass")).unwrap(),
             Some(("user".to_string(), "pass".to_string()))
         );
+        assert_eq!(
+            digest_credentials(Some(" user : pass ")).unwrap(),
+            Some((" user ".to_string(), " pass ".to_string()))
+        );
         assert!(digest_credentials(Some("nocolon")).is_err());
         assert_eq!(digest_credentials(None).unwrap(), None);
     }
@@ -3605,10 +3608,10 @@ mod tests {
     }
 
     #[test]
-    fn basic_header_encodes_credentials_like_go() {
+    fn basic_header_preserves_credential_spaces() {
         assert_eq!(
             basic_header(Some(" user : pass ")).unwrap(),
-            Some("Basic dXNlcjpwYXNz".to_string())
+            Some("Basic IHVzZXIgOiBwYXNzIA==".to_string())
         );
         assert!(basic_header(Some("nocolon")).is_err());
         assert_eq!(basic_header(None).unwrap(), None);
