@@ -249,7 +249,7 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     crate::cli::normalize_range_values(&mut cli.ranges).map_err(FetchError::Message)?;
     validate_proto_schema_files(cli)?;
     validate_client_certificate_flags(direct_cli_sources)?;
-    normalize_auth_credentials(cli)?;
+    validate_auth_credentials(cli)?;
     print_config_debug(cli, config_path.as_deref());
 
     if cli.update {
@@ -347,12 +347,12 @@ fn validate_client_certificate_flags(sources: DirectCliSources) -> Result<(), Fe
     Ok(())
 }
 
-fn normalize_auth_credentials(cli: &mut Cli) -> Result<(), FetchError> {
+fn validate_auth_credentials(cli: &mut Cli) -> Result<(), FetchError> {
     if let Some(value) = cli.basic.take() {
-        cli.basic = Some(normalize_user_password_option("basic", &value)?);
+        cli.basic = Some(validate_user_password_option("basic", &value)?);
     }
     if let Some(value) = cli.digest.take() {
-        cli.digest = Some(normalize_user_password_option("digest", &value)?);
+        cli.digest = Some(validate_user_password_option("digest", &value)?);
     }
     Ok(())
 }
@@ -377,14 +377,14 @@ fn print_config_debug(cli: &Cli, path: Option<&std::path::Path>) {
     let _ = printer.flush_to(&mut stderr);
 }
 
-fn normalize_user_password_option(option: &str, value: &str) -> Result<String, FetchError> {
-    let Some((username, password)) = value.split_once(':') else {
+fn validate_user_password_option(option: &str, value: &str) -> Result<String, FetchError> {
+    if !value.contains(':') {
         return Err(format!(
             "invalid value '{value}' for option '--{option}': format must be <USERNAME:PASSWORD>"
         )
         .into());
-    };
-    Ok(format!("{}:{}", username.trim(), password.trim()))
+    }
+    Ok(value.to_string())
 }
 
 fn check_file_exists(path: &str) -> Result<(), FetchError> {
@@ -1153,14 +1153,14 @@ mod tests {
     }
 
     #[test]
-    fn basic_auth_parsing_trims_like_go() {
+    fn basic_auth_parsing_preserves_spaces() {
         let mut cli =
             Cli::try_parse_from(["fetch", "--basic", " user : pass ", "http://example.com"])
                 .unwrap();
 
-        normalize_auth_credentials(&mut cli).unwrap();
+        validate_auth_credentials(&mut cli).unwrap();
 
-        assert_eq!(cli.basic.as_deref(), Some("user:pass"));
+        assert_eq!(cli.basic.as_deref(), Some(" user : pass "));
     }
 
     #[test]
@@ -1168,9 +1168,7 @@ mod tests {
         let mut cli =
             Cli::try_parse_from(["fetch", "--basic", "nocolon", "http://example.com"]).unwrap();
 
-        let err = normalize_auth_credentials(&mut cli)
-            .unwrap_err()
-            .to_string();
+        let err = validate_auth_credentials(&mut cli).unwrap_err().to_string();
 
         assert_eq!(
             err,
@@ -1203,7 +1201,18 @@ mod tests {
     }
 
     #[test]
-    fn from_curl_basic_auth_trims_like_go_application() {
+    fn digest_auth_parsing_preserves_spaces() {
+        let mut cli =
+            Cli::try_parse_from(["fetch", "--digest", " user : pass ", "http://example.com"])
+                .unwrap();
+
+        validate_auth_credentials(&mut cli).unwrap();
+
+        assert_eq!(cli.digest.as_deref(), Some(" user : pass "));
+    }
+
+    #[test]
+    fn from_curl_basic_auth_preserves_spaces() {
         let mut cli = Cli::try_parse_from([
             "fetch",
             "--from-curl",
@@ -1212,9 +1221,9 @@ mod tests {
         .unwrap();
 
         apply_from_curl(&mut cli).unwrap();
-        normalize_auth_credentials(&mut cli).unwrap();
+        validate_auth_credentials(&mut cli).unwrap();
 
-        assert_eq!(cli.basic.as_deref(), Some("user:pass"));
+        assert_eq!(cli.basic.as_deref(), Some(" user : pass "));
     }
 
     #[test]

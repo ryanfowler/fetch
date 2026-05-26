@@ -2612,6 +2612,15 @@ fn basic_bearer_and_aws_auth_headers() {
             assert_eq!(String::from_utf8_lossy(&decoded), "user:pass");
             return TestResponse::ok("");
         }
+        if req.path == "/basic-spaces" {
+            let auth = req.header("authorization");
+            let raw = auth.strip_prefix("Basic ").unwrap_or_default();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(raw)
+                .unwrap_or_default();
+            assert_eq!(String::from_utf8_lossy(&decoded), " user : pass ");
+            return TestResponse::ok("");
+        }
         if req.path == "/bearer" {
             assert_eq!(req.header("authorization"), "Bearer token");
             return TestResponse::ok("");
@@ -2630,6 +2639,13 @@ fn basic_bearer_and_aws_auth_headers() {
     });
 
     let res = run_fetch(&[&format!("{}/basic", server.url), "--basic", "user:pass"]);
+    assert_exit(&res, 0);
+
+    let res = run_fetch(&[
+        &format!("{}/basic-spaces", server.url),
+        "--basic",
+        " user : pass ",
+    ]);
     assert_exit(&res, 0);
 
     let res = run_fetch(&[&format!("{}/bearer", server.url), "--bearer", "token"]);
