@@ -142,6 +142,7 @@ pub struct InteractiveMode {
     status: String,
     messages: Vec<MessageEntry>,
     format_json: bool,
+    color_json: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -152,6 +153,10 @@ pub enum InputAction {
 
 impl InteractiveMode {
     pub fn new(cols: usize, format_json: bool) -> Self {
+        Self::new_with_color(cols, format_json, false)
+    }
+
+    pub fn new_with_color(cols: usize, format_json: bool, color_json: bool) -> Self {
         Self {
             editor: LineEditor::default(),
             rows: 0,
@@ -160,6 +165,7 @@ impl InteractiveMode {
             status: "connected".to_string(),
             messages: Vec::new(),
             format_json,
+            color_json,
         }
     }
 
@@ -448,10 +454,14 @@ impl InteractiveMode {
     pub fn format_message(&self, data: &[u8]) -> Result<String, FetchError> {
         if self.format_json
             && serde_json::from_slice::<serde_json::Value>(data).is_ok()
-            && let Ok(formatted) = json::format_json_line(data, false)
+            && let Ok(formatted) = json::format_json_line(data, self.color_json)
         {
             let text = String::from_utf8_lossy(&formatted);
-            return Ok(sanitize_message_text(text.trim_end_matches('\n')));
+            return Ok(if self.color_json {
+                text.trim_end_matches('\n').to_string()
+            } else {
+                sanitize_message_text(text.trim_end_matches('\n'))
+            });
         }
         Ok(sanitize_message_text(&String::from_utf8_lossy(data)))
     }
@@ -644,6 +654,7 @@ pub async fn run_terminal<S>(
     stream: S,
     initial_message: Option<&[u8]>,
     format_json: bool,
+    color_json: bool,
     rows: usize,
     cols: usize,
 ) -> Result<(), FetchError>
@@ -655,7 +666,7 @@ where
     let (input_tx, mut input_rx) = tokio_mpsc::channel(STDIN_CHAN_BUF);
     spawn_stdin_reader(input_tx);
 
-    let mut mode = InteractiveMode::new(cols, format_json);
+    let mut mode = InteractiveMode::new_with_color(cols, format_json, color_json);
     let (initial_row, mut pending) = detect_cursor_row_async(&mut input_rx, &mut stdout).await?;
     mode.setup_screen(&mut stdout, rows, cols, initial_row)?;
     stdout.flush()?;
@@ -1029,7 +1040,18 @@ pub fn wrap_display_lines(text: &str, width: usize) -> Vec<String> {
 
         let mut line = String::new();
         let mut line_width = 0;
-        for ch in part.chars() {
+        let mut index = 0;
+        while index < part.len() {
+            if let Some((sequence, next)) = ansi_csi_sequence(part, index) {
+                line.push_str(sequence);
+                index = next;
+                continue;
+            }
+
+            let ch = part[index..]
+                .chars()
+                .next()
+                .expect("index is inside string bounds");
             let char_width = char_display_width(ch).max(1);
             if line_width > 0 && line_width + char_width > width {
                 lines.push(std::mem::take(&mut line));
@@ -1037,6 +1059,7 @@ pub fn wrap_display_lines(text: &str, width: usize) -> Vec<String> {
             }
             line.push(ch);
             line_width += char_width;
+            index += ch.len_utf8();
         }
         lines.push(line);
     }
@@ -1065,7 +1088,35 @@ pub fn fit_display_width(text: &str, width: usize) -> String {
 }
 
 fn display_width(text: &str) -> usize {
-    text.chars().map(|ch| char_display_width(ch).max(1)).sum()
+    let mut width = 0;
+    let mut index = 0;
+    while index < text.len() {
+        if let Some((_, next)) = ansi_csi_sequence(text, index) {
+            index = next;
+            continue;
+        }
+        let ch = text[index..]
+            .chars()
+            .next()
+            .expect("index is inside string bounds");
+        width += char_display_width(ch).max(1);
+        index += ch.len_utf8();
+    }
+    width
+}
+
+fn ansi_csi_sequence(text: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = text.as_bytes();
+    if bytes.get(start) != Some(&b'\x1b') || bytes.get(start + 1) != Some(&b'[') {
+        return None;
+    }
+
+    for index in start + 2..bytes.len() {
+        if (0x40..=0x7e).contains(&bytes[index]) {
+            return Some((&text[start..=index], index + 1));
+        }
+    }
+    None
 }
 
 fn char_display_width(ch: char) -> usize {
@@ -1282,6 +1333,12 @@ mod tests {
                 4,
                 vec!["日本", "語"],
             ),
+            (
+                "ansi sgr sequences do not count toward width",
+                "\x1b[34mabc\x1b[0mdef",
+                3,
+                vec!["\x1b[34mabc\x1b[0m", "def"],
+            ),
         ];
 
         for (name, input, width, want) in cases {
@@ -1485,6 +1542,15 @@ mod tests {
         let formatted = mode.format_message(br#"{"ok":true}"#).unwrap();
 
         assert_eq!(formatted, r#"{ "ok": true }"#);
+    }
+
+    #[test]
+    fn format_message_colors_json_when_enabled() {
+        let mode = InteractiveMode::new_with_color(80, true, true);
+        let formatted = mode.format_message(br#"{"ok":"yes"}"#).unwrap();
+
+        assert!(formatted.contains("\"\x1b[34m\x1b[1mok\x1b[0m\""));
+        assert!(formatted.contains("\"\x1b[32myes\x1b[0m\""));
     }
 
     #[test]
