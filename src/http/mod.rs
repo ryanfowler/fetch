@@ -1575,23 +1575,30 @@ async fn apply_digest_challenge(
         RequestAuthorization::Digest(&auth),
     )?;
 
+    if digest_retry_before_drain(&response) {
+        let retry_response: Result<Response, FetchError> =
+            retry_request.send().await.map_err(Into::into);
+        drain_response_body_bounded(response).await;
+        retry_response
+    } else {
+        drain_response_body_bounded(response).await;
+        retry_request.send().await.map_err(Into::into)
+    }
+}
+
+fn digest_retry_before_drain(response: &Response) -> bool {
+    if response_body_exceeds_discard_bound(response) {
+        return true;
+    }
+
     #[cfg(windows)]
     {
-        if response_connection_close(&response) {
-            drain_response_body_bounded(response).await;
-            retry_request.send().await.map_err(Into::into)
-        } else {
-            let retry_response: Result<Response, FetchError> =
-                retry_request.send().await.map_err(Into::into);
-            drain_response_body_bounded(response).await;
-            retry_response
-        }
+        !response_connection_close(response)
     }
 
     #[cfg(not(windows))]
     {
-        drain_response_body_bounded(response).await;
-        retry_request.send().await.map_err(Into::into)
+        false
     }
 }
 
@@ -1628,6 +1635,12 @@ fn digest_challenged_request(
     }
 
     (method, body)
+}
+
+fn response_body_exceeds_discard_bound(response: &Response) -> bool {
+    response
+        .content_length()
+        .is_some_and(|len| len > MAX_DISCARDED_RESPONSE_BYTES as u64)
 }
 
 fn digest_credentials(value: Option<&str>) -> Result<Option<(String, String)>, FetchError> {
