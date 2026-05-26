@@ -87,6 +87,8 @@ impl RequestBodyPayload {
 
 const MAX_BUFFERED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DISCARDED_RESPONSE_BYTES: usize = 1024 * 1024;
+const BINARY_RESPONSE_WARNING: &str =
+    "the response body appears to be binary\n\nTo output to the terminal anyway, use '--output -'";
 pub(crate) const MAX_DURATION_SECONDS: f64 = i64::MAX as f64 / 1_000_000_000_f64;
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
@@ -794,11 +796,13 @@ async fn finish_response(
         }
         if let Some(target) = stdout_stream_target(cli, &response_headers, stdout_is_terminal) {
             let streamed = stream_response_to_stdout(
+                cli,
                 response,
                 response_headers.clone(),
                 compression,
                 cli.copy,
                 target,
+                stdout_is_terminal,
             )
             .await?;
             handle_optional_clipboard_outcome(cli, streamed.clipboard);
@@ -842,12 +846,13 @@ struct StdoutBody {
 }
 
 fn write_stdout_bytes(cli: &Cli, body: &StdoutBody) -> Result<(), FetchError> {
-    if should_page_stdout(
-        cli,
-        &body.bytes,
-        body.content_type,
-        std::io::stdout().is_terminal(),
-    ) {
+    let stdout_is_terminal = std::io::stdout().is_terminal();
+    if should_warn_for_terminal_binary_stdout(cli, &body.bytes, stdout_is_terminal) {
+        write_warning(cli, BINARY_RESPONSE_WARNING);
+        return Ok(());
+    }
+
+    if should_page_stdout(cli, &body.bytes, body.content_type, stdout_is_terminal) {
         return write_stdout_bytes_with_pager(&body.bytes);
     }
 
@@ -936,6 +941,18 @@ fn response_header_content_type(headers: &HeaderMap) -> ContentType {
     content_type::get_content_type(content_type).0
 }
 
+fn terminal_binary_stdout_guard_enabled(cli: &Cli, stdout_is_terminal: bool) -> bool {
+    stdout_is_terminal && cli.output.as_deref() != Some("-")
+}
+
+fn should_warn_for_terminal_binary_stdout(
+    cli: &Cli,
+    bytes: &[u8],
+    stdout_is_terminal: bool,
+) -> bool {
+    terminal_binary_stdout_guard_enabled(cli, stdout_is_terminal) && !is_printable(bytes)
+}
+
 fn should_stream_formatted_sse_stdout(
     cli: &Cli,
     headers: &HeaderMap,
@@ -1022,23 +1039,22 @@ async fn stream_response_to_discard(
 }
 
 async fn stream_response_to_stdout(
+    cli: &Cli,
     response: Response,
     response_headers: HeaderMap,
     compression: CompressionMode,
     copy: bool,
     target: StdoutStreamTarget,
+    stdout_is_terminal: bool,
 ) -> Result<StreamedOutput, FetchError> {
     let (reader, trailers) = async_response_reader(response);
     let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
     let mut capture = copy.then(clipboard::Capture::default);
-    let bytes_written = match target {
-        StdoutStreamTarget::Direct => {
-            let mut stdout = tokio::io::stdout();
-            copy_async_reader_to_writer(&mut reader, &mut stdout, capture.as_mut()).await?
-        }
-        StdoutStreamTarget::Pager => {
-            stream_async_reader_to_pager(&mut reader, capture.as_mut()).await?
-        }
+    let bytes_written = if terminal_binary_stdout_guard_enabled(cli, stdout_is_terminal) {
+        stream_response_to_stdout_with_binary_check(cli, &mut reader, target, capture.as_mut())
+            .await?
+    } else {
+        copy_async_reader_to_stdout_target(&mut reader, target, &[], capture.as_mut()).await?
     };
     let clipboard = capture.map(clipboard::Capture::copy);
     let trailers = trailers
@@ -1233,6 +1249,50 @@ fn async_response_reader(response: Response) -> (AsyncReadBox, Arc<Mutex<HeaderM
     (Box::pin(StreamReader::new(stream)), trailers)
 }
 
+async fn stream_response_to_stdout_with_binary_check(
+    cli: &Cli,
+    reader: &mut AsyncReadBox,
+    target: StdoutStreamTarget,
+    mut capture: Option<&mut clipboard::Capture>,
+) -> Result<i64, FetchError> {
+    let mut first_chunk = vec![0; 16 * 1024];
+    let n = reader.read(&mut first_chunk).await?;
+    if n == 0 {
+        return Ok(0);
+    }
+
+    let first_chunk = &first_chunk[..n];
+    if !is_printable(first_chunk) {
+        write_warning(cli, BINARY_RESPONSE_WARNING);
+        if let Some(capture) = capture.as_mut() {
+            capture.push(first_chunk);
+        }
+        let mut sink = tokio::io::sink();
+        let drained = copy_async_reader_to_writer(reader, &mut sink, capture).await?;
+        return Ok(i64::try_from(n).unwrap_or(i64::MAX).saturating_add(drained));
+    }
+
+    copy_async_reader_to_stdout_target(reader, target, first_chunk, capture).await
+}
+
+async fn copy_async_reader_to_stdout_target(
+    reader: &mut AsyncReadBox,
+    target: StdoutStreamTarget,
+    prefix: &[u8],
+    capture: Option<&mut clipboard::Capture>,
+) -> Result<i64, FetchError> {
+    match target {
+        StdoutStreamTarget::Direct => {
+            let mut stdout = tokio::io::stdout();
+            Ok(
+                copy_async_reader_to_writer_with_prefix(reader, &mut stdout, prefix, capture)
+                    .await?,
+            )
+        }
+        StdoutStreamTarget::Pager => stream_async_reader_to_pager(reader, prefix, capture).await,
+    }
+}
+
 async fn copy_async_reader_to_writer<W>(
     reader: &mut AsyncReadBox,
     writer: &mut W,
@@ -1258,8 +1318,30 @@ where
     }
 }
 
+async fn copy_async_reader_to_writer_with_prefix<W>(
+    reader: &mut AsyncReadBox,
+    writer: &mut W,
+    prefix: &[u8],
+    mut capture: Option<&mut clipboard::Capture>,
+) -> std::io::Result<i64>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut written = 0i64;
+    if !prefix.is_empty() {
+        if let Some(capture) = capture.as_mut() {
+            capture.push(prefix);
+        }
+        writer.write_all(prefix).await?;
+        writer.flush().await?;
+        written = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+    }
+    Ok(written.saturating_add(copy_async_reader_to_writer(reader, writer, capture).await?))
+}
+
 async fn stream_async_reader_to_pager(
     reader: &mut AsyncReadBox,
+    prefix: &[u8],
     capture: Option<&mut clipboard::Capture>,
 ) -> Result<i64, FetchError> {
     let mut child = match tokio::process::Command::new("less")
@@ -1272,14 +1354,20 @@ async fn stream_async_reader_to_pager(
         Ok(child) => child,
         Err(err) if err.kind() == ErrorKind::NotFound => {
             let mut stdout = tokio::io::stdout();
-            return Ok(copy_async_reader_to_writer(reader, &mut stdout, capture).await?);
+            return Ok(copy_async_reader_to_writer_with_prefix(
+                reader,
+                &mut stdout,
+                prefix,
+                capture,
+            )
+            .await?);
         }
         Err(err) => return Err(err.into()),
     };
 
     let mut bytes_written = 0;
     if let Some(mut stdin) = child.stdin.take() {
-        match copy_async_reader_to_writer(reader, &mut stdin, capture).await {
+        match copy_async_reader_to_writer_with_prefix(reader, &mut stdin, prefix, capture).await {
             Ok(n) => bytes_written = n,
             Err(err) if err.kind() == ErrorKind::BrokenPipe => {}
             Err(err) => return Err(err.into()),
@@ -3220,6 +3308,33 @@ mod tests {
         assert!(is_printable("snowman: \u{2603}\n".as_bytes()));
         assert!(!is_printable(b"abc\0def"));
         assert!(!is_printable(&[0xff, 0xfe, 0xfd, b'a']));
+    }
+
+    #[test]
+    fn terminal_binary_stdout_guard_requires_terminal_and_allows_forced_stdout() {
+        let cli = Cli::try_parse_from(["fetch", "https://example.com"]).unwrap();
+        assert!(should_warn_for_terminal_binary_stdout(
+            &cli,
+            b"abc\0def",
+            true
+        ));
+        assert!(!should_warn_for_terminal_binary_stdout(
+            &cli,
+            b"abc\0def",
+            false
+        ));
+        assert!(!should_warn_for_terminal_binary_stdout(
+            &cli,
+            b"plain text",
+            true
+        ));
+
+        let forced = Cli::try_parse_from(["fetch", "-o", "-", "https://example.com"]).unwrap();
+        assert!(!should_warn_for_terminal_binary_stdout(
+            &forced,
+            b"abc\0def",
+            true
+        ));
     }
 
     #[test]
