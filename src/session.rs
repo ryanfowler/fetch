@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -344,15 +345,23 @@ fn cookie_origin_url(cookie: &SessionCookie) -> Result<Option<Url>, SessionError
         return Ok(None);
     }
     let scheme = if cookie.secure { "https" } else { "http" };
+    let host = format_cookie_host(&cookie.domain);
     let path = if cookie.path.is_empty() {
         "/"
     } else {
         &cookie.path
     };
-    Ok(Some(Url::parse(&format!(
-        "{scheme}://{}{}",
-        cookie.domain, path
-    ))?))
+    Ok(Some(Url::parse(&format!("{scheme}://{host}{path}"))?))
+}
+
+fn format_cookie_host(domain: &str) -> String {
+    if domain.starts_with('[') && domain.ends_with(']') {
+        return domain.to_string();
+    }
+    match domain.parse::<IpAddr>() {
+        Ok(IpAddr::V6(addr)) => format!("[{addr}]"),
+        _ => domain.to_string(),
+    }
 }
 
 fn cookie_is_expired(cookie: &SessionCookie) -> bool {
@@ -723,6 +732,57 @@ mod tests {
         let subdomain_cookies = subdomain_cookies.to_str().unwrap();
         assert!(!subdomain_cookies.contains("host=only"));
         assert!(subdomain_cookies.contains("domain=wide"));
+    }
+
+    #[test]
+    fn test_session_reload_preserves_ipv6_host_only_cookies() {
+        let _guard = lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        set_sessions_dir(dir.path());
+        let session = Session::load("ipv6-host-only-test").unwrap().session;
+        let origin = Url::parse("http://[::1]/").unwrap();
+        session.store.set_cookies(
+            &mut [HeaderValue::from_static("loopback=yes; Path=/")].iter(),
+            &origin,
+        );
+        session.save().unwrap();
+
+        let saved = session.cookies();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].host_only);
+
+        let reloaded = Session::load("ipv6-host-only-test").unwrap().session;
+        let origin_cookies = reloaded.store.cookies(&origin).unwrap();
+        assert!(origin_cookies.to_str().unwrap().contains("loopback=yes"));
+    }
+
+    #[test]
+    fn test_session_load_accepts_bare_ipv6_cookie_domain() {
+        let _guard = lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        set_sessions_dir(dir.path());
+        let path = dir.path().join("bare-ipv6-host.json");
+        std::fs::write(
+            path,
+            r#"{
+  "cookies": [
+    {
+      "name": "loopback",
+      "value": "yes",
+      "domain": "::1",
+      "host_only": true,
+      "path": "/"
+    }
+  ]
+}
+"#,
+        )
+        .unwrap();
+
+        let loaded = Session::load("bare-ipv6-host").unwrap().session;
+        let origin = Url::parse("http://[::1]/").unwrap();
+        let origin_cookies = loaded.store.cookies(&origin).unwrap();
+        assert!(origin_cookies.to_str().unwrap().contains("loopback=yes"));
     }
 
     #[test]
