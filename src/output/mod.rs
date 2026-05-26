@@ -146,30 +146,25 @@ pub fn write_output_reader<R: Read>(
     }
 
     let absolute_target = absolute_path(target)?;
-    let (temp_path, mut temp_file) = create_download_temp(&absolute_target)?;
+    let (temp_path, temp_file) = create_download_temp(&absolute_target)?;
+    let temp_guard = DownloadTempGuard::new(temp_path);
+    let mut temp_file = temp_file;
 
-    let progress_summary = match write_temp_body(
+    let progress_summary = write_temp_body(
         &mut temp_file,
         reader,
         &progress,
         absolute_target.to_string_lossy().as_ref(),
-    ) {
-        Ok(summary) => summary,
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(err);
-        }
-    };
+    )?;
     if let Err(err) = temp_file.sync_all() {
-        let _ = std::fs::remove_file(&temp_path);
         return Err(OutputError::Io(err));
     }
     drop(temp_file);
 
     let install_result = if clobber {
-        fileutil::atomic_replace_file(&temp_path, &absolute_target)
+        fileutil::atomic_replace_file(temp_guard.path(), &absolute_target)
     } else {
-        fileutil::atomic_write_new_file(&temp_path, &absolute_target)
+        fileutil::atomic_write_new_file(temp_guard.path(), &absolute_target)
     };
     match install_result {
         Ok(()) => {
@@ -179,16 +174,12 @@ pub fn write_output_reader<R: Read>(
             Ok(progress_summary.bytes_written)
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = std::fs::remove_file(&temp_path);
             Err(OutputError::FileExists(path.to_string()))
         }
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp_path);
-            Err(OutputError::FileCheck {
-                path: path.to_string(),
-                source: err,
-            })
-        }
+        Err(err) => Err(OutputError::FileCheck {
+            path: path.to_string(),
+            source: err,
+        }),
     }
 }
 
@@ -205,32 +196,25 @@ pub async fn write_output_async_reader<R: AsyncRead + Unpin>(
 
     let absolute_target = absolute_path(target)?;
     let (temp_path, temp_file) = create_download_temp(&absolute_target)?;
+    let temp_guard = DownloadTempGuard::new(temp_path);
     let mut temp_file = tokio::fs::File::from_std(temp_file);
 
-    let progress_summary = match write_temp_body_async(
+    let progress_summary = write_temp_body_async(
         &mut temp_file,
         reader,
         &progress,
         absolute_target.to_string_lossy().as_ref(),
     )
-    .await
-    {
-        Ok(summary) => summary,
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(err);
-        }
-    };
+    .await?;
     if let Err(err) = temp_file.sync_all().await {
-        let _ = std::fs::remove_file(&temp_path);
         return Err(OutputError::Io(err));
     }
     drop(temp_file);
 
     let install_result = if clobber {
-        fileutil::atomic_replace_file(&temp_path, &absolute_target)
+        fileutil::atomic_replace_file(temp_guard.path(), &absolute_target)
     } else {
-        fileutil::atomic_write_new_file(&temp_path, &absolute_target)
+        fileutil::atomic_write_new_file(temp_guard.path(), &absolute_target)
     };
     match install_result {
         Ok(()) => {
@@ -240,16 +224,12 @@ pub async fn write_output_async_reader<R: AsyncRead + Unpin>(
             Ok(progress_summary.bytes_written)
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = std::fs::remove_file(&temp_path);
             Err(OutputError::FileExists(path.to_string()))
         }
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp_path);
-            Err(OutputError::FileCheck {
-                path: path.to_string(),
-                source: err,
-            })
-        }
+        Err(err) => Err(OutputError::FileCheck {
+            path: path.to_string(),
+            source: err,
+        }),
     }
 }
 
@@ -309,6 +289,26 @@ fn create_download_temp(target: &Path) -> Result<(PathBuf, File), OutputError> {
             "unable to create unique temporary output file",
         ),
     })
+}
+
+struct DownloadTempGuard {
+    path: PathBuf,
+}
+
+impl DownloadTempGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for DownloadTempGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 fn write_temp_body<R: Read>(
@@ -691,7 +691,11 @@ fn cut_last<'a>(value: &'a str, separator: &str) -> (&'a str, &'a str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
     use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+    use tokio::io::ReadBuf;
 
     #[derive(Clone)]
     struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
@@ -704,6 +708,26 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    struct PendingAfterPartial {
+        wrote: bool,
+    }
+
+    impl AsyncRead for PendingAfterPartial {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.wrote {
+                Poll::Pending
+            } else {
+                self.wrote = true;
+                buf.put_slice(b"partial");
+                Poll::Ready(Ok(()))
+            }
         }
     }
 
@@ -907,5 +931,36 @@ mod tests {
             output.contains(path.to_str().unwrap()),
             "progress output missing absolute path: {output:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn write_output_async_reader_removes_temp_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("download.txt");
+        let mut reader = PendingAfterPartial { wrote: false };
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            write_output_async_reader(
+                path.to_str().unwrap(),
+                &mut reader,
+                false,
+                WriteProgress::disabled(),
+            ),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!path.exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".download"))
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
     }
 }
