@@ -20,8 +20,9 @@ use flate2::read::GzDecoder;
 use futures_util::stream;
 use http_body_util::BodyExt;
 use reqwest::header::{
-    ACCEPT, ACCEPT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
-    LOCATION, RANGE, RETRY_AFTER, USER_AGENT, WWW_AUTHENTICATE,
+    ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap,
+    HeaderName, HeaderValue, LOCATION, PROXY_AUTHORIZATION, RANGE, RETRY_AFTER, USER_AGENT,
+    WWW_AUTHENTICATE,
 };
 use reqwest::{Body, Client, Method, RequestBuilder, Response, StatusCode};
 use sha2::{Digest as _, Sha256};
@@ -199,6 +200,10 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         let mut timing = AttemptTiming::start();
         let attempt_result = loop {
             let mut attempt_headers = headers.clone();
+            let auth_allowed = same_origin(&url, &request_url);
+            if !auth_allowed {
+                strip_cross_origin_sensitive_headers(&mut attempt_headers);
+            }
             if cli.verbose >= 2 && !cli.silent {
                 print_request_metadata(
                     cli,
@@ -218,7 +223,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             {
                 print_dns_debug(cli, dns);
             }
-            if let Some(config) = &aws_config {
+            if auth_allowed && let Some(config) = &aws_config {
                 apply_aws_sigv4(
                     cli,
                     request_method.as_str(),
@@ -236,7 +241,11 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 attempt_headers,
                 request_body.clone(),
                 cli,
-                None,
+                if auth_allowed {
+                    RequestAuthorization::Cli
+                } else {
+                    RequestAuthorization::None
+                },
             )?;
             timing.set_dns(
                 request_client
@@ -299,6 +308,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         body: request_body.clone(),
                         cli,
                         redirect_statuses,
+                        auth_allowed: same_origin(&url, &request_url),
                     },
                     digest_credentials.as_ref(),
                 )
@@ -1185,7 +1195,7 @@ fn build_request(
     mut headers: HeaderMap,
     body: RequestBody,
     cli: &Cli,
-    authorization: Option<&str>,
+    authorization: RequestAuthorization<'_>,
 ) -> Result<RequestBuilder, FetchError> {
     if let Some(len) = request_body_content_len(&body)
         && !headers.contains_key(CONTENT_LENGTH)
@@ -1205,11 +1215,27 @@ fn build_request(
         req = req.body(request_body_to_reqwest_body(body)?);
     }
 
-    let mut authorization_headers = HeaderMap::new();
-    apply_builder_authorization_headers(&mut authorization_headers, cli, authorization)?;
-    req = req.headers(authorization_headers);
+    match authorization {
+        RequestAuthorization::Cli => {
+            let mut authorization_headers = HeaderMap::new();
+            apply_builder_authorization_headers(&mut authorization_headers, cli, None)?;
+            req = req.headers(authorization_headers);
+        }
+        RequestAuthorization::Digest(auth) => {
+            let mut authorization_headers = HeaderMap::new();
+            apply_builder_authorization_headers(&mut authorization_headers, cli, Some(auth))?;
+            req = req.headers(authorization_headers);
+        }
+        RequestAuthorization::None => {}
+    }
 
     Ok(req)
+}
+
+enum RequestAuthorization<'a> {
+    Cli,
+    Digest(&'a str),
+    None,
 }
 
 fn apply_builder_authorization_headers(
@@ -1252,6 +1278,7 @@ struct DigestRetryContext<'a> {
     body: RequestBody,
     cli: &'a Cli,
     redirect_statuses: Vec<StatusCode>,
+    auth_allowed: bool,
 }
 
 async fn apply_digest_challenge(
@@ -1263,6 +1290,9 @@ async fn apply_digest_challenge(
         return Ok(response);
     };
     if response.status() != StatusCode::UNAUTHORIZED {
+        return Ok(response);
+    }
+    if !context.auth_allowed {
         return Ok(response);
     }
 
@@ -1303,7 +1333,7 @@ async fn apply_digest_challenge(
         context.headers,
         challenged_body,
         context.cli,
-        Some(&auth),
+        RequestAuthorization::Digest(&auth),
     )?
     .send()
     .await
@@ -1930,6 +1960,20 @@ fn is_redirect_status(status: StatusCode) -> bool {
             | StatusCode::TEMPORARY_REDIRECT
             | StatusCode::PERMANENT_REDIRECT
     )
+}
+
+fn same_origin(a: &Url, b: &Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str()
+            .zip(b.host_str())
+            .is_some_and(|(a_host, b_host)| a_host.eq_ignore_ascii_case(b_host))
+        && a.port_or_known_default() == b.port_or_known_default()
+}
+
+fn strip_cross_origin_sensitive_headers(headers: &mut HeaderMap) {
+    headers.remove(AUTHORIZATION);
+    headers.remove(COOKIE);
+    headers.remove(PROXY_AUTHORIZATION);
 }
 
 fn redirected_request(

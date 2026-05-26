@@ -2755,6 +2755,128 @@ fn digest_auth_drain_is_bounded_for_large_challenge_body() {
 }
 
 #[test]
+fn cross_origin_redirect_strips_explicit_sensitive_headers() {
+    let target = TestServer::start(|req| {
+        if !req.header("authorization").is_empty()
+            || !req.header("cookie").is_empty()
+            || !req.header("proxy-authorization").is_empty()
+        {
+            return TestResponse::status(400, "Bad Request", "sensitive header leaked");
+        }
+        TestResponse::ok("safe")
+    });
+    let location = target.url.clone();
+    let origin = TestServer::start(move |_| {
+        TestResponse::status(302, "Found", "").header("Location", &location)
+    });
+
+    let res = run_fetch(&[
+        &origin.url,
+        "--header",
+        "Authorization: explicit",
+        "--header",
+        "Cookie: sid=secret",
+        "--header",
+        "Proxy-Authorization: proxy-secret",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "safe");
+
+    let requests = target.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].header("authorization").is_empty());
+    assert!(requests[0].header("cookie").is_empty());
+    assert!(requests[0].header("proxy-authorization").is_empty());
+}
+
+#[test]
+fn cross_origin_redirect_does_not_reapply_cli_auth() {
+    for args in [vec!["--basic", "user:pass"], vec!["--bearer", "token"]] {
+        let target = TestServer::start(|req| {
+            if !req.header("authorization").is_empty() {
+                return TestResponse::status(400, "Bad Request", "authorization leaked");
+            }
+            TestResponse::ok("safe")
+        });
+        let location = target.url.clone();
+        let origin = TestServer::start(move |_| {
+            TestResponse::status(302, "Found", "").header("Location", &location)
+        });
+
+        let mut fetch_args = vec![origin.url.as_str()];
+        fetch_args.extend(args);
+        let res = run_fetch(&fetch_args);
+        assert_exit(&res, 0);
+        assert_eq!(res.stdout, "safe");
+
+        let requests = target.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].header("authorization").is_empty());
+    }
+}
+
+#[test]
+fn cross_origin_redirect_does_not_sign_with_aws_auth() {
+    let target = TestServer::start(|req| {
+        if !req.header("authorization").is_empty()
+            || !req.header("x-amz-date").is_empty()
+            || !req.header("x-amz-security-token").is_empty()
+        {
+            return TestResponse::status(400, "Bad Request", "aws auth leaked");
+        }
+        TestResponse::ok("safe")
+    });
+    let location = target.url.clone();
+    let origin = TestServer::start(move |_| {
+        TestResponse::status(302, "Found", "").header("Location", &location)
+    });
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: vec![
+                ("AWS_ACCESS_KEY_ID".to_string(), "1234".to_string()),
+                ("AWS_SECRET_ACCESS_KEY".to_string(), "5678".to_string()),
+                ("AWS_SESSION_TOKEN".to_string(), "session-token".to_string()),
+            ],
+            ..Default::default()
+        },
+        &[&origin.url, "--aws-sigv4", "us-east-1/s3"],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "safe");
+
+    let requests = target.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].header("authorization").is_empty());
+    assert!(requests[0].header("x-amz-date").is_empty());
+    assert!(requests[0].header("x-amz-security-token").is_empty());
+}
+
+#[test]
+fn cross_origin_redirect_does_not_retry_digest_auth() {
+    let target = TestServer::start(|req| {
+        if !req.header("authorization").is_empty() {
+            return TestResponse::status(400, "Bad Request", "digest auth leaked");
+        }
+        TestResponse::status(401, "Unauthorized", "").header(
+            "WWW-Authenticate",
+            r#"Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5""#,
+        )
+    });
+    let location = target.url.clone();
+    let origin = TestServer::start(move |_| {
+        TestResponse::status(302, "Found", "").header("Location", &location)
+    });
+
+    let res = run_fetch(&[&origin.url, "--digest", "user:pass"]);
+    assert_exit(&res, 4);
+
+    let requests = target.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].header("authorization").is_empty());
+}
+
+#[test]
 fn redirects_range_status_and_timeouts() {
     let server = TestServer::start(|req| match req.path.as_str() {
         "/start" => TestResponse::status(302, "Found", "")
