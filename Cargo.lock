@@ -691,6 +691,7 @@ dependencies = [
  "http-body-util",
  "httpdate",
  "image",
+ "ipnet",
  "libc",
  "md-5",
  "mimalloc",

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use ipnet::IpNet;
 use reqwest::{Client, redirect};
 use tower::{Layer, Service};
 use url::Url;
@@ -444,6 +445,7 @@ pub(crate) fn no_proxy_matches_url(url: &Url, no_proxy: Option<&str>) -> bool {
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_ascii_lowercase();
+    let host_ip = host.parse::<IpAddr>().ok();
     no_proxy.split(',').any(|entry| {
         let entry = entry.trim();
         if entry == "*" {
@@ -451,6 +453,12 @@ pub(crate) fn no_proxy_matches_url(url: &Url, no_proxy: Option<&str>) -> bool {
         }
         if entry.is_empty() {
             return false;
+        }
+        if let Some(host_ip) = host_ip {
+            return entry
+                .parse::<IpNet>()
+                .is_ok_and(|network| network.contains(&host_ip))
+                || entry.parse::<IpAddr>().is_ok_and(|ip| ip == host_ip);
         }
         let entry = entry.trim_start_matches('.').to_ascii_lowercase();
         host == entry
@@ -631,6 +639,25 @@ mod tests {
         assert!(!no_proxy_matches_url(&url, Some("notexample.com")));
         assert!(!no_proxy_matches_url(&url, Some("")));
         assert!(!no_proxy_matches_url(&url, None));
+    }
+
+    #[test]
+    fn no_proxy_matching_supports_ip_and_cidr_entries() {
+        let ipv4_url = Url::parse("https://192.168.1.42/api").unwrap();
+        let ipv6_url = Url::parse("https://[fd00::42]/api").unwrap();
+
+        assert!(no_proxy_matches_url(&ipv4_url, Some("192.168.1.42")));
+        assert!(no_proxy_matches_url(&ipv4_url, Some("192.168.1.0/24")));
+        assert!(!no_proxy_matches_url(&ipv4_url, Some(".192.168.1.42")));
+        assert!(no_proxy_matches_url(
+            &ipv4_url,
+            Some("10.0.0.0/8, 192.168.0.0/16")
+        ));
+        assert!(!no_proxy_matches_url(&ipv4_url, Some("192.168.2.0/24")));
+
+        assert!(no_proxy_matches_url(&ipv6_url, Some("fd00::42")));
+        assert!(no_proxy_matches_url(&ipv6_url, Some("fd00::/8")));
+        assert!(!no_proxy_matches_url(&ipv6_url, Some("fe80::/10")));
     }
 
     #[test]
