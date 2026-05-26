@@ -21,8 +21,8 @@ use futures_util::stream;
 use http_body_util::BodyExt;
 use reqwest::header::{
     ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap,
-    HeaderName, HeaderValue, LOCATION, PROXY_AUTHORIZATION, RANGE, RETRY_AFTER, USER_AGENT,
-    WWW_AUTHENTICATE,
+    HeaderName, HeaderValue, LOCATION, PROXY_AUTHORIZATION, RANGE, RETRY_AFTER, TRANSFER_ENCODING,
+    USER_AGENT, WWW_AUTHENTICATE,
 };
 use reqwest::{Body, Client, Method, RequestBuilder, Response, StatusCode};
 use sha2::{Digest as _, Sha256};
@@ -207,12 +207,16 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         let mut request_client = initial_client.clone();
         let mut redirect_statuses = Vec::new();
         let mut redirect_count = 0_usize;
+        let mut strip_entity_headers = false;
         let mut timing = AttemptTiming::start();
         let attempt_result = loop {
             let mut attempt_headers = headers.clone();
             let auth_allowed = same_origin(&url, &request_url);
             if !auth_allowed {
                 strip_cross_origin_sensitive_headers(&mut attempt_headers);
+            }
+            if strip_entity_headers {
+                strip_entity_headers_for_bodyless_redirect(&mut attempt_headers);
             }
             if auth_allowed && let Some(config) = &aws_config {
                 apply_aws_sigv4(
@@ -272,7 +276,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         timing.set_connect(connect_timing.duration());
                         print_redirect_status(cli, response.status());
                         redirect_statuses.push(response.status());
-                        let (next_method, next_body) =
+                        let redirected =
                             redirected_request(request_method, request_body, response.status())?;
                         let refresh_client = redirect_requires_client_refresh(
                             cli,
@@ -281,9 +285,10 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                             &redirect,
                         );
                         drain_response_body_bounded(response).await;
-                        request_method = next_method;
+                        request_method = redirected.method;
                         request_url = redirect;
-                        request_body = next_body;
+                        request_body = redirected.body;
+                        strip_entity_headers |= redirected.strip_entity_headers;
                         if refresh_client {
                             request_client =
                                 client::build_client_for_url(cli, &request_url, &client_build)
@@ -318,6 +323,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         body: request_body.clone(),
                         cli,
                         redirect_statuses,
+                        strip_entity_headers,
                         auth_allowed: same_origin(&url, &request_url),
                     },
                     digest_credentials.as_ref(),
@@ -1525,6 +1531,7 @@ struct DigestRetryContext<'a> {
     body: RequestBody,
     cli: &'a Cli,
     redirect_statuses: Vec<StatusCode>,
+    strip_entity_headers: bool,
     auth_allowed: bool,
 }
 
@@ -1561,6 +1568,10 @@ async fn apply_digest_challenge(
     let (challenged_method, challenged_body) =
         digest_challenged_request(context.method, context.body, &context.redirect_statuses);
     ensure_request_body_replayable(&challenged_body, "digest authentication")?;
+    let mut challenged_headers = context.headers;
+    if context.strip_entity_headers {
+        strip_entity_headers_for_bodyless_redirect(&mut challenged_headers);
+    }
     let auth = match digest::response(
         challenged_method.as_str(),
         &request_target(&challenged_url),
@@ -1576,7 +1587,7 @@ async fn apply_digest_challenge(
         context.client,
         challenged_method,
         challenged_url,
-        context.headers,
+        challenged_headers,
         challenged_body,
         context.cli,
         RequestAuthorization::Digest(&auth),
@@ -2262,17 +2273,31 @@ fn strip_cross_origin_sensitive_headers(headers: &mut HeaderMap) {
     headers.remove(PROXY_AUTHORIZATION);
 }
 
+fn strip_entity_headers_for_bodyless_redirect(headers: &mut HeaderMap) {
+    headers.remove(CONTENT_TYPE);
+    headers.remove(CONTENT_LENGTH);
+    headers.remove(TRANSFER_ENCODING);
+}
+
+struct RedirectedRequest {
+    method: Method,
+    body: RequestBody,
+    strip_entity_headers: bool,
+}
+
 fn redirected_request(
     mut method: Method,
     mut body: RequestBody,
     status: StatusCode,
-) -> Result<(Method, RequestBody), FetchError> {
+) -> Result<RedirectedRequest, FetchError> {
+    let mut strip_entity_headers = false;
     match status {
         StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND | StatusCode::SEE_OTHER => {
             if method != Method::GET && method != Method::HEAD {
                 method = Method::GET;
             }
             body = None;
+            strip_entity_headers = true;
         }
         StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT
             if !request_body_replayable(&body) =>
@@ -2283,7 +2308,11 @@ fn redirected_request(
         }
         _ => {}
     }
-    Ok((method, body))
+    Ok(RedirectedRequest {
+        method,
+        body,
+        strip_entity_headers,
+    })
 }
 
 fn request_body_replayable(body: &RequestBody) -> bool {
@@ -3949,6 +3978,25 @@ mod tests {
         );
         assert_eq!(method, Method::HEAD);
         assert!(body.is_none());
+    }
+
+    #[test]
+    fn redirected_post_to_get_marks_entity_headers_for_stripping() {
+        let original_body = Some(RequestBodyPayload::from_bytes(
+            b"payload".to_vec(),
+            Some("text/plain".to_string()),
+        ));
+
+        let redirected =
+            redirected_request(Method::POST, original_body, StatusCode::FOUND).unwrap();
+        assert_eq!(redirected.method, Method::GET);
+        assert!(redirected.body.is_none());
+        assert!(redirected.strip_entity_headers);
+
+        let preserved =
+            redirected_request(Method::POST, None, StatusCode::TEMPORARY_REDIRECT).unwrap();
+        assert_eq!(preserved.method, Method::POST);
+        assert!(!preserved.strip_entity_headers);
     }
 
     #[test]
