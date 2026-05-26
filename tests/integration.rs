@@ -2667,7 +2667,7 @@ fn verbosity_and_color_output() {
 
     let res = run_fetch(&[&server.url, "-vvv"]);
     assert_exit(&res, 0);
-    assert!(res.stderr.contains("* TCP:"));
+    assert!(res.stderr.contains("* Connect:"));
     assert!(res.stderr.contains("* TTFB:"));
 }
 
@@ -5236,7 +5236,7 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "udp dns ok");
     assert!(res.stderr.contains("DNS"));
-    assert!(res.stderr.contains("TCP"));
+    assert!(res.stderr.contains("Connect"));
     assert!(res.stderr.contains("TTFB"));
 
     let redirect_location = Arc::new(Mutex::new(String::new()));
@@ -5333,10 +5333,10 @@ fn socks_proxy_unix_socket_timing_and_grpc_binary_cases() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "timed");
     assert!(res.stderr.contains("Total") || res.stderr.contains("Timing"));
-    assert!(res.stderr.contains("TCP"));
+    assert!(res.stderr.contains("Connect"));
     assert!(res.stderr.contains("█"));
     assert!(res.stderr.contains("─"));
-    assert!(!res.stderr.contains("* TCP:"));
+    assert!(!res.stderr.contains("* Connect:"));
     assert!(!res.stderr.contains("* TTFB:"));
     let res = run_fetch(&[&format!("{}/timing", server.url), "-T"]);
     assert_exit(&res, 0);
@@ -5345,7 +5345,7 @@ fn socks_proxy_unix_socket_timing_and_grpc_binary_cases() {
     assert!(res.stderr.contains("█"));
     let res = run_fetch(&[&format!("{}/timing", server.url), "-T", "-vvv"]);
     assert_exit(&res, 0);
-    assert!(res.stderr.contains("* TCP:"));
+    assert!(res.stderr.contains("* Connect:"));
     assert!(res.stderr.contains("* TTFB:"));
     assert!(res.stderr.contains("Total") || res.stderr.contains("Timing"));
 

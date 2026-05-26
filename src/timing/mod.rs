@@ -187,7 +187,7 @@ pub fn print_debug_lines(timing: &AttemptTiming, target: &str, color: Option<&st
         .unwrap_or_default();
     let mut out = Printer::new(core::color_enabled(color, std::io::stderr().is_terminal()));
     out.write_info_prefix();
-    out.write_styled("TCP", &[Sequence::Bold, Sequence::Yellow]);
+    out.write_styled("Connect", &[Sequence::Bold, Sequence::Yellow]);
     out.push_str(": ");
     out.push_str(target);
     out.push_str(" ");
@@ -218,7 +218,7 @@ fn build_phases(timing: ResponseTiming) -> Vec<Phase> {
     }
     if let Some(connect) = timing.connect {
         phases.push(Phase {
-            label: "TCP",
+            label: "Connect",
             color: Sequence::Green,
             duration: connect,
         });
@@ -352,7 +352,7 @@ mod tests {
         );
 
         assert!(out.contains("\x1b[1m\x1b[36mDNS  "));
-        assert!(out.contains("\x1b[1m\x1b[32mTCP"));
+        assert!(out.contains("\x1b[1m\x1b[32mConnect"));
         assert!(out.contains("\x1b[1m\x1b[35mTTFB "));
         assert!(out.contains("\x1b[34m█\x1b[0m"));
         assert!(out.contains("\x1b[2mTotal"));
@@ -375,7 +375,7 @@ mod tests {
                 .char_indices()
                 .find_map(|(index, ch)| (ch == '█' || ch == '░').then_some(index))
                 .expect("waterfall line has a bar");
-            assert_eq!(bar_start, 9, "{line}");
+            assert_eq!(bar_start, 11, "{line}");
         }
     }
 
