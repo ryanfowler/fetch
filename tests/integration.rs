@@ -2779,6 +2779,7 @@ fn basic_bearer_and_aws_auth_headers() {
             &format!("{}/aws", server.url),
             "--aws-sigv4",
             "us-east-1/s3",
+            "-vv",
         ],
     );
     assert_exit(&res, 0);
@@ -2786,6 +2787,12 @@ fn basic_bearer_and_aws_auth_headers() {
         res.stdout,
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     );
+    assert!(res.stderr.contains("> authorization: AWS4-HMAC-SHA256 "));
+    assert!(res.stderr.contains("> x-amz-date: "));
+    assert!(res.stderr.contains("> x-amz-security-token: session-token"));
+    assert!(res.stderr.contains(
+        "> x-amz-content-sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    ));
 }
 
 #[test]
