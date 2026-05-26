@@ -60,7 +60,9 @@ auto-update = false
 
 # Custom update interval
 auto-update = 4h
+auto-update = 1.5h
 auto-update = 30m
+auto-update = +30m
 auto-update = 1d
 ```
 

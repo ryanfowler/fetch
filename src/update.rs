@@ -852,50 +852,7 @@ fn parse_auto_update_interval(value: &str) -> Option<Duration> {
         _ => {}
     }
 
-    parse_go_duration(value)
-}
-
-fn parse_go_duration(value: &str) -> Option<Duration> {
-    if value.starts_with('-') {
-        return None;
-    }
-
-    let mut rest = value;
-    let mut total = Duration::ZERO;
-    while !rest.is_empty() {
-        let value_len = rest
-            .bytes()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count();
-        if value_len == 0 {
-            return None;
-        }
-        let amount = rest[..value_len].parse::<u64>().ok()?;
-        rest = &rest[value_len..];
-
-        let (unit, multiplier) = duration_unit(rest)?;
-        rest = &rest[unit.len()..];
-        total = total.checked_add(Duration::from_nanos(amount.checked_mul(multiplier)?))?;
-    }
-
-    Some(total)
-}
-
-fn duration_unit(value: &str) -> Option<(&'static str, u64)> {
-    for (unit, nanos) in [
-        ("ms", 1_000_000),
-        ("us", 1_000),
-        ("µs", 1_000),
-        ("ns", 1),
-        ("h", 60 * 60 * 1_000_000_000),
-        ("m", 60 * 1_000_000_000),
-        ("s", 1_000_000_000),
-    ] {
-        if value.starts_with(unit) {
-            return Some((unit, nanos));
-        }
-    }
-    None
+    crate::duration::parse_duration_interval(value)
 }
 
 fn changelog_compare_ref(old_version: &str) -> String {
@@ -1493,6 +1450,18 @@ mod tests {
         assert_eq!(
             parse_auto_update_interval("1h30m"),
             Some(Duration::from_secs(90 * 60))
+        );
+        assert_eq!(
+            parse_auto_update_interval("1.5h"),
+            Some(Duration::from_secs(90 * 60))
+        );
+        assert_eq!(
+            parse_auto_update_interval("+30m"),
+            Some(Duration::from_secs(30 * 60))
+        );
+        assert_eq!(
+            parse_auto_update_interval("1d"),
+            Some(Duration::from_secs(24 * 60 * 60))
         );
         assert_eq!(
             parse_auto_update_interval("250ms"),

@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod core;
 pub mod dns;
+pub(crate) mod duration;
 pub mod error;
 pub mod fileutil;
 pub mod format;
