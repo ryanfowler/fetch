@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use prost::Message;
 use prost_reflect::{
     Cardinality, DescriptorPool, DynamicMessage, FieldDescriptor, Kind, MessageDescriptor,
@@ -6,6 +7,7 @@ use prost_reflect::{
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::error::FetchError;
 use crate::grpc::framing;
@@ -197,17 +199,16 @@ pub(crate) fn grpc_request_body(
     };
 
     if method.is_client_streaming() {
-        let Some((bytes, _)) = crate::http::request_body_into_bytes(body)? else {
+        let Some(body) = body else {
             return Ok(None);
         };
-        return stream_json_to_grpc_frames(&bytes, &method.input())
-            .map(|bytes| {
-                Some(crate::http::RequestBodyPayload::from_bytes(
-                    bytes,
-                    Some(grpc_content_type()),
-                ))
-            })
-            .map_err(|err| FetchError::Message(err.to_string()));
+        return Ok(Some(
+            crate::http::RequestBodyPayload::from_grpc_json_stream(
+                body,
+                method.input(),
+                Some(grpc_content_type()),
+            ),
+        ));
     }
 
     let raw = if let Some((bytes, _)) = crate::http::request_body_into_bytes(body)? {
@@ -229,25 +230,36 @@ pub fn format_grpc_stream_with_descriptor(
     let frames = framing::read_frames(bytes)
         .map_err(|err| ProtoError::Message(format!("failed to read gRPC stream: {err}")))?;
     let mut out = String::new();
-    for (index, frame) in frames.iter().enumerate() {
-        if frame.compressed {
-            return Err(ProtoError::Message(
-                "compressed gRPC messages are not supported".to_string(),
-            ));
+    let mut messages_written = 0usize;
+    for frame in &frames {
+        if let Some(formatted) = format_grpc_frame_with_descriptor(frame, desc)? {
+            if messages_written > 0 && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&formatted);
+            messages_written += 1;
         }
-        if frame.data.is_empty() {
-            continue;
-        }
-        if index > 0 && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        let msg = decode_dynamic_message(frame.data.as_slice(), desc)?;
-        let mut formatted = String::from_utf8(serialize_dynamic_message_json(&msg, true)?)
-            .map_err(|err| ProtoError::Message(format!("failed to format protobuf JSON: {err}")))?;
-        formatted.push('\n');
-        out.push_str(&formatted);
     }
     Ok(out)
+}
+
+pub fn format_grpc_frame_with_descriptor(
+    frame: &framing::Frame,
+    desc: &MessageDescriptor,
+) -> Result<Option<String>, ProtoError> {
+    if frame.compressed {
+        return Err(ProtoError::Message(
+            "compressed gRPC messages are not supported".to_string(),
+        ));
+    }
+    if frame.data.is_empty() {
+        return Ok(None);
+    }
+    let msg = decode_dynamic_message(frame.data.as_slice(), desc)?;
+    let mut formatted = String::from_utf8(serialize_dynamic_message_json(&msg, true)?)
+        .map_err(|err| ProtoError::Message(format!("failed to format protobuf JSON: {err}")))?;
+    formatted.push('\n');
+    Ok(Some(formatted))
 }
 
 pub fn describe_symbol(schema: &Schema, symbol: &str) -> Result<String, FetchError> {
@@ -430,25 +442,128 @@ pub fn stream_json_to_grpc_frames(
 ) -> Result<Vec<u8>, ProtoError> {
     let mut out = Vec::new();
     let stream = serde_json::Deserializer::from_slice(json_stream).into_iter::<serde_json::Value>();
-    let options = prost_reflect::DeserializeOptions::new().deny_unknown_fields(false);
     for value in stream {
         let value = value
             .map_err(|err| ProtoError::Message(format!("failed to decode JSON message: {err}")))?;
-        let value_text = value.to_string();
-        let mut deserializer = serde_json::Deserializer::from_str(&value_text);
-        let msg =
-            DynamicMessage::deserialize_with_options(desc.clone(), &mut deserializer, &options)
-                .map_err(|err| {
-                    ProtoError::Message(format!("failed to convert JSON to protobuf: {err}"))
-                })?;
-        deserializer
-            .end()
-            .map_err(|err| ProtoError::Message(format!("failed to decode JSON message: {err}")))?;
-        let frame = framing::frame(&msg.encode_to_vec(), false)
-            .map_err(|err| ProtoError::Message(err.to_string()))?;
-        out.extend_from_slice(&frame);
+        out.extend_from_slice(&json_value_to_grpc_frame(value, desc)?);
     }
     Ok(out)
+}
+
+pub(crate) fn json_reader_to_grpc_frame_stream<R>(
+    reader: R,
+    desc: MessageDescriptor,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    struct State<R> {
+        reader: R,
+        desc: MessageDescriptor,
+        pending: Vec<u8>,
+        eof: bool,
+    }
+
+    futures_util::stream::try_unfold(
+        State {
+            reader,
+            desc,
+            pending: Vec::new(),
+            eof: false,
+        },
+        |mut state| async move {
+            loop {
+                match parse_next_json_value(&state.pending, state.eof) {
+                    Ok(JsonParse::Message { value, consumed }) => {
+                        state.pending.drain(..consumed);
+                        let frame = json_value_to_grpc_frame(value, &state.desc)
+                            .map_err(std::io::Error::other)?;
+                        return Ok(Some((Bytes::from(frame), state)));
+                    }
+                    Ok(JsonParse::NeedMore) => {}
+                    Ok(JsonParse::Done) => return Ok(None),
+                    Err(err) => return Err(std::io::Error::other(err)),
+                }
+
+                if state.eof {
+                    return Ok(None);
+                }
+
+                let mut buf = [0_u8; 16 * 1024];
+                let n = state.reader.read(&mut buf).await?;
+                if n == 0 {
+                    state.eof = true;
+                } else {
+                    state.pending.extend_from_slice(&buf[..n]);
+                }
+            }
+        },
+    )
+}
+
+enum JsonParse {
+    Message {
+        value: serde_json::Value,
+        consumed: usize,
+    },
+    NeedMore,
+    Done,
+}
+
+fn parse_next_json_value(buf: &[u8], eof: bool) -> Result<JsonParse, ProtoError> {
+    if buf.is_empty() {
+        return Ok(if eof {
+            JsonParse::Done
+        } else {
+            JsonParse::NeedMore
+        });
+    }
+    if buf.iter().all(u8::is_ascii_whitespace) {
+        return Ok(if eof {
+            JsonParse::Done
+        } else {
+            JsonParse::NeedMore
+        });
+    }
+
+    let mut stream = serde_json::Deserializer::from_slice(buf).into_iter::<serde_json::Value>();
+    match stream.next() {
+        Some(Ok(value)) => Ok(JsonParse::Message {
+            value,
+            consumed: stream.byte_offset(),
+        }),
+        Some(Err(err)) if err.is_eof() && !eof => Ok(JsonParse::NeedMore),
+        Some(Err(err)) => Err(ProtoError::Message(format!(
+            "failed to decode JSON message: {err}"
+        ))),
+        None => Ok(if eof {
+            JsonParse::Done
+        } else {
+            JsonParse::NeedMore
+        }),
+    }
+}
+
+fn json_value_to_grpc_frame(
+    value: serde_json::Value,
+    desc: &MessageDescriptor,
+) -> Result<Vec<u8>, ProtoError> {
+    let value_text = value.to_string();
+    let mut deserializer = serde_json::Deserializer::from_str(&value_text);
+    let options = prost_reflect::DeserializeOptions::new().deny_unknown_fields(false);
+    let msg =
+        match DynamicMessage::deserialize_with_options(desc.clone(), &mut deserializer, &options) {
+            Ok(msg) => msg,
+            Err(err) => {
+                return Err(ProtoError::Message(format!(
+                    "failed to convert JSON to protobuf: {err}"
+                )));
+            }
+        };
+    deserializer
+        .end()
+        .map_err(|err| ProtoError::Message(format!("failed to decode JSON message: {err}")))?;
+    framing::frame(&msg.encode_to_vec(), false).map_err(|err| ProtoError::Message(err.to_string()))
 }
 
 fn split_method_name(full_name: &str) -> Result<(&str, &str), ProtoError> {

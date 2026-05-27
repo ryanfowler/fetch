@@ -85,6 +85,8 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - `--grpc-list` and `--grpc-describe` provide grpcurl-style discovery using reflection or local descriptor files.
 - `--grpc` now automatically tries gRPC reflection when no local schema is supplied.
 - Plaintext loopback gRPC servers are supported via `h2c` for both calls and discovery.
+- Formatted gRPC responses with `Content-Type: application/grpc+proto` stream through `FrameDecoder`, writing each complete message immediately while preserving trailers.
+- Client-streaming and bidi gRPC calls stream JSON input into framed protobuf request bodies instead of materializing the whole stream up front.
 - `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP or DoH responses.
 - `--inspect-tls --http 3` performs QUIC/TLS inspection with `h3` ALPN instead of the TCP TLS path.
 - Rust `--inspect-tls` renders a verified certificate chain when verification succeeds, appending omitted trusted roots or replacing server-sent cross-signed roots with the matching platform/custom trusted root for expiry display; `--insecure` keeps the raw peer chain.

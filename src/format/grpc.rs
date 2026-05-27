@@ -18,21 +18,23 @@ pub fn format_grpc_stream(buf: &[u8]) -> Result<String, GrpcFormatError> {
     let mut out = String::new();
 
     for (idx, frame) in frames.iter().enumerate() {
-        if frame.compressed {
-            return Err(GrpcFormatError(
-                "compressed gRPC messages are not supported".to_string(),
-            ));
-        }
         if idx > 0 {
             out.push('\n');
         }
-        out.push_str(
-            &crate::format::protobuf::format_protobuf(&frame.data)
-                .map_err(|err| GrpcFormatError(err.to_string()))?,
-        );
+        out.push_str(&format_grpc_frame(frame)?);
     }
 
     Ok(out)
+}
+
+pub fn format_grpc_frame(frame: &framing::Frame) -> Result<String, GrpcFormatError> {
+    if frame.compressed {
+        return Err(GrpcFormatError(
+            "compressed gRPC messages are not supported".to_string(),
+        ));
+    }
+    crate::format::protobuf::format_protobuf(&frame.data)
+        .map_err(|err| GrpcFormatError(err.to_string()))
 }
 
 #[cfg(test)]
