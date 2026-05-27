@@ -1956,6 +1956,25 @@ fn start_http_connect_proxy(target_addr: String) -> (String, mpsc::Receiver<Stri
     (proxy_url, seen_rx)
 }
 
+fn start_stalling_proxy(scheme: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalling proxy");
+    let proxy_url = format!("{scheme}://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else {
+                break;
+            };
+            thread::spawn(move || {
+                let _ = conn.set_read_timeout(Some(Duration::from_millis(200)));
+                let mut buf = [0_u8; 1024];
+                let _ = conn.read(&mut buf);
+                thread::sleep(Duration::from_secs(5));
+            });
+        }
+    });
+    proxy_url
+}
+
 fn handle_http_connect_proxy_conn(
     mut conn: TcpStream,
     target_addr: &str,
@@ -6423,6 +6442,54 @@ fn websocket_custom_dns_and_proxy_cases() {
         "socks websocket"
     );
     assert!(res.stdout.contains("echo: socks websocket"));
+}
+
+#[test]
+fn websocket_connect_timeout_covers_dns_and_proxy_handshakes() {
+    let unresponsive_dns_addr = start_unresponsive_udp_dns_server();
+    let res = run_fetch(&[
+        "--dns-server",
+        &unresponsive_dns_addr,
+        "--connect-timeout",
+        "0.05",
+        "--timeout",
+        "1",
+        "ws://ws-dns-timeout.test:80",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("request timed out after 50ms"));
+
+    let http_proxy = start_stalling_proxy("http");
+    let res = run_fetch(&[
+        "--proxy",
+        &http_proxy,
+        "--connect-timeout",
+        "0.05",
+        "--timeout",
+        "1",
+        "ws://example.com/socket",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("request timed out after 50ms"));
+
+    let socks_proxy = start_stalling_proxy("socks5");
+    let res = run_fetch(&[
+        "--proxy",
+        &socks_proxy,
+        "--connect-timeout",
+        "0.05",
+        "--timeout",
+        "1",
+        "ws://example.com/socket",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("request timed out after 50ms"));
 }
 
 #[test]

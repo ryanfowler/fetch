@@ -98,6 +98,12 @@ The `--timeout` flag applies to the WebSocket handshake only. The connection sta
 fetch --timeout 5 ws://api.example.com/ws
 ```
 
+Use `--connect-timeout` to bound WebSocket connection setup phases such as custom DNS resolution, TCP connect, proxy CONNECT or SOCKS negotiation, and TLS handshakes. When both timeout flags are set, the connect timeout is capped by the remaining `--timeout` budget:
+
+```sh
+fetch --connect-timeout 2 --timeout 10 wss://api.example.com/ws
+```
+
 ## Limitations
 
 - WebSocket requires HTTP/1.1 for the upgrade handshake. Using `--http 3` with WebSocket is not supported.
