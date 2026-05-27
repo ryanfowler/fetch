@@ -580,7 +580,7 @@ fn split_method_name(full_name: &str) -> Result<(&str, &str), ProtoError> {
 }
 
 fn grpc_content_type() -> String {
-    "application/grpc+proto".to_string()
+    crate::grpc::headers::PROTO_CONTENT_TYPE.to_string()
 }
 
 fn reflected_file_name(file: &[u8]) -> Result<String, ProtoError> {

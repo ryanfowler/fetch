@@ -49,6 +49,7 @@ use crate::format::sse;
 use crate::format::xml;
 use crate::format::yaml;
 use crate::grpc::encoding as grpc_encoding;
+use crate::grpc::headers as grpc_headers;
 use crate::grpc::status as grpc_status;
 use crate::http::client::DnsResolution;
 use crate::output;
@@ -177,7 +178,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     );
     if cli.grpc {
         apply_headers(&mut headers, &cli.headers)?;
-        apply_grpc_headers(&mut headers);
+        grpc_headers::apply_standard_headers(&mut headers);
     } else {
         headers.insert(
             ACCEPT,
@@ -1718,7 +1719,7 @@ enum RequestAuthorization<'a> {
     None,
 }
 
-fn apply_builder_authorization_headers(
+pub(crate) fn apply_builder_authorization_headers(
     headers: &mut HeaderMap,
     cli: &Cli,
     authorization: Option<&str>,
@@ -1822,10 +1823,15 @@ async fn apply_digest_challenge(
 
     if response_body_exceeds_discard_bound(&response) {
         drain_response_body_bounded_mut(&mut response).await;
-        let retry_response: Result<Response, FetchError> =
-            retry_request.send().await.map_err(Into::into);
-        drop(response);
-        retry_response
+        if digest_drop_before_retry_after_large_drain(&response) {
+            drop(response);
+            retry_request.send().await.map_err(Into::into)
+        } else {
+            let retry_response: Result<Response, FetchError> =
+                retry_request.send().await.map_err(Into::into);
+            drop(response);
+            retry_response
+        }
     } else if digest_retry_before_drain(&response) {
         let retry_response: Result<Response, FetchError> =
             retry_request.send().await.map_err(Into::into);
@@ -1834,6 +1840,19 @@ async fn apply_digest_challenge(
     } else {
         drain_response_body_bounded(response).await;
         retry_request.send().await.map_err(Into::into)
+    }
+}
+
+fn digest_drop_before_retry_after_large_drain(response: &Response) -> bool {
+    #[cfg(windows)]
+    {
+        response_connection_close(response)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = response;
+        false
     }
 }
 
@@ -2201,29 +2220,11 @@ fn apply_body_content_type(headers: &mut HeaderMap, body: &RequestBody) {
     }
 }
 
-fn apply_grpc_headers(headers: &mut HeaderMap) {
-    headers.insert(ACCEPT, HeaderValue::from_static("application/grpc+proto"));
-    headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/grpc+proto"),
-    );
-    headers.insert(
-        HeaderName::from_static("te"),
-        HeaderValue::from_static("trailers"),
-    );
-    headers.insert(
-        HeaderName::from_static("grpc-accept-encoding"),
-        HeaderValue::from_static(grpc_encoding::ACCEPT_ENCODING),
-    );
-}
-
 fn check_grpc_status(cli: &Cli, headers: &HeaderMap, trailers: &HeaderMap, exit_code: i32) -> i32 {
     if !cli.grpc {
         return exit_code;
     }
-    let Some(status) =
-        grpc_status_from_headers(trailers).or_else(|| grpc_status_from_headers(headers))
-    else {
+    let Some(status) = grpc_status::from_headers_or_trailers(headers, trailers) else {
         return exit_code;
     };
     if status.ok() {
@@ -2233,18 +2234,6 @@ fn check_grpc_status(cli: &Cli, headers: &HeaderMap, trailers: &HeaderMap, exit_
         write_error_with_color(status, cli.color.as_deref());
     }
     if exit_code == 0 { 1 } else { exit_code }
-}
-
-fn grpc_status_from_headers(headers: &HeaderMap) -> Option<grpc_status::Status> {
-    let status = headers.get("grpc-status")?.to_str().ok()?;
-    if status == "0" {
-        return None;
-    }
-    let message = headers
-        .get("grpc-message")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    Some(grpc_status::parse_status(status, message))
 }
 
 fn print_response_metadata(cli: &Cli, response: &Response) {
@@ -4668,28 +4657,6 @@ mod tests {
             framed.0,
             crate::grpc::framing::frame(b"hello", false).unwrap()
         );
-    }
-
-    #[test]
-    fn grpc_status_from_headers_parses_non_ok_status() {
-        let mut headers = HeaderMap::new();
-        headers.insert("grpc-status", HeaderValue::from_static("13"));
-        headers.insert("grpc-message", HeaderValue::from_static("oh%20no%21"));
-
-        let status = grpc_status_from_headers(&headers).unwrap();
-
-        assert_eq!(status.code, grpc_status::Code::INTERNAL);
-        assert_eq!(status.message, "oh no!");
-        assert_eq!(status.to_string(), "grpc error: INTERNAL: oh no!");
-    }
-
-    #[test]
-    fn grpc_status_from_headers_ignores_ok_or_missing_status() {
-        assert!(grpc_status_from_headers(&HeaderMap::new()).is_none());
-
-        let mut headers = HeaderMap::new();
-        headers.insert("grpc-status", HeaderValue::from_static("0"));
-        assert!(grpc_status_from_headers(&headers).is_none());
     }
 
     #[cfg(unix)]
