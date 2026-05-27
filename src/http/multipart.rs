@@ -49,7 +49,6 @@ impl Multipart {
             let (name, value) = raw.split_once('=').unwrap_or((raw, ""));
             let name = name.trim().to_string();
             validate_multipart_disposition_value("field name", &name)?;
-            let value = value.trim();
             let value = if let Some(path) = value.strip_prefix('@') {
                 let path = expand_home(path);
                 validate_file(&path)?;
@@ -404,6 +403,18 @@ mod tests {
         assert!(body.contains("name=\"field\""));
         assert!(body.contains("value"));
         assert!(multipart.content_type().contains(&multipart.boundary));
+    }
+
+    #[test]
+    fn multipart_text_field_preserves_value_spaces_after_equals() {
+        let multipart = Multipart::from_cli_fields(&[" note = hello ".to_string()])
+            .unwrap()
+            .unwrap();
+
+        let body = String::from_utf8(multipart.open().unwrap()).unwrap();
+
+        assert!(body.contains("name=\"note\""));
+        assert!(body.contains("\r\n\r\n hello \r\n"));
     }
 
     #[test]

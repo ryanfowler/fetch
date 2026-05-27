@@ -294,7 +294,7 @@ fn parse_file(path: &Path, contents: &str) -> Result<ConfigFile, String> {
             continue;
         }
 
-        let Some((key, value)) = line.split_once('=') else {
+        let Some((key, value)) = raw_line.trim_start().split_once('=') else {
             return Err(file_error(
                 path,
                 line_num,
@@ -302,7 +302,11 @@ fn parse_file(path: &Path, contents: &str) -> Result<ConfigFile, String> {
             ));
         };
         let key = key.trim();
-        let value = value.trim();
+        let value = if key == "query" {
+            value.trim_start()
+        } else {
+            value.trim()
+        };
         let target = match current_host.as_deref() {
             Some(host) => file
                 .hosts
@@ -734,7 +738,7 @@ fn header_value_error(path: &Path, line_num: usize, value: &str) -> String {
 
 fn parse_query(value: &str) -> String {
     let (key, val) = value.split_once('=').unwrap_or((value, ""));
-    format!("{}={}", key.trim(), val.trim())
+    format!("{}={}", key.trim(), val)
 }
 
 fn validate_dns_server(path: &Path, line_num: usize, value: &str) -> Result<(), String> {
@@ -1097,6 +1101,19 @@ mod tests {
         assert_eq!(file.global.session.as_deref(), Some("abc_123"));
         assert_eq!(file.global.sort_headers, Some(true));
         assert_eq!(file.global.verbosity, Some(3));
+    }
+
+    #[test]
+    fn parse_query_preserves_value_spaces_after_equals() {
+        assert_eq!(parse_query(" q = hello "), "q= hello ");
+    }
+
+    #[test]
+    fn parse_file_preserves_query_value_trailing_space_after_equals() {
+        let path = PathBuf::from("test/config");
+        let file = parse_file(&path, "query = q= hello \n").unwrap();
+
+        assert_eq!(file.global.query, vec!["q= hello "]);
     }
 
     #[test]

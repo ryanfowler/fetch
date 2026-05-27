@@ -4348,6 +4348,35 @@ fn request_construction_host_header_form_and_http_version() {
 }
 
 #[test]
+fn request_query_form_and_multipart_values_preserve_spaces_after_equals() {
+    let server = TestServer::start(|_| TestResponse::ok(""));
+
+    let res = run_fetch(&[&server.url, "--query", "q= hello "]);
+    assert_exit(&res, 0);
+    let req = wait_for_requests(&server, 1).remove(0);
+    assert_eq!(req.path, "/?q=+hello+");
+
+    let res = run_fetch(&[&server.url, "--form", "message= hello "]);
+    assert_exit(&res, 0);
+    let req = wait_for_requests(&server, 2).remove(1);
+    assert_eq!(
+        req.header("content-type"),
+        "application/x-www-form-urlencoded"
+    );
+    assert_eq!(req.body_string(), "message=+hello+");
+
+    let res = run_fetch(&[&server.url, "--multipart", "note= hello "]);
+    assert_exit(&res, 0);
+    let req = wait_for_requests(&server, 3).remove(2);
+    assert!(
+        req.header("content-type")
+            .starts_with("multipart/form-data; boundary=")
+    );
+    let body = req.body_string();
+    assert!(body.contains("name=\"note\"\r\n\r\n hello \r\n"), "{body}");
+}
+
+#[test]
 fn proxy_config_environment_and_curl_http1_cases() {
     let proxy = TestServer::start(|req| {
         if req.path.starts_with("http://target.example/via-proxy")
