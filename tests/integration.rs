@@ -200,6 +200,11 @@ struct ReflectionGrpcServer {
     ca_cert_path: Option<PathBuf>,
 }
 
+struct ReadCapture {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+}
+
 #[cfg(unix)]
 struct PtyPair {
     master: fs::File,
@@ -750,6 +755,55 @@ fn wait_for_h3_requests(server: &H3TestServer, count: usize) -> Vec<H3Request> {
     }
 }
 
+fn start_read_capture<R>(mut reader: R) -> ReadCapture
+where
+    R: Read + Send + 'static,
+{
+    let buffer = Arc::new(Mutex::new(Vec::new()));
+    let buffer_for_thread = Arc::clone(&buffer);
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut chunk = [0_u8; 1024];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => buffer_for_thread
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+        let _ = tx.send(());
+    });
+    ReadCapture { buffer, done: rx }
+}
+
+impl ReadCapture {
+    fn output(&self) -> String {
+        String::from_utf8_lossy(&self.buffer.lock().unwrap()).into_owned()
+    }
+
+    fn wait_for(&self, want: &str, timeout: Duration) {
+        let start = Instant::now();
+        loop {
+            if self.output().contains(want) {
+                return;
+            }
+            assert!(
+                start.elapsed() < timeout,
+                "timed out waiting for captured output {want:?}; output:\n{}",
+                self.output()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn close(self) {
+        let _ = self.done.recv_timeout(Duration::from_secs(1));
+    }
+}
+
 #[cfg(unix)]
 fn open_pty(rows: u16, cols: u16, xpixel: u16, ypixel: u16) -> PtyPair {
     let mut master: libc::c_int = -1;
@@ -852,7 +906,6 @@ impl PtyCapture {
     }
 }
 
-#[cfg(unix)]
 fn wait_child(
     child: &mut std::process::Child,
     timeout: Duration,
@@ -1432,6 +1485,47 @@ fn start_status_grpc_h2c_server() -> String {
     url
 }
 
+#[cfg(unix)]
+fn start_delayed_response_grpc_h2c_server(close_rx: mpsc::Receiver<()>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind delayed grpc server");
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            serve_delayed_response_grpc_h2_connection(stream, close_rx).await;
+        });
+    });
+    url
+}
+
+fn start_delayed_bidi_grpc_h2c_server(finish_rx: mpsc::Receiver<()>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind delayed bidi grpc server");
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            serve_delayed_bidi_grpc_h2_connection(stream, finish_rx).await;
+        });
+    });
+    url
+}
+
 async fn serve_status_grpc_h2_connection<T>(stream: T)
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -1446,6 +1540,45 @@ where
         tokio::spawn(async move {
             handle_status_grpc_h2_request(request, respond).await;
         });
+    }
+}
+
+#[cfg(unix)]
+async fn serve_delayed_response_grpc_h2_connection<T>(stream: T, close_rx: mpsc::Receiver<()>)
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let Ok(mut connection) = h2::server::handshake(stream).await else {
+        return;
+    };
+    if let Some(Ok((request, respond))) = connection.accept().await {
+        tokio::spawn(async move {
+            handle_delayed_response_grpc_h2_request(request, respond, close_rx).await;
+        });
+    }
+    while let Some(result) = connection.accept().await {
+        if result.is_err() {
+            break;
+        }
+    }
+}
+
+async fn serve_delayed_bidi_grpc_h2_connection<T>(stream: T, finish_rx: mpsc::Receiver<()>)
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let Ok(mut connection) = h2::server::handshake(stream).await else {
+        return;
+    };
+    if let Some(Ok((request, respond))) = connection.accept().await {
+        tokio::spawn(async move {
+            handle_delayed_bidi_grpc_h2_request(request, respond, finish_rx).await;
+        });
+    }
+    while let Some(result) = connection.accept().await {
+        if result.is_err() {
+            break;
+        }
     }
 }
 
@@ -1490,6 +1623,111 @@ async fn handle_status_grpc_h2_request(
         trailers.insert("grpc-message", http::HeaderValue::from_static(message));
     }
     let _ = send.send_trailers(trailers);
+}
+
+#[cfg(unix)]
+async fn handle_delayed_response_grpc_h2_request(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<bytes::Bytes>,
+    close_rx: mpsc::Receiver<()>,
+) {
+    let mut body = request.into_body();
+    while let Some(chunk) = body.data().await {
+        if chunk.is_err() {
+            return;
+        }
+    }
+
+    let Ok(response) = http::Response::builder()
+        .status(200)
+        .header("content-type", "application/grpc+proto")
+        .body(())
+    else {
+        return;
+    };
+    let Ok(mut send) = respond.send_response(response, false) else {
+        return;
+    };
+    if send
+        .send_data(
+            bytes::Bytes::from(grpc_frame(&proto_field_varint(1, 1))),
+            false,
+        )
+        .is_err()
+    {
+        return;
+    }
+    wait_for_test_signal(close_rx, Duration::from_secs(5)).await;
+    if send
+        .send_data(
+            bytes::Bytes::from(grpc_frame(&proto_field_varint(1, 2))),
+            false,
+        )
+        .is_err()
+    {
+        return;
+    }
+    send_ok_grpc_trailers(send);
+}
+
+async fn handle_delayed_bidi_grpc_h2_request(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<bytes::Bytes>,
+    finish_rx: mpsc::Receiver<()>,
+) {
+    let mut body = request.into_body();
+    let mut pending = Vec::new();
+    while !has_complete_grpc_frame(&pending) {
+        match body.data().await {
+            Some(Ok(chunk)) => pending.extend_from_slice(&chunk),
+            Some(Err(_)) | None => return,
+        }
+    }
+
+    let Ok(response) = http::Response::builder()
+        .status(200)
+        .header("content-type", "application/grpc+proto")
+        .body(())
+    else {
+        return;
+    };
+    let Ok(mut send) = respond.send_response(response, false) else {
+        return;
+    };
+    if send
+        .send_data(
+            bytes::Bytes::from(grpc_frame(&proto_field_varint(1, 1))),
+            false,
+        )
+        .is_err()
+    {
+        return;
+    }
+    wait_for_test_signal(finish_rx, Duration::from_secs(5)).await;
+    while let Some(chunk) = body.data().await {
+        if chunk.is_err() {
+            return;
+        }
+    }
+    send_ok_grpc_trailers(send);
+}
+
+fn has_complete_grpc_frame(bytes: &[u8]) -> bool {
+    if bytes.len() < 5 {
+        return false;
+    }
+    let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+    bytes.len() >= 5 + len
+}
+
+fn send_ok_grpc_trailers(mut send: h2::SendStream<bytes::Bytes>) {
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+    let _ = send.send_trailers(trailers);
+}
+
+async fn wait_for_test_signal(rx: mpsc::Receiver<()>, timeout: Duration) {
+    let _ = tokio::task::spawn_blocking(move || rx.recv_timeout(timeout)).await;
 }
 
 async fn handle_reflection_h2_request(
@@ -6444,6 +6682,132 @@ fn grpc_h2c_stream_frames_and_status_trailers_are_handled() {
     assert!(res.stdout.is_empty(), "stdout:\n{}", res.stdout);
     assert!(res.stderr.contains("PERMISSION_DENIED"), "{}", res.stderr);
     assert!(res.stderr.contains("permission denied"), "{}", res.stderr);
+}
+
+#[cfg(unix)]
+#[test]
+fn formatted_grpc_outputs_frames_before_stream_ends() {
+    let dir = TempDir::new().unwrap();
+    let stream_desc = write_stream_descriptor_set(dir.path());
+    let (close_tx, close_rx) = mpsc::channel();
+    let server_url = start_delayed_response_grpc_h2c_server(close_rx);
+    let url = format!("{server_url}/streampkg.StreamService/ServerStream");
+
+    let pty = open_pty(24, 80, 800, 480);
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([
+        url.as_str(),
+        "--grpc",
+        "--proto-desc",
+        stream_desc.to_str().unwrap(),
+        "-d",
+        r#"{"value":"seed"}"#,
+        "--format",
+        "on",
+        "--pager",
+        "off",
+    ]);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+    configure_pty_child(&mut cmd, &pty.slave);
+    let mut child = cmd.spawn().expect("spawn delayed grpc fetch under PTY");
+    drop(pty.slave);
+    let capture = start_pty_capture(&pty.master);
+
+    capture.wait_for(r#""count": "1""#, Duration::from_secs(5));
+    assert!(
+        wait_child(&mut child, Duration::from_millis(100)).is_none(),
+        "fetch exited before the gRPC stream closed; PTY output:\n{}",
+        capture.output()
+    );
+    close_tx.send(()).unwrap();
+
+    let status = wait_child(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            panic!(
+                "fetch did not exit after gRPC stream closed; PTY output:\n{}",
+                capture.output()
+            )
+        })
+        .expect("wait delayed grpc fetch");
+    assert!(
+        status.success(),
+        "fetch exited with {status}; PTY output:\n{}",
+        capture.output()
+    );
+    assert!(capture.output().contains(r#""count": "2""#));
+    drop(pty.master);
+    capture.close();
+}
+
+#[test]
+fn bidi_grpc_streams_request_and_response_before_stdin_eof() {
+    let dir = TempDir::new().unwrap();
+    let stream_desc = write_stream_descriptor_set(dir.path());
+    let (finish_tx, finish_rx) = mpsc::channel();
+    let server_url = start_delayed_bidi_grpc_h2c_server(finish_rx);
+
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([
+        &format!("{server_url}/streampkg.StreamService/Bidi"),
+        "--grpc",
+        "--proto-desc",
+        stream_desc.to_str().unwrap(),
+        "-d",
+        "@-",
+        "--format",
+        "on",
+        "--pager",
+        "off",
+    ]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.env("NO_COLOR", "");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let mut child = cmd.spawn().expect("spawn delayed bidi grpc fetch");
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let stdout = start_read_capture(child.stdout.take().expect("child stdout"));
+    let stderr = start_read_capture(child.stderr.take().expect("child stderr"));
+
+    stdin.write_all(br#"{"value":"one"}"#).unwrap();
+    stdin.flush().unwrap();
+    stdout.wait_for(r#""count": "1""#, Duration::from_secs(5));
+    assert!(
+        wait_child(&mut child, Duration::from_millis(100)).is_none(),
+        "fetch exited before stdin EOF; stdout:\n{}\nstderr:\n{}",
+        stdout.output(),
+        stderr.output()
+    );
+
+    drop(stdin);
+    finish_tx.send(()).unwrap();
+    let status = wait_child(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            panic!(
+                "fetch did not exit after stdin closed; stdout:\n{}\nstderr:\n{}",
+                stdout.output(),
+                stderr.output()
+            )
+        })
+        .expect("wait delayed bidi grpc fetch");
+    assert!(
+        status.success(),
+        "fetch exited with {status}; stdout:\n{}\nstderr:\n{}",
+        stdout.output(),
+        stderr.output()
+    );
+    stdout.close();
+    stderr.close();
 }
 
 #[test]

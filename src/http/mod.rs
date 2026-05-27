@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::fmt;
-use std::io::{ErrorKind, IsTerminal, Read, Write};
+use std::io::{Cursor, ErrorKind, IsTerminal, Read, Write};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
@@ -17,7 +17,7 @@ use base64::Engine;
 use bytes::Bytes;
 #[cfg(test)]
 use flate2::read::GzDecoder;
-use futures_util::stream;
+use futures_util::{TryStreamExt, stream};
 use http_body_util::BodyExt;
 use reqwest::header::{
     ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap,
@@ -71,15 +71,36 @@ pub(crate) struct RequestBodyPayload {
 #[derive(Debug, Clone)]
 enum RequestBodySource {
     Bytes(Bytes),
-    File { path: String, len: u64 },
+    File {
+        path: String,
+        len: u64,
+    },
     Stdin,
     Multipart(multipart::Multipart),
+    GrpcJsonStream {
+        source: Box<RequestBodySource>,
+        desc: prost_reflect::MessageDescriptor,
+    },
 }
 
 impl RequestBodyPayload {
     pub(crate) fn from_bytes(bytes: Vec<u8>, content_type: Option<String>) -> Self {
         Self {
             source: RequestBodySource::Bytes(Bytes::from(bytes)),
+            content_type,
+        }
+    }
+
+    pub(crate) fn from_grpc_json_stream(
+        body: RequestBodyPayload,
+        desc: prost_reflect::MessageDescriptor,
+        content_type: Option<String>,
+    ) -> Self {
+        Self {
+            source: RequestBodySource::GrpcJsonStream {
+                source: Box::new(body.source),
+                desc,
+            },
             content_type,
         }
     }
@@ -807,6 +828,28 @@ async fn finish_response(
                 code,
             ));
         }
+        if should_stream_formatted_grpc_stdout(cli, &response_headers, stdout_is_terminal) {
+            let streamed = stream_response_to_formatted_grpc_stdout(
+                response,
+                response_headers.clone(),
+                compression,
+                cli.copy,
+                grpc_method.map(|method| method.output()),
+            )
+            .await?;
+            handle_optional_clipboard_outcome(cli, streamed.clipboard);
+            let body_duration =
+                body_duration_from_len(method_is_head, streamed.bytes_written, body_start);
+            print_timing(cli, response_timing, body_duration);
+
+            let code = exit_code(status.as_u16(), cli.ignore_status);
+            return Ok(check_grpc_status(
+                cli,
+                &response_headers,
+                &streamed.trailers,
+                code,
+            ));
+        }
         if let Some(target) = stdout_stream_target(cli, &response_headers, stdout_is_terminal) {
             let streamed = stream_response_to_stdout(
                 cli,
@@ -975,6 +1018,15 @@ fn should_stream_formatted_sse_stdout(
         && format_enabled(cli.format.as_deref(), stdout_is_terminal)
 }
 
+fn should_stream_formatted_grpc_stdout(
+    cli: &Cli,
+    headers: &HeaderMap,
+    stdout_is_terminal: bool,
+) -> bool {
+    response_header_content_type(headers) == ContentType::Grpc
+        && format_enabled(cli.format.as_deref(), stdout_is_terminal)
+}
+
 fn should_retry_sse_without_compression(response: &Response, compression: CompressionMode) -> bool {
     compression == CompressionMode::Auto
         && response_header_content_type(response.headers()) == ContentType::Sse
@@ -1134,6 +1186,78 @@ async fn stream_response_to_formatted_sse_stdout(
         if !formatted.is_empty() {
             stdout.write_all(formatted.as_bytes()).await?;
             stdout.flush().await?;
+        }
+    }
+}
+
+async fn stream_response_to_formatted_grpc_stdout(
+    response: Response,
+    response_headers: HeaderMap,
+    compression: CompressionMode,
+    copy: bool,
+    grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
+) -> Result<StreamedOutput, FetchError> {
+    let (reader, trailers) = async_response_reader(response);
+    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let mut stdout = tokio::io::stdout();
+    let mut capture = copy.then(clipboard::Capture::default);
+    let mut decoder = crate::grpc::framing::FrameDecoder::new();
+    let mut buf = vec![0; 16 * 1024];
+    let mut bytes_read = 0i64;
+    let mut frame_index = 0usize;
+    let mut descriptor_messages_written = 0usize;
+    let mut descriptor_output_ends_with_newline = true;
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            decoder
+                .finish()
+                .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
+            stdout.flush().await?;
+            let clipboard = capture.map(clipboard::Capture::copy);
+            let trailers = trailers
+                .lock()
+                .map(|trailers| trailers.clone())
+                .unwrap_or_default();
+            return Ok(StreamedOutput {
+                trailers,
+                bytes_written: bytes_read,
+                clipboard,
+            });
+        }
+
+        if let Some(capture) = capture.as_mut() {
+            capture.push(&buf[..n]);
+        }
+        bytes_read = bytes_read.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
+        let frames = decoder
+            .push(&buf[..n])
+            .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
+        for frame in frames {
+            if let Some(desc) = grpc_response_desc.as_ref() {
+                let Some(formatted) = proto::format_grpc_frame_with_descriptor(&frame, desc)
+                    .map_err(|err| FetchError::Message(err.to_string()))?
+                else {
+                    continue;
+                };
+                if descriptor_messages_written > 0 && !descriptor_output_ends_with_newline {
+                    stdout.write_all(b"\n").await?;
+                }
+                stdout.write_all(formatted.as_bytes()).await?;
+                stdout.flush().await?;
+                descriptor_output_ends_with_newline = formatted.ends_with('\n');
+                descriptor_messages_written += 1;
+            } else {
+                if frame_index > 0 {
+                    stdout.write_all(b"\n").await?;
+                }
+                let formatted = grpc_format::format_grpc_frame(&frame)
+                    .map_err(|err| FetchError::Message(err.to_string()))?;
+                stdout.write_all(formatted.as_bytes()).await?;
+                stdout.flush().await?;
+                frame_index += 1;
+            }
         }
     }
 }
@@ -1737,6 +1861,17 @@ fn request_body_sha256_hex(body: &RequestBody) -> Result<String, FetchError> {
                 .write_to(&mut writer)
                 .map_err(|err| FetchError::Message(err.to_string()))?;
         }
+        RequestBodySource::GrpcJsonStream { source, desc } => {
+            if request_body_source_uses_stdin(source) {
+                return Err(FetchError::Message(
+                    "AWS SigV4 cannot sign a streaming stdin request body unless x-amz-content-sha256 is set or S3 unsigned payload is used".to_string(),
+                ));
+            }
+            let bytes = request_body_source_to_bytes((**source).clone())?;
+            let framed = proto::stream_json_to_grpc_frames(&bytes, desc)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            hasher.update(framed);
+        }
         RequestBodySource::Stdin => {
             return Err(FetchError::Message(
                 "AWS SigV4 cannot sign a streaming stdin request body unless x-amz-content-sha256 is set or S3 unsigned payload is used".to_string(),
@@ -1811,6 +1946,10 @@ fn request_body_content_len(body: &RequestBody) -> Option<u64> {
             source: RequestBodySource::Stdin,
             ..
         } => None,
+        RequestBodyPayload {
+            source: RequestBodySource::GrpcJsonStream { .. },
+            ..
+        } => None,
     }
 }
 
@@ -1823,6 +1962,36 @@ fn request_body_to_reqwest_body(body: RequestBodyPayload) -> Result<Body, FetchE
         }
         RequestBodySource::Stdin => Ok(Body::wrap_stream(ReaderStream::new(tokio::io::stdin()))),
         RequestBodySource::Multipart(multipart) => Ok(Body::wrap_stream(multipart.stream())),
+        RequestBodySource::GrpcJsonStream { source, desc } => {
+            let reader = request_body_source_to_async_reader(*source)?;
+            Ok(Body::wrap_stream(proto::json_reader_to_grpc_frame_stream(
+                reader, desc,
+            )))
+        }
+    }
+}
+
+fn request_body_source_to_async_reader(
+    source: RequestBodySource,
+) -> Result<AsyncReadBox, FetchError> {
+    match source {
+        RequestBodySource::Bytes(bytes) => Ok(Box::pin(Cursor::new(bytes))),
+        RequestBodySource::File { path, .. } => {
+            let file = std::fs::File::open(&path)?;
+            Ok(Box::pin(tokio::fs::File::from_std(file)))
+        }
+        RequestBodySource::Stdin => Ok(Box::pin(tokio::io::stdin())),
+        RequestBodySource::Multipart(multipart) => Ok(Box::pin(StreamReader::new(
+            multipart
+                .stream()
+                .map_err(|err| std::io::Error::other(err.to_string())),
+        ))),
+        RequestBodySource::GrpcJsonStream { source, desc } => {
+            let reader = request_body_source_to_async_reader(*source)?;
+            Ok(Box::pin(StreamReader::new(
+                proto::json_reader_to_grpc_frame_stream(reader, desc),
+            )))
+        }
     }
 }
 
@@ -1833,19 +2002,28 @@ pub(crate) fn request_body_into_bytes(
         return Ok(None);
     };
     let content_type = body.content_type.clone();
-    let bytes = match body.source {
-        RequestBodySource::Bytes(bytes) => bytes.to_vec(),
-        RequestBodySource::File { path, .. } => std::fs::read(path)?,
+    let bytes = request_body_source_to_bytes(body.source)?;
+    Ok(Some((bytes, content_type)))
+}
+
+fn request_body_source_to_bytes(source: RequestBodySource) -> Result<Vec<u8>, FetchError> {
+    match source {
+        RequestBodySource::Bytes(bytes) => Ok(bytes.to_vec()),
+        RequestBodySource::File { path, .. } => Ok(std::fs::read(path)?),
         RequestBodySource::Stdin => {
             let mut buf = Vec::new();
             std::io::stdin().read_to_end(&mut buf)?;
-            buf
+            Ok(buf)
         }
         RequestBodySource::Multipart(multipart) => multipart
             .open()
-            .map_err(|err| FetchError::Message(err.to_string()))?,
-    };
-    Ok(Some((bytes, content_type)))
+            .map_err(|err| FetchError::Message(err.to_string())),
+        RequestBodySource::GrpcJsonStream { source, desc } => {
+            let bytes = request_body_source_to_bytes(*source)?;
+            proto::stream_json_to_grpc_frames(&bytes, &desc)
+                .map_err(|err| FetchError::Message(err.to_string()))
+        }
+    }
 }
 
 fn request_body_preview(body: &RequestBodyPayload) -> Result<Vec<u8>, FetchError> {
@@ -1864,6 +2042,10 @@ fn request_body_preview(body: &RequestBodyPayload) -> Result<Vec<u8>, FetchError
                 .map_err(|err| FetchError::Message(err.to_string()))?;
             Ok(out)
         }
+        RequestBodySource::GrpcJsonStream { .. } => {
+            request_body_source_to_bytes(body.source.clone())
+                .map(|bytes| bytes.into_iter().take(1024).collect())
+        }
     }
 }
 
@@ -1879,6 +2061,9 @@ fn write_request_body_to_stderr(body: &RequestBodyPayload) -> Result<(), FetchEr
         RequestBodySource::Multipart(multipart) => multipart
             .write_to(&mut stderr)
             .map_err(|err| FetchError::Message(err.to_string()))?,
+        RequestBodySource::GrpcJsonStream { .. } => {
+            stderr.write_all(&request_body_source_to_bytes(body.source.clone())?)?
+        }
     }
     Ok(())
 }
@@ -2324,10 +2509,18 @@ fn redirected_request(
 }
 
 fn request_body_replayable(body: &RequestBody) -> bool {
-    !matches!(
-        body.as_ref().map(|body| &body.source),
-        Some(RequestBodySource::Stdin)
-    )
+    body.as_ref()
+        .is_none_or(|body| !request_body_source_uses_stdin(&body.source))
+}
+
+fn request_body_source_uses_stdin(source: &RequestBodySource) -> bool {
+    match source {
+        RequestBodySource::Stdin => true,
+        RequestBodySource::GrpcJsonStream { source, .. } => request_body_source_uses_stdin(source),
+        RequestBodySource::Bytes(_)
+        | RequestBodySource::File { .. }
+        | RequestBodySource::Multipart(_) => false,
+    }
 }
 
 fn ensure_request_body_replayable(body: &RequestBody, action: &str) -> Result<(), FetchError> {
