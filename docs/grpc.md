@@ -14,9 +14,9 @@ Enable gRPC mode. This flag:
 
 - Forces HTTP/2 protocol
 - Sets method to POST
-- Adds gRPC headers (`Content-Type: application/grpc+proto`, `TE: trailers`)
+- Adds gRPC headers (`Content-Type: application/grpc+proto`, `TE: trailers`, `grpc-accept-encoding: gzip`)
 - Applies gRPC message framing
-- Handles gRPC response framing
+- Handles gRPC response framing, including gzip-compressed response messages when the server sends `grpc-encoding: gzip`
 
 ```sh
 fetch --grpc https://localhost:50051/package.Service/Method
@@ -411,6 +411,8 @@ fetch --grpc --proto-file service.proto \
 ```
 
 For streaming responses, messages are separated by blank lines in the output. Formatting and flushing happen incrementally, so results appear in real time.
+
+If a server compresses individual response messages, `fetch` decompresses gzip-framed gRPC messages before protobuf decoding. Unsupported per-message encodings are reported with the encoding name.
 
 ### gRPC Status
 

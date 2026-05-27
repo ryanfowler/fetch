@@ -47,6 +47,7 @@ use crate::format::protobuf;
 use crate::format::sse;
 use crate::format::xml;
 use crate::format::yaml;
+use crate::grpc::encoding as grpc_encoding;
 use crate::grpc::status as grpc_status;
 use crate::http::client::DnsResolution;
 use crate::output;
@@ -1202,6 +1203,7 @@ async fn stream_response_to_formatted_grpc_stdout(
     let mut stdout = tokio::io::stdout();
     let mut capture = copy.then(clipboard::Capture::default);
     let mut decoder = crate::grpc::framing::FrameDecoder::new();
+    let grpc_message_encoding = grpc_encoding::MessageEncoding::from_headers(&response_headers);
     let mut buf = vec![0; 16 * 1024];
     let mut bytes_read = 0i64;
     let mut frame_index = 0usize;
@@ -1236,8 +1238,9 @@ async fn stream_response_to_formatted_grpc_stdout(
             .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
         for frame in frames {
             if let Some(desc) = grpc_response_desc.as_ref() {
-                let formatted = proto::format_grpc_frame_with_descriptor(&frame, desc)
-                    .map_err(|err| FetchError::Message(err.to_string()))?;
+                let formatted =
+                    proto::format_grpc_frame_with_descriptor(&frame, desc, &grpc_message_encoding)
+                        .map_err(|err| FetchError::Message(err.to_string()))?;
                 if descriptor_wrote_any && !descriptor_output_ends_with_newline {
                     stdout.write_all(b"\n").await?;
                 }
@@ -1249,7 +1252,7 @@ async fn stream_response_to_formatted_grpc_stdout(
                 if frame_index > 0 {
                     stdout.write_all(b"\n").await?;
                 }
-                let formatted = grpc_format::format_grpc_frame(&frame)
+                let formatted = grpc_format::format_grpc_frame(&frame, &grpc_message_encoding)
                     .map_err(|err| FetchError::Message(err.to_string()))?;
                 stdout.write_all(formatted.as_bytes()).await?;
                 stdout.flush().await?;
@@ -2107,6 +2110,10 @@ fn apply_grpc_headers(headers: &mut HeaderMap) {
         HeaderName::from_static("te"),
         HeaderValue::from_static("trailers"),
     );
+    headers.insert(
+        HeaderName::from_static("grpc-accept-encoding"),
+        HeaderValue::from_static(grpc_encoding::ACCEPT_ENCODING),
+    );
 }
 
 fn check_grpc_status(cli: &Cli, headers: &HeaderMap, trailers: &HeaderMap, exit_code: i32) -> i32 {
@@ -2290,12 +2297,13 @@ fn format_stdout_bytes_with_terminal(
             }
         }
         ContentType::Grpc => {
+            let grpc_message_encoding = grpc_encoding::MessageEncoding::from_headers(headers);
             if let Some(desc) = grpc_response_desc {
-                proto::format_grpc_stream_with_descriptor(&bytes, &desc)
+                proto::format_grpc_stream_with_descriptor(&bytes, &desc, &grpc_message_encoding)
                     .map(|formatted| formatted.into_bytes())
                     .map_err(|err| FetchError::Message(err.to_string()))
             } else {
-                grpc_format::format_grpc_stream(&bytes)
+                grpc_format::format_grpc_stream(&bytes, &grpc_message_encoding)
                     .map(|formatted| formatted.into_bytes())
                     .map_err(|err| FetchError::Message(err.to_string()))
             }

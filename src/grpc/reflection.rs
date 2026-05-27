@@ -8,6 +8,7 @@ use url::Url;
 use crate::cli::Cli;
 use crate::core;
 use crate::error::FetchError;
+use crate::grpc::encoding::{self, MessageEncoding};
 use crate::grpc::framing;
 use crate::grpc::status;
 use crate::proto::Schema;
@@ -170,8 +171,9 @@ async fn invoke(
     }
 
     let headers = response.headers().clone();
+    let message_encoding = MessageEncoding::from_headers(&headers);
     let response: http::Response<reqwest::Body> = response.into();
-    let (out, trailers) = read_reflection_frames(response.into_body()).await?;
+    let (out, trailers) = read_reflection_frames(response.into_body(), &message_encoding).await?;
     if let Some(grpc_status) =
         grpc_status_from_headers(&trailers).or_else(|| grpc_status_from_headers(&headers))
     {
@@ -183,6 +185,7 @@ async fn invoke(
 
 async fn read_reflection_frames(
     mut body: reqwest::Body,
+    message_encoding: &MessageEncoding,
 ) -> Result<(Vec<Vec<u8>>, HeaderMap), FetchError> {
     let mut decoder = framing::FrameDecoder::new();
     let mut out = Vec::new();
@@ -196,10 +199,9 @@ async fn read_reflection_frames(
                     .push(&data)
                     .map_err(|err| FetchError::Message(err.to_string()))?
                 {
-                    if frame.compressed {
-                        return Err("compressed gRPC messages are not supported".into());
-                    }
-                    out.push(frame.data);
+                    let data = encoding::decompress_frame(&frame, message_encoding)
+                        .map_err(|err| FetchError::Message(err.to_string()))?;
+                    out.push(data);
                 }
             }
             Err(frame) => {
@@ -230,6 +232,10 @@ fn reflection_headers(cli: &Cli) -> Result<HeaderMap, FetchError> {
     headers.insert(
         HeaderName::from_static("te"),
         HeaderValue::from_static("trailers"),
+    );
+    headers.insert(
+        HeaderName::from_static("grpc-accept-encoding"),
+        HeaderValue::from_static(encoding::ACCEPT_ENCODING),
     );
     for raw in &cli.headers {
         let Some((name, value)) = raw.split_once(':') else {
@@ -572,8 +578,41 @@ mod tests {
                 bytes::Bytes::from_static(&[0x00, 0x04, 0x00, 0x00, 0x01]),
             )]));
 
-        let err = read_reflection_frames(body).await.unwrap_err();
+        let err = read_reflection_frames(body, &MessageEncoding::Identity)
+            .await
+            .unwrap_err();
 
         assert!(err.to_string().contains("gRPC message too large"));
+    }
+
+    #[tokio::test]
+    async fn reflection_reader_decodes_gzip_messages() {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, b"\x3a\x01*").unwrap();
+        let compressed = encoder.finish().unwrap();
+        let body =
+            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+                bytes::Bytes::from(framing::frame(&compressed, true).unwrap()),
+            )]));
+
+        let (messages, _) = read_reflection_frames(body, &MessageEncoding::Gzip)
+            .await
+            .unwrap();
+
+        assert_eq!(messages, [b"\x3a\x01*".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn reflection_reader_names_unsupported_compression() {
+        let body =
+            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+                bytes::Bytes::from(framing::frame(b"payload", true).unwrap()),
+            )]));
+
+        let err = read_reflection_frames(body, &MessageEncoding::Unsupported("br".to_string()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "unsupported gRPC compression encoding: br");
     }
 }

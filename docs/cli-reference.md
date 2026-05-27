@@ -548,7 +548,7 @@ See [WebSocket documentation](websocket.md) for details.
 
 ### `--grpc`
 
-Enable gRPC mode. Automatically sets HTTP/2, POST method, and gRPC headers. When no local proto schema is provided, `fetch` automatically tries gRPC reflection before falling back to generic protobuf handling.
+Enable gRPC mode. Automatically sets HTTP/2, POST method, and gRPC headers, including `grpc-accept-encoding: gzip`. When no local proto schema is provided, `fetch` automatically tries gRPC reflection before falling back to generic protobuf handling. Gzip-compressed gRPC response messages are decompressed before protobuf formatting.
 
 ```sh
 fetch --grpc https://localhost:50051/package.Service/Method
