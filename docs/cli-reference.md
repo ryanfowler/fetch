@@ -121,6 +121,7 @@ fetch --basic username:password example.com
 ### `--digest USER:PASS`
 
 HTTP Digest Authentication. Uses a challenge-response handshake to avoid sending credentials in plain text.
+Supports challenges without `qop` and challenges with `qop=auth`; unsupported digest parameters are reported as diagnostics.
 
 ```sh
 fetch --digest username:password example.com

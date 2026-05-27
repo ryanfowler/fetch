@@ -3340,6 +3340,56 @@ fn digest_auth_replays_after_challenge() {
 }
 
 #[test]
+fn digest_auth_reports_unsupported_qop_challenge() {
+    let challenged = Arc::new(AtomicUsize::new(0));
+    let challenged_for_handler = Arc::clone(&challenged);
+    let server = TestServer::start(move |req| {
+        assert!(req.header("authorization").is_empty());
+        challenged_for_handler.fetch_add(1, Ordering::SeqCst);
+        TestResponse::status(401, "Unauthorized", "").header(
+            "WWW-Authenticate",
+            r#"Digest realm="test", nonce="abc123", qop="auth-int", algorithm="MD5""#,
+        )
+    });
+
+    let res = run_fetch(&[&server.url, "--digest", "user:pass"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains(
+            "unsupported digest authentication challenge: unsupported digest qop: auth-int"
+        ),
+        "stderr:\n{}",
+        res.stderr
+    );
+    assert_eq!(challenged.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn digest_auth_reports_unsupported_algorithm_challenge() {
+    let challenged = Arc::new(AtomicUsize::new(0));
+    let challenged_for_handler = Arc::clone(&challenged);
+    let server = TestServer::start(move |req| {
+        assert!(req.header("authorization").is_empty());
+        challenged_for_handler.fetch_add(1, Ordering::SeqCst);
+        TestResponse::status(401, "Unauthorized", "").header(
+            "WWW-Authenticate",
+            r#"Digest realm="test", nonce="abc123", qop="auth", algorithm="SHA-512""#,
+        )
+    });
+
+    let res = run_fetch(&[&server.url, "--digest", "user:pass"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains(
+            "unsupported digest authentication challenge: unsupported digest algorithm: sha-512"
+        ),
+        "stderr:\n{}",
+        res.stderr
+    );
+    assert_eq!(challenged.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn digest_auth_rejects_stdin_body_replay_after_challenge() {
     let server = TestServer::start(|req| {
         assert!(req.header("authorization").is_empty());

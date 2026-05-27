@@ -35,11 +35,13 @@ fetch --digest username:password example.com
 The `--digest` flag performs a two-step handshake:
 
 1. **Challenge**: The server responds with `401 Unauthorized` and a `WWW-Authenticate: Digest ...` header containing a nonce and realm.
-2. **Response**: `fetch` computes an MD5 hash of the credentials, nonce, and request details, then resends the request with an `Authorization` header:
+2. **Response**: `fetch` computes the digest from the credentials, nonce, algorithm, and request details, then resends the request with an `Authorization` header:
 
 ```
 Authorization: Digest username="...", realm="...", nonce="...", uri="...", response="..."
 ```
+
+`fetch` supports challenges without `qop` and challenges with `qop=auth` using MD5, MD5-SESS, SHA-256, SHA-256-SESS, SHA-512-256, or SHA-512-256-SESS. If the server only offers unsupported parameters such as `qop=auth-int`, `fetch` exits with a diagnostic instead of treating it as an ordinary `401 Unauthorized`.
 
 ### Compatibility with curl
 
