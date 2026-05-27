@@ -1786,18 +1786,11 @@ async fn apply_digest_challenge(
     let Some(challenge) = challenge else {
         return Ok(response);
     };
-    let Ok(challenge) = digest::parse_challenge(&challenge) else {
-        return Ok(response);
-    };
+    let challenge = digest::parse_challenge(&challenge).map_err(digest_challenge_error)?;
 
     let challenged_url = response.url().clone();
     let (challenged_method, challenged_body) =
         digest_challenged_request(context.method, context.body, &context.redirect_statuses);
-    ensure_request_body_replayable(&challenged_body, "digest authentication")?;
-    let mut challenged_headers = context.headers;
-    if context.strip_entity_headers {
-        strip_entity_headers_for_bodyless_redirect(&mut challenged_headers);
-    }
     let auth = match digest::response(
         challenged_method.as_str(),
         &request_target(&challenged_url),
@@ -1806,8 +1799,13 @@ async fn apply_digest_challenge(
         password,
     ) {
         Ok(auth) => auth,
-        Err(_) => return Ok(response),
+        Err(err) => return Err(digest_challenge_error(err)),
     };
+    ensure_request_body_replayable(&challenged_body, "digest authentication")?;
+    let mut challenged_headers = context.headers;
+    if context.strip_entity_headers {
+        strip_entity_headers_for_bodyless_redirect(&mut challenged_headers);
+    }
 
     let retry_request = build_request(
         context.client,
@@ -1839,6 +1837,16 @@ async fn apply_digest_challenge(
         drain_response_body_bounded(response).await;
         retry_request.send().await.map_err(Into::into)
     }
+}
+
+fn digest_challenge_error(err: digest::DigestError) -> FetchError {
+    let prefix = match err {
+        digest::DigestError::UnsupportedAlgorithm(_) | digest::DigestError::UnsupportedQop(_) => {
+            "unsupported"
+        }
+        digest::DigestError::NotDigest | digest::DigestError::MissingRequiredParameter => "invalid",
+    };
+    FetchError::Runtime(format!("{prefix} digest authentication challenge: {err}"))
 }
 
 fn digest_drop_before_retry_after_large_drain(response: &Response) -> bool {
