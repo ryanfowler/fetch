@@ -8,6 +8,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use url::Url;
 
+use crate::core;
 use crate::fileutil;
 use crate::output::progress::{
     Bar, BarCounter, ProgressPrinter, Spinner, SpinnerCounter, emit_native_progress,
@@ -54,16 +55,12 @@ impl WriteProgress {
         }
     }
 
-    pub fn stdio(
-        use_color: bool,
-        stderr_is_terminal: bool,
-        stdout_is_terminal: bool,
-        total_bytes: Option<i64>,
-    ) -> Self {
+    pub fn stdio(color_setting: Option<&str>, total_bytes: Option<i64>) -> Self {
+        let stdio = core::stdio();
         Self::with_printer(
-            ProgressPrinter::stderr(use_color),
-            stderr_is_terminal,
-            stdout_is_terminal,
+            ProgressPrinter::stderr(color_setting),
+            stdio.stderr_is_terminal(),
+            stdio.stdout_is_terminal(),
             total_bytes,
         )
     }

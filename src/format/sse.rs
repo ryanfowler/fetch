@@ -1,14 +1,25 @@
 use serde_json::Value;
 
-use crate::core::{Sequence, write_styled_to_string};
+use crate::core::{Printer, Sequence};
 
-pub fn format_event_stream(bytes: &[u8], color: bool) -> Result<String, std::str::Utf8Error> {
+#[cfg(test)]
+pub(crate) fn format_event_stream(
+    bytes: &[u8],
+    color: bool,
+) -> Result<String, std::str::Utf8Error> {
+    let mut out = Printer::new(color);
+    format_event_stream_to(bytes, &mut out)?;
+    Ok(out
+        .into_string()
+        .expect("event stream formatter output is valid UTF-8"))
+}
+
+pub fn format_event_stream_to(bytes: &[u8], out: &mut Printer) -> Result<(), std::str::Utf8Error> {
     let input = std::str::from_utf8(bytes)?;
-    let mut formatter = EventStreamFormatter::new(color);
-    let mut out = String::new();
-    formatter.push_str(input, &mut out);
-    formatter.finish(&mut out);
-    Ok(out)
+    let mut formatter = EventStreamFormatter::new();
+    formatter.push_str(input, out);
+    formatter.finish(out);
+    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -18,18 +29,14 @@ pub struct EventStreamFormatter {
     line: String,
     seen_first_line: bool,
     pending_cr: bool,
-    color: bool,
 }
 
 impl EventStreamFormatter {
-    pub fn new(color: bool) -> Self {
-        Self {
-            color,
-            ..Self::default()
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn push_str(&mut self, input: &str, out: &mut String) {
+    pub fn push_str(&mut self, input: &str, out: &mut Printer) {
         for ch in input.chars() {
             if self.pending_cr {
                 self.pending_cr = false;
@@ -49,7 +56,7 @@ impl EventStreamFormatter {
         }
     }
 
-    pub fn finish(&mut self, out: &mut String) {
+    pub fn finish(&mut self, out: &mut Printer) {
         if !self.line.is_empty() {
             self.process_line(out);
         }
@@ -58,7 +65,7 @@ impl EventStreamFormatter {
         }
     }
 
-    fn process_line(&mut self, out: &mut String) {
+    fn process_line(&mut self, out: &mut Printer) {
         if !self.seen_first_line {
             if self.line.starts_with('\u{feff}') {
                 self.line.drain(..'\u{feff}'.len_utf8());
@@ -90,7 +97,7 @@ impl EventStreamFormatter {
         self.line.clear();
     }
 
-    fn dispatch_event(&mut self, out: &mut String) {
+    fn dispatch_event(&mut self, out: &mut Printer) {
         let event_data = self.data.trim_end_matches('\n');
         if event_data.is_empty() {
             self.event_type.clear();
@@ -104,11 +111,11 @@ impl EventStreamFormatter {
         } else {
             &self.event_type
         };
-        write_sse_field(out, "event", event_type, self.color);
+        write_sse_field(out, "event", event_type);
         out.push('\n');
-        let formatted_data = format_event_data(event_data, self.color);
+        let formatted_data = format_event_data(event_data, out.use_color());
         for line in formatted_data.split('\n') {
-            write_sse_field(out, "data", line, self.color);
+            write_sse_field(out, "data", line);
             out.push('\n');
         }
         out.push('\n');
@@ -118,8 +125,8 @@ impl EventStreamFormatter {
     }
 }
 
-fn write_sse_field(out: &mut String, name: &str, value: &str, color: bool) {
-    write_styled_to_string(out, name, &[Sequence::Bold, Sequence::Cyan], color);
+fn write_sse_field(out: &mut Printer, name: &str, value: &str) {
+    out.write_styled(name, &[Sequence::Bold, Sequence::Cyan]);
     out.push_str(": ");
     out.push_str(value);
 }
@@ -132,46 +139,50 @@ fn format_event_data(data: &str, color: bool) -> String {
 }
 
 fn format_json_inline(value: &Value, color: bool) -> String {
+    let mut out = Printer::new(color);
+    write_json_inline(value, &mut out);
+    out.into_string()
+        .expect("inline JSON formatter output is valid UTF-8")
+}
+
+fn write_json_inline(value: &Value, out: &mut Printer) {
     match value {
         Value::Array(values) => {
             if values.is_empty() {
-                return "[]".to_string();
+                out.push_str("[]");
+                return;
             }
-            let values = values
-                .iter()
-                .map(|value| format_json_inline(value, color))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("[ {values} ]")
+            out.push_str("[ ");
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                write_json_inline(value, out);
+            }
+            out.push_str(" ]");
         }
         Value::Object(map) => {
             if map.is_empty() {
-                return "{}".to_string();
+                out.push_str("{}");
+                return;
             }
-            let values = map
-                .iter()
-                .map(|(key, value)| {
-                    let key = serde_json::to_string(key).expect("string key serializes");
-                    let mut styled_key = String::new();
-                    write_styled_to_string(
-                        &mut styled_key,
-                        &key,
-                        &[Sequence::Blue, Sequence::Bold],
-                        color,
-                    );
-                    format!("{}: {}", styled_key, format_json_inline(value, color))
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{{ {values} }}")
+            out.push_str("{ ");
+            for (index, (key, value)) in map.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                let key = serde_json::to_string(key).expect("string key serializes");
+                out.write_styled(&key, &[Sequence::Blue, Sequence::Bold]);
+                out.push_str(": ");
+                write_json_inline(value, out);
+            }
+            out.push_str(" }");
         }
         Value::String(_) => {
             let value = serde_json::to_string(value).expect("JSON value serializes");
-            let mut out = String::new();
-            write_styled_to_string(&mut out, &value, &[Sequence::Green], color);
-            out
+            out.write_styled(&value, &[Sequence::Green]);
         }
-        _ => serde_json::to_string(value).expect("JSON value serializes"),
+        _ => out.push_str(&serde_json::to_string(value).expect("JSON value serializes")),
     }
 }
 
@@ -216,15 +227,18 @@ mod tests {
 
     #[test]
     fn formatter_streams_events_across_chunks() {
-        let mut formatter = EventStreamFormatter::new(false);
-        let mut got = String::new();
+        let mut formatter = EventStreamFormatter::new();
+        let mut got = Printer::new(false);
 
         formatter.push_str("data: {\"a\"", &mut got);
-        assert!(got.is_empty());
+        assert!(got.bytes().is_empty());
         formatter.push_str(":1}\r\n", &mut got);
-        assert!(got.is_empty());
+        assert!(got.bytes().is_empty());
         formatter.push_str("\nevent: done\ndata: two\n\n", &mut got);
         formatter.finish(&mut got);
+        let got = got
+            .into_string()
+            .expect("event stream formatter output is valid UTF-8");
 
         assert_eq!(
             got,

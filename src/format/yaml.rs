@@ -1,7 +1,8 @@
+#[cfg(test)]
 use std::borrow::Cow;
 use std::fmt;
 
-use crate::core::{Sequence, write_styled_to_string};
+use crate::core::{Printer, Sequence};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YamlError(String);
@@ -14,7 +15,8 @@ impl fmt::Display for YamlError {
 
 impl std::error::Error for YamlError {}
 
-pub fn format_yaml(buf: &[u8], color: bool) -> Result<Vec<u8>, YamlError> {
+#[cfg(test)]
+pub(crate) fn format_yaml(buf: &[u8], color: bool) -> Result<Vec<u8>, YamlError> {
     let input = String::from_utf8_lossy(buf);
     if !color {
         validate_quotes(&input)?;
@@ -24,14 +26,21 @@ pub fn format_yaml(buf: &[u8], color: bool) -> Result<Vec<u8>, YamlError> {
         });
     }
 
-    let mut out = String::new();
-    for segment in LineSegments::new(&input) {
-        write_yaml_line(&mut out, segment.body, color)?;
-        out.push_str(segment.ending);
-    }
+    let mut out = Printer::new(color);
+    format_yaml_to(buf, &mut out)?;
     Ok(out.into_bytes())
 }
 
+pub fn format_yaml_to(buf: &[u8], out: &mut Printer) -> Result<(), YamlError> {
+    let input = String::from_utf8_lossy(buf);
+    for segment in LineSegments::new(&input) {
+        write_yaml_line(out, segment.body)?;
+        out.push_str(segment.ending);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn validate_quotes(input: &str) -> Result<(), YamlError> {
     for segment in LineSegments::new(input) {
         let mut index = 0;
@@ -93,25 +102,25 @@ impl<'a> Iterator for LineSegments<'a> {
     }
 }
 
-fn write_yaml_line(out: &mut String, line: &str, color: bool) -> Result<(), YamlError> {
+fn write_yaml_line(out: &mut Printer, line: &str) -> Result<(), YamlError> {
     let first = first_non_space(line);
     if let Some(first) = first {
         let rest = &line[first..];
         if rest.starts_with('#') {
             out.push_str(&line[..first]);
-            write_styled(out, rest, &[Sequence::Dim], color);
+            out.write_styled(rest, &[Sequence::Dim]);
             return Ok(());
         }
         if marker_at_line_start(rest, "---") || marker_at_line_start(rest, "...") {
             out.push_str(&line[..first]);
-            write_styled(out, &rest[..3], &[Sequence::Dim], color);
+            out.write_styled(&rest[..3], &[Sequence::Dim]);
             out.push_str(&rest[3..]);
             return Ok(());
         }
         if rest.starts_with('%') {
             out.push_str(&line[..first]);
             let end = first + token_end(rest, 0);
-            write_styled(out, &line[first..end], &[Sequence::Cyan], color);
+            out.write_styled(&line[first..end], &[Sequence::Cyan]);
             out.push_str(&line[end..]);
             return Ok(());
         }
@@ -122,27 +131,27 @@ fn write_yaml_line(out: &mut String, line: &str, color: bool) -> Result<(), Yaml
         let ch = line[index..].chars().next().unwrap();
         match ch {
             '#' => {
-                write_styled(out, &line[index..], &[Sequence::Dim], color);
+                out.write_styled(&line[index..], &[Sequence::Dim]);
                 break;
             }
             '\'' | '"' => {
                 let end = parse_quoted(line, index, ch)?;
                 let token = &line[index..end];
                 if is_yaml_key(line, end) {
-                    write_styled(out, token, &[Sequence::Blue, Sequence::Bold], color);
+                    out.write_styled(token, &[Sequence::Blue, Sequence::Bold]);
                 } else {
-                    write_styled(out, token, &[Sequence::Green], color);
+                    out.write_styled(token, &[Sequence::Green]);
                 }
                 index = end;
             }
             '&' | '*' => {
                 let end = index + token_end(&line[index..], 0);
-                write_styled(out, &line[index..end], &[Sequence::Cyan], color);
+                out.write_styled(&line[index..end], &[Sequence::Cyan]);
                 index = end;
             }
             '!' => {
                 let end = index + token_end(&line[index..], 0);
-                write_styled(out, &line[index..end], &[Sequence::Cyan], color);
+                out.write_styled(&line[index..end], &[Sequence::Cyan]);
                 index = end;
             }
             c if c.is_whitespace() || is_yaml_punctuation(c) => {
@@ -153,9 +162,9 @@ fn write_yaml_line(out: &mut String, line: &str, color: bool) -> Result<(), Yaml
                 let end = index + token_end(&line[index..], 0);
                 let token = &line[index..end];
                 if is_yaml_key(line, end) {
-                    write_styled(out, token, &[Sequence::Blue, Sequence::Bold], color);
+                    out.write_styled(token, &[Sequence::Blue, Sequence::Bold]);
                 } else if is_plain_string_token(token) {
-                    write_styled(out, token, &[Sequence::Green], color);
+                    out.write_styled(token, &[Sequence::Green]);
                 } else {
                     out.push_str(token);
                 }
@@ -242,10 +251,6 @@ fn is_plain_string_token(token: &str) -> bool {
         return false;
     }
     token.parse::<i64>().is_err() && token.parse::<f64>().is_err()
-}
-
-fn write_styled(out: &mut String, value: &str, styles: &[Sequence], color: bool) {
-    write_styled_to_string(out, value, styles, color);
 }
 
 #[cfg(test)]

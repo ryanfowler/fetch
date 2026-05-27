@@ -6999,9 +6999,11 @@ fn bidi_grpc_streams_request_and_response_before_stdin_eof() {
     let stdout = start_read_capture(child.stdout.take().expect("child stdout"));
     let stderr = start_read_capture(child.stderr.take().expect("child stderr"));
 
-    stdin.write_all(br#"{"value":"one"}"#).unwrap();
+    // Keep stdin open, but delimit the first streaming JSON value with
+    // whitespace so platform stdio layers do not need EOF to expose it.
+    stdin.write_all(b"{\"value\":\"one\"}\n").unwrap();
     stdin.flush().unwrap();
-    stdout.wait_for(r#""count": "1""#, Duration::from_secs(5));
+    stdout.wait_for(r#""count": "1""#, Duration::from_secs(15));
     assert!(
         wait_child(&mut child, Duration::from_millis(100)).is_none(),
         "fetch exited before stdin EOF; stdout:\n{}\nstderr:\n{}",

@@ -1,7 +1,7 @@
 use clap::{ColorChoice, CommandFactory, Parser};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{Read, Write};
 
 use crate::cli::{Cli, from_curl};
 use crate::core;
@@ -850,7 +850,7 @@ fn parse_aws_sigv4(value: &str) -> Result<String, FetchError> {
 }
 
 fn print_build_info(cli: &Cli) -> Result<(), FetchError> {
-    let stdout_is_terminal = std::io::stdout().is_terminal();
+    let stdout_is_terminal = core::stdio().stdout_is_terminal();
     let output = build_info_output(cli, stdout_is_terminal)?;
     std::io::stdout().write_all(&output)?;
     Ok(())
@@ -862,9 +862,12 @@ fn build_info_output(cli: &Cli, stdout_is_terminal: bool) -> Result<Vec<u8>, Fet
         return Ok(encoded);
     }
 
-    let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
-    Ok(crate::format::json::format_json(&encoded, use_color)
-        .unwrap_or_else(|_| newline_terminated(encoded)))
+    let mut out = core::Printer::with_color_setting(cli.color.as_deref(), stdout_is_terminal);
+    if crate::format::json::format_json_to(&encoded, &mut out).is_ok() {
+        Ok(out.into_bytes())
+    } else {
+        Ok(newline_terminated(encoded))
+    }
 }
 
 fn build_info_json(include_deps: bool) -> Vec<u8> {

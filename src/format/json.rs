@@ -4,31 +4,49 @@ use serde_json::Value;
 
 use crate::core::{Printer, Sequence};
 
-pub fn format_json(bytes: &[u8], color: bool) -> Result<Vec<u8>, serde_json::Error> {
-    let value: Value = serde_json::from_slice(bytes)?;
+#[cfg(test)]
+pub(crate) fn format_json(bytes: &[u8], color: bool) -> Result<Vec<u8>, serde_json::Error> {
     let mut out = Printer::new(color);
-    write_value(&mut out, &value, 0);
-    out.push('\n');
+    format_json_to(bytes, &mut out)?;
     Ok(out.into_bytes())
 }
 
-pub fn format_json_line(bytes: &[u8], color: bool) -> Result<Vec<u8>, serde_json::Error> {
-    let value: Value = serde_json::from_slice(bytes)?;
+#[cfg(test)]
+pub(crate) fn format_json_line(bytes: &[u8], color: bool) -> Result<Vec<u8>, serde_json::Error> {
     let mut out = Printer::new(color);
-    write_line_value(&mut out, &value);
-    out.push('\n');
+    format_json_line_to(bytes, &mut out)?;
     Ok(out.into_bytes())
 }
 
-pub fn format_ndjson(bytes: &[u8], color: bool) -> Result<Vec<u8>, serde_json::Error> {
+#[cfg(test)]
+pub(crate) fn format_ndjson(bytes: &[u8], color: bool) -> Result<Vec<u8>, serde_json::Error> {
     let mut out = Printer::new(color);
+    format_ndjson_to(bytes, &mut out)?;
+    Ok(out.into_bytes())
+}
+
+pub fn format_json_to(bytes: &[u8], out: &mut Printer) -> Result<(), serde_json::Error> {
+    let value: Value = serde_json::from_slice(bytes)?;
+    write_value(out, &value, 0);
+    out.push('\n');
+    Ok(())
+}
+
+pub fn format_json_line_to(bytes: &[u8], out: &mut Printer) -> Result<(), serde_json::Error> {
+    let value: Value = serde_json::from_slice(bytes)?;
+    write_line_value(out, &value);
+    out.push('\n');
+    Ok(())
+}
+
+pub fn format_ndjson_to(bytes: &[u8], out: &mut Printer) -> Result<(), serde_json::Error> {
     let stream = serde_json::Deserializer::from_slice(bytes).into_iter::<Value>();
     for value in stream {
         let value = value?;
-        write_line_value(&mut out, &value);
+        write_line_value(out, &value);
         out.push('\n');
     }
-    Ok(out.into_bytes())
+    Ok(())
 }
 
 fn write_value(out: &mut Printer, value: &Value, indent: usize) {

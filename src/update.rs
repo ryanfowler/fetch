@@ -1,4 +1,3 @@
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -352,10 +351,10 @@ enum UpdateDownloadProgress {
 
 impl UpdateDownloadProgress {
     fn maybe_start(silent: bool, content_length: i64) -> Self {
-        if silent || !std::io::stderr().is_terminal() {
+        if silent || !core::stdio().stderr_is_terminal() {
             return Self::None;
         }
-        Self::new_for_terminal(ProgressPrinter::stderr(false), content_length)
+        Self::new_for_terminal(ProgressPrinter::stderr_with_color(false), content_length)
     }
 
     fn new_for_terminal(printer: ProgressPrinter, content_length: i64) -> Self {

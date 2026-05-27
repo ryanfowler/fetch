@@ -1,5 +1,4 @@
 use std::fmt;
-use std::io::IsTerminal;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,13 +41,9 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         .await?;
 
     if !cli.silent {
-        eprint!(
-            "{}",
-            render_with_color(
-                &inspection,
-                core::color_enabled(cli.color.as_deref(), std::io::stderr().is_terminal())
-            )
-        );
+        let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
+        render_to(&inspection, &mut printer);
+        printer.flush_to(&mut std::io::stderr())?;
     }
     Ok(0)
 }
@@ -580,8 +575,14 @@ fn render(inspection: &Inspection) -> String {
     render_with_color(inspection, false)
 }
 
+#[cfg(test)]
 fn render_with_color(inspection: &Inspection, use_color: bool) -> String {
     let mut out = Printer::new(use_color);
+    render_to(inspection, &mut out);
+    out.into_string().expect("TLS inspection output is UTF-8")
+}
+
+fn render_to(inspection: &Inspection, out: &mut Printer) {
     out.write_info_prefix();
     out.write_styled(
         version_label(inspection.version),
@@ -603,11 +604,10 @@ fn render_with_color(inspection: &Inspection, use_color: bool) -> String {
     if !inspection.chain.is_empty() {
         out.write_info_prefix();
         out.push_str("\n");
-        render_cert_chain(&mut out, &inspection.chain);
-        render_sans(&mut out, &inspection.chain[0]);
+        render_cert_chain(out, &inspection.chain);
+        render_sans(out, &inspection.chain[0]);
     }
-    render_ocsp_status(&mut out, &inspection.ocsp_response);
-    out.into_string().expect("TLS inspection output is UTF-8")
+    render_ocsp_status(out, &inspection.ocsp_response);
 }
 
 fn render_cert_chain(out: &mut Printer, chain: &[ParsedCert]) {

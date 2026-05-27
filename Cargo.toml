@@ -61,7 +61,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
 url = "2"
 webpki-roots = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 zstd = "0.13"
 

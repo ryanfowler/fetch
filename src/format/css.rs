@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::core::{Sequence, write_styled_to_string};
+use crate::core::{Printer, Sequence};
 
 const BOLD: Sequence = Sequence::Bold;
 const DIM: Sequence = Sequence::Dim;
@@ -270,42 +270,45 @@ fn byte_to_string(byte: u8) -> String {
     String::from_utf8_lossy(&[byte]).into_owned()
 }
 
-pub fn format_css(buf: &[u8], color: bool) -> Result<Vec<u8>, CssError> {
-    let output = format_css_indented(buf, color, 0)?;
-    Ok(output.into_bytes())
+#[cfg(test)]
+pub(crate) fn format_css(buf: &[u8], color: bool) -> Result<Vec<u8>, CssError> {
+    let mut out = Printer::new(color);
+    format_css_to_indented(buf, &mut out, 0)?;
+    Ok(out.into_bytes())
 }
 
-pub(crate) fn format_css_indented(
+pub fn format_css_to(buf: &[u8], out: &mut Printer) -> Result<(), CssError> {
+    format_css_to_indented(buf, out, 0)
+}
+
+pub(crate) fn format_css_to_indented(
     buf: &[u8],
-    color: bool,
+    out: &mut Printer,
     base_indent: usize,
-) -> Result<String, CssError> {
+) -> Result<(), CssError> {
     if buf.is_empty() {
-        return Ok(String::new());
+        return Ok(());
     }
 
-    let mut formatter = CssFormatter::new(buf, color, base_indent);
+    let mut formatter = CssFormatter::new(buf, out, base_indent);
     formatter.advance();
-    formatter.format()?;
-    Ok(formatter.out)
+    formatter.format()
 }
 
-struct CssFormatter<'a> {
+struct CssFormatter<'a, 'out> {
     tok: CssTokenizer<'a>,
-    color: bool,
-    out: String,
+    out: &'out mut Printer,
     indent: usize,
     current: CssToken,
     at_newline: bool,
     wrote_rule: bool,
 }
 
-impl<'a> CssFormatter<'a> {
-    fn new(input: &'a [u8], color: bool, indent: usize) -> Self {
+impl<'a, 'out> CssFormatter<'a, 'out> {
+    fn new(input: &'a [u8], out: &'out mut Printer, indent: usize) -> Self {
         Self {
             tok: CssTokenizer::new(input),
-            color,
-            out: String::new(),
+            out,
             indent,
             current: CssToken {
                 typ: CssTokenType::Eof,
@@ -360,7 +363,7 @@ impl<'a> CssFormatter<'a> {
 
     fn format_comment(&mut self) {
         self.write_indent();
-        write_styled(&mut self.out, &self.current.value, &[DIM], self.color);
+        self.out.write_styled(&self.current.value, &[DIM]);
         self.out.push('\n');
         self.at_newline = true;
         self.advance();
@@ -368,12 +371,7 @@ impl<'a> CssFormatter<'a> {
 
     fn format_at_rule(&mut self) {
         self.write_indent();
-        write_styled(
-            &mut self.out,
-            &self.current.value,
-            &[BOLD, BLUE],
-            self.color,
-        );
+        self.out.write_styled(&self.current.value, &[BOLD, BLUE]);
         self.advance();
         self.format_at_rule_prelude();
         self.skip_whitespace();
@@ -516,14 +514,14 @@ impl<'a> CssFormatter<'a> {
                     "{" => break,
                     "[" => {
                         bracket_depth += 1;
-                        write_styled(&mut self.out, "[", &[BOLD, BLUE], self.color);
+                        self.out.write_styled("[", &[BOLD, BLUE]);
                         self.advance();
                         need_space = false;
                         continue;
                     }
                     "]" => {
                         bracket_depth = bracket_depth.saturating_sub(1);
-                        write_styled(&mut self.out, "]", &[BOLD, BLUE], self.color);
+                        self.out.write_styled("]", &[BOLD, BLUE]);
                         self.advance();
                         need_space = true;
                         continue;
@@ -538,12 +536,7 @@ impl<'a> CssFormatter<'a> {
                         if need_space {
                             self.out.push(' ');
                         }
-                        write_styled(
-                            &mut self.out,
-                            &self.current.value,
-                            &[BOLD, BLUE],
-                            self.color,
-                        );
+                        self.out.write_styled(&self.current.value, &[BOLD, BLUE]);
                         self.advance();
                         need_space = true;
                         continue;
@@ -552,18 +545,13 @@ impl<'a> CssFormatter<'a> {
                         if need_space && self.current.value != ":" {
                             self.out.push(' ');
                         }
-                        write_styled(
-                            &mut self.out,
-                            &self.current.value,
-                            &[BOLD, BLUE],
-                            self.color,
-                        );
+                        self.out.write_styled(&self.current.value, &[BOLD, BLUE]);
                         self.advance();
                         need_space = false;
                         continue;
                     }
                     "=" => {
-                        write_styled(&mut self.out, "=", &[BOLD, BLUE], self.color);
+                        self.out.write_styled("=", &[BOLD, BLUE]);
                         self.advance();
                         need_space = false;
                         continue;
@@ -587,38 +575,23 @@ impl<'a> CssFormatter<'a> {
 
             match self.current.typ {
                 CssTokenType::Ident | CssTokenType::Hash => {
-                    write_styled(
-                        &mut self.out,
-                        &self.current.value,
-                        &[BOLD, BLUE],
-                        self.color,
-                    );
+                    self.out.write_styled(&self.current.value, &[BOLD, BLUE]);
                     self.advance();
                     need_space = false;
                 }
                 CssTokenType::String => {
-                    write_styled(&mut self.out, &self.current.value, &[GREEN], self.color);
+                    self.out.write_styled(&self.current.value, &[GREEN]);
                     self.advance();
                     need_space = false;
                 }
                 CssTokenType::Function => {
-                    write_styled(
-                        &mut self.out,
-                        &self.current.value,
-                        &[BOLD, BLUE],
-                        self.color,
-                    );
+                    self.out.write_styled(&self.current.value, &[BOLD, BLUE]);
                     self.advance();
                     self.format_function_args();
                     need_space = false;
                 }
                 CssTokenType::Dimension | CssTokenType::Number => {
-                    write_styled(
-                        &mut self.out,
-                        &self.current.value,
-                        &[BOLD, BLUE],
-                        self.color,
-                    );
+                    self.out.write_styled(&self.current.value, &[BOLD, BLUE]);
                     self.advance();
                     need_space = false;
                 }
@@ -650,7 +623,7 @@ impl<'a> CssFormatter<'a> {
 
     fn format_declaration(&mut self) {
         self.write_indent();
-        write_styled(&mut self.out, &self.current.value, &[CYAN], self.color);
+        self.out.write_styled(&self.current.value, &[CYAN]);
         self.advance();
         self.skip_whitespace();
 
@@ -734,17 +707,17 @@ impl<'a> CssFormatter<'a> {
             | CssTokenType::Dimension
             | CssTokenType::String
             | CssTokenType::Hash => {
-                write_styled(&mut self.out, &self.current.value, &[GREEN], self.color);
+                self.out.write_styled(&self.current.value, &[GREEN]);
                 self.advance();
             }
             CssTokenType::Function => {
-                write_styled(&mut self.out, &self.current.value, &[GREEN], self.color);
+                self.out.write_styled(&self.current.value, &[GREEN]);
                 self.advance();
                 self.format_function_args_value();
             }
             CssTokenType::Delim => {
                 if self.current.value == "!" {
-                    write_styled(&mut self.out, "!", &[GREEN], self.color);
+                    self.out.write_styled("!", &[GREEN]);
                 }
                 self.advance();
             }
@@ -757,13 +730,13 @@ impl<'a> CssFormatter<'a> {
         while self.current.typ != CssTokenType::Eof && depth > 0 {
             if self.current.typ == CssTokenType::Delim && self.current.value == "(" {
                 depth += 1;
-                write_styled(&mut self.out, "(", &[BOLD, BLUE], self.color);
+                self.out.write_styled("(", &[BOLD, BLUE]);
                 self.advance();
                 continue;
             }
             if self.current.typ == CssTokenType::Delim && self.current.value == ")" {
                 depth = depth.saturating_sub(1);
-                write_styled(&mut self.out, ")", &[BOLD, BLUE], self.color);
+                self.out.write_styled(")", &[BOLD, BLUE]);
                 self.advance();
                 continue;
             }
@@ -774,22 +747,12 @@ impl<'a> CssFormatter<'a> {
 
             match self.current.typ {
                 CssTokenType::Ident | CssTokenType::Hash => {
-                    write_styled(
-                        &mut self.out,
-                        &self.current.value,
-                        &[BOLD, BLUE],
-                        self.color,
-                    );
+                    self.out.write_styled(&self.current.value, &[BOLD, BLUE]);
                     self.advance();
                 }
                 CssTokenType::Delim => {
                     if matches!(self.current.value.as_str(), "." | ":" | "*") {
-                        write_styled(
-                            &mut self.out,
-                            &self.current.value,
-                            &[BOLD, BLUE],
-                            self.color,
-                        );
+                        self.out.write_styled(&self.current.value, &[BOLD, BLUE]);
                     }
                     self.advance();
                 }
@@ -861,20 +824,16 @@ impl<'a> CssFormatter<'a> {
 
     fn write_indent(&mut self) {
         if self.at_newline {
-            write_indent(&mut self.out, self.indent);
+            write_indent(self.out, self.indent);
             self.at_newline = false;
         }
     }
 }
 
-fn write_indent(out: &mut String, indent: usize) {
+fn write_indent(out: &mut Printer, indent: usize) {
     for _ in 0..indent {
         out.push_str("  ");
     }
-}
-
-fn write_styled(out: &mut String, value: &str, styles: &[Sequence], color: bool) {
-    write_styled_to_string(out, value, styles, color);
 }
 
 #[cfg(test)]

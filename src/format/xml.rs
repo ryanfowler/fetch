@@ -3,7 +3,7 @@ use quick_xml::{Reader, XmlVersion};
 use std::fmt;
 use std::io::Cursor;
 
-use crate::core::{Sequence, write_styled_to_string};
+use crate::core::{Printer, Sequence};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlError(String);
@@ -16,13 +16,19 @@ impl fmt::Display for XmlError {
 
 impl std::error::Error for XmlError {}
 
-pub fn format_xml(buf: &[u8], color: bool) -> Result<Vec<u8>, XmlError> {
+#[cfg(test)]
+pub(crate) fn format_xml(buf: &[u8], color: bool) -> Result<Vec<u8>, XmlError> {
+    let mut out = Printer::new(color);
+    format_xml_to(buf, &mut out)?;
+    Ok(out.into_bytes())
+}
+
+pub fn format_xml_to(buf: &[u8], out: &mut Printer) -> Result<(), XmlError> {
     let mut reader = Reader::from_reader(Cursor::new(buf));
     reader.config_mut().trim_text(false);
 
     let mut scratch = Vec::new();
     let mut stack = Vec::new();
-    let mut out = String::new();
     let mut pending_text = String::new();
 
     loop {
@@ -31,27 +37,27 @@ pub fn format_xml(buf: &[u8], color: bool) -> Result<Vec<u8>, XmlError> {
             .map_err(|err| XmlError(err.to_string()))?
         {
             Event::Start(element) => {
-                flush_xml_text(&mut out, &mut pending_text, color);
-                let name = write_start_element(&mut out, &element, &reader, &mut stack, color)?;
+                flush_xml_text(out, &mut pending_text);
+                let name = write_start_element(out, &element, &reader, &mut stack)?;
                 stack.push((name, false));
             }
             Event::Empty(element) => {
-                flush_xml_text(&mut out, &mut pending_text, color);
-                let name = write_start_element(&mut out, &element, &reader, &mut stack, color)?;
+                flush_xml_text(out, &mut pending_text);
+                let name = write_start_element(out, &element, &reader, &mut stack)?;
                 out.push_str("</");
-                write_xml_tag_name(&mut out, &name, color);
+                write_xml_tag_name(out, &name);
                 out.push_str(">\n");
             }
             Event::End(element) => {
-                flush_xml_text(&mut out, &mut pending_text, color);
+                flush_xml_text(out, &mut pending_text);
                 let name = local_name(element.name().as_ref());
                 if let Some((_open_name, had_child)) = stack.pop()
                     && had_child
                 {
-                    write_indent(&mut out, stack.len());
+                    write_indent(out, stack.len());
                 }
                 out.push_str("</");
-                write_xml_tag_name(&mut out, &name, color);
+                write_xml_tag_name(out, &name);
                 out.push_str(">\n");
             }
             Event::Text(text) => {
@@ -65,36 +71,31 @@ pub fn format_xml(buf: &[u8], color: bool) -> Result<Vec<u8>, XmlError> {
                 pending_text.push_str(&decoded);
             }
             Event::Comment(comment) => {
-                flush_xml_text(&mut out, &mut pending_text, color);
-                write_indent(&mut out, stack.len());
+                flush_xml_text(out, &mut pending_text);
+                write_indent(out, stack.len());
                 out.push_str("<!--");
-                write_xml_comment(&mut out, &String::from_utf8_lossy(comment.as_ref()), color);
+                write_xml_comment(out, &String::from_utf8_lossy(comment.as_ref()));
                 out.push_str("-->\n");
             }
             Event::Decl(decl) => {
-                flush_xml_text(&mut out, &mut pending_text, color);
+                flush_xml_text(out, &mut pending_text);
                 let raw = String::from_utf8_lossy(decl.as_ref());
                 let raw = if raw.trim_start().starts_with("xml") {
                     raw.into_owned()
                 } else {
                     format!("xml {}", raw.trim())
                 };
-                write_proc_inst_raw(&mut out, stack.len(), &raw, color);
+                write_proc_inst_raw(out, stack.len(), &raw);
             }
             Event::PI(pi) => {
-                flush_xml_text(&mut out, &mut pending_text, color);
-                write_proc_inst_raw(
-                    &mut out,
-                    stack.len(),
-                    &String::from_utf8_lossy(pi.as_ref()),
-                    color,
-                );
+                flush_xml_text(out, &mut pending_text);
+                write_proc_inst_raw(out, stack.len(), &String::from_utf8_lossy(pi.as_ref()));
             }
             Event::DocType(doctype) => {
-                flush_xml_text(&mut out, &mut pending_text, color);
-                write_indent(&mut out, stack.len());
+                flush_xml_text(out, &mut pending_text);
+                write_indent(out, stack.len());
                 out.push_str("<!DOCTYPE ");
-                write_xml_directive(&mut out, &String::from_utf8_lossy(doctype.as_ref()), color);
+                write_xml_directive(out, &String::from_utf8_lossy(doctype.as_ref()));
                 out.push_str(">\n");
             }
             Event::GeneralRef(reference) => {
@@ -107,28 +108,27 @@ pub fn format_xml(buf: &[u8], color: bool) -> Result<Vec<u8>, XmlError> {
                 pending_text.push_str(&unescaped);
             }
             Event::Eof => {
-                flush_xml_text(&mut out, &mut pending_text, color);
-                return Ok(out.into_bytes());
+                flush_xml_text(out, &mut pending_text);
+                return Ok(());
             }
         }
         scratch.clear();
     }
 }
 
-fn flush_xml_text(out: &mut String, pending_text: &mut String, color: bool) {
+fn flush_xml_text(out: &mut Printer, pending_text: &mut String) {
     let trimmed = pending_text.trim();
     if !trimmed.is_empty() {
-        write_xml_text(out, trimmed, color);
+        write_xml_text(out, trimmed);
     }
     pending_text.clear();
 }
 
 fn write_start_element(
-    out: &mut String,
+    out: &mut Printer,
     element: &BytesStart<'_>,
     reader: &Reader<Cursor<&[u8]>>,
     stack: &mut [(String, bool)],
-    color: bool,
 ) -> Result<String, XmlError> {
     if let Some((_name, had_child)) = stack.last()
         && !*had_child
@@ -139,7 +139,7 @@ fn write_start_element(
 
     let name = local_name(element.name().as_ref());
     out.push('<');
-    write_xml_tag_name(out, &name, color);
+    write_xml_tag_name(out, &name);
 
     let mut saw_attr = false;
     for attr in element.attributes() {
@@ -150,12 +150,12 @@ fn write_start_element(
         } else {
             out.push(' ');
         }
-        write_xml_attr_name(out, &local_name(attr.key.as_ref()), color);
+        write_xml_attr_name(out, &local_name(attr.key.as_ref()));
         out.push_str("=\"");
         let value = attr
             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|err| XmlError(err.to_string()))?;
-        write_xml_attr_val(out, &value, color);
+        write_xml_attr_val(out, &value);
         out.push('"');
     }
     out.push('>');
@@ -167,7 +167,7 @@ fn write_start_element(
     Ok(name)
 }
 
-fn write_proc_inst_raw(out: &mut String, indent: usize, raw: &str, color: bool) {
+fn write_proc_inst_raw(out: &mut Printer, indent: usize, raw: &str) {
     let raw = raw.trim();
     if raw.is_empty() {
         return;
@@ -179,30 +179,30 @@ fn write_proc_inst_raw(out: &mut String, indent: usize, raw: &str, color: bool) 
 
     write_indent(out, indent);
     out.push_str("<?");
-    write_xml_tag_name(out, target, color);
-    write_xml_proc_inst(out, inst, color);
+    write_xml_tag_name(out, target);
+    write_xml_proc_inst(out, inst);
     out.push_str("?>\n");
 }
 
-fn write_xml_proc_inst(out: &mut String, inst: &str, color: bool) {
+fn write_xml_proc_inst(out: &mut Printer, inst: &str) {
     for pair in inst.split_whitespace() {
         out.push(' ');
         if let Some((key, value)) = pair.split_once('=') {
-            write_styled(out, key, &[Sequence::Cyan], color);
+            out.write_styled(key, &[Sequence::Cyan]);
             out.push('=');
             if let Some(value) = value.strip_prefix('"') {
                 out.push('"');
                 if let Some(value) = value.strip_suffix('"') {
-                    write_styled(out, value, &[Sequence::Green], color);
+                    out.write_styled(value, &[Sequence::Green]);
                     out.push('"');
                     continue;
                 }
-                write_styled(out, value, &[Sequence::Cyan], color);
+                out.write_styled(value, &[Sequence::Cyan]);
             } else {
-                write_styled(out, value, &[Sequence::Cyan], color);
+                out.write_styled(value, &[Sequence::Cyan]);
             }
         } else {
-            write_styled(out, pair, &[Sequence::Cyan], color);
+            out.write_styled(pair, &[Sequence::Cyan]);
         }
     }
 }
@@ -214,42 +214,38 @@ fn local_name(bytes: &[u8]) -> String {
         .map_or_else(|| value.to_string(), |(_prefix, local)| local.to_string())
 }
 
-fn write_xml_tag_name(out: &mut String, value: &str, color: bool) {
+fn write_xml_tag_name(out: &mut Printer, value: &str) {
     let escaped = escape_xml_string(value);
-    write_styled(out, &escaped, &[Sequence::Bold, Sequence::Blue], color);
+    out.write_styled(&escaped, &[Sequence::Bold, Sequence::Blue]);
 }
 
-fn write_xml_attr_name(out: &mut String, value: &str, color: bool) {
+fn write_xml_attr_name(out: &mut Printer, value: &str) {
     let escaped = escape_xml_string(value);
-    write_styled(out, &escaped, &[Sequence::Cyan], color);
+    out.write_styled(&escaped, &[Sequence::Cyan]);
 }
 
-fn write_xml_attr_val(out: &mut String, value: &str, color: bool) {
+fn write_xml_attr_val(out: &mut Printer, value: &str) {
     let escaped = escape_xml_string(value);
-    write_styled(out, &escaped, &[Sequence::Green], color);
+    out.write_styled(&escaped, &[Sequence::Green]);
 }
 
-fn write_xml_text(out: &mut String, value: &str, color: bool) {
+fn write_xml_text(out: &mut Printer, value: &str) {
     let escaped = escape_xml_string(value);
-    write_styled(out, &escaped, &[Sequence::Green], color);
+    out.write_styled(&escaped, &[Sequence::Green]);
 }
 
-fn write_xml_directive(out: &mut String, value: &str, color: bool) {
-    write_styled(out, value, &[Sequence::Cyan], color);
+fn write_xml_directive(out: &mut Printer, value: &str) {
+    out.write_styled(value, &[Sequence::Cyan]);
 }
 
-fn write_xml_comment(out: &mut String, value: &str, color: bool) {
-    write_styled(out, value, &[Sequence::Dim], color);
+fn write_xml_comment(out: &mut Printer, value: &str) {
+    out.write_styled(value, &[Sequence::Dim]);
 }
 
-fn write_indent(out: &mut String, indent: usize) {
+fn write_indent(out: &mut Printer, indent: usize) {
     for _ in 0..indent {
         out.push_str("  ");
     }
-}
-
-fn write_styled(out: &mut String, value: &str, styles: &[Sequence], color: bool) {
-    write_styled_to_string(out, value, styles, color);
 }
 
 fn escape_xml_string(value: &str) -> String {

@@ -4,6 +4,7 @@ use prost_reflect::{
     Cardinality, DescriptorPool, DynamicMessage, FieldDescriptor, Kind, MessageDescriptor,
     MethodDescriptor, SerializeOptions, ServiceDescriptor,
 };
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -495,6 +496,147 @@ where
             }
         },
     )
+}
+
+pub(crate) fn stdin_json_to_grpc_frame_stream(
+    desc: MessageDescriptor,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>> {
+    const READ_BUF_LEN: usize = 16 * 1024;
+
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut stdin_read = StdinReadState::new(&stdin);
+        let mut reader = stdin.lock();
+        let mut pending = Vec::new();
+        let mut eof = false;
+        let mut buf = [0_u8; READ_BUF_LEN];
+
+        loop {
+            match parse_next_json_value(&pending, eof) {
+                Ok(JsonParse::Message { value, consumed }) => {
+                    pending.drain(..consumed);
+                    let item = json_value_to_grpc_frame(value, &desc)
+                        .map(Bytes::from)
+                        .map_err(std::io::Error::other);
+                    if tx.blocking_send(item).is_err() {
+                        break;
+                    }
+                }
+                Ok(JsonParse::NeedMore) => {}
+                Ok(JsonParse::Done) => break,
+                Err(err) => {
+                    let _ = tx.blocking_send(Err(std::io::Error::other(err)));
+                    break;
+                }
+            }
+
+            if eof {
+                break;
+            }
+
+            match stdin_read.read_chunk(&mut reader, &mut buf) {
+                Ok(0) => eof = true,
+                Ok(n) => pending.extend_from_slice(&buf[..n]),
+                Err(err) => {
+                    let _ = tx.blocking_send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
+
+    futures_util::stream::unfold(rx, |mut rx| async {
+        rx.recv().await.map(|item| (item, rx))
+    })
+}
+
+#[cfg(not(windows))]
+struct StdinReadState;
+
+#[cfg(not(windows))]
+impl StdinReadState {
+    fn new(_stdin: &std::io::Stdin) -> Self {
+        Self
+    }
+
+    fn read_chunk<R: Read>(&mut self, reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+        reader.read(buf)
+    }
+}
+
+#[cfg(windows)]
+struct StdinReadState {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    is_pipe: bool,
+}
+
+#[cfg(windows)]
+impl StdinReadState {
+    fn new(stdin: &std::io::Stdin) -> Self {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
+
+        let handle = stdin.as_raw_handle();
+        // SAFETY: the handle is borrowed from stdio and remains valid while
+        // stdin is alive; GetFileType does not retain it.
+        let is_pipe = unsafe { GetFileType(handle) } == FILE_TYPE_PIPE;
+        Self { handle, is_pipe }
+    }
+
+    fn read_chunk<R: Read>(&mut self, reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+        if !self.is_pipe {
+            return reader.read(buf);
+        }
+
+        loop {
+            match self.pipe_bytes_available()? {
+                PipeReadiness::Available(0) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                PipeReadiness::Available(n) => {
+                    let len = n.min(buf.len());
+                    return reader.read(&mut buf[..len]);
+                }
+                PipeReadiness::Eof => return Ok(0),
+            }
+        }
+    }
+
+    fn pipe_bytes_available(&self) -> std::io::Result<PipeReadiness> {
+        use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, GetLastError};
+        use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+        let mut available = 0_u32;
+        // SAFETY: the handle is a stdin pipe handle. All optional output
+        // pointers are either null or valid for the duration of the call.
+        let ok = unsafe {
+            PeekNamedPipe(
+                self.handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok != 0 {
+            return Ok(PipeReadiness::Available(available as usize));
+        }
+
+        // SAFETY: GetLastError reads the thread-local error from the failed
+        // PeekNamedPipe call above.
+        match unsafe { GetLastError() } {
+            ERROR_BROKEN_PIPE | ERROR_HANDLE_EOF => Ok(PipeReadiness::Eof),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    }
+}
+
+#[cfg(windows)]
+enum PipeReadiness {
+    Available(usize),
+    Eof,
 }
 
 enum JsonParse {

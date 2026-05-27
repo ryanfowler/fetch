@@ -1,4 +1,3 @@
-use std::io::IsTerminal;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
@@ -73,10 +72,18 @@ pub struct DnsTiming {
     pub duration: Duration,
 }
 
+#[cfg(test)]
 pub fn render_waterfall(timing: ResponseTiming, use_color: bool) -> String {
+    let mut out = Printer::new(use_color);
+    render_waterfall_to(timing, &mut out);
+    out.into_string()
+        .expect("timing waterfall output is valid UTF-8")
+}
+
+pub fn render_waterfall_to(timing: ResponseTiming, out: &mut Printer) {
     let phases = build_phases(timing);
     if phases.is_empty() {
-        return String::new();
+        return;
     }
 
     let mut total = phases
@@ -101,7 +108,6 @@ pub fn render_waterfall(timing: ResponseTiming, use_color: bool) -> String {
         .chain(std::iter::once("Total".len()))
         .max()
         .unwrap_or(5);
-    let mut out = Printer::new(use_color);
     out.push('\n');
 
     let mut offset = Duration::ZERO;
@@ -150,12 +156,17 @@ pub fn render_waterfall(timing: ResponseTiming, use_color: bool) -> String {
     total_line.push_str(&pad_duration(&total_duration, max_duration_width));
     total_line.push('\n');
     out.write_styled(&total_line, &[Sequence::Dim]);
-    out.into_string()
-        .expect("timing waterfall output is valid UTF-8")
 }
 
+#[cfg(test)]
 pub fn render_dns_debug(dns: &DnsTiming, use_color: bool) -> String {
     let mut out = Printer::new(use_color);
+    render_dns_debug_to(dns, &mut out);
+    out.into_string()
+        .expect("timing debug output is valid UTF-8")
+}
+
+pub fn render_dns_debug_to(dns: &DnsTiming, out: &mut Printer) {
     out.write_info_prefix();
     out.write_styled("DNS", &[Sequence::Bold, Sequence::Yellow]);
     out.push_str(": ");
@@ -172,8 +183,6 @@ pub fn render_dns_debug(dns: &DnsTiming, use_color: bool) -> String {
         out.write_styled(&addr.to_string(), &[Sequence::Italic]);
         out.push('\n');
     }
-    out.into_string()
-        .expect("timing debug output is valid UTF-8")
 }
 
 pub fn print_debug_lines(timing: &AttemptTiming, target: &str, color: Option<&str>) {
@@ -185,7 +194,7 @@ pub fn print_debug_lines(timing: &AttemptTiming, target: &str, color: Option<&st
         .response_headers
         .map(|elapsed| elapsed.saturating_sub(timing.connect.unwrap_or_default()))
         .unwrap_or_default();
-    let mut out = Printer::new(core::color_enabled(color, std::io::stderr().is_terminal()));
+    let mut out = core::stdio().stderr_printer(color);
     out.write_info_prefix();
     out.write_styled("Connect", &[Sequence::Bold, Sequence::Yellow]);
     out.push_str(": ");

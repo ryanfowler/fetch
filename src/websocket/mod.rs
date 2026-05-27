@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -89,11 +89,12 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         && let Some(size) = core::terminal_size()
         && interactive::InteractiveMode::is_screen_tall_enough(size.rows)
     {
+        let stdio = core::stdio();
         interactive::run_terminal(
             stream,
             initial_message.as_deref(),
             should_format_for_interactive(cli),
-            use_color(cli, io::stdout().is_terminal()),
+            stdio.stdout_color(cli.color.as_deref()),
             size.rows,
             size.cols,
         )
@@ -654,9 +655,7 @@ fn write_warning(cli: &Cli, message: &str) {
 }
 
 fn should_use_interactive(cli: &Cli) -> Result<bool, FetchError> {
-    let all_terms =
-        io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal();
-    interactive_for_mode(cli.ws_interactive.as_deref(), all_terms)
+    interactive_for_mode(cli.ws_interactive.as_deref(), core::stdio().all_terminal())
 }
 
 fn interactive_for_mode(mode: Option<&str>, all_terms: bool) -> Result<bool, FetchError> {
@@ -679,7 +678,7 @@ fn websocket_initial_message(cli: &Cli) -> Result<Option<Vec<u8>>, FetchError> {
 
 fn read_stdin_messages() -> Result<Vec<String>, FetchError> {
     let mut stdin = io::stdin();
-    if stdin.is_terminal() {
+    if core::stdio().stdin_is_terminal() {
         return Ok(Vec::new());
     }
 
@@ -799,7 +798,7 @@ async fn read_messages<S>(cli: &Cli, stream: &mut S) -> Result<(), FetchError>
 where
     S: futures_util::Stream<Item = Result<Message, WsError>> + Unpin,
 {
-    let stdout_is_terminal = io::stdout().is_terminal();
+    let stdout_is_terminal = core::stdio().stdout_is_terminal();
     while let Some(message) = stream.next().await {
         match message.map_err(websocket_error)? {
             Message::Text(text) => {
@@ -814,22 +813,19 @@ where
 }
 
 fn write_text_message(cli: &Cli, bytes: &[u8], stdout_is_terminal: bool) -> Result<(), FetchError> {
-    if should_format(cli, stdout_is_terminal)
-        && let Ok(formatted) = json::format_json_line(bytes, use_color(cli, stdout_is_terminal))
-    {
-        print!("{}", String::from_utf8_lossy(&formatted));
-        return Ok(());
+    if should_format(cli, stdout_is_terminal) {
+        let mut formatted = core::Printer::new(use_color(cli, stdout_is_terminal));
+        if json::format_json_line_to(bytes, &mut formatted).is_ok() {
+            print!("{}", String::from_utf8_lossy(&formatted.into_bytes()));
+            return Ok(());
+        }
     }
     println!("{}", String::from_utf8_lossy(bytes));
     Ok(())
 }
 
 fn should_format(cli: &Cli, stdout_is_terminal: bool) -> bool {
-    match cli.format.as_deref() {
-        Some("off") => false,
-        Some("on") => true,
-        _ => stdout_is_terminal,
-    }
+    core::format_enabled(cli.format.as_deref(), stdout_is_terminal)
 }
 
 fn should_format_for_interactive(cli: &Cli) -> bool {
