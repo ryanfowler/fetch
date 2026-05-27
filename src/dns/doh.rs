@@ -37,8 +37,11 @@ pub async fn lookup_doh(
         return Ok(vec![ip]);
     }
 
-    let a = lookup_doh_type(server_url, host, "A", DNS_TYPE_A, timeout).await;
-    let aaaa = lookup_doh_type(server_url, host, "AAAA", DNS_TYPE_AAAA, timeout).await;
+    let client = doh_client(timeout)?;
+    let (a, aaaa) = tokio::join!(
+        lookup_doh_type_with_client(&client, server_url, host, "A", DNS_TYPE_A),
+        lookup_doh_type_with_client(&client, server_url, host, "AAAA", DNS_TYPE_AAAA)
+    );
 
     let mut addrs = Vec::new();
     if let Ok(records) = &a {
@@ -63,13 +66,27 @@ pub async fn lookup_doh_type(
     answer_type: u16,
     timeout: Option<Duration>,
 ) -> Result<Vec<DnsRecord>, DnsError> {
-    let url = doh_query_url(server_url, host, dns_type);
+    let client = doh_client(timeout)?;
+    lookup_doh_type_with_client(&client, server_url, host, dns_type, answer_type).await
+}
 
+fn doh_client(timeout: Option<Duration>) -> Result<reqwest::Client, DnsError> {
     let mut builder = reqwest::Client::builder().use_rustls_tls();
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
-    let client = builder.build().map_err(|err| DnsError(err.to_string()))?;
+    builder.build().map_err(|err| DnsError(err.to_string()))
+}
+
+async fn lookup_doh_type_with_client(
+    client: &reqwest::Client,
+    server_url: &Url,
+    host: &str,
+    dns_type: &str,
+    answer_type: u16,
+) -> Result<Vec<DnsRecord>, DnsError> {
+    let url = doh_query_url(server_url, host, dns_type);
+
     let response = client
         .get(url)
         .header(ACCEPT, "application/dns-json")
@@ -194,6 +211,7 @@ struct DohErrorResponse {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
     async fn start_test_server<F>(handler: F) -> (Url, tokio::task::JoinHandle<()>)
     where
@@ -225,6 +243,66 @@ mod tests {
                         .body(request.into_owned())
                         .unwrap();
                     let response = handler(req);
+                    let (parts, body) = response.into_parts();
+                    let status = parts.status.as_u16();
+                    let reason = parts.status.canonical_reason().unwrap_or("");
+                    let raw = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.writable().await;
+                    let _ = stream.try_write(raw.as_bytes());
+                });
+            }
+        });
+        (
+            Url::parse(&format!("http://{addr}/dns-query")).unwrap(),
+            task,
+        )
+    }
+
+    async fn start_delayed_test_server(delay: Duration) -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0; 4096];
+                    let Ok(n) = stream
+                        .readable()
+                        .await
+                        .and_then(|_| stream.try_read(&mut buf))
+                    else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = request.lines().next().unwrap_or_default();
+                    let path = first_line.split_whitespace().nth(1).unwrap_or("/");
+                    let ty = path
+                        .split_once('?')
+                        .map(|(_, query)| query)
+                        .unwrap_or_default()
+                        .split('&')
+                        .find_map(|part| part.strip_prefix("type="))
+                        .unwrap_or_default();
+
+                    tokio::time::sleep(delay).await;
+
+                    let response = match ty {
+                        "A" => http::Response::new(
+                            r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#.to_string(),
+                        ),
+                        "AAAA" => http::Response::new(
+                            r#"{"Status":0,"Answer":[{"type":28,"data":"::1"}]}"#.to_string(),
+                        ),
+                        _ => http::Response::builder()
+                            .status(400)
+                            .body(r#"{"error":"bad type"}"#.to_string())
+                            .unwrap(),
+                    };
                     let (parts, body) = response.into_parts();
                     let status = parts.status.as_u16();
                     let reason = parts.status.canonical_reason().unwrap_or("");
@@ -278,7 +356,30 @@ mod tests {
             addrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
             ["127.0.0.1", "::1"]
         );
-        assert_eq!(queries.lock().unwrap().join(","), "A,AAAA");
+        let mut queries = queries.lock().unwrap().clone();
+        queries.sort();
+        assert_eq!(queries, ["A", "AAAA"]);
+        task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn lookup_doh_queries_a_and_aaaa_concurrently() {
+        let delay = Duration::from_millis(250);
+        let (url, task) = start_delayed_test_server(delay).await;
+
+        let _ = doh_client(None).unwrap();
+        let start = Instant::now();
+        let addrs = lookup_doh(&url, "example.com", None).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            addrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["127.0.0.1", "::1"]
+        );
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "lookup took {elapsed:?}, expected parallel A/AAAA queries near {delay:?}"
+        );
         task.abort();
     }
 
