@@ -3786,6 +3786,10 @@ fn retry_status_rejects_stdin_body_replay() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows can report a socket abort when the bounded retry drain abandons a large body"
+)]
 fn retry_status_drain_is_bounded_for_large_error_body() {
     let server = PartialBodyReplayServer::start(503, "Service Unavailable", Vec::new(), "retried");
 

@@ -229,16 +229,6 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
         }
     }
 
-    if cli.version {
-        println!("fetch {}", core::version());
-        return Ok(0);
-    }
-
-    if cli.buildinfo {
-        print_build_info(cli)?;
-        return Ok(0);
-    }
-
     let direct_cli_sources = DirectCliSources::capture(cli);
 
     apply_from_curl(cli)?;
