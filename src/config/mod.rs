@@ -1028,8 +1028,20 @@ fn url_hostname(raw: &str) -> Option<String> {
             .and_then(|url| url.host_str().map(ToOwned::to_owned));
     }
 
-    let host = raw.split('/').next().unwrap_or(raw);
+    let host = raw.split(['/', '?', '#']).next().unwrap_or(raw);
     let host = host.split('@').next_back().unwrap_or(host);
+    if let Some(rest) = host.strip_prefix('[') {
+        let (host, rest) = rest.split_once(']')?;
+        if !rest.is_empty() && !rest.starts_with(':') {
+            return None;
+        }
+        return if host.is_empty() {
+            None
+        } else {
+            Some(host.to_string())
+        };
+    }
+
     let host = host.split(':').next().unwrap_or(host);
     if host.is_empty() {
         None
@@ -1685,6 +1697,25 @@ mod tests {
 
         assert_eq!(cli.color.as_deref(), Some("on"));
         assert_eq!(cli.format.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn apply_file_matches_bare_bracketed_ipv6_url_to_host_section() {
+        let path = PathBuf::from("test/config");
+        let file = parse_file(
+            &path,
+            "
+              [::1]
+              color = on
+            ",
+        )
+        .unwrap();
+        let mut cli = Cli::try_parse_from(["fetch", "[::1]:3000/path"]).unwrap();
+
+        let sources = CliConfigSources::capture(&cli);
+        apply_file(&mut cli, &file, sources);
+
+        assert_eq!(cli.color.as_deref(), Some("on"));
     }
 
     #[test]
