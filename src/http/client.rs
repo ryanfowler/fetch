@@ -13,6 +13,7 @@ use url::Url;
 
 use crate::cli::{Cli, HttpVersion};
 use crate::dns::custom;
+use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
 use crate::timing::DnsTiming;
 
@@ -58,11 +59,12 @@ pub(crate) async fn build_client_for_url(
     context: &ClientBuildContext<'_>,
 ) -> Result<UrlClient, FetchError> {
     let http_version = context.mode.http_version();
-    let dns_timeout = dns_resolution_timeout(
-        context.request_timeout,
+    let dns_timeout = TimeoutBudget::for_connect(
         context.connect_timeout,
+        context.request_timeout,
         context.request_start,
-    )?;
+    )?
+    .timeout();
     let dns_resolution = resolve_dns_for_client(cli, url, http_version, dns_timeout).await?;
     let mut builder = Client::builder()
         .use_rustls_tls()
@@ -84,7 +86,7 @@ pub(crate) async fn build_client_for_url(
         builder = builder.danger_accept_invalid_certs(true);
     }
     if let Some(timeout) =
-        remaining_request_timeout(context.request_timeout, context.request_start)?
+        TimeoutBudget::started_at(context.request_timeout, context.request_start).remaining()?
     {
         builder = builder.timeout(timeout);
     }
@@ -121,36 +123,6 @@ pub(crate) fn configure_unix_socket(
     }
 }
 
-fn dns_resolution_timeout(
-    request_timeout: Option<Duration>,
-    connect_timeout: Option<Duration>,
-    start: Instant,
-) -> Result<Option<Duration>, FetchError> {
-    let remaining = remaining_request_timeout(request_timeout, start)?;
-    Ok(match (connect_timeout, remaining) {
-        (Some(connect), Some(remaining)) => Some(connect.min(remaining)),
-        (Some(connect), None) => Some(connect),
-        (None, remaining) => remaining,
-    })
-}
-
-fn remaining_request_timeout(
-    timeout: Option<Duration>,
-    start: Instant,
-) -> Result<Option<Duration>, FetchError> {
-    let Some(timeout) = timeout else {
-        return Ok(None);
-    };
-    let elapsed = start.elapsed();
-    if elapsed >= timeout {
-        return Err(FetchError::Runtime(format!(
-            "request timed out after {}",
-            crate::http::format_go_duration(timeout)
-        )));
-    }
-    Ok(Some(timeout - elapsed))
-}
-
 async fn resolve_dns_for_client(
     cli: &Cli,
     url: &Url,
@@ -158,33 +130,7 @@ async fn resolve_dns_for_client(
     timeout: Option<Duration>,
 ) -> Result<Option<DnsResolution>, FetchError> {
     let resolve = resolve_dns_for_client_inner(cli, url, http_version, timeout);
-    if let Some(timeout) = timeout {
-        let start = Instant::now();
-        match tokio::time::timeout(timeout, resolve).await {
-            Ok(Err(err)) if start.elapsed() >= timeout && is_timeout_error(&err) => {
-                Err(request_timeout_error(timeout))
-            }
-            Ok(result) => result,
-            Err(_) => Err(request_timeout_error(timeout)),
-        }
-    } else {
-        resolve.await
-    }
-}
-
-fn request_timeout_error(timeout: Duration) -> FetchError {
-    FetchError::Runtime(format!(
-        "request timed out after {}",
-        crate::http::format_go_duration(timeout)
-    ))
-}
-
-fn is_timeout_error(err: &FetchError) -> bool {
-    match err {
-        FetchError::Runtime(message) => message.contains("timed out"),
-        FetchError::Reqwest(err) => err.is_timeout(),
-        _ => false,
-    }
+    TimeoutBudget::new(timeout).run(resolve).await
 }
 
 async fn resolve_dns_for_client_inner(

@@ -11,6 +11,7 @@ use crate::cli::Cli;
 use crate::core::{self, Printer, Sequence};
 use crate::dns::util::{dns_query_id, udp_dns_timeout};
 use crate::dns::wire;
+use crate::duration::{TimeoutBudget, duration_from_seconds};
 use crate::error::{FetchError, write_error_with_color, write_warning_with_color};
 
 const DNS_TYPE_A: u16 = wire::TYPE_A;
@@ -114,25 +115,17 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     let timeout = cli
         .timeout
-        .map(|seconds| crate::http::duration_from_seconds("timeout", seconds))
+        .map(|seconds| duration_from_seconds("timeout", seconds))
         .transpose()?;
     let use_color = core::color_enabled(cli.color.as_deref(), std::io::stderr().is_terminal());
-    let inspected = if let Some(timeout) = timeout {
-        match tokio::time::timeout(
+    let inspected = TimeoutBudget::new(timeout)
+        .run(inspect_with_color(
+            &url,
+            cli.dns_server.as_deref(),
+            use_color,
             timeout,
-            inspect_with_color(&url, cli.dns_server.as_deref(), use_color, Some(timeout)),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(FetchError::Message(format!(
-                "request timed out after {}",
-                format_timeout(timeout)
-            ))),
-        }
-    } else {
-        inspect_with_color(&url, cli.dns_server.as_deref(), use_color, None).await
-    };
+        ))
+        .await;
 
     match inspected {
         Ok(output) => {
@@ -650,18 +643,6 @@ fn format_duration(duration: Duration) -> String {
         ((nanos + 50_000) / 100_000) * 100_000
     };
     format_go_duration_nanos(rounded)
-}
-
-fn format_timeout(timeout: Duration) -> String {
-    let seconds = timeout.as_secs_f64();
-    if timeout.subsec_nanos() == 0 {
-        format!("{}s", timeout.as_secs())
-    } else {
-        format!("{seconds:.3}s")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
-    }
 }
 
 fn format_go_duration_nanos(nanos: u128) -> String {

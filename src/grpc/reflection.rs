@@ -7,6 +7,7 @@ use url::Url;
 
 use crate::cli::Cli;
 use crate::core;
+use crate::duration::duration_from_seconds;
 use crate::error::FetchError;
 use crate::grpc::encoding::{self, MessageEncoding};
 use crate::grpc::framing;
@@ -33,11 +34,11 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
     let request_start = Instant::now();
     let request_timeout = cli
         .timeout
-        .map(|seconds| crate::http::duration_from_seconds("timeout", seconds))
+        .map(|seconds| duration_from_seconds("timeout", seconds))
         .transpose()?;
     let connect_timeout = cli
         .connect_timeout
-        .map(|seconds| crate::http::duration_from_seconds("connect-timeout", seconds))
+        .map(|seconds| duration_from_seconds("connect-timeout", seconds))
         .transpose()?;
     crate::tls::install_default_crypto_provider();
     let connect_timing = crate::http::client::ConnectionTiming::default();
