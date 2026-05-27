@@ -3237,7 +3237,7 @@ fn expand_home(path: &str) -> String {
 }
 
 fn detect_body_file_content_type(path: &str) -> Result<String, FetchError> {
-    if let Some(content_type) = detect_type_by_extension(path) {
+    if let Some(content_type) = content_type::request_content_type_for_path(Path::new(path)) {
         return Ok(content_type.to_string());
     }
     Ok(sniff_content_type_like_go(&read_file_prefix(path, 512)?))
@@ -3249,86 +3249,6 @@ fn read_file_prefix(path: &str, limit: usize) -> Result<Vec<u8>, FetchError> {
     let len = file.read(&mut out)?;
     out.truncate(len);
     Ok(out)
-}
-
-fn detect_type_by_extension(path: &str) -> Option<&'static str> {
-    let ext = Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase)?;
-    match ext.as_str() {
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "png" => Some("image/png"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        "avif" => Some("image/avif"),
-        "heic" | "heif" => Some("image/heif"),
-        "jxl" => Some("image/jxl"),
-        "tif" | "tiff" => Some("image/tiff"),
-        "bmp" => Some("image/bmp"),
-        "ico" => Some("image/x-icon"),
-        "svg" => Some("image/svg+xml"),
-        "psd" => Some("image/vnd.adobe.photoshop"),
-        "raw" | "dng" | "nef" | "cr2" | "arw" => Some("image/x-raw"),
-        "mp4" => Some("video/mp4"),
-        "m4v" => Some("video/x-m4v"),
-        "webm" => Some("video/webm"),
-        "mov" => Some("video/quicktime"),
-        "mkv" => Some("video/x-matroska"),
-        "avi" => Some("video/x-msvideo"),
-        "wmv" => Some("video/x-ms-wmv"),
-        "flv" => Some("video/x-flv"),
-        "mpeg" | "mpg" => Some("video/mpeg"),
-        "ogv" => Some("video/ogg"),
-        "mp3" => Some("audio/mpeg"),
-        "m4a" => Some("audio/mp4"),
-        "aac" => Some("audio/aac"),
-        "wav" => Some("audio/wav"),
-        "flac" => Some("audio/flac"),
-        "ogg" => Some("audio/ogg"),
-        "opus" => Some("audio/opus"),
-        "aiff" | "aif" => Some("audio/aiff"),
-        "mid" | "midi" => Some("audio/midi"),
-        "pdf" => Some("application/pdf"),
-        "txt" => Some("text/plain; charset=utf-8"),
-        "html" | "htm" => Some("text/html; charset=utf-8"),
-        "css" => Some("text/css; charset=utf-8"),
-        "csv" => Some("text/csv; charset=utf-8"),
-        "json" => Some("application/json"),
-        "xml" => Some("application/xml"),
-        "yaml" | "yml" => Some("application/yaml"),
-        "md" => Some("text/markdown; charset=utf-8"),
-        "rtf" => Some("application/rtf"),
-        "doc" => Some("application/msword"),
-        "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
-        "xls" => Some("application/vnd.ms-excel"),
-        "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-        "ppt" => Some("application/vnd.ms-powerpoint"),
-        "pptx" => Some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
-        "woff" => Some("font/woff"),
-        "woff2" => Some("font/woff2"),
-        "ttf" => Some("font/ttf"),
-        "otf" => Some("font/otf"),
-        "eot" => Some("application/vnd.ms-fontobject"),
-        "zip" => Some("application/zip"),
-        "tar" => Some("application/x-tar"),
-        "gz" | "tgz" => Some("application/gzip"),
-        "bz2" => Some("application/x-bzip2"),
-        "xz" => Some("application/x-xz"),
-        "7z" => Some("application/x-7z-compressed"),
-        "rar" => Some("application/vnd.rar"),
-        "exe" => Some("application/vnd.microsoft.portable-executable"),
-        "msi" => Some("application/x-msi"),
-        "deb" => Some("application/vnd.debian.binary-package"),
-        "rpm" => Some("application/x-rpm"),
-        "js" | "mjs" => Some("application/javascript"),
-        "ts" => Some("application/typescript"),
-        "go" => Some("text/x-go; charset=utf-8"),
-        "rs" => Some("text/x-rust; charset=utf-8"),
-        "py" => Some("text/x-python; charset=utf-8"),
-        "sh" => Some("application/x-sh"),
-        _ => None,
-    }
 }
 
 fn sniff_content_type_like_go(body: &[u8]) -> String {

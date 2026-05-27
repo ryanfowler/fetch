@@ -8,6 +8,8 @@ use futures_util::Stream;
 use thiserror::Error;
 use tokio::io::{AsyncRead, ReadBuf};
 
+use crate::format::content_type;
+
 #[derive(Debug, Error)]
 pub enum MultipartError {
     #[error("file does not exist: '{0}'")]
@@ -196,43 +198,13 @@ fn validate_multipart_disposition_value(
 }
 
 fn detect_content_type(path: &Path) -> Result<&'static str, MultipartError> {
-    if let Some(content_type) = detect_type_by_extension(path) {
+    if let Some(content_type) = content_type::request_content_type_for_path(path) {
         return Ok(content_type);
     }
     let mut file = std::fs::File::open(path)?;
     let mut bytes = [0_u8; 512];
     let len = file.read(&mut bytes)?;
     Ok(sniff_content_type(&bytes[..len]))
-}
-
-fn detect_type_by_extension(path: &Path) -> Option<&'static str> {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("jpg" | "jpeg") => Some("image/jpeg"),
-        Some("png") => Some("image/png"),
-        Some("gif") => Some("image/gif"),
-        Some("webp") => Some("image/webp"),
-        Some("avif") => Some("image/avif"),
-        Some("heic" | "heif") => Some("image/heif"),
-        Some("jxl") => Some("image/jxl"),
-        Some("tif" | "tiff") => Some("image/tiff"),
-        Some("bmp") => Some("image/bmp"),
-        Some("ico") => Some("image/x-icon"),
-        Some("svg") => Some("image/svg+xml"),
-        Some("pdf") => Some("application/pdf"),
-        Some("json") => Some("application/json"),
-        Some("xml") => Some("application/xml"),
-        Some("yaml" | "yml") => Some("application/yaml"),
-        Some("html" | "htm") => Some("text/html; charset=utf-8"),
-        Some("css") => Some("text/css; charset=utf-8"),
-        Some("csv") => Some("text/csv; charset=utf-8"),
-        Some("txt" | "text") => Some("text/plain; charset=utf-8"),
-        _ => None,
-    }
 }
 
 fn sniff_content_type(bytes: &[u8]) -> &'static str {

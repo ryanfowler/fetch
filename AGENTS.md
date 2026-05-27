@@ -132,7 +132,7 @@ Rust request uploads use a replayable body descriptor instead of a universal `Ve
 
 ### Content Type Detection
 
-`src/format/content_type.rs` maps MIME types to formatters. Supported types include JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, gRPC, SSE, NDJSON, Markdown, and images.
+`src/format/content_type.rs` centralizes MIME policy, mapping MIME types to response formatter kinds, preferred file extensions, and request-body default Content-Types for `@file` and multipart file parts. Supported formatter types include JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, gRPC, SSE, NDJSON, Markdown, and images.
 
 ## Testing
 
