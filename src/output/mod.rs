@@ -580,7 +580,9 @@ fn parse_content_disposition_filename(value: &str) -> Option<String> {
     let mut filename_star = None;
 
     for part in split_parameters(value).into_iter().skip(1) {
-        let (key, raw_value) = part.split_once('=')?;
+        let Some((key, raw_value)) = part.split_once('=') else {
+            continue;
+        };
         let key = key.trim();
         let value = parse_parameter_value(raw_value.trim());
         if key.eq_ignore_ascii_case("filename") {
@@ -879,6 +881,14 @@ mod tests {
                 r#"attachment; filename="legacy.txt"; filename*=UTF-8''extended.txt"#
             ),
             Some("extended.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn content_disposition_filename_skips_malformed_parameters() {
+        assert_eq!(
+            parse_content_disposition_filename(r#"attachment; bad-param; filename="ok.txt""#),
+            Some("ok.txt".to_string())
         );
     }
 

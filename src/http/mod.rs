@@ -1819,15 +1819,10 @@ async fn apply_digest_challenge(
 
     if response_body_exceeds_discard_bound(&response) {
         drain_response_body_bounded_mut(&mut response).await;
-        if digest_drop_before_retry_after_large_drain(&response) {
-            drop(response);
-            retry_request.send().await.map_err(Into::into)
-        } else {
-            let retry_response: Result<Response, FetchError> =
-                retry_request.send().await.map_err(Into::into);
-            drop(response);
-            retry_response
-        }
+        let retry_response: Result<Response, FetchError> =
+            retry_request.send().await.map_err(Into::into);
+        drop(response);
+        retry_response
     } else if digest_retry_before_drain(&response) {
         let retry_response: Result<Response, FetchError> =
             retry_request.send().await.map_err(Into::into);
@@ -1847,19 +1842,6 @@ fn digest_challenge_error(err: digest::DigestError) -> FetchError {
         digest::DigestError::NotDigest | digest::DigestError::MissingRequiredParameter => "invalid",
     };
     FetchError::Runtime(format!("{prefix} digest authentication challenge: {err}"))
-}
-
-fn digest_drop_before_retry_after_large_drain(response: &Response) -> bool {
-    #[cfg(windows)]
-    {
-        response_connection_close(response)
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = response;
-        false
-    }
 }
 
 fn digest_retry_before_drain(response: &Response) -> bool {
