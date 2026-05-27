@@ -656,6 +656,8 @@ fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
         Some("copy")
     } else if cli.discard {
         Some("discard")
+    } else if cli.digest.is_some() {
+        Some("digest")
     } else if cli.edit {
         Some("edit")
     } else if !cli.form.is_empty() {
@@ -1232,6 +1234,18 @@ mod tests {
         assert_eq!(
             err,
             "'ws://' scheme and '--copy' flag cannot be used together"
+        );
+    }
+
+    #[test]
+    fn websocket_rejects_digest_auth() {
+        let cli =
+            Cli::try_parse_from(["fetch", "wss://example.com", "--digest", "user:pass"]).unwrap();
+        let err = validate_websocket_exclusives(&cli).unwrap_err().to_string();
+
+        assert_eq!(
+            err,
+            "'wss://' scheme and '--digest' flag cannot be used together"
         );
     }
 

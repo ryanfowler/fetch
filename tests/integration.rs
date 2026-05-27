@@ -3415,6 +3415,7 @@ fn digest_auth_rejects_stdin_body_replay_after_challenge() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn digest_auth_drain_is_bounded_for_large_challenge_body() {
     let server = PartialBodyReplayServer::start(

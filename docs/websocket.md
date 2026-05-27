@@ -74,7 +74,7 @@ fetch -vv ws://echo.websocket.events -d "hello"
 
 ## Authentication
 
-All authentication options work with WebSocket connections — headers are sent during the HTTP upgrade handshake:
+Header-based authentication options work with WebSocket connections; headers are sent during the HTTP upgrade handshake. Digest authentication (`--digest`) is not supported for WebSocket requests because it requires a challenge/response retry flow before the upgrade completes.
 
 ```sh
 fetch --bearer mytoken ws://api.example.com/ws
