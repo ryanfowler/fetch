@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::grpc::encoding::{self, MessageEncoding};
 use crate::grpc::framing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,7 +14,10 @@ impl fmt::Display for GrpcFormatError {
 
 impl std::error::Error for GrpcFormatError {}
 
-pub fn format_grpc_stream(buf: &[u8]) -> Result<String, GrpcFormatError> {
+pub fn format_grpc_stream(
+    buf: &[u8],
+    message_encoding: &MessageEncoding,
+) -> Result<String, GrpcFormatError> {
     let frames = framing::read_frames(buf).map_err(|err| GrpcFormatError(err.to_string()))?;
     let mut out = String::new();
 
@@ -21,31 +25,37 @@ pub fn format_grpc_stream(buf: &[u8]) -> Result<String, GrpcFormatError> {
         if idx > 0 {
             out.push('\n');
         }
-        out.push_str(&format_grpc_frame(frame)?);
+        out.push_str(&format_grpc_frame(frame, message_encoding)?);
     }
 
     Ok(out)
 }
 
-pub fn format_grpc_frame(frame: &framing::Frame) -> Result<String, GrpcFormatError> {
-    if frame.compressed {
-        return Err(GrpcFormatError(
-            "compressed gRPC messages are not supported".to_string(),
-        ));
-    }
-    crate::format::protobuf::format_protobuf(&frame.data)
-        .map_err(|err| GrpcFormatError(err.to_string()))
+pub fn format_grpc_frame(
+    frame: &framing::Frame,
+    message_encoding: &MessageEncoding,
+) -> Result<String, GrpcFormatError> {
+    let data = encoding::decompress_frame(frame, message_encoding)
+        .map_err(|err| GrpcFormatError(err.to_string()))?;
+    crate::format::protobuf::format_protobuf(&data).map_err(|err| GrpcFormatError(err.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::grpc::framing::frame;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
 
     #[test]
     fn test_format_grpc_stream_single_frame() {
         let proto_data = append_bytes(append_varint(Vec::new(), 1, 42), 2, b"hello");
-        let output = format_grpc_stream(&frame(&proto_data, false).unwrap()).unwrap();
+        let output = format_grpc_stream(
+            &frame(&proto_data, false).unwrap(),
+            &MessageEncoding::Identity,
+        )
+        .unwrap();
         assert!(output.contains("1:"));
         assert!(output.contains("42"));
         assert!(output.contains("2:"));
@@ -63,7 +73,7 @@ mod tests {
         stream.extend_from_slice(&frame2);
         stream.extend_from_slice(&frame3);
 
-        let output = format_grpc_stream(&stream).unwrap();
+        let output = format_grpc_stream(&stream, &MessageEncoding::Identity).unwrap();
         assert!(output.contains("100"));
         assert!(output.contains("200"));
         assert!(output.contains("300"));
@@ -71,16 +81,39 @@ mod tests {
 
     #[test]
     fn test_format_grpc_stream_empty_stream_and_message() {
-        assert_eq!(format_grpc_stream(&[]).unwrap(), "");
-        assert_eq!(format_grpc_stream(&frame(&[], false).unwrap()).unwrap(), "");
+        assert_eq!(
+            format_grpc_stream(&[], &MessageEncoding::Identity).unwrap(),
+            ""
+        );
+        assert_eq!(
+            format_grpc_stream(&frame(&[], false).unwrap(), &MessageEncoding::Identity).unwrap(),
+            ""
+        );
     }
 
     #[test]
-    fn test_format_grpc_stream_compressed_frame() {
-        let err = format_grpc_stream(&frame(b"compressed payload", true).unwrap()).unwrap_err();
+    fn test_format_grpc_stream_gzip_compressed_frame() {
+        let proto_data = append_bytes(Vec::new(), 1, b"compressed payload");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&proto_data).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let out =
+            format_grpc_stream(&frame(&compressed, true).unwrap(), &MessageEncoding::Gzip).unwrap();
+
+        assert!(out.contains("\"compressed payload\""));
+    }
+
+    #[test]
+    fn test_format_grpc_stream_unsupported_compressed_frame() {
+        let err = format_grpc_stream(
+            &frame(b"compressed payload", true).unwrap(),
+            &MessageEncoding::Unsupported("br".to_string()),
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
-                .contains("compressed gRPC messages are not supported")
+                .contains("unsupported gRPC compression encoding: br")
         );
     }
 
@@ -88,7 +121,7 @@ mod tests {
     fn test_format_grpc_stream_error_mid_stream() {
         let mut stream = frame(&append_varint(Vec::new(), 1, 42), false).unwrap();
         stream.extend_from_slice(&[0x00, 0x00]);
-        assert!(format_grpc_stream(&stream).is_err());
+        assert!(format_grpc_stream(&stream, &MessageEncoding::Identity).is_err());
     }
 
     #[test]
@@ -100,7 +133,7 @@ mod tests {
         stream.extend_from_slice(&frame(&msg1, false).unwrap());
         stream.extend_from_slice(&frame(&msg2, false).unwrap());
 
-        let output = format_grpc_stream(&stream).unwrap();
+        let output = format_grpc_stream(&stream, &MessageEncoding::Identity).unwrap();
         assert!(output.contains("10"));
         assert!(output.contains("\"first\""));
         assert!(output.contains("20"));

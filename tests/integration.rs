@@ -2008,10 +2008,20 @@ fn assert_proxy_seen(seen: &mpsc::Receiver<String>, want: &str) {
 }
 
 fn grpc_frame(payload: &[u8]) -> Vec<u8> {
-    let mut out = vec![0; 5 + payload.len()];
+    grpc_frame_with_flag(payload, false)
+}
+
+fn grpc_frame_with_flag(payload: &[u8], compressed: bool) -> Vec<u8> {
+    let mut out = vec![u8::from(compressed); 5 + payload.len()];
     out[1..5].copy_from_slice(&(payload.len() as u32).to_be_bytes());
     out[5..].copy_from_slice(payload);
     out
+}
+
+fn gzip_bytes(payload: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(payload).unwrap();
+    encoder.finish().unwrap()
 }
 
 fn proto_field_string(field: u64, value: &str) -> Vec<u8> {
@@ -5767,6 +5777,7 @@ fn socks_proxy_unix_socket_timing_and_grpc_binary_cases() {
         out.extend(grpc_frame(&proto_field_string(1, "message three")));
         out
     };
+    let grpc_gzip = grpc_frame_with_flag(&gzip_bytes(&proto_field_string(1, "gzip grpc")), true);
     let binary = TestServer::start(move |req| match req.path.as_str() {
         "/proto" => {
             TestResponse::ok(proto_body.clone()).header("Content-Type", "application/protobuf")
@@ -5774,6 +5785,12 @@ fn socks_proxy_unix_socket_timing_and_grpc_binary_cases() {
         "/grpc" => {
             TestResponse::ok(grpc_body.clone()).header("Content-Type", "application/grpc+proto")
         }
+        "/grpc-gzip" => TestResponse::ok(grpc_gzip.clone())
+            .header("Content-Type", "application/grpc+proto")
+            .header("grpc-encoding", "gzip"),
+        "/grpc-br" => TestResponse::ok(grpc_frame_with_flag(b"not actually br", true))
+            .header("Content-Type", "application/grpc+proto")
+            .header("grpc-encoding", "br"),
         "/grpc-stream" => {
             TestResponse::ok(grpc_stream.clone()).header("Content-Type", "application/grpc+proto")
         }
@@ -5795,6 +5812,15 @@ fn socks_proxy_unix_socket_timing_and_grpc_binary_cases() {
     let res = run_fetch(&[&format!("{}/grpc", binary.url), "--format", "on"]);
     assert_exit(&res, 0);
     assert!(res.stdout.contains("grpc test"));
+    let res = run_fetch(&[&format!("{}/grpc-gzip", binary.url), "--format", "on"]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains("gzip grpc"));
+    let res = run_fetch(&[&format!("{}/grpc-br", binary.url), "--format", "on"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("unsupported gRPC compression encoding: br")
+    );
     let res = run_fetch(&[&format!("{}/grpc-stream", binary.url), "--format", "on"]);
     assert_exit(&res, 0);
     assert!(res.stdout.contains("message one"));
@@ -6595,6 +6621,7 @@ service StreamService {
     assert_eq!(request.method, "POST");
     assert_eq!(request.header("content-type"), "application/grpc+proto");
     assert_eq!(request.header("te"), "trailers");
+    assert_eq!(request.header("grpc-accept-encoding"), "gzip");
     assert_eq!(request.header("x-test"), "yes");
     assert!(request.header("authorization").starts_with("Basic "));
     assert_eq!(request.body, grpc_frame(&proto_field_string(1, "svc")));

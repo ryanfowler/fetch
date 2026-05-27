@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::error::FetchError;
+use crate::grpc::encoding::{self, MessageEncoding};
 use crate::grpc::framing;
 
 #[derive(Debug, Clone)]
@@ -226,13 +227,14 @@ pub(crate) fn grpc_request_body(
 pub fn format_grpc_stream_with_descriptor(
     bytes: &[u8],
     desc: &MessageDescriptor,
+    message_encoding: &MessageEncoding,
 ) -> Result<String, ProtoError> {
     let frames = framing::read_frames(bytes)
         .map_err(|err| ProtoError::Message(format!("failed to read gRPC stream: {err}")))?;
     let mut out = String::new();
     let mut wrote_any = false;
     for frame in &frames {
-        let formatted = format_grpc_frame_with_descriptor(frame, desc)?;
+        let formatted = format_grpc_frame_with_descriptor(frame, desc, message_encoding)?;
         if wrote_any && !out.ends_with('\n') {
             out.push('\n');
         }
@@ -245,13 +247,11 @@ pub fn format_grpc_stream_with_descriptor(
 pub fn format_grpc_frame_with_descriptor(
     frame: &framing::Frame,
     desc: &MessageDescriptor,
+    message_encoding: &MessageEncoding,
 ) -> Result<String, ProtoError> {
-    if frame.compressed {
-        return Err(ProtoError::Message(
-            "compressed gRPC messages are not supported".to_string(),
-        ));
-    }
-    let msg = decode_dynamic_message(frame.data.as_slice(), desc)?;
+    let data = encoding::decompress_frame(frame, message_encoding)
+        .map_err(|err| ProtoError::Message(err.to_string()))?;
+    let msg = decode_dynamic_message(data.as_slice(), desc)?;
     let mut formatted = String::from_utf8(serialize_dynamic_message_json(&msg, true)?)
         .map_err(|err| ProtoError::Message(format!("failed to format protobuf JSON: {err}")))?;
     formatted.push('\n');
@@ -756,12 +756,15 @@ pub enum ProtoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use prost_types::{
         DescriptorProto, EnumDescriptorProto, EnumValueDescriptorProto, FieldDescriptorProto,
         FileDescriptorProto, FileDescriptorSet, MessageOptions, MethodDescriptorProto,
         OneofDescriptorProto, ServiceDescriptorProto,
         field_descriptor_proto::{Label, Type},
     };
+    use std::io::Write;
     use std::path::Path;
 
     fn stream_descriptor_set() -> Vec<u8> {
@@ -1228,7 +1231,26 @@ mod tests {
             .unwrap();
         let body = framing::frame(b"\x08\x03", false).unwrap();
 
-        let out = format_grpc_stream_with_descriptor(&body, &method.output()).unwrap();
+        let out =
+            format_grpc_stream_with_descriptor(&body, &method.output(), &MessageEncoding::Identity)
+                .unwrap();
+
+        assert!(out.contains("\"count\": \"3\""));
+    }
+
+    #[test]
+    fn format_grpc_stream_with_descriptor_decodes_gzip_messages() {
+        let schema = Schema::from_descriptor_set(&stream_descriptor_set()).unwrap();
+        let method = schema
+            .find_method("streampkg.StreamService/ClientStream")
+            .unwrap();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"\x08\x03").unwrap();
+        let body = framing::frame(&encoder.finish().unwrap(), true).unwrap();
+
+        let out =
+            format_grpc_stream_with_descriptor(&body, &method.output(), &MessageEncoding::Gzip)
+                .unwrap();
 
         assert!(out.contains("\"count\": \"3\""));
     }
@@ -1242,7 +1264,9 @@ mod tests {
         let mut body = framing::frame(&[], false).unwrap();
         body.extend_from_slice(&framing::frame(b"\x08\x03", false).unwrap());
 
-        let out = format_grpc_stream_with_descriptor(&body, &method.output()).unwrap();
+        let out =
+            format_grpc_stream_with_descriptor(&body, &method.output(), &MessageEncoding::Identity)
+                .unwrap();
 
         assert_eq!(out, "{}\n{\n  \"count\": \"3\"\n}\n");
     }
