@@ -41,16 +41,21 @@ cat data.json | fetch -d @- -m POST example.com/api
 ### Content-Type Detection
 
 When using `@filename`, the Content-Type is detected from the file extension.
-Some examples are:
+Multipart file parts use the same policy. Some examples are:
 
-| Extension | Content-Type               |
-| --------- | -------------------------- |
-| `.json`   | `application/json`         |
-| `.xml`    | `application/xml`          |
-| `.html`   | `text/html`                |
-| `.txt`    | `text/plain`               |
-| `.csv`    | `text/csv`                 |
-| Unknown   | `application/octet-stream` |
+| Extension        | Content-Type                |
+| ---------------- | --------------------------- |
+| `.json`          | `application/json`          |
+| `.xml`           | `application/xml`           |
+| `.html`, `.htm`  | `text/html`                 |
+| `.txt`, `.text`  | `text/plain`                |
+| `.csv`           | `text/csv`                  |
+| `.md`            | `text/markdown`             |
+| `.ndjson`        | `application/x-ndjson`      |
+| `.msgpack`       | `application/msgpack`       |
+| `.pb`            | `application/protobuf`      |
+| Image extensions | matching `image/*` type     |
+| Unknown          | `application/octet-stream`  |
 
 Override with a header:
 
@@ -206,6 +211,7 @@ fetch -F config=@~/config.json -m POST example.com/settings
 ## Editor Integration
 
 The `-e` or `--edit` flag opens an editor to compose or modify the request body before sending.
+When the request has a recognized Content-Type, the temporary edit file uses the matching extension from the shared MIME policy.
 
 ### Basic Usage
 

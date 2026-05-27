@@ -12,6 +12,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use reqwest::header::{CONTENT_TYPE, HeaderMap};
 
 use crate::error::FetchError;
+use crate::format::content_type;
 
 use super::{RequestBody, request_body_into_bytes};
 
@@ -76,14 +77,11 @@ fn edit_bytes_with_editor(
 }
 
 fn extension_for_content_type(headers: &HeaderMap) -> &'static str {
-    match headers
+    headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-    {
-        Some("application/json") => ".json",
-        Some("application/xml") | Some("text/xml") => ".xml",
-        _ => "",
-    }
+        .and_then(|value| content_type::extension_for_content_type(Some(value)))
+        .unwrap_or("")
 }
 
 fn find_editor() -> Option<Vec<String>> {
@@ -425,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn content_type_extensions_match_go_edit_tempfile_policy() {
+    fn content_type_extensions_use_shared_mime_policy() {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         assert_eq!(extension_for_content_type(&headers), ".json");
@@ -439,6 +437,21 @@ mod tests {
         headers.insert(
             CONTENT_TYPE,
             HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        assert_eq!(extension_for_content_type(&headers), ".json");
+
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/html"));
+        assert_eq!(extension_for_content_type(&headers), ".html");
+
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/vnd.api+json"),
+        );
+        assert_eq!(extension_for_content_type(&headers), ".json");
+
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
         );
         assert_eq!(extension_for_content_type(&headers), "");
     }
