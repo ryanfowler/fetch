@@ -37,8 +37,10 @@ pub async fn lookup_udp(
     }
 
     let timeout = udp_dns_timeout(timeout);
-    let a = lookup_udp_type(server_addr, host, DNS_TYPE_A, timeout).await;
-    let aaaa = lookup_udp_type(server_addr, host, DNS_TYPE_AAAA, timeout).await;
+    let (a, aaaa) = tokio::join!(
+        lookup_udp_type(server_addr, host, DNS_TYPE_A, timeout),
+        lookup_udp_type(server_addr, host, DNS_TYPE_AAAA, timeout)
+    );
 
     let mut addrs = Vec::new();
     if let Ok(records) = &a {
@@ -292,9 +294,9 @@ fn rcode_name(status: i32) -> &'static str {
 mod tests {
     use super::*;
     use std::net::UdpSocket as StdUdpSocket;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[tokio::test]
     async fn lookup_udp_returns_a_and_aaaa() {
@@ -305,6 +307,29 @@ mod tests {
         assert_eq!(
             addrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
             ["127.0.0.1", "::1"]
+        );
+        stop();
+    }
+
+    #[tokio::test]
+    async fn lookup_udp_queries_a_and_aaaa_concurrently() {
+        let delay = Duration::from_millis(100);
+        let timeout = Duration::from_millis(700);
+        let (addr, stop) = start_delayed_udp_server(delay);
+
+        let start = Instant::now();
+        let addrs = lookup_udp(&addr, "example.com", Some(timeout))
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            addrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["127.0.0.1", "::1"]
+        );
+        assert!(
+            elapsed < Duration::from_millis(450),
+            "lookup took {elapsed:?}, expected parallel A/AAAA queries near {delay:?}"
         );
         stop();
     }
@@ -434,6 +459,73 @@ mod tests {
                     }
                 }
                 let _ = socket.send_to(&response, peer);
+            }
+        });
+
+        (addr, move || {
+            *done.lock().unwrap() = true;
+            let _ = StdUdpSocket::bind("127.0.0.1:0")
+                .unwrap()
+                .send_to(&[0], "127.0.0.1:9");
+            handle.join().unwrap();
+        })
+    }
+
+    fn start_delayed_udp_server(delay: Duration) -> (String, impl FnOnce()) {
+        let socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let addr = socket.local_addr().unwrap().to_string();
+        let done = Arc::new(Mutex::new(false));
+        let barrier = Arc::new(Barrier::new(2));
+        let thread_done = done.clone();
+        let handle = thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            loop {
+                if *thread_done.lock().unwrap() {
+                    return;
+                }
+                let Ok((n, peer)) = socket.recv_from(&mut buf) else {
+                    continue;
+                };
+                if n < 12 {
+                    continue;
+                }
+                let Ok(response_socket) = socket.try_clone() else {
+                    continue;
+                };
+                let query = buf[..n].to_vec();
+                let worker_barrier = barrier.clone();
+                thread::spawn(move || {
+                    worker_barrier.wait();
+                    thread::sleep(delay);
+
+                    let query_type = read_question_type(&query).unwrap_or_default();
+                    let question_name_end = question_end(&query).unwrap_or(12);
+                    let question_end = (question_name_end + 4).min(query.len());
+                    let mut response = Vec::new();
+                    response.extend_from_slice(&query[0..2]);
+                    let answer_count =
+                        u16::from(query_type == DNS_TYPE_A || query_type == DNS_TYPE_AAAA);
+                    response.extend_from_slice(&0x8180u16.to_be_bytes());
+                    response.extend_from_slice(&1u16.to_be_bytes());
+                    response.extend_from_slice(&answer_count.to_be_bytes());
+                    response.extend_from_slice(&0u16.to_be_bytes());
+                    response.extend_from_slice(&0u16.to_be_bytes());
+                    response.extend_from_slice(&query[12..question_end]);
+                    match query_type {
+                        DNS_TYPE_A => write_answer(&mut response, DNS_TYPE_A, 42, &[127, 0, 0, 1]),
+                        DNS_TYPE_AAAA => write_answer(
+                            &mut response,
+                            DNS_TYPE_AAAA,
+                            43,
+                            &std::net::Ipv6Addr::LOCALHOST.octets(),
+                        ),
+                        _ => {}
+                    }
+                    let _ = response_socket.send_to(&response, peer);
+                });
             }
         });
 

@@ -158,15 +158,31 @@ async fn resolve_dns_for_client(
 ) -> Result<Option<DnsResolution>, FetchError> {
     let resolve = resolve_dns_for_client_inner(cli, url, http_version, timeout);
     if let Some(timeout) = timeout {
+        let start = Instant::now();
         match tokio::time::timeout(timeout, resolve).await {
+            Ok(Err(err)) if start.elapsed() >= timeout && is_timeout_error(&err) => {
+                Err(request_timeout_error(timeout))
+            }
             Ok(result) => result,
-            Err(_) => Err(FetchError::Runtime(format!(
-                "request timed out after {}",
-                crate::http::format_go_duration(timeout)
-            ))),
+            Err(_) => Err(request_timeout_error(timeout)),
         }
     } else {
         resolve.await
+    }
+}
+
+fn request_timeout_error(timeout: Duration) -> FetchError {
+    FetchError::Runtime(format!(
+        "request timed out after {}",
+        crate::http::format_go_duration(timeout)
+    ))
+}
+
+fn is_timeout_error(err: &FetchError) -> bool {
+    match err {
+        FetchError::Runtime(message) => message.contains("timed out"),
+        FetchError::Reqwest(err) => err.is_timeout(),
+        _ => false,
     }
 }
 
