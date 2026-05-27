@@ -1,5 +1,4 @@
 use std::fmt;
-use std::io::Cursor;
 use std::io::IsTerminal;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -8,10 +7,9 @@ use std::time::Duration;
 use quinn::crypto::rustls::{HandshakeData, QuicClientConfig};
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{
     DigitallySignedStruct, ProtocolVersion, RootCertStore, SignatureScheme, SupportedCipherSuite,
-    SupportedProtocolVersion,
 };
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -343,7 +341,8 @@ fn build_client_config(
             }))
     };
 
-    if let Some((certs, key)) = client_auth(cli.cert.as_deref(), cli.key.as_deref())? {
+    if let Some((certs, key)) = super::rustls_client_auth(cli.cert.as_deref(), cli.key.as_deref())?
+    {
         builder
             .with_client_auth_cert(certs, key)
             .map_err(|err| FetchError::Message(err.to_string()))
@@ -354,44 +353,18 @@ fn build_client_config(
 
 fn inspection_protocol_versions(
     cli: &Cli,
-) -> Result<Vec<&'static SupportedProtocolVersion>, FetchError> {
-    let min_requested = cli
-        .min_tls
-        .as_deref()
-        .or(cli.tls.as_deref())
-        .map(|value| {
-            super::tls_order(
-                if cli.min_tls.is_some() {
-                    "min-tls"
-                } else {
-                    "tls"
-                },
-                value,
-            )
-        })
-        .transpose()?;
-    let max_requested = cli
-        .max_tls
-        .as_deref()
-        .map(|value| super::tls_order("max-tls", value))
-        .transpose()?;
-    let min = min_requested.unwrap_or(12);
-    let max = max_requested.unwrap_or(13);
-
-    let mut versions = Vec::new();
-    if min <= 13 && max >= 13 {
-        versions.push(&rustls::version::TLS13);
-    }
-    if min <= 12 && max >= 12 {
-        versions.push(&rustls::version::TLS12);
-    }
-    if versions.is_empty() {
-        return Err(super::unsupported_legacy_tls_versions(
-            min_requested,
-            max_requested,
-        ));
-    }
-    Ok(versions)
+) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, FetchError> {
+    let min_tls = cli.min_tls.as_deref().or(cli.tls.as_deref()).map(|value| {
+        (
+            if cli.min_tls.is_some() {
+                "min-tls"
+            } else {
+                "tls"
+            },
+            value,
+        )
+    });
+    super::rustls_protocol_versions(min_tls, cli.max_tls.as_deref())
 }
 
 fn ensure_quic_protocol_versions(cli: &Cli) -> Result<(), FetchError> {
@@ -511,7 +484,7 @@ fn load_ca_certs(paths: &[String]) -> Result<Vec<ParsedCert>, FetchError> {
     let mut certs = Vec::new();
     for path in paths {
         let data = super::read_pem_file(path)?;
-        let blocks = pem_certificates(&data).map_err(|err| {
+        let blocks = super::pem_certificates(&data).map_err(|err| {
             FetchError::Message(format!("invalid CA certificate '{path}': {err}"))
         })?;
         if blocks.is_empty() {
@@ -524,77 +497,6 @@ fn load_ca_certs(paths: &[String]) -> Result<Vec<ParsedCert>, FetchError> {
         }
     }
     Ok(certs)
-}
-
-fn client_auth(
-    cert_path: Option<&str>,
-    key_path: Option<&str>,
-) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>, FetchError> {
-    let Some(cert_path) = cert_path else {
-        return Ok(None);
-    };
-
-    let cert_data = super::read_pem_file(cert_path)?;
-    super::validate_client_cert(cert_path, &cert_data)?;
-    let certs = pem_certificates(&cert_data).map_err(|err| {
-        FetchError::Message(format!("invalid client certificate '{cert_path}': {err}"))
-    })?;
-    if certs.is_empty() {
-        return Err(format!("invalid client certificate '{cert_path}': no PEM data found").into());
-    }
-
-    let key_data = if let Some(path) = key_path {
-        let data = super::read_pem_file(path)?;
-        super::validate_client_key(path, &data)?;
-        data
-    } else {
-        cert_data.clone()
-    };
-    let key = first_private_key(&key_data)?;
-    let Some(key) = key else {
-        return if let Some(key_path) = key_path {
-            Err(format!("certificate '{cert_path}' and key '{key_path}' may not match: private key or certificate not found").into())
-        } else {
-            Err(format!("client certificate '{cert_path}' may require a private key (use --key): private key or certificate not found").into())
-        };
-    };
-
-    Ok(Some((
-        certs.into_iter().map(CertificateDer::from).collect(),
-        key,
-    )))
-}
-
-fn pem_certificates(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    let mut cursor = Cursor::new(data);
-    let mut certs = Vec::new();
-    while let Some((kind, item)) =
-        rustls::pki_types::pem::from_buf(&mut cursor).map_err(|_| "invalid PEM data".to_string())?
-    {
-        if kind == rustls::pki_types::pem::SectionKind::Certificate {
-            certs.push(item);
-        }
-    }
-    Ok(certs)
-}
-
-fn first_private_key(data: &[u8]) -> Result<Option<PrivateKeyDer<'static>>, FetchError> {
-    let mut cursor = Cursor::new(data);
-    while let Some((kind, item)) = rustls::pki_types::pem::from_buf(&mut cursor)
-        .map_err(|_| FetchError::Message("invalid PEM data".to_string()))?
-    {
-        use rustls::pki_types::pem::SectionKind;
-        let key = match kind {
-            SectionKind::PrivateKey => Some(PrivateKeyDer::Pkcs8(item.into())),
-            SectionKind::RsaPrivateKey => Some(PrivateKeyDer::Pkcs1(item.into())),
-            SectionKind::EcPrivateKey => Some(PrivateKeyDer::Sec1(item.into())),
-            _ => None,
-        };
-        if key.is_some() {
-            return Ok(key);
-        }
-    }
-    Ok(None)
 }
 
 fn alpn_protocols(http_version: Option<HttpVersion>) -> &'static [&'static str] {
@@ -1959,12 +1861,12 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     fn test_tcp_server_config() -> rustls::ServerConfig {
         crate::tls::install_default_crypto_provider();
 
-        let certs = pem_certificates(TEST_QUIC_CERT_PEM)
+        let certs = super::super::pem_certificates(TEST_QUIC_CERT_PEM)
             .unwrap()
             .into_iter()
             .map(CertificateDer::from)
             .collect();
-        let key = first_private_key(TEST_QUIC_KEY_PEM)
+        let key = super::super::first_private_key(TEST_QUIC_KEY_PEM)
             .unwrap()
             .expect("test TLS private key");
         let mut config = rustls::ServerConfig::builder()
@@ -1978,12 +1880,12 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     fn test_quic_server_config() -> quinn::ServerConfig {
         crate::tls::install_default_crypto_provider();
 
-        let certs = pem_certificates(TEST_QUIC_CERT_PEM)
+        let certs = super::super::pem_certificates(TEST_QUIC_CERT_PEM)
             .unwrap()
             .into_iter()
             .map(CertificateDer::from)
             .collect();
-        let key = first_private_key(TEST_QUIC_KEY_PEM)
+        let key = super::super::first_private_key(TEST_QUIC_KEY_PEM)
             .unwrap()
             .expect("test QUIC private key");
         let mut crypto = rustls::ServerConfig::builder()
