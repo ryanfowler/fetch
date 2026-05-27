@@ -2974,7 +2974,7 @@ pub(crate) fn apply_query(url: &mut Url, query: &[String]) {
         values
             .entry(key.trim().to_string())
             .or_default()
-            .push(val.trim().to_string());
+            .push(val.to_string());
     }
 
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
@@ -3233,7 +3233,7 @@ pub(crate) fn request_body(cli: &Cli) -> Result<RequestBody, FetchError> {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
         for raw in &cli.form {
             let (key, val) = raw.split_once('=').unwrap_or((raw, ""));
-            serializer.append_pair(key.trim(), val.trim());
+            serializer.append_pair(key.trim(), val);
         }
         return Ok(Some(RequestBodyPayload {
             source: RequestBodySource::Bytes(Bytes::from(serializer.finish().into_bytes())),
@@ -3629,12 +3629,13 @@ mod tests {
                 "z=two".to_string(),
                 "blank".to_string(),
                 "space=second value".to_string(),
+                "spaced= hello ".to_string(),
             ],
         );
 
         assert_eq!(
             url.as_str(),
-            "https://example.com/path?a=one&blank=&space=hello+world&space=second+value&z=old&z=two"
+            "https://example.com/path?a=one&blank=&space=hello+world&space=second+value&spaced=+hello+&z=old&z=two"
         );
     }
 
@@ -3764,6 +3765,19 @@ mod tests {
             .unwrap();
         assert_eq!(body.0, br#"{"ok":true}"#);
         assert_eq!(body.1.as_deref(), Some("application/json"));
+    }
+
+    #[test]
+    fn request_body_form_preserves_value_spaces_after_equals() {
+        let cli =
+            Cli::try_parse_from(["fetch", "--form", "message= hello ", "https://example.com"])
+                .unwrap();
+        let body = request_body_into_bytes(request_body(&cli).unwrap())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(body.0, b"message=+hello+");
+        assert_eq!(body.1.as_deref(), Some("application/x-www-form-urlencoded"));
     }
 
     #[test]
