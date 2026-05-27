@@ -3820,6 +3820,90 @@ fn chunked_ndjson_formats_records_split_across_chunks() {
 
 #[cfg(unix)]
 #[test]
+fn formatted_ndjson_outputs_records_before_stream_ends() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind streaming ndjson server");
+    let url = format!("http://{}", listener.local_addr().expect("local addr"));
+    let (close_tx, close_rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept streaming ndjson request");
+        let reader_stream = stream.try_clone().expect("clone streaming ndjson stream");
+        let mut reader = BufReader::new(reader_stream);
+        let _ = read_request(&mut reader).expect("read streaming ndjson request");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let first = br#"{"event":"started","n":1}
+"#;
+        write!(stream, "{:x}\r\n", first.len()).unwrap();
+        stream.write_all(first).unwrap();
+        stream.write_all(b"\r\n").unwrap();
+        stream.flush().unwrap();
+
+        let _ = close_rx.recv_timeout(Duration::from_secs(5));
+        let second = br#"{"event":"finished","n":2}
+"#;
+        write!(stream, "{:x}\r\n", second.len()).unwrap();
+        stream.write_all(second).unwrap();
+        stream.write_all(b"\r\n0\r\n\r\n").unwrap();
+        let _ = stream.flush();
+        let _ = stream.shutdown(Shutdown::Both);
+    });
+
+    let pty = open_pty(24, 80, 800, 480);
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([
+        url.as_str(),
+        "--format",
+        "on",
+        "--color",
+        "off",
+        "--pager",
+        "off",
+    ]);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+    configure_pty_child(&mut cmd, &pty.slave);
+    let mut child = cmd.spawn().expect("spawn streaming ndjson fetch under PTY");
+    drop(pty.slave);
+    let capture = start_pty_capture(&pty.master);
+
+    capture.wait_for(r#"{ "event": "started", "n": 1 }"#, Duration::from_secs(5));
+    assert!(
+        wait_child(&mut child, Duration::from_millis(100)).is_none(),
+        "fetch exited before the NDJSON stream closed; PTY output:\n{}",
+        capture.output()
+    );
+    close_tx.send(()).unwrap();
+
+    let status = wait_child(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            panic!(
+                "fetch did not exit after NDJSON stream closed; PTY output:\n{}",
+                capture.output()
+            )
+        })
+        .expect("wait streaming ndjson fetch");
+    assert!(
+        status.success(),
+        "fetch exited with {status}; PTY output:\n{}",
+        capture.output()
+    );
+    let output = capture.output();
+    assert!(output.contains(r#"{ "event": "started", "n": 1 }"#));
+    assert!(output.contains(r#"{ "event": "finished", "n": 2 }"#));
+    drop(pty.master);
+    capture.close();
+    join.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn raw_ndjson_outputs_chunks_before_stream_ends() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind streaming ndjson server");
     let url = format!("http://{}", listener.local_addr().expect("local addr"));

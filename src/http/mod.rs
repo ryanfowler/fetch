@@ -829,6 +829,29 @@ async fn finish_response(
                 code,
             ));
         }
+        if should_stream_formatted_ndjson_stdout(cli, &response_headers, stdout_is_terminal) {
+            let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
+            let streamed = stream_response_to_formatted_ndjson_stdout(
+                response,
+                response_headers.clone(),
+                compression,
+                cli.copy,
+                use_color,
+            )
+            .await?;
+            handle_optional_clipboard_outcome(cli, streamed.clipboard);
+            let body_duration =
+                body_duration_from_len(method_is_head, streamed.bytes_written, body_start);
+            print_timing(cli, response_timing, body_duration);
+
+            let code = exit_code(status.as_u16(), cli.ignore_status);
+            return Ok(check_grpc_status(
+                cli,
+                &response_headers,
+                &streamed.trailers,
+                code,
+            ));
+        }
         if should_stream_formatted_grpc_stdout(cli, &response_headers, stdout_is_terminal) {
             let streamed = stream_response_to_formatted_grpc_stdout(
                 response,
@@ -1019,6 +1042,15 @@ fn should_stream_formatted_sse_stdout(
         && format_enabled(cli.format.as_deref(), stdout_is_terminal)
 }
 
+fn should_stream_formatted_ndjson_stdout(
+    cli: &Cli,
+    headers: &HeaderMap,
+    stdout_is_terminal: bool,
+) -> bool {
+    response_header_content_type(headers) == ContentType::Ndjson
+        && format_enabled(cli.format.as_deref(), stdout_is_terminal)
+}
+
 fn should_stream_formatted_grpc_stdout(
     cli: &Cli,
     headers: &HeaderMap,
@@ -1189,6 +1221,75 @@ async fn stream_response_to_formatted_sse_stdout(
             stdout.flush().await?;
         }
     }
+}
+
+async fn stream_response_to_formatted_ndjson_stdout(
+    response: Response,
+    response_headers: HeaderMap,
+    compression: CompressionMode,
+    copy: bool,
+    use_color: bool,
+) -> Result<StreamedOutput, FetchError> {
+    let (reader, trailers) = async_response_reader(response);
+    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let mut stdout = tokio::io::stdout();
+    let mut capture = copy.then(clipboard::Capture::default);
+    let mut pending = Vec::new();
+    let mut buf = vec![0; 16 * 1024];
+    let mut bytes_read = 0i64;
+
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            if !pending.is_empty() {
+                write_formatted_ndjson_record(&mut stdout, &pending, use_color, false).await?;
+            }
+            stdout.flush().await?;
+            let clipboard = capture.map(clipboard::Capture::copy);
+            let trailers = trailers
+                .lock()
+                .map(|trailers| trailers.clone())
+                .unwrap_or_default();
+            return Ok(StreamedOutput {
+                trailers,
+                bytes_written: bytes_read,
+                clipboard,
+            });
+        }
+
+        if let Some(capture) = capture.as_mut() {
+            capture.push(&buf[..n]);
+        }
+        bytes_read = bytes_read.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
+        pending.extend_from_slice(&buf[..n]);
+        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
+            let mut record = pending.drain(..=newline).collect::<Vec<_>>();
+            record.pop();
+            write_formatted_ndjson_record(&mut stdout, &record, use_color, true).await?;
+            stdout.flush().await?;
+        }
+    }
+}
+
+async fn write_formatted_ndjson_record(
+    stdout: &mut tokio::io::Stdout,
+    record: &[u8],
+    use_color: bool,
+    terminated: bool,
+) -> Result<(), FetchError> {
+    if record.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    match json::format_json_line(record, use_color) {
+        Ok(formatted) => stdout.write_all(&formatted).await?,
+        Err(_) => {
+            stdout.write_all(record).await?;
+            if terminated {
+                stdout.write_all(b"\n").await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn stream_response_to_formatted_grpc_stdout(
@@ -3865,6 +3966,27 @@ mod tests {
 
         let cli = Cli::try_parse_from(["fetch", "--format", "off", "https://example.com"]).unwrap();
         assert!(!should_stream_formatted_sse_stdout(&cli, &headers, true));
+    }
+
+    #[test]
+    fn formatted_ndjson_uses_dedicated_streaming_path() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-ndjson"),
+        );
+
+        let cli = Cli::try_parse_from(["fetch", "https://example.com"]).unwrap();
+        assert!(!should_stream_formatted_ndjson_stdout(
+            &cli, &headers, false
+        ));
+        assert!(should_stream_formatted_ndjson_stdout(&cli, &headers, true));
+
+        let cli = Cli::try_parse_from(["fetch", "--format", "on", "https://example.com"]).unwrap();
+        assert!(should_stream_formatted_ndjson_stdout(&cli, &headers, false));
+
+        let cli = Cli::try_parse_from(["fetch", "--format", "off", "https://example.com"]).unwrap();
+        assert!(!should_stream_formatted_ndjson_stdout(&cli, &headers, true));
     }
 
     #[test]
