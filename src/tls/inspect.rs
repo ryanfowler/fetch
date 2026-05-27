@@ -104,11 +104,8 @@ async fn inspect_tcp(
     url: &Url,
     http_version: Option<HttpVersion>,
 ) -> Result<Inspection, FetchError> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| FetchError::Message("--inspect-tls requires an HTTPS URL".to_string()))?;
+    let host = tls_host(url)?;
     let port = url.port_or_known_default().unwrap_or(443);
-    let addr = format!("{host}:{port}");
 
     let ca_certs = load_ca_certs(&cli.ca_cert)?;
     let native_roots = load_native_root_certs();
@@ -120,9 +117,9 @@ async fn inspect_tcp(
         .map(|protocol| protocol.as_bytes().to_vec())
         .collect();
 
-    let server_name = ServerName::try_from(host.to_string())
+    let server_name = ServerName::try_from(host.clone())
         .map_err(|_| FetchError::Message(format!("invalid server name '{host}'")))?;
-    let stream = TcpStream::connect(addr).await?;
+    let stream = connect_tcp_host(&host, port).await?;
     let connector = TlsConnector::from(Arc::new(config));
     let stream = connector
         .connect(server_name, stream)
@@ -151,13 +148,27 @@ async fn inspect_tcp(
     })
 }
 
+async fn connect_tcp_host(host: &str, port: u16) -> Result<TcpStream, FetchError> {
+    let addrs = tokio::net::lookup_host((host, port)).await?;
+    let mut last_err = None;
+
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    Err(last_err
+        .map(FetchError::from)
+        .unwrap_or_else(|| FetchError::Message("no addresses found".to_string())))
+}
+
 async fn inspect_quic(cli: &Cli, url: &Url) -> Result<Inspection, FetchError> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| FetchError::Message("--inspect-tls requires an HTTPS URL".to_string()))?;
+    let host = tls_host(url)?;
     ensure_quic_protocol_versions(cli)?;
     let port = url.port_or_known_default().unwrap_or(443);
-    let addrs = tokio::net::lookup_host((host, port)).await?;
+    let addrs = tokio::net::lookup_host((host.as_str(), port)).await?;
 
     let ca_certs = load_ca_certs(&cli.ca_cert)?;
     let native_roots = load_native_root_certs();
@@ -175,7 +186,7 @@ async fn inspect_quic(cli: &Cli, url: &Url) -> Result<Inspection, FetchError> {
         ocsp_capture.clear();
         match inspect_quic_addr(
             addr,
-            host,
+            &host,
             quic_config.clone(),
             &trusted_roots,
             !cli.insecure,
@@ -188,6 +199,17 @@ async fn inspect_quic(cli: &Cli, url: &Url) -> Result<Inspection, FetchError> {
         }
     }
     Err(last_err.unwrap_or_else(|| FetchError::Message("no addresses found".to_string())))
+}
+
+fn tls_host(url: &Url) -> Result<String, FetchError> {
+    match url.host() {
+        Some(url::Host::Domain(host)) => Ok(host.to_string()),
+        Some(url::Host::Ipv4(host)) => Ok(host.to_string()),
+        Some(url::Host::Ipv6(host)) => Ok(host.to_string()),
+        None => Err(FetchError::Message(
+            "--inspect-tls requires an HTTPS URL".to_string(),
+        )),
+    }
 }
 
 async fn inspect_quic_addr(
@@ -1837,6 +1859,49 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     }
 
     #[tokio::test]
+    async fn inspect_tcp_supports_ipv6_loopback_literals() {
+        let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                eprintln!("skipping IPv6 loopback TLS inspection test: {err}");
+                return;
+            }
+            Err(err) => panic!("bind IPv6 TLS server: {err}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(test_tcp_server_config()));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept IPv6 TLS connection");
+            acceptor
+                .accept(stream)
+                .await
+                .expect("accept IPv6 TLS handshake");
+        });
+
+        let raw_url = format!("https://[::1]:{port}");
+        let cli = Cli::try_parse_from(["fetch", "--inspect-tls", "--insecure", &raw_url]).unwrap();
+        let url = tls_url(&raw_url).unwrap();
+
+        let inspection = tokio::time::timeout(
+            Duration::from_secs(5),
+            inspect_tcp(&cli, &url, Some(HttpVersion::Http2)),
+        )
+        .await
+        .expect("IPv6 TLS inspection timed out")
+        .unwrap();
+
+        assert!(inspection.version.is_some());
+        assert_eq!(inspection.alpn.as_deref(), Some("h2"));
+        assert!(
+            inspection
+                .chain
+                .iter()
+                .any(|cert| cert.display_name() == "quic-server")
+        );
+        assert!(server.await.is_ok());
+    }
+
+    #[tokio::test]
     async fn inspect_http3_uses_quic_and_h3_alpn() {
         let server_config = test_quic_server_config();
         let endpoint =
@@ -1873,6 +1938,25 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
                 .any(|cert| cert.display_name() == "quic-server")
         );
         assert!(server.await.is_ok());
+    }
+
+    fn test_tcp_server_config() -> rustls::ServerConfig {
+        crate::tls::install_default_crypto_provider();
+
+        let certs = pem_certificates(TEST_QUIC_CERT_PEM)
+            .unwrap()
+            .into_iter()
+            .map(CertificateDer::from)
+            .collect();
+        let key = first_private_key(TEST_QUIC_KEY_PEM)
+            .unwrap()
+            .expect("test TLS private key");
+        let mut config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap();
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        config
     }
 
     fn test_quic_server_config() -> quinn::ServerConfig {
