@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::core::{Sequence, write_styled_to_string};
+use crate::core::{Printer, Sequence};
 use crate::format::css;
 
 const BOLD: Sequence = Sequence::Bold;
@@ -293,25 +293,30 @@ struct HtmlStackEntry {
     has_block_child: bool,
 }
 
-pub fn format_html(buf: &[u8], color: bool) -> Result<Vec<u8>, HtmlError> {
-    let mut formatter = HtmlFormatter::new(buf, color);
-    formatter.format()?;
-    Ok(formatter.out.into_bytes())
+#[cfg(test)]
+pub(crate) fn format_html(buf: &[u8], color: bool) -> Result<Vec<u8>, HtmlError> {
+    let mut out = Printer::new(color);
+    format_html_to(buf, &mut out)?;
+    Ok(out.into_bytes())
 }
 
-struct HtmlFormatter<'a> {
+pub fn format_html_to(buf: &[u8], out: &mut Printer) -> Result<(), HtmlError> {
+    let mut formatter = HtmlFormatter::new(buf, out);
+    formatter.format()?;
+    Ok(())
+}
+
+struct HtmlFormatter<'a, 'out> {
     tokenizer: HtmlTokenizer<'a>,
-    color: bool,
-    out: String,
+    out: &'out mut Printer,
     stack: Vec<HtmlStackEntry>,
 }
 
-impl<'a> HtmlFormatter<'a> {
-    fn new(input: &'a [u8], color: bool) -> Self {
+impl<'a, 'out> HtmlFormatter<'a, 'out> {
+    fn new(input: &'a [u8], out: &'out mut Printer) -> Self {
         Self {
             tokenizer: HtmlTokenizer::new(input),
-            color,
-            out: String::new(),
+            out,
             stack: Vec::new(),
         }
     }
@@ -357,7 +362,7 @@ impl<'a> HtmlFormatter<'a> {
                 self.out.push('\n');
             }
             parent.has_block_child = true;
-            write_indent(&mut self.out, self.stack.len());
+            write_indent(self.out, self.stack.len());
         }
 
         self.out.push('<');
@@ -398,7 +403,7 @@ impl<'a> HtmlFormatter<'a> {
         }
 
         if entry.is_block && entry.has_block_child {
-            write_indent(&mut self.out, self.stack.len());
+            write_indent(self.out, self.stack.len());
         }
 
         self.out.push_str("</");
@@ -420,7 +425,7 @@ impl<'a> HtmlFormatter<'a> {
                 self.out.push('\n');
             }
             parent.has_block_child = true;
-            write_indent(&mut self.out, self.stack.len());
+            write_indent(self.out, self.stack.len());
         }
 
         self.out.push('<');
@@ -443,8 +448,13 @@ impl<'a> HtmlFormatter<'a> {
                 self.out.push('\n');
                 let trimmed = trim_ascii_whitespace(text);
                 if !trimmed.is_empty() {
-                    match css::format_css_indented(trimmed, self.color, self.stack.len()) {
-                        Ok(formatted) => self.out.push_str(&formatted),
+                    let mut formatted = Printer::new(self.out.use_color());
+                    match css::format_css_to_indented(trimmed, &mut formatted, self.stack.len()) {
+                        Ok(()) => self.out.push_str(
+                            &formatted
+                                .into_string()
+                                .expect("CSS formatter output is valid UTF-8"),
+                        ),
                         Err(_) => self.write_text(text),
                     }
                 }
@@ -479,7 +489,7 @@ impl<'a> HtmlFormatter<'a> {
                 self.out.push('\n');
             }
             parent.has_block_child = true;
-            write_indent(&mut self.out, self.stack.len());
+            write_indent(self.out, self.stack.len());
         }
         self.out.push_str("<!--");
         self.write_comment(comment);
@@ -499,38 +509,33 @@ impl<'a> HtmlFormatter<'a> {
     }
 
     fn write_tag_name(&mut self, name: &str) {
-        write_styled_to_string(&mut self.out, name, &[BOLD, BLUE], self.color);
+        self.out.write_styled(name, &[BOLD, BLUE]);
     }
 
     fn write_attr_name(&mut self, name: &str) {
-        write_styled_to_string(&mut self.out, name, &[CYAN], self.color);
+        self.out.write_styled(name, &[CYAN]);
     }
 
     fn write_attr_value(&mut self, value: &str) {
         let mut escaped = String::new();
         escape_html_attr_value_into(&mut escaped, value);
-        write_styled_to_string(&mut self.out, &escaped, &[GREEN], self.color);
+        self.out.write_styled(&escaped, &[GREEN]);
     }
 
     fn write_text(&mut self, text: &[u8]) {
-        write_styled_to_string(&mut self.out, &bytes_to_string(text), &[GREEN], self.color);
+        self.out.write_styled(&bytes_to_string(text), &[GREEN]);
     }
 
     fn write_doctype(&mut self, data: &str) {
-        write_styled_to_string(
-            &mut self.out,
-            &format!("DOCTYPE {data}"),
-            &[CYAN],
-            self.color,
-        );
+        self.out.write_styled(&format!("DOCTYPE {data}"), &[CYAN]);
     }
 
     fn write_comment(&mut self, comment: &str) {
-        write_styled_to_string(&mut self.out, comment, &[DIM], self.color);
+        self.out.write_styled(comment, &[DIM]);
     }
 }
 
-fn write_indent(out: &mut String, level: usize) {
+fn write_indent(out: &mut Printer, level: usize) {
     for _ in 0..level {
         out.push_str("  ");
     }

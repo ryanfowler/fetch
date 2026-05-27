@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::core::Sequence;
+use crate::core::{Printer, Sequence};
 
 const BOLD: Sequence = Sequence::Bold;
 const DIM: Sequence = Sequence::Dim;
@@ -28,7 +28,14 @@ impl ProgressPrinter {
         }
     }
 
-    pub fn stderr(use_color: bool) -> Self {
+    pub fn stderr(color_setting: Option<&str>) -> Self {
+        Self::new(
+            std::io::stderr(),
+            crate::core::stdio().stderr_color(color_setting),
+        )
+    }
+
+    pub fn stderr_with_color(use_color: bool) -> Self {
         Self::new(std::io::stderr(), use_color)
     }
 
@@ -40,8 +47,15 @@ impl ProgressPrinter {
         let _ = writer.flush();
     }
 
-    fn use_color(&self) -> bool {
-        self.use_color
+    fn output_printer(&self) -> Printer {
+        Printer::new(self.use_color)
+    }
+
+    fn render_printer(&self, printer: Printer) {
+        let output = printer
+            .into_string()
+            .expect("progress output is valid UTF-8");
+        self.render(&output);
     }
 
     #[cfg(test)]
@@ -96,31 +110,25 @@ pub fn write_final_progress(
     to_clear: i32,
     path: &str,
 ) {
-    let mut out = String::new();
+    let mut out = printer.output_printer();
     if to_clear >= 0 {
         out.push('\r');
     }
 
     out.push_str("Downloaded ");
-    set(&mut out, BOLD, printer.use_color());
-    out.push_str(&format_size(bytes_read));
-    reset(&mut out, printer.use_color());
+    out.write_styled(&format_size(bytes_read), &[BOLD]);
     out.push_str(" in ");
-    set(&mut out, ITALIC, printer.use_color());
-    out.push_str(&format_progress_duration(duration));
-    reset(&mut out, printer.use_color());
+    out.write_styled(&format_progress_duration(duration), &[ITALIC]);
 
     out.push_str(" to '");
-    set(&mut out, DIM, printer.use_color());
-    out.push_str(path);
-    reset(&mut out, printer.use_color());
+    out.write_styled(path, &[DIM]);
     out.push('\'');
 
     let padding = (to_clear - path.len() as i32).max(0) as usize;
-    out.extend(std::iter::repeat_n(' ', padding));
+    push_repeat(&mut out, ' ', padding);
     out.push('\n');
 
-    printer.render(&out);
+    printer.render_printer(out);
 }
 
 pub fn emit_native_progress(printer: &ProgressPrinter, state: i32, percent: i64) {
@@ -401,36 +409,37 @@ fn render_bar(
         callback(percentage);
     }
 
-    let mut out = String::new();
+    let mut out = printer.output_printer();
     out.push('\r');
 
-    set(&mut out, BOLD, printer.use_color());
+    out.set(BOLD);
     out.push('[');
-    set(&mut out, GREEN, printer.use_color());
-    out.extend(std::iter::repeat_n('=', completed_width));
-    reset(&mut out, printer.use_color());
-    out.extend(std::iter::repeat_n(
+    out.set(GREEN);
+    push_repeat(&mut out, '=', completed_width);
+    out.reset();
+    push_repeat(
+        &mut out,
         ' ',
         (BAR_WIDTH as usize).saturating_sub(completed_width),
-    ));
-    set(&mut out, BOLD, printer.use_color());
+    );
+    out.set(BOLD);
     out.push_str("] ");
 
     let pct = percentage.to_string();
-    out.extend(std::iter::repeat_n(' ', 3usize.saturating_sub(pct.len())));
+    push_repeat(&mut out, ' ', 3usize.saturating_sub(pct.len()));
     out.push_str(&pct);
     out.push('%');
-    reset(&mut out, printer.use_color());
+    out.reset();
 
     out.push_str(" (");
     let size = format_size(bytes_read);
-    out.extend(std::iter::repeat_n(' ', 7usize.saturating_sub(size.len())));
+    push_repeat(&mut out, ' ', 7usize.saturating_sub(size.len()));
     out.push_str(&size);
     out.push_str(" / ");
     out.push_str(&format_size(total_bytes));
     out.push(')');
 
-    printer.render(&out);
+    printer.render_printer(out);
 }
 
 fn render_spinner(printer: &ProgressPrinter, bytes_read: &AtomicI64, position: i64) {
@@ -443,38 +452,31 @@ fn render_spinner(printer: &ProgressPrinter, bytes_read: &AtomicI64, position: i
         ("<=", (WIDTH * 2 - position - 1) as usize)
     };
 
-    let mut out = String::new();
+    let mut out = printer.output_printer();
     out.push('\r');
-    set(&mut out, BOLD, printer.use_color());
+    out.set(BOLD);
     out.push('[');
-    out.extend(std::iter::repeat_n(' ', offset));
-    set(&mut out, GREEN, printer.use_color());
+    push_repeat(&mut out, ' ', offset);
+    out.set(GREEN);
     out.push_str(value);
-    reset(&mut out, printer.use_color());
-    out.extend(std::iter::repeat_n(
-        ' ',
-        (WIDTH as usize).saturating_sub(offset + 1),
-    ));
-    set(&mut out, BOLD, printer.use_color());
+    out.reset();
+    push_repeat(&mut out, ' ', (WIDTH as usize).saturating_sub(offset + 1));
+    out.set(BOLD);
     out.push(']');
-    reset(&mut out, printer.use_color());
+    out.reset();
 
     out.push(' ');
     let size = format_size(bytes_read.load(Ordering::Relaxed));
-    out.extend(std::iter::repeat_n(' ', 7usize.saturating_sub(size.len())));
+    push_repeat(&mut out, ' ', 7usize.saturating_sub(size.len()));
     out.push_str(&size);
 
-    printer.render(&out);
+    printer.render_printer(out);
 }
 
-fn set(out: &mut String, sequence: Sequence, use_color: bool) {
-    if use_color {
-        out.push_str(&sequence.ansi());
+fn push_repeat(out: &mut Printer, ch: char, count: usize) {
+    for _ in 0..count {
+        out.push(ch);
     }
-}
-
-fn reset(out: &mut String, use_color: bool) {
-    set(out, Sequence::Reset, use_color);
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::core::{Sequence, write_styled_to_string};
+use crate::core::{Printer, Sequence};
 use crate::format::{css, html, json, xml, yaml};
 
 const BOLD: Sequence = Sequence::Bold;
@@ -21,7 +21,20 @@ impl fmt::Display for MarkdownError {
 
 impl std::error::Error for MarkdownError {}
 
-pub fn format_markdown(buf: &[u8], color: bool) -> Result<Vec<u8>, MarkdownError> {
+#[cfg(test)]
+pub(crate) fn format_markdown(buf: &[u8], color: bool) -> Result<Vec<u8>, MarkdownError> {
+    let mut out = Printer::new(color);
+    format_markdown_to(buf, &mut out)?;
+    Ok(out.into_bytes())
+}
+
+pub fn format_markdown_to(buf: &[u8], out: &mut Printer) -> Result<(), MarkdownError> {
+    let rendered = render_markdown_bytes(buf, out.use_color())?;
+    out.push_str(&String::from_utf8_lossy(&rendered));
+    Ok(())
+}
+
+fn render_markdown_bytes(buf: &[u8], color: bool) -> Result<Vec<u8>, MarkdownError> {
     if buf.is_empty() {
         return Ok(Vec::new());
     }
@@ -29,7 +42,7 @@ pub fn format_markdown(buf: &[u8], color: bool) -> Result<Vec<u8>, MarkdownError
     let mut out = String::new();
     let mut rest = buf;
     if let (Some(front_matter), after_front_matter) = extract_front_matter(buf) {
-        match yaml::format_yaml(front_matter, color) {
+        match format_with_printer(color, |out| yaml::format_yaml_to(front_matter, out)) {
             Ok(mut formatted) => {
                 trim_trailing_line_ending(&mut formatted);
                 out.push_str(&String::from_utf8_lossy(&formatted));
@@ -457,7 +470,7 @@ impl Renderer {
     }
 
     fn write_styled(&self, out: &mut String, text: &str, styles: &[Sequence]) {
-        write_styled_to_string(out, text, styles, self.color);
+        write_styled(out, text, styles, self.color);
     }
 }
 
@@ -601,7 +614,13 @@ fn render_inline(input: &str, color: bool) -> String {
 }
 
 fn write_styled(out: &mut String, text: &str, styles: &[Sequence], color: bool) {
-    write_styled_to_string(out, text, styles, color);
+    let mut printer = Printer::new(color);
+    printer.write_styled(text, styles);
+    out.push_str(
+        &printer
+            .into_string()
+            .expect("markdown styled output is valid UTF-8"),
+    );
 }
 
 fn parse_link_like(input: &str, text_start: usize) -> Option<(&str, &str, usize)> {
@@ -902,13 +921,22 @@ fn has_next_nonblank(lines: &[&str], start: usize) -> bool {
 
 fn format_code_block(lang: &str, content: &[u8], color: bool) -> Option<Vec<u8>> {
     match lang.to_ascii_lowercase().as_str() {
-        "json" => json::format_json(content, color).ok(),
-        "yaml" | "yml" => yaml::format_yaml(content, color).ok(),
-        "xml" => xml::format_xml(content, color).ok(),
-        "html" => html::format_html(content, color).ok(),
-        "css" => css::format_css(content, color).ok(),
+        "json" => format_with_printer(color, |out| json::format_json_to(content, out)).ok(),
+        "yaml" | "yml" => format_with_printer(color, |out| yaml::format_yaml_to(content, out)).ok(),
+        "xml" => format_with_printer(color, |out| xml::format_xml_to(content, out)).ok(),
+        "html" => format_with_printer(color, |out| html::format_html_to(content, out)).ok(),
+        "css" => format_with_printer(color, |out| css::format_css_to(content, out)).ok(),
         _ => None,
     }
+}
+
+fn format_with_printer<E>(
+    color: bool,
+    write: impl FnOnce(&mut Printer) -> Result<(), E>,
+) -> Result<Vec<u8>, E> {
+    let mut out = Printer::new(color);
+    write(&mut out)?;
+    Ok(out.into_bytes())
 }
 
 #[cfg(test)]

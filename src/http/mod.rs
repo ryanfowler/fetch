@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::fmt;
-use std::io::{Cursor, ErrorKind, IsTerminal, Read, Write};
+use std::io::{Cursor, ErrorKind, Read, Write};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
@@ -495,13 +495,9 @@ fn url_client_endpoint(url: &Url) -> Option<(&str, &str, Option<u16>)> {
 }
 
 fn print_dns_debug(cli: &Cli, dns: &DnsTiming) {
-    eprint!(
-        "{}",
-        timing::render_dns_debug(
-            dns,
-            core::color_enabled(cli.color.as_deref(), std::io::stderr().is_terminal())
-        )
-    );
+    let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
+    timing::render_dns_debug_to(dns, &mut printer);
+    let _ = printer.flush_to(&mut std::io::stderr());
 }
 
 fn connect_debug_target(
@@ -742,6 +738,7 @@ async fn finish_response(
         output_progress_total_bytes(compression, &response_headers, response_content_length);
     let method_is_head = cli.method().eq_ignore_ascii_case("HEAD");
     let response_timing = timing.and_then(AttemptTiming::response_timing);
+    let stdio = core::stdio();
     if cli.discard {
         let body_start = Instant::now();
         let streamed =
@@ -770,13 +767,7 @@ async fn finish_response(
         let progress = if cli.silent {
             output::WriteProgress::disabled()
         } else {
-            let stderr_is_terminal = std::io::stderr().is_terminal();
-            output::WriteProgress::stdio(
-                core::color_enabled(cli.color.as_deref(), stderr_is_terminal),
-                stderr_is_terminal,
-                std::io::stdout().is_terminal(),
-                output_progress_total,
-            )
+            output::WriteProgress::stdio(cli.color.as_deref(), output_progress_total)
         };
         let body_start = Instant::now();
         let streamed = stream_response_to_output(
@@ -806,9 +797,9 @@ async fn finish_response(
         ))
     } else {
         let body_start = Instant::now();
-        let stdout_is_terminal = std::io::stdout().is_terminal();
+        let stdout_is_terminal = stdio.stdout_is_terminal();
         if should_stream_formatted_sse_stdout(cli, &response_headers, stdout_is_terminal) {
-            let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
+            let use_color = stdio.stdout_color(cli.color.as_deref());
             let streamed = stream_response_to_formatted_sse_stdout(
                 response,
                 response_headers.clone(),
@@ -831,7 +822,7 @@ async fn finish_response(
             ));
         }
         if should_stream_formatted_ndjson_stdout(cli, &response_headers, stdout_is_terminal) {
-            let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
+            let use_color = stdio.stdout_color(cli.color.as_deref());
             let streamed = stream_response_to_formatted_ndjson_stdout(
                 response,
                 response_headers.clone(),
@@ -927,7 +918,7 @@ struct StdoutBody {
 }
 
 fn write_stdout_bytes(cli: &Cli, body: &StdoutBody) -> Result<(), FetchError> {
-    let stdout_is_terminal = std::io::stdout().is_terminal();
+    let stdout_is_terminal = core::stdio().stdout_is_terminal();
     if should_warn_for_terminal_binary_stdout(cli, &body.bytes, stdout_is_terminal) {
         write_warning(cli, BINARY_RESPONSE_WARNING);
         return Ok(());
@@ -999,7 +990,7 @@ fn stdout_stream_target(
     headers: &HeaderMap,
     stdout_is_terminal: bool,
 ) -> Option<StdoutStreamTarget> {
-    if format_enabled(cli.format.as_deref(), stdout_is_terminal) {
+    if core::format_enabled(cli.format.as_deref(), stdout_is_terminal) {
         return None;
     }
 
@@ -1040,7 +1031,7 @@ fn should_stream_formatted_sse_stdout(
     stdout_is_terminal: bool,
 ) -> bool {
     response_header_content_type(headers) == ContentType::Sse
-        && format_enabled(cli.format.as_deref(), stdout_is_terminal)
+        && core::format_enabled(cli.format.as_deref(), stdout_is_terminal)
 }
 
 fn should_stream_formatted_ndjson_stdout(
@@ -1049,7 +1040,7 @@ fn should_stream_formatted_ndjson_stdout(
     stdout_is_terminal: bool,
 ) -> bool {
     response_header_content_type(headers) == ContentType::Ndjson
-        && format_enabled(cli.format.as_deref(), stdout_is_terminal)
+        && core::format_enabled(cli.format.as_deref(), stdout_is_terminal)
 }
 
 fn should_stream_formatted_grpc_stdout(
@@ -1058,7 +1049,7 @@ fn should_stream_formatted_grpc_stdout(
     stdout_is_terminal: bool,
 ) -> bool {
     response_header_content_type(headers) == ContentType::Grpc
-        && format_enabled(cli.format.as_deref(), stdout_is_terminal)
+        && core::format_enabled(cli.format.as_deref(), stdout_is_terminal)
 }
 
 fn should_retry_sse_without_compression(response: &Response, compression: CompressionMode) -> bool {
@@ -1182,7 +1173,7 @@ async fn stream_response_to_formatted_sse_stdout(
     let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
     let mut stdout = tokio::io::stdout();
     let mut capture = copy.then(clipboard::Capture::default);
-    let mut formatter = sse::EventStreamFormatter::new(use_color);
+    let mut formatter = sse::EventStreamFormatter::new();
     let mut pending = Vec::new();
     let mut buf = vec![0; 16 * 1024];
     let mut bytes_read = 0i64;
@@ -1190,8 +1181,8 @@ async fn stream_response_to_formatted_sse_stdout(
     loop {
         let n = reader.read(&mut buf).await?;
         if n == 0 {
-            let formatted =
-                finish_sse_stream_formatter(&mut pending, &mut formatter).map_err(|err| {
+            let formatted = finish_sse_stream_formatter(&mut pending, &mut formatter, use_color)
+                .map_err(|err| {
                     FetchError::Message(format!("invalid UTF-8 in event stream: {err}"))
                 })?;
             if !formatted.is_empty() {
@@ -1215,7 +1206,7 @@ async fn stream_response_to_formatted_sse_stdout(
         }
         bytes_read = bytes_read.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
         pending.extend_from_slice(&buf[..n]);
-        let formatted = push_sse_stream_bytes(&mut pending, &mut formatter)
+        let formatted = push_sse_stream_bytes(&mut pending, &mut formatter, use_color)
             .map_err(|err| FetchError::Message(format!("invalid UTF-8 in event stream: {err}")))?;
         if !formatted.is_empty() {
             stdout.write_all(formatted.as_bytes()).await?;
@@ -1281,8 +1272,9 @@ async fn write_formatted_ndjson_record(
     if record.iter().all(u8::is_ascii_whitespace) {
         return Ok(());
     }
-    match json::format_json_line(record, use_color) {
-        Ok(formatted) => stdout.write_all(&formatted).await?,
+    let mut formatted = core::Printer::new(use_color);
+    match json::format_json_line_to(record, &mut formatted) {
+        Ok(()) => stdout.write_all(&formatted.into_bytes()).await?,
         Err(_) => {
             stdout.write_all(record).await?;
             if terminated {
@@ -1367,19 +1359,24 @@ async fn stream_response_to_formatted_grpc_stdout(
 fn push_sse_stream_bytes(
     pending: &mut Vec<u8>,
     formatter: &mut sse::EventStreamFormatter,
+    use_color: bool,
 ) -> Result<String, std::str::Utf8Error> {
-    let mut out = String::new();
+    let mut out = core::Printer::new(use_color);
     loop {
         match std::str::from_utf8(pending) {
             Ok(input) => {
                 formatter.push_str(input, &mut out);
                 pending.clear();
-                return Ok(out);
+                return Ok(out
+                    .into_string()
+                    .expect("event stream formatter output is valid UTF-8"));
             }
             Err(err) if err.error_len().is_none() => {
                 let valid_up_to = err.valid_up_to();
                 if valid_up_to == 0 {
-                    return Ok(out);
+                    return Ok(out
+                        .into_string()
+                        .expect("event stream formatter output is valid UTF-8"));
                 }
                 let input = std::str::from_utf8(&pending[..valid_up_to])?.to_string();
                 formatter.push_str(&input, &mut out);
@@ -1393,10 +1390,15 @@ fn push_sse_stream_bytes(
 fn finish_sse_stream_formatter(
     pending: &mut Vec<u8>,
     formatter: &mut sse::EventStreamFormatter,
+    use_color: bool,
 ) -> Result<String, std::str::Utf8Error> {
-    let mut out = push_sse_stream_bytes(pending, formatter)?;
+    let mut out = core::Printer::new(use_color);
+    let chunk = push_sse_stream_bytes(pending, formatter, use_color)?;
+    out.push_str(&chunk);
     formatter.finish(&mut out);
-    Ok(out)
+    Ok(out
+        .into_string()
+        .expect("event stream formatter output is valid UTF-8"))
 }
 
 async fn stream_response_to_output(
@@ -1660,13 +1662,9 @@ fn print_timing(cli: &Cli, timing: Option<ResponseTiming>, body: Option<Duration
         return;
     };
     timing.body = body;
-    eprint!(
-        "{}",
-        timing::render_waterfall(
-            timing,
-            core::color_enabled(cli.color.as_deref(), std::io::stderr().is_terminal())
-        )
-    );
+    let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
+    timing::render_waterfall_to(timing, &mut printer);
+    let _ = printer.flush_to(&mut std::io::stderr());
 }
 
 fn build_request(
@@ -2082,12 +2080,17 @@ fn request_body_to_reqwest_body(body: RequestBodyPayload) -> Result<Body, FetchE
         }
         RequestBodySource::Stdin => Ok(Body::wrap_stream(ReaderStream::new(tokio::io::stdin()))),
         RequestBodySource::Multipart(multipart) => Ok(Body::wrap_stream(multipart.stream())),
-        RequestBodySource::GrpcJsonStream { source, desc } => {
-            let reader = request_body_source_to_async_reader(*source)?;
-            Ok(Body::wrap_stream(proto::json_reader_to_grpc_frame_stream(
-                reader, desc,
-            )))
-        }
+        RequestBodySource::GrpcJsonStream { source, desc } => match *source {
+            RequestBodySource::Stdin => Ok(Body::wrap_stream(
+                proto::stdin_json_to_grpc_frame_stream(desc),
+            )),
+            source => {
+                let reader = request_body_source_to_async_reader(source)?;
+                Ok(Body::wrap_stream(proto::json_reader_to_grpc_frame_stream(
+                    reader, desc,
+                )))
+            }
+        },
     }
 }
 
@@ -2288,7 +2291,7 @@ fn format_stdout_bytes(
     bytes: &[u8],
     grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
 ) -> Result<StdoutBody, FetchError> {
-    let stdout_is_terminal = std::io::stdout().is_terminal();
+    let stdout_is_terminal = core::stdio().stdout_is_terminal();
     let terminal_cols = if stdout_is_terminal {
         core::terminal_cols()
     } else {
@@ -2319,7 +2322,7 @@ fn format_stdout_bytes_with_terminal(
     if content_type == ContentType::Unknown {
         content_type = content_type::sniff_content_type(bytes);
     }
-    if !format_enabled(cli.format.as_deref(), stdout_is_terminal) {
+    if !core::format_enabled(cli.format.as_deref(), stdout_is_terminal) {
         return Ok(StdoutBody {
             bytes: bytes.to_vec(),
             content_type,
@@ -2330,40 +2333,64 @@ fn format_stdout_bytes_with_terminal(
     let bytes = transcode_format_bytes(bytes, &charset, content_type);
     let bytes = match content_type {
         ContentType::Json => {
-            Ok(json::format_json(&bytes, use_color).unwrap_or_else(|_| bytes.to_vec()))
-        }
-        ContentType::Ndjson => {
-            Ok(json::format_ndjson(&bytes, use_color).unwrap_or_else(|_| bytes.to_vec()))
-        }
-        ContentType::Csv => {
             Ok(
-                csv::format_csv_with_terminal_cols(&bytes, use_color, terminal_cols)
-                    .map(|formatted| formatted.into_bytes())
+                format_printer_bytes(use_color, |out| json::format_json_to(&bytes, out))
                     .unwrap_or_else(|_| bytes.to_vec()),
             )
         }
+        ContentType::Ndjson => {
+            Ok(
+                format_printer_bytes(use_color, |out| json::format_ndjson_to(&bytes, out))
+                    .unwrap_or_else(|_| bytes.to_vec()),
+            )
+        }
+        ContentType::Csv => Ok(format_printer_bytes(use_color, |out| {
+            csv::format_csv_to_with_terminal_cols(&bytes, out, terminal_cols)
+        })
+        .unwrap_or_else(|_| bytes.to_vec())),
         ContentType::Xml => {
-            Ok(xml::format_xml(&bytes, use_color).unwrap_or_else(|_| bytes.to_vec()))
+            Ok(
+                format_printer_bytes(use_color, |out| xml::format_xml_to(&bytes, out))
+                    .unwrap_or_else(|_| bytes.to_vec()),
+            )
         }
         ContentType::Yaml => {
-            Ok(yaml::format_yaml(&bytes, use_color).unwrap_or_else(|_| bytes.to_vec()))
+            Ok(
+                format_printer_bytes(use_color, |out| yaml::format_yaml_to(&bytes, out))
+                    .unwrap_or_else(|_| bytes.to_vec()),
+            )
         }
         ContentType::Css => {
-            Ok(css::format_css(&bytes, use_color).unwrap_or_else(|_| bytes.to_vec()))
+            Ok(
+                format_printer_bytes(use_color, |out| css::format_css_to(&bytes, out))
+                    .unwrap_or_else(|_| bytes.to_vec()),
+            )
         }
         ContentType::Html => {
-            Ok(html::format_html(&bytes, use_color).unwrap_or_else(|_| bytes.to_vec()))
+            Ok(
+                format_printer_bytes(use_color, |out| html::format_html_to(&bytes, out))
+                    .unwrap_or_else(|_| bytes.to_vec()),
+            )
         }
         ContentType::Markdown => {
-            Ok(markdown::format_markdown(&bytes, use_color).unwrap_or_else(|_| bytes.to_vec()))
+            Ok(
+                format_printer_bytes(use_color, |out| markdown::format_markdown_to(&bytes, out))
+                    .unwrap_or_else(|_| bytes.to_vec()),
+            )
         }
         ContentType::MsgPack => {
-            Ok(msgpack::format_msgpack(&bytes, use_color).unwrap_or_else(|_| bytes.to_vec()))
+            Ok(
+                format_printer_bytes(use_color, |out| msgpack::format_msgpack_to(&bytes, out))
+                    .unwrap_or_else(|_| bytes.to_vec()),
+            )
         }
         ContentType::Protobuf => {
             if let Some(desc) = grpc_response_desc {
                 if let Ok(json_bytes) = proto::protobuf_to_json(&bytes, &desc) {
-                    Ok(json::format_json(&json_bytes, use_color).unwrap_or(json_bytes))
+                    Ok(format_printer_bytes(use_color, |out| {
+                        json::format_json_to(&json_bytes, out)
+                    })
+                    .unwrap_or(json_bytes))
                 } else {
                     Ok(bytes.to_vec())
                 }
@@ -2398,9 +2425,10 @@ fn format_stdout_bytes_with_terminal(
                     .map_err(|err| FetchError::Message(err.to_string()))
             }
         }
-        ContentType::Sse => sse::format_event_stream(&bytes, use_color)
-            .map(|formatted| formatted.into_bytes())
-            .map_err(|err| FetchError::Message(err.to_string())),
+        ContentType::Sse => {
+            format_printer_bytes(use_color, |out| sse::format_event_stream_to(&bytes, out))
+                .map_err(|err| FetchError::Message(err.to_string()))
+        }
         _ => Ok(bytes.to_vec()),
     }?;
     Ok(StdoutBody {
@@ -2409,13 +2437,13 @@ fn format_stdout_bytes_with_terminal(
     })
 }
 
-fn format_enabled(setting: Option<&str>, stdout_is_terminal: bool) -> bool {
-    match setting {
-        Some("on") => true,
-        Some("off") => false,
-        Some("auto") | None => stdout_is_terminal,
-        Some(_) => false,
-    }
+fn format_printer_bytes<E>(
+    use_color: bool,
+    write: impl FnOnce(&mut core::Printer) -> Result<(), E>,
+) -> Result<Vec<u8>, E> {
+    let mut out = core::Printer::new(use_color);
+    write(&mut out)?;
+    Ok(out.into_bytes())
 }
 
 fn transcode_format_bytes(bytes: &[u8], charset: &str, content_type: ContentType) -> Vec<u8> {

@@ -452,16 +452,17 @@ impl InteractiveMode {
     }
 
     pub fn format_message(&self, data: &[u8]) -> Result<String, FetchError> {
-        if self.format_json
-            && serde_json::from_slice::<serde_json::Value>(data).is_ok()
-            && let Ok(formatted) = json::format_json_line(data, self.color_json)
-        {
-            let text = String::from_utf8_lossy(&formatted);
-            return Ok(if self.color_json {
-                text.trim_end_matches('\n').to_string()
-            } else {
-                sanitize_message_text(text.trim_end_matches('\n'))
-            });
+        if self.format_json && serde_json::from_slice::<serde_json::Value>(data).is_ok() {
+            let mut formatted = crate::core::Printer::new(self.color_json);
+            if json::format_json_line_to(data, &mut formatted).is_ok() {
+                let formatted = formatted.into_bytes();
+                let text = String::from_utf8_lossy(&formatted);
+                return Ok(if self.color_json {
+                    text.trim_end_matches('\n').to_string()
+                } else {
+                    sanitize_message_text(text.trim_end_matches('\n'))
+                });
+            }
         }
         Ok(sanitize_message_text(&String::from_utf8_lossy(data)))
     }

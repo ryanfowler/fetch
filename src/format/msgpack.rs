@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 
 use base64::Engine;
 
+use crate::core::Printer;
 use crate::format::json;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,9 +23,16 @@ impl fmt::Display for MsgPackError {
 
 impl std::error::Error for MsgPackError {}
 
-pub fn format_msgpack(buf: &[u8], color: bool) -> Result<Vec<u8>, MsgPackError> {
+#[cfg(test)]
+pub(crate) fn format_msgpack(buf: &[u8], color: bool) -> Result<Vec<u8>, MsgPackError> {
+    let mut out = Printer::new(color);
+    format_msgpack_to(buf, &mut out)?;
+    Ok(out.into_bytes())
+}
+
+pub fn format_msgpack_to(buf: &[u8], out: &mut Printer) -> Result<(), MsgPackError> {
     let json_bytes = msgpack_to_json(buf)?;
-    json::format_json(json_bytes.as_bytes(), color)
+    json::format_json_to(json_bytes.as_bytes(), out)
         .map_err(|err| MsgPackError::new(err.to_string()))
 }
 

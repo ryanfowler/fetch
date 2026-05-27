@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::core::{Sequence, write_styled_to_string};
+use crate::core::{Printer, Sequence};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsvError(String);
@@ -13,41 +13,59 @@ impl fmt::Display for CsvError {
 
 impl std::error::Error for CsvError {}
 
-pub fn format_csv(buf: &[u8], color: bool) -> Result<Vec<u8>, CsvError> {
-    let output = format_csv_with_terminal_cols(buf, color, 0)?;
-    Ok(output.into_bytes())
+#[cfg(test)]
+pub(crate) fn format_csv(buf: &[u8], color: bool) -> Result<Vec<u8>, CsvError> {
+    let mut out = Printer::new(color);
+    format_csv_to_with_terminal_cols(buf, &mut out, 0)?;
+    Ok(out.into_bytes())
 }
 
+#[cfg(test)]
 pub(crate) fn format_csv_with_terminal_cols(
     buf: &[u8],
     color: bool,
     terminal_columns: usize,
 ) -> Result<String, CsvError> {
+    let mut out = Printer::new(color);
+    format_csv_to_with_terminal_cols(buf, &mut out, terminal_columns)?;
+    out.into_string()
+        .map_err(|err| CsvError(format!("invalid UTF-8 output: {err}")))
+}
+
+pub fn format_csv_to(buf: &[u8], out: &mut Printer) -> Result<(), CsvError> {
+    format_csv_to_with_terminal_cols(buf, out, 0)
+}
+
+pub(crate) fn format_csv_to_with_terminal_cols(
+    buf: &[u8],
+    out: &mut Printer,
+    terminal_columns: usize,
+) -> Result<(), CsvError> {
     if buf.is_empty() {
-        return Ok(String::new());
+        return Ok(());
     }
 
     let delimiter = detect_delimiter(buf);
     let records = parse_records(&String::from_utf8_lossy(buf), delimiter);
     if records.is_empty() {
-        return Ok(String::new());
+        return Ok(());
     }
 
     let column_widths = calculate_column_widths(&records);
     let total_width = calculate_total_width(&column_widths);
     if terminal_columns > 0 && total_width > terminal_columns && records.len() > 1 {
-        return Ok(write_vertical(&records, color));
+        write_vertical_to(out, &records);
+        return Ok(());
     }
 
-    let mut out = String::new();
     for (index, row) in records.iter().enumerate() {
         if index > 0 {
             out.push('\n');
         }
-        write_row(&mut out, row, &column_widths, index == 0, color);
+        write_row(out, row, &column_widths, index == 0);
     }
     out.push('\n');
-    Ok(out)
+    Ok(())
 }
 
 fn parse_records(input: &str, delimiter: char) -> Vec<Vec<String>> {
@@ -149,22 +167,16 @@ fn calculate_total_width(column_widths: &[usize]) -> usize {
     }
 }
 
-fn write_row(
-    out: &mut String,
-    row: &[String],
-    column_widths: &[usize],
-    is_header: bool,
-    color: bool,
-) {
+fn write_row(out: &mut Printer, row: &[String], column_widths: &[usize], is_header: bool) {
     for (index, cell) in row.iter().enumerate() {
         if index > 0 {
             out.push_str("  ");
         }
 
         if is_header {
-            write_styled(out, cell, &[Sequence::Blue, Sequence::Bold], color);
+            out.write_styled(cell, &[Sequence::Blue, Sequence::Bold]);
         } else {
-            write_styled(out, cell, &[Sequence::Green], color);
+            out.write_styled(cell, &[Sequence::Green]);
         }
 
         if index < column_widths.len() - 1 {
@@ -176,7 +188,7 @@ fn write_row(
     }
 }
 
-fn write_vertical(records: &[Vec<String>], color: bool) -> String {
+fn write_vertical_to(out: &mut Printer, records: &[Vec<String>]) {
     let headers = records.first().map(Vec::as_slice).unwrap_or(&[]);
     let max_header_width = headers
         .iter()
@@ -184,17 +196,14 @@ fn write_vertical(records: &[Vec<String>], color: bool) -> String {
         .max()
         .unwrap_or(0);
 
-    let mut out = String::new();
     for (row_index, row) in records.iter().skip(1).enumerate() {
         if row_index > 0 {
             out.push('\n');
         }
 
-        write_styled(
-            &mut out,
+        out.write_styled(
             &format!("--- Row {} ---\n", row_index + 1),
             &[Sequence::Dim],
-            color,
         );
 
         for (column_index, cell) in row.iter().enumerate() {
@@ -203,18 +212,20 @@ fn write_vertical(records: &[Vec<String>], color: bool) -> String {
             for _ in 0..padding {
                 out.push(' ');
             }
-            write_styled(&mut out, header, &[Sequence::Blue, Sequence::Bold], color);
+            out.write_styled(header, &[Sequence::Blue, Sequence::Bold]);
             out.push_str(": ");
-            write_styled(&mut out, cell, &[Sequence::Green], color);
+            out.write_styled(cell, &[Sequence::Green]);
             out.push('\n');
         }
     }
-
-    out
 }
 
-fn write_styled(out: &mut String, value: &str, styles: &[Sequence], color: bool) {
-    write_styled_to_string(out, value, styles, color);
+#[cfg(test)]
+fn write_vertical(records: &[Vec<String>], color: bool) -> String {
+    let mut out = Printer::new(color);
+    write_vertical_to(&mut out, records);
+    out.into_string()
+        .expect("CSV formatter output is valid UTF-8")
 }
 
 fn display_width(value: &str) -> usize {

@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io::IsTerminal;
+use std::sync::OnceLock;
 
 pub const DEFAULT_ACCEPT_HEADER: &str = "application/json, */*;q=0.5";
 
@@ -11,12 +12,50 @@ pub enum Color {
     Off,
 }
 
+impl Color {
+    pub fn from_setting(setting: Option<&str>) -> Self {
+        match setting {
+            Some("on") => Self::On,
+            Some("off") => Self::Off,
+            Some("auto") | None => Self::Auto,
+            Some(_) => Self::Unknown,
+        }
+    }
+
+    pub fn enabled(self, is_terminal: bool) -> bool {
+        match self {
+            Self::On => true,
+            Self::Off => false,
+            Self::Auto | Self::Unknown => is_terminal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     Unknown,
     Auto,
     Off,
     On,
+}
+
+impl Format {
+    pub fn from_setting(setting: Option<&str>) -> Self {
+        match setting {
+            Some("on") => Self::On,
+            Some("off") => Self::Off,
+            Some("auto") | None => Self::Auto,
+            Some(_) => Self::Unknown,
+        }
+    }
+
+    pub fn enabled(self, is_terminal: bool) -> bool {
+        match self {
+            Self::On => true,
+            Self::Off => false,
+            Self::Auto | Self::Unknown => is_terminal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,17 +115,84 @@ pub struct TerminalSize {
     pub height_px: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stdio {
+    stdin_is_terminal: bool,
+    stderr_is_terminal: bool,
+    stdout_is_terminal: bool,
+}
+
+impl Stdio {
+    fn new(stdin_is_terminal: bool, stderr_is_terminal: bool, stdout_is_terminal: bool) -> Self {
+        Self {
+            stdin_is_terminal,
+            stderr_is_terminal,
+            stdout_is_terminal,
+        }
+    }
+
+    fn detect() -> Self {
+        Self::new(
+            std::io::stdin().is_terminal(),
+            std::io::stderr().is_terminal(),
+            std::io::stdout().is_terminal(),
+        )
+    }
+
+    pub fn stdin_is_terminal(self) -> bool {
+        self.stdin_is_terminal
+    }
+
+    pub fn stderr_is_terminal(self) -> bool {
+        self.stderr_is_terminal
+    }
+
+    pub fn stdout_is_terminal(self) -> bool {
+        self.stdout_is_terminal
+    }
+
+    pub fn all_terminal(self) -> bool {
+        self.stdin_is_terminal && self.stderr_is_terminal && self.stdout_is_terminal
+    }
+
+    pub fn stderr_color(self, setting: Option<&str>) -> bool {
+        color_enabled(setting, self.stderr_is_terminal)
+    }
+
+    pub fn stdout_color(self, setting: Option<&str>) -> bool {
+        color_enabled(setting, self.stdout_is_terminal)
+    }
+
+    pub fn stderr_printer(self, setting: Option<&str>) -> Printer {
+        Printer::with_color_setting(setting, self.stderr_is_terminal)
+    }
+
+    pub fn stdout_printer(self, setting: Option<&str>) -> Printer {
+        Printer::with_color_setting(setting, self.stdout_is_terminal)
+    }
+
+    pub fn printer_handle(self, setting: Option<&str>) -> PrinterHandle {
+        PrinterHandle::new(setting, self.stderr_is_terminal, self.stdout_is_terminal)
+    }
+}
+
+static STDIO: OnceLock<Stdio> = OnceLock::new();
+
+pub fn stdio() -> Stdio {
+    *STDIO.get_or_init(Stdio::detect)
+}
+
 pub fn cut_trimmed<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
     let (key, val) = s.split_once(sep)?;
     Some((key.trim(), val.trim()))
 }
 
 pub fn color_enabled(setting: Option<&str>, is_terminal: bool) -> bool {
-    match setting {
-        Some("on") => true,
-        Some("off") => false,
-        _ => is_terminal,
-    }
+    Color::from_setting(setting).enabled(is_terminal)
+}
+
+pub fn format_enabled(setting: Option<&str>, is_terminal: bool) -> bool {
+    Format::from_setting(setting).enabled(is_terminal)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,11 +257,11 @@ impl Printer {
     }
 
     pub fn stderr(setting: Option<&str>) -> Self {
-        Self::with_color_setting(setting, std::io::stderr().is_terminal())
+        stdio().stderr_printer(setting)
     }
 
     pub fn stdout(setting: Option<&str>) -> Self {
-        Self::with_color_setting(setting, std::io::stdout().is_terminal())
+        stdio().stdout_printer(setting)
     }
 
     pub fn use_color(&self) -> bool {
@@ -277,6 +383,10 @@ pub struct PrinterHandle {
 }
 
 impl PrinterHandle {
+    pub fn stdio(color_setting: Option<&str>) -> Self {
+        stdio().printer_handle(color_setting)
+    }
+
     pub fn new(
         color_setting: Option<&str>,
         stderr_is_terminal: bool,
@@ -294,18 +404,6 @@ impl PrinterHandle {
 
     pub fn stdout(&mut self) -> &mut Printer {
         &mut self.stdout
-    }
-}
-
-pub fn write_styled_to_string(out: &mut String, value: &str, styles: &[Sequence], use_color: bool) {
-    if use_color {
-        for style in styles {
-            out.push_str(&style.ansi());
-        }
-        out.push_str(value);
-        out.push_str(&Sequence::Reset.ansi());
-    } else {
-        out.push_str(value);
     }
 }
 
@@ -382,6 +480,35 @@ mod tests {
         assert!(!color_enabled(None, false));
         assert!(color_enabled(Some("auto"), true));
         assert!(!color_enabled(Some("auto"), false));
+    }
+
+    #[test]
+    fn format_enabled_matches_go_auto_policy() {
+        assert!(format_enabled(Some("on"), false));
+        assert!(format_enabled(Some("on"), true));
+        assert!(!format_enabled(Some("off"), true));
+        assert!(!format_enabled(Some("off"), false));
+        assert!(format_enabled(None, true));
+        assert!(!format_enabled(None, false));
+        assert!(format_enabled(Some("auto"), true));
+        assert!(!format_enabled(Some("auto"), false));
+    }
+
+    #[test]
+    fn stdio_builds_target_specific_printers() {
+        let stdio = Stdio::new(true, false, true);
+        assert!(stdio.stdin_is_terminal());
+        assert!(!stdio.stderr_is_terminal());
+        assert!(stdio.stdout_is_terminal());
+        assert!(!stdio.all_terminal());
+
+        let mut stderr = stdio.stderr_printer(Some("auto"));
+        stderr.write_styled("err", &[Sequence::Red]);
+        assert_eq!(stderr.into_string().unwrap(), "err");
+
+        let mut stdout = stdio.stdout_printer(Some("auto"));
+        stdout.write_styled("out", &[Sequence::Green]);
+        assert_eq!(stdout.into_string().unwrap(), "\x1b[32mout\x1b[0m");
     }
 
     #[test]

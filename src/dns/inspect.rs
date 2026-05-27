@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::IsTerminal;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
@@ -117,19 +116,19 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         .timeout
         .map(|seconds| duration_from_seconds("timeout", seconds))
         .transpose()?;
-    let use_color = core::color_enabled(cli.color.as_deref(), std::io::stderr().is_terminal());
+    let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
     let inspected = TimeoutBudget::new(timeout)
-        .run(inspect_with_color(
+        .run(inspect_to(
             &url,
             cli.dns_server.as_deref(),
-            use_color,
+            &mut printer,
             timeout,
         ))
         .await;
 
     match inspected {
-        Ok(output) => {
-            eprint!("{output}");
+        Ok(()) => {
+            printer.flush_to(&mut std::io::stderr())?;
             Ok(0)
         }
         Err(err) => {
@@ -141,15 +140,17 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
 #[cfg(test)]
 async fn inspect(url: &Url, dns_server: Option<&str>) -> Result<String, FetchError> {
-    inspect_with_color(url, dns_server, false, None).await
+    let mut out = Printer::new(false);
+    inspect_to(url, dns_server, &mut out, None).await?;
+    Ok(out.into_string().expect("DNS inspection output is UTF-8"))
 }
 
-async fn inspect_with_color(
+async fn inspect_to(
     url: &Url,
     dns_server: Option<&str>,
-    use_color: bool,
+    out: &mut Printer,
     timeout: Option<Duration>,
-) -> Result<String, FetchError> {
+) -> Result<(), FetchError> {
     let host = url
         .host_str()
         .filter(|host| !host.is_empty())
@@ -158,17 +159,13 @@ async fn inspect_with_color(
     let start = Instant::now();
 
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(render_ip_literal_with_color(
-            host,
-            ip,
-            target.label(),
-            start.elapsed(),
-            use_color,
-        ));
+        render_ip_literal_to(out, host, ip, target.label(), start.elapsed());
+        return Ok(());
     }
 
     let result = lookup(host, target, start, timeout).await?;
-    Ok(render_with_color(&result, use_color))
+    render_to(&result, out);
+    Ok(())
 }
 
 async fn lookup(
@@ -509,26 +506,22 @@ fn resolver_target_from_resolv_conf(
     }
 }
 
-fn render_ip_literal_with_color(
+fn render_ip_literal_to(
+    out: &mut Printer,
     host: &str,
     ip: IpAddr,
     resolver: &str,
     duration: Duration,
-    use_color: bool,
-) -> String {
-    let mut printer = Printer::new(use_color);
-    write_dns_title(&mut printer, host, resolver);
-    printer.write_info_prefix();
-    printer.push_str("IP literal: ");
-    printer.write_styled(&ip.to_string(), &[Sequence::Green]);
-    printer.push_str(" (no DNS query needed)\n");
-    printer.write_info_prefix();
-    printer.push_str("Duration: ");
-    printer.write_styled(&format_duration(duration), &[Sequence::Dim]);
-    printer.push_str("\n");
-    printer
-        .into_string()
-        .expect("DNS inspection output is UTF-8")
+) {
+    write_dns_title(out, host, resolver);
+    out.write_info_prefix();
+    out.push_str("IP literal: ");
+    out.write_styled(&ip.to_string(), &[Sequence::Green]);
+    out.push_str(" (no DNS query needed)\n");
+    out.write_info_prefix();
+    out.push_str("Duration: ");
+    out.write_styled(&format_duration(duration), &[Sequence::Dim]);
+    out.push_str("\n");
 }
 
 #[cfg(test)]
@@ -536,18 +529,20 @@ fn render(result: &Inspection) -> String {
     render_with_color(result, false)
 }
 
+#[cfg(test)]
 fn render_with_color(result: &Inspection, use_color: bool) -> String {
     let mut out = Printer::new(use_color);
-    write_dns_title(&mut out, &result.host, &result.resolver);
+    render_to(result, &mut out);
+    out.into_string().expect("DNS inspection output is UTF-8")
+}
+
+fn render_to(result: &Inspection, out: &mut Printer) {
+    write_dns_title(out, &result.host, &result.resolver);
 
     for query_type in INSPECT_TYPES {
-        render_section(
-            &mut out,
-            query_type.label,
-            result.records.get(query_type.label),
-        );
+        render_section(out, query_type.label, result.records.get(query_type.label));
     }
-    render_other_sections(&mut out, &result.records);
+    render_other_sections(out, &result.records);
 
     out.write_info_prefix();
     out.push_str("Addresses: ");
@@ -563,7 +558,6 @@ fn render_with_color(result: &Inspection, use_color: bool) -> String {
     out.push_str("Duration: ");
     out.write_styled(&format_duration(result.duration), &[Sequence::Dim]);
     out.push_str("\n");
-    out.into_string().expect("DNS inspection output is UTF-8")
 }
 
 fn write_dns_title(out: &mut Printer, host: &str, resolver: &str) {
