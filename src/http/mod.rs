@@ -1205,7 +1205,7 @@ async fn stream_response_to_formatted_grpc_stdout(
     let mut buf = vec![0; 16 * 1024];
     let mut bytes_read = 0i64;
     let mut frame_index = 0usize;
-    let mut descriptor_messages_written = 0usize;
+    let mut descriptor_wrote_any = false;
     let mut descriptor_output_ends_with_newline = true;
 
     loop {
@@ -1236,18 +1236,15 @@ async fn stream_response_to_formatted_grpc_stdout(
             .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
         for frame in frames {
             if let Some(desc) = grpc_response_desc.as_ref() {
-                let Some(formatted) = proto::format_grpc_frame_with_descriptor(&frame, desc)
-                    .map_err(|err| FetchError::Message(err.to_string()))?
-                else {
-                    continue;
-                };
-                if descriptor_messages_written > 0 && !descriptor_output_ends_with_newline {
+                let formatted = proto::format_grpc_frame_with_descriptor(&frame, desc)
+                    .map_err(|err| FetchError::Message(err.to_string()))?;
+                if descriptor_wrote_any && !descriptor_output_ends_with_newline {
                     stdout.write_all(b"\n").await?;
                 }
                 stdout.write_all(formatted.as_bytes()).await?;
                 stdout.flush().await?;
                 descriptor_output_ends_with_newline = formatted.ends_with('\n');
-                descriptor_messages_written += 1;
+                descriptor_wrote_any = true;
             } else {
                 if frame_index > 0 {
                     stdout.write_all(b"\n").await?;
