@@ -230,15 +230,14 @@ pub fn format_grpc_stream_with_descriptor(
     let frames = framing::read_frames(bytes)
         .map_err(|err| ProtoError::Message(format!("failed to read gRPC stream: {err}")))?;
     let mut out = String::new();
-    let mut messages_written = 0usize;
+    let mut wrote_any = false;
     for frame in &frames {
-        if let Some(formatted) = format_grpc_frame_with_descriptor(frame, desc)? {
-            if messages_written > 0 && !out.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str(&formatted);
-            messages_written += 1;
+        let formatted = format_grpc_frame_with_descriptor(frame, desc)?;
+        if wrote_any && !out.ends_with('\n') {
+            out.push('\n');
         }
+        out.push_str(&formatted);
+        wrote_any = true;
     }
     Ok(out)
 }
@@ -246,20 +245,17 @@ pub fn format_grpc_stream_with_descriptor(
 pub fn format_grpc_frame_with_descriptor(
     frame: &framing::Frame,
     desc: &MessageDescriptor,
-) -> Result<Option<String>, ProtoError> {
+) -> Result<String, ProtoError> {
     if frame.compressed {
         return Err(ProtoError::Message(
             "compressed gRPC messages are not supported".to_string(),
         ));
     }
-    if frame.data.is_empty() {
-        return Ok(None);
-    }
     let msg = decode_dynamic_message(frame.data.as_slice(), desc)?;
     let mut formatted = String::from_utf8(serialize_dynamic_message_json(&msg, true)?)
         .map_err(|err| ProtoError::Message(format!("failed to format protobuf JSON: {err}")))?;
     formatted.push('\n');
-    Ok(Some(formatted))
+    Ok(formatted)
 }
 
 pub fn describe_symbol(schema: &Schema, symbol: &str) -> Result<String, FetchError> {
@@ -1235,6 +1231,20 @@ mod tests {
         let out = format_grpc_stream_with_descriptor(&body, &method.output()).unwrap();
 
         assert!(out.contains("\"count\": \"3\""));
+    }
+
+    #[test]
+    fn format_grpc_stream_with_descriptor_preserves_empty_messages() {
+        let schema = Schema::from_descriptor_set(&stream_descriptor_set()).unwrap();
+        let method = schema
+            .find_method("streampkg.StreamService/ClientStream")
+            .unwrap();
+        let mut body = framing::frame(&[], false).unwrap();
+        body.extend_from_slice(&framing::frame(b"\x08\x03", false).unwrap());
+
+        let out = format_grpc_stream_with_descriptor(&body, &method.output()).unwrap();
+
+        assert_eq!(out, "{}\n{\n  \"count\": \"3\"\n}\n");
     }
 
     #[test]
