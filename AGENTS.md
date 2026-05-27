@@ -90,6 +90,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - Client-streaming and bidi gRPC calls stream JSON input into framed protobuf request bodies instead of materializing the whole stream up front.
 - `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP or DoH responses.
 - `--inspect-tls --http 3` performs QUIC/TLS inspection with `h3` ALPN instead of the TCP TLS path.
+- `--inspect-tls` honors `--dns-server` for both TCP and QUIC inspection, resolving domain targets through the configured UDP or DoH resolver before the TLS handshake.
 - Rust `--inspect-tls` renders a verified certificate chain when verification succeeds, appending omitted trusted roots or replacing server-sent cross-signed roots with the matching platform/custom trusted root for expiry display; `--insecure` keeps the raw peer chain.
 - `--tls` remains a compatibility alias for setting the minimum TLS version; prefer `--min-tls` in new docs/examples, and use `--max-tls` to cap negotiation or combine min/max for an exact TLS version.
 - Rust TLS version options accept only TLS 1.2 and TLS 1.3; legacy TLS 1.0/1.1 values are rejected consistently for CLI flags, config, WebSocket, and inspection paths.
