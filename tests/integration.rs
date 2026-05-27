@@ -3682,6 +3682,79 @@ fn retry_statuses_and_request_body_replay() {
 }
 
 #[test]
+fn retry_status_delay_obeys_request_timeout_budget() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_handler = Arc::clone(&attempts);
+    let server = TestServer::start(move |_| {
+        if attempts_for_handler.fetch_add(1, Ordering::SeqCst) == 0 {
+            TestResponse::status(503, "Service Unavailable", "retry")
+                .header("Connection", "keep-alive")
+        } else {
+            TestResponse::ok("done").header("Connection", "keep-alive")
+        }
+    });
+
+    let start = Instant::now();
+    let res = run_fetch(&[
+        &server.url,
+        "--retry",
+        "1",
+        "--retry-delay",
+        "3",
+        "--timeout",
+        "0.25",
+    ]);
+    let elapsed = start.elapsed();
+
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains("request timed out after 250ms"),
+        "stderr:\n{}",
+        res.stderr
+    );
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "retry delay was not capped; elapsed: {elapsed:?}\nstdout:\n{}\nstderr:\n{}",
+        res.stdout,
+        res.stderr
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn retry_transport_error_delay_obeys_request_timeout_budget() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused port");
+    let addr = listener.local_addr().expect("unused port local addr");
+    drop(listener);
+    let url = format!("http://{addr}");
+
+    let start = Instant::now();
+    let res = run_fetch(&[
+        &url,
+        "--retry",
+        "1",
+        "--retry-delay",
+        "3",
+        "--timeout",
+        "0.25",
+    ]);
+    let elapsed = start.elapsed();
+
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains("request timed out after 250ms"),
+        "stderr:\n{}",
+        res.stderr
+    );
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "retry delay was not capped; elapsed: {elapsed:?}\nstdout:\n{}\nstderr:\n{}",
+        res.stdout,
+        res.stderr
+    );
+}
+
+#[test]
 fn retry_status_rejects_stdin_body_replay() {
     let server = TestServer::start(|_| {
         TestResponse::status(503, "Service Unavailable", "retry").header("Connection", "keep-alive")
