@@ -1,7 +1,6 @@
 use std::time::Instant;
 
-use http_body_util::BodyExt;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::{Client, StatusCode};
 use url::Url;
 
@@ -9,8 +8,10 @@ use crate::cli::Cli;
 use crate::core;
 use crate::duration::duration_from_seconds;
 use crate::error::FetchError;
-use crate::grpc::encoding::{self, MessageEncoding};
+use crate::grpc::body;
+use crate::grpc::encoding::MessageEncoding;
 use crate::grpc::framing;
+use crate::grpc::headers as grpc_headers;
 use crate::grpc::status;
 use crate::proto::Schema;
 
@@ -174,49 +175,14 @@ async fn invoke(
     let headers = response.headers().clone();
     let message_encoding = MessageEncoding::from_headers(&headers);
     let response: http::Response<reqwest::Body> = response.into();
-    let (out, trailers) = read_reflection_frames(response.into_body(), &message_encoding).await?;
-    if let Some(grpc_status) =
-        grpc_status_from_headers(&trailers).or_else(|| grpc_status_from_headers(&headers))
+    let body = body::read_framed_body(response.into_body(), &message_encoding).await?;
+    if let Some(grpc_status) = status::from_headers_or_trailers(&headers, &body.trailers)
+        && !grpc_status.ok()
     {
         return Err(grpc_status.to_string().into());
     }
 
-    Ok(out)
-}
-
-async fn read_reflection_frames(
-    mut body: reqwest::Body,
-    message_encoding: &MessageEncoding,
-) -> Result<(Vec<Vec<u8>>, HeaderMap), FetchError> {
-    let mut decoder = framing::FrameDecoder::new();
-    let mut out = Vec::new();
-    let mut trailers = HeaderMap::new();
-
-    while let Some(frame) = body.frame().await {
-        let frame = frame?;
-        match frame.into_data() {
-            Ok(data) => {
-                for frame in decoder
-                    .push(&data)
-                    .map_err(|err| FetchError::Message(err.to_string()))?
-                {
-                    let data = encoding::decompress_frame(&frame, message_encoding)
-                        .map_err(|err| FetchError::Message(err.to_string()))?;
-                    out.push(data);
-                }
-            }
-            Err(frame) => {
-                if let Ok(frame_trailers) = frame.into_trailers() {
-                    trailers = frame_trailers;
-                }
-            }
-        }
-    }
-
-    decoder
-        .finish()
-        .map_err(|err| FetchError::Message(err.to_string()))?;
-    Ok((out, trailers))
+    Ok(body.messages)
 }
 
 fn reflection_headers(cli: &Cli) -> Result<HeaderMap, FetchError> {
@@ -225,44 +191,9 @@ fn reflection_headers(cli: &Cli) -> Result<HeaderMap, FetchError> {
         USER_AGENT,
         HeaderValue::from_str(&core::user_agent()).expect("valid user agent"),
     );
-    headers.insert(ACCEPT, HeaderValue::from_static("application/grpc+proto"));
-    headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/grpc+proto"),
-    );
-    headers.insert(
-        HeaderName::from_static("te"),
-        HeaderValue::from_static("trailers"),
-    );
-    headers.insert(
-        HeaderName::from_static("grpc-accept-encoding"),
-        HeaderValue::from_static(encoding::ACCEPT_ENCODING),
-    );
-    for raw in &cli.headers {
-        let Some((name, value)) = raw.split_once(':') else {
-            return Err(format!("invalid header {raw:?}: expected name:value").into());
-        };
-        let name = HeaderName::from_bytes(name.trim().as_bytes())
-            .map_err(|err| FetchError::Message(format!("invalid header name {name:?}: {err}")))?;
-        let value = HeaderValue::from_str(value.trim()).map_err(|err| {
-            FetchError::Message(format!("invalid header value for {}: {err}", name.as_str()))
-        })?;
-        headers.append(name, value);
-    }
-    if let Some(auth) = crate::http::basic_header(cli.basic.as_deref())? {
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            HeaderValue::from_str(&auth)
-                .map_err(|err| FetchError::Message(format!("invalid auth header: {err}")))?,
-        );
-    }
-    if let Some(token) = cli.bearer.as_deref() {
-        headers.insert(
-            reqwest::header::AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|err| FetchError::Message(format!("invalid bearer token: {err}")))?,
-        );
-    }
+    crate::http::apply_headers(&mut headers, &cli.headers)?;
+    grpc_headers::apply_standard_headers(&mut headers);
+    crate::http::apply_builder_authorization_headers(&mut headers, cli, None)?;
     Ok(headers)
 }
 
@@ -398,18 +329,6 @@ fn reflection_unavailable(reason: &str) -> FetchError {
 
 fn is_unimplemented_error(err: &FetchError) -> bool {
     err.to_string().contains("UNIMPLEMENTED")
-}
-
-fn grpc_status_from_headers(headers: &HeaderMap) -> Option<status::Status> {
-    let grpc_status = headers.get("grpc-status")?.to_str().ok()?;
-    if grpc_status == "0" {
-        return None;
-    }
-    let message = headers
-        .get("grpc-message")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    Some(status::parse_status(grpc_status, message))
 }
 
 const WIRE_VARINT: u8 = 0;
@@ -570,50 +489,5 @@ mod tests {
             normalize_reflection_symbol("grpc.health.v1.Health/Check"),
             "grpc.health.v1.Health.Check"
         );
-    }
-
-    #[tokio::test]
-    async fn reflection_reader_rejects_oversized_message_from_header() {
-        let body =
-            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
-                bytes::Bytes::from_static(&[0x00, 0x04, 0x00, 0x00, 0x01]),
-            )]));
-
-        let err = read_reflection_frames(body, &MessageEncoding::Identity)
-            .await
-            .unwrap_err();
-
-        assert!(err.to_string().contains("gRPC message too large"));
-    }
-
-    #[tokio::test]
-    async fn reflection_reader_decodes_gzip_messages() {
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        std::io::Write::write_all(&mut encoder, b"\x3a\x01*").unwrap();
-        let compressed = encoder.finish().unwrap();
-        let body =
-            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
-                bytes::Bytes::from(framing::frame(&compressed, true).unwrap()),
-            )]));
-
-        let (messages, _) = read_reflection_frames(body, &MessageEncoding::Gzip)
-            .await
-            .unwrap();
-
-        assert_eq!(messages, [b"\x3a\x01*".to_vec()]);
-    }
-
-    #[tokio::test]
-    async fn reflection_reader_names_unsupported_compression() {
-        let body =
-            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
-                bytes::Bytes::from(framing::frame(b"payload", true).unwrap()),
-            )]));
-
-        let err = read_reflection_frames(body, &MessageEncoding::Unsupported("br".to_string()))
-            .await
-            .unwrap_err();
-
-        assert_eq!(err.to_string(), "unsupported gRPC compression encoding: br");
     }
 }

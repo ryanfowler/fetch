@@ -1,6 +1,7 @@
 use std::fmt;
 
 use percent_encoding::percent_decode_str;
+use reqwest::header::HeaderMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Code(pub i32);
@@ -94,9 +95,23 @@ pub fn parse_status(grpc_status: &str, grpc_message: &str) -> Status {
     Status { code, message }
 }
 
+pub fn from_headers(headers: &HeaderMap) -> Option<Status> {
+    let status = headers.get("grpc-status")?.to_str().ok()?;
+    let message = headers
+        .get("grpc-message")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    Some(parse_status(status, message))
+}
+
+pub fn from_headers_or_trailers(headers: &HeaderMap, trailers: &HeaderMap) -> Option<Status> {
+    from_headers(trailers).or_else(|| from_headers(headers))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::HeaderValue;
 
     #[test]
     fn test_code_string() {
@@ -217,5 +232,51 @@ mod tests {
             assert_eq!(status.code, want_code, "{name}");
             assert_eq!(status.message, want_message, "{name}");
         }
+    }
+
+    #[test]
+    fn from_headers_parses_status_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert("grpc-status", HeaderValue::from_static("13"));
+        headers.insert("grpc-message", HeaderValue::from_static("oh%20no%21"));
+
+        let status = from_headers(&headers).unwrap();
+
+        assert_eq!(status.code, Code::INTERNAL);
+        assert_eq!(status.message, "oh no!");
+        assert_eq!(status.to_string(), "grpc error: INTERNAL: oh no!");
+    }
+
+    #[test]
+    fn from_headers_returns_ok_status() {
+        let mut headers = HeaderMap::new();
+        headers.insert("grpc-status", HeaderValue::from_static("0"));
+
+        let status = from_headers(&headers).unwrap();
+
+        assert!(status.ok());
+    }
+
+    #[test]
+    fn from_headers_or_trailers_prefers_trailers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("grpc-status", HeaderValue::from_static("13"));
+        headers.insert("grpc-message", HeaderValue::from_static("header failure"));
+        let mut trailers = HeaderMap::new();
+        trailers.insert("grpc-status", HeaderValue::from_static("0"));
+
+        let status = from_headers_or_trailers(&headers, &trailers).unwrap();
+
+        assert!(status.ok());
+    }
+
+    #[test]
+    fn from_headers_or_trailers_falls_back_to_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("grpc-status", HeaderValue::from_static("5"));
+
+        let status = from_headers_or_trailers(&headers, &HeaderMap::new()).unwrap();
+
+        assert_eq!(status.code, Code::NOT_FOUND);
     }
 }
