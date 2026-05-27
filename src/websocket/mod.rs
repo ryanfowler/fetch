@@ -21,6 +21,7 @@ use url::Url;
 use crate::auth::aws_sigv4;
 use crate::cli::Cli;
 use crate::core;
+use crate::duration::{TimeoutBudget, duration_from_seconds};
 use crate::error::{FetchError, write_warning_with_color};
 use crate::format::json;
 
@@ -66,21 +67,14 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     let request_start = Instant::now();
     let request_timeout = websocket_request_timeout(cli)?;
+    let request_budget = TimeoutBudget::started_at(request_timeout, request_start);
     let connect_timeout = websocket_connect_timeout(cli, request_timeout, request_start)?;
-    let connect = connect_websocket(cli, &url, request, connector, connect_timeout);
-    let (mut stream, response) = if let Some(timeout) = request_timeout {
-        tokio::time::timeout(timeout, connect)
+    let connect = async {
+        connect_websocket(cli, &url, request, connector, connect_timeout)
             .await
-            .map_err(|_| {
-                FetchError::Message(format!(
-                    "request timed out after {}",
-                    crate::timing::format_timing_duration(timeout)
-                ))
-            })?
-            .map_err(websocket_error)?
-    } else {
-        connect.await.map_err(websocket_error)?
+            .map_err(websocket_error)
     };
+    let (mut stream, response) = request_budget.run(connect).await?;
 
     if cli.verbose > 0 && !cli.silent {
         let status = response.status();
@@ -611,39 +605,9 @@ fn url_authority(url: &Url) -> Result<String, FetchError> {
     })
 }
 
-#[derive(Clone, Copy)]
-struct TimeoutBudget {
-    timeout: Option<Duration>,
-    started_at: Instant,
-}
-
-impl TimeoutBudget {
-    fn new(timeout: Option<Duration>) -> Self {
-        Self {
-            timeout,
-            started_at: Instant::now(),
-        }
-    }
-
-    fn remaining(self) -> Result<Option<Duration>, FetchError> {
-        let Some(timeout) = self.timeout else {
-            return Ok(None);
-        };
-        let elapsed = self.started_at.elapsed();
-        if elapsed >= timeout {
-            return Err(websocket_timeout_error(timeout));
-        }
-        Ok(Some(timeout - elapsed))
-    }
-
-    fn timeout_error(self) -> FetchError {
-        websocket_timeout_error(self.timeout.expect("timeout checked by caller"))
-    }
-}
-
 fn websocket_request_timeout(cli: &Cli) -> Result<Option<Duration>, FetchError> {
     cli.timeout
-        .map(|seconds| crate::http::duration_from_seconds("timeout", seconds))
+        .map(|seconds| duration_from_seconds("timeout", seconds))
         .transpose()
 }
 
@@ -654,46 +618,16 @@ fn websocket_connect_timeout(
 ) -> Result<TimeoutBudget, FetchError> {
     let connect_timeout = cli
         .connect_timeout
-        .map(|seconds| crate::http::duration_from_seconds("connect-timeout", seconds))
+        .map(|seconds| duration_from_seconds("connect-timeout", seconds))
         .transpose()?;
-    let request_remaining = remaining_timeout(request_timeout, request_start)?;
-    let timeout = match (connect_timeout, request_remaining) {
-        (Some(connect), Some(remaining)) => Some(connect.min(remaining)),
-        (Some(connect), None) => Some(connect),
-        (None, remaining) => remaining,
-    };
-    Ok(TimeoutBudget::new(timeout))
-}
-
-fn remaining_timeout(
-    timeout: Option<Duration>,
-    started_at: Instant,
-) -> Result<Option<Duration>, FetchError> {
-    let Some(timeout) = timeout else {
-        return Ok(None);
-    };
-    let elapsed = started_at.elapsed();
-    if elapsed >= timeout {
-        return Err(websocket_timeout_error(timeout));
-    }
-    Ok(Some(timeout - elapsed))
+    TimeoutBudget::for_connect(connect_timeout, request_timeout, request_start)
 }
 
 async fn timeout_fetch<T>(
     timeout: TimeoutBudget,
     future: impl Future<Output = Result<T, FetchError>>,
 ) -> Result<T, FetchError> {
-    let Some(remaining) = timeout.remaining()? else {
-        return future.await;
-    };
-    let started_at = Instant::now();
-    match tokio::time::timeout(remaining, future).await {
-        Ok(Err(err)) if started_at.elapsed() >= remaining && is_timeout_error(&err) => {
-            Err(timeout.timeout_error())
-        }
-        Ok(result) => result,
-        Err(_) => Err(timeout.timeout_error()),
-    }
+    timeout.run(future).await
 }
 
 async fn timeout_ws<T>(
@@ -706,21 +640,6 @@ async fn timeout_ws<T>(
     tokio::time::timeout(remaining, future)
         .await
         .map_err(|_| websocket_io_error(timeout.timeout_error()))?
-}
-
-fn websocket_timeout_error(timeout: Duration) -> FetchError {
-    FetchError::Runtime(format!(
-        "request timed out after {}",
-        crate::http::format_go_duration(timeout)
-    ))
-}
-
-fn is_timeout_error(err: &FetchError) -> bool {
-    match err {
-        FetchError::Runtime(message) => message.contains("timed out"),
-        FetchError::Reqwest(err) => err.is_timeout(),
-        _ => false,
-    }
 }
 
 fn websocket_io_error(err: FetchError) -> WsError {
@@ -929,7 +848,11 @@ fn write_binary_indicator(cli: &Cli, len: usize) {
 }
 
 fn websocket_error(err: WsError) -> FetchError {
-    FetchError::Message(err.to_string())
+    let message = err.to_string();
+    if let Some(start) = message.find("request timed out after ") {
+        return FetchError::Runtime(message[start..].to_string());
+    }
+    FetchError::Message(message)
 }
 
 #[cfg(test)]

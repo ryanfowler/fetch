@@ -642,7 +642,7 @@ fn parse_duration_seconds(
     let seconds = value
         .parse::<f64>()
         .map_err(|_| value_error(path, line_num, option, value, usage))?;
-    if !seconds.is_finite() || !(0.0..=crate::http::MAX_DURATION_SECONDS).contains(&seconds) {
+    if !seconds.is_finite() || !(0.0..=crate::duration::MAX_DURATION_SECONDS).contains(&seconds) {
         return Err(value_error(path, line_num, option, value, usage));
     }
     Ok(seconds)

@@ -27,8 +27,7 @@ pub async fn main_entry() -> i32 {
     };
 
     let signal_color = cli.color.clone();
-    let run = run(cli);
-    tokio::pin!(run);
+    let mut run = Box::pin(run(cli));
     tokio::select! {
         result = &mut run => match result {
             Ok(code) => code,

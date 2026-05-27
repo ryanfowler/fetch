@@ -51,7 +51,7 @@ struct ReleaseArtifact<'a> {
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let timeout = cli
         .timeout
-        .map(|seconds| crate::http::duration_from_seconds("timeout", seconds))
+        .map(|seconds| crate::duration::duration_from_seconds("timeout", seconds))
         .transpose()?;
     let mut builder = reqwest::Client::builder().use_rustls_tls();
     if let Some(timeout) = timeout {

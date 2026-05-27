@@ -19,6 +19,7 @@ use url::Url;
 
 use crate::cli::{Cli, HttpVersion};
 use crate::core::{self, Printer, Sequence};
+use crate::duration::{TimeoutBudget, duration_from_seconds};
 use crate::error::{FetchError, write_warning_with_color};
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
@@ -36,20 +37,11 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     let timeout = cli
         .timeout
-        .map(|seconds| crate::http::duration_from_seconds("timeout", seconds))
+        .map(|seconds| duration_from_seconds("timeout", seconds))
         .transpose()?;
-    let inspection = if let Some(timeout) = timeout {
-        tokio::time::timeout(timeout, inspect(cli, &url, http_version, Some(timeout)))
-            .await
-            .map_err(|_| {
-                FetchError::Message(format!(
-                    "request timed out after {}",
-                    format_timeout(timeout)
-                ))
-            })??
-    } else {
-        inspect(cli, &url, http_version, None).await?
-    };
+    let inspection = TimeoutBudget::new(timeout)
+        .run(inspect(cli, &url, http_version, timeout))
+        .await?;
 
     if !cli.silent {
         eprint!(
@@ -797,18 +789,6 @@ fn version_label(version: Option<ProtocolVersion>) -> &'static str {
 
 fn cipher_suite_label(cipher: SupportedCipherSuite) -> String {
     format!("{:?}", cipher.suite())
-}
-
-fn format_timeout(timeout: Duration) -> String {
-    let seconds = timeout.as_secs_f64();
-    if timeout.subsec_nanos() == 0 {
-        format!("{}s", timeout.as_secs())
-    } else {
-        format!("{seconds:.3}s")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
-    }
 }
 
 #[derive(Clone)]

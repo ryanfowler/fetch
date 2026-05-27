@@ -34,6 +34,7 @@ use crate::auth::aws_sigv4;
 use crate::auth::digest;
 use crate::cli::{Cli, CompressionMode, HttpVersion};
 use crate::core;
+use crate::duration::{duration_from_seconds, request_timeout_message};
 use crate::error::{FetchError, write_error_with_color, write_warning_with_color};
 use crate::format::content_type::{self, ContentType};
 use crate::format::css;
@@ -111,7 +112,6 @@ const MAX_BUFFERED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DISCARDED_RESPONSE_BYTES: usize = 1024 * 1024;
 const BINARY_RESPONSE_WARNING: &str =
     "the response body appears to be binary\n\nTo output to the terminal anyway, use '--output -'";
-pub(crate) const MAX_DURATION_SECONDS: f64 = i64::MAX as f64 / 1_000_000_000_f64;
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let http_version =
@@ -2695,10 +2695,7 @@ fn timeout_error_message(cli: &Cli, err: &reqwest::Error) -> Option<String> {
     }
     let seconds = cli.timeout?;
     let duration = duration_from_seconds("timeout", seconds).ok()?;
-    Some(format!(
-        "request timed out after {}",
-        format_go_duration(duration)
-    ))
+    Some(request_timeout_message(duration))
 }
 
 fn reqwest_request_error_message(err: &reqwest::Error) -> String {
@@ -2786,42 +2783,6 @@ fn is_certificate_validation_message(message: &str) -> bool {
                 || lower.contains("hostname")))
 }
 
-pub(crate) fn format_go_duration(duration: Duration) -> String {
-    let nanos = duration.as_nanos();
-    if nanos < 1_000 {
-        return format!("{nanos}ns");
-    }
-    if nanos < 1_000_000 {
-        return format_duration_unit(nanos, 1_000, "us");
-    }
-    if nanos < 1_000_000_000 {
-        return format_duration_unit(nanos, 1_000_000, "ms");
-    }
-    format_duration_unit(nanos, 1_000_000_000, "s")
-}
-
-fn format_duration_unit(nanos: u128, unit_nanos: u128, suffix: &str) -> String {
-    let whole = nanos / unit_nanos;
-    let remainder = nanos % unit_nanos;
-    if remainder == 0 {
-        return format!("{whole}{suffix}");
-    }
-
-    let digits = match suffix {
-        "us" => 3_u32,
-        "ms" => 6_u32,
-        _ => 9_u32,
-    };
-    let scale = 10_u128.pow(digits);
-    let fraction_value = remainder * scale / unit_nanos;
-    let fraction = format!(
-        "{fraction_value:0width$}",
-        width = usize::try_from(digits).expect("small duration precision")
-    );
-    let fraction = fraction.trim_end_matches('0');
-    format!("{whole}.{fraction}{suffix}")
-}
-
 fn retry_reason(status: StatusCode) -> String {
     format!(
         "{} {}",
@@ -2891,13 +2852,6 @@ pub(crate) fn request_target(url: &Url) -> String {
         target.push_str(query);
     }
     target
-}
-
-pub(crate) fn duration_from_seconds(flag: &str, seconds: f64) -> Result<Duration, FetchError> {
-    if !seconds.is_finite() || !(0.0..=MAX_DURATION_SECONDS).contains(&seconds) {
-        return Err(format!("{flag} must be a non-negative number").into());
-    }
-    Ok(Duration::from_secs_f64(seconds))
 }
 
 pub(crate) fn total_attempts_for_retry(retry_count: usize) -> Result<usize, FetchError> {
@@ -4458,19 +4412,6 @@ mod tests {
     }
 
     #[test]
-    fn duration_from_seconds_rejects_values_outside_supported_range() {
-        assert_eq!(
-            duration_from_seconds("timeout", 1.5).unwrap(),
-            Duration::from_millis(1500)
-        );
-
-        for seconds in [-1.0, f64::NAN, f64::INFINITY, 1e100] {
-            let err = duration_from_seconds("timeout", seconds).unwrap_err();
-            assert_eq!(err.to_string(), "timeout must be a non-negative number");
-        }
-    }
-
-    #[test]
     fn total_attempts_for_retry_rejects_overflow() {
         assert_eq!(total_attempts_for_retry(0).unwrap(), 1);
         assert_eq!(total_attempts_for_retry(3).unwrap(), 4);
@@ -4589,17 +4530,6 @@ mod tests {
                 "{message} should not be treated as certificate validation"
             );
         }
-    }
-
-    #[test]
-    fn format_go_duration_matches_common_go_units() {
-        assert_eq!(format_go_duration(Duration::from_nanos(100)), "100ns");
-        assert_eq!(format_go_duration(Duration::from_nanos(1_500)), "1.5us");
-        assert_eq!(format_go_duration(Duration::from_nanos(1_500_000)), "1.5ms");
-        assert_eq!(
-            format_go_duration(Duration::from_nanos(1_500_000_000)),
-            "1.5s"
-        );
     }
 
     #[test]
