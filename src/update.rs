@@ -3,7 +3,6 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, USER_AGENT};
@@ -159,7 +158,7 @@ async fn update_inner(
 
     let temp_dir = std::env::temp_dir().join(format!("fetch-update-{}", unique_suffix()));
     std::fs::create_dir_all(&temp_dir)?;
-    let unpack_result = unpack_artifact(&temp_dir, &artifact);
+    let unpack_result = unpack_artifact(&temp_dir, release_artifact.archive_name, &artifact);
     if let Err(err) = unpack_result {
         let _ = std::fs::remove_dir_all(&temp_dir);
         return Err(err);
@@ -423,25 +422,17 @@ fn release_artifact_for_platform<'a>(
     })
 }
 
-#[cfg(windows)]
-fn unpack_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
-    unpack_zip_artifact(dir, data)
+fn unpack_artifact(dir: &Path, archive_name: &str, data: &[u8]) -> Result<(), FetchError> {
+    if archive_name.ends_with(".zip") {
+        unpack_zip_artifact(dir, data)
+    } else if archive_name.ends_with(".tar.gz") || archive_name.ends_with(".tgz") {
+        unpack_tar_gz_artifact(dir, data)
+    } else {
+        Err(format!("unsupported self-update archive format: {archive_name}").into())
+    }
 }
 
-#[cfg(all(unix, not(windows)))]
-fn unpack_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
-    unpack_tar_gz_artifact(dir, data)
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn unpack_artifact(_dir: &Path, _data: &[u8]) -> Result<(), FetchError> {
-    Err("self-update archive unpacking is not implemented on this platform yet".into())
-}
-
-#[cfg(unix)]
 fn unpack_tar_gz_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
-    use std::os::unix::fs::PermissionsExt;
-
     let decoder = GzDecoder::new(data);
     let mut archive = tar::Archive::new(decoder);
     for entry in archive.entries()? {
@@ -458,15 +449,19 @@ fn unpack_tar_gz_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
         if !entry.header().entry_type().is_file() {
             continue;
         }
-        let mode = entry.header().mode().unwrap_or(0o755);
         let mut file = std::fs::File::create(&out)?;
         std::io::copy(&mut entry, &mut file)?;
-        std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = entry.header().mode().unwrap_or(0o755);
+            std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode))?;
+        }
     }
     Ok(())
 }
 
-#[cfg(any(windows, test))]
 fn unpack_zip_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
     let reader = std::io::Cursor::new(data);
     let mut archive =
@@ -554,20 +549,19 @@ fn self_replace(exe_path: &Path, new_exe_path: &Path) -> Result<(), FetchError> 
 
 #[cfg(not(windows))]
 fn self_replace(exe_path: &Path, new_exe_path: &Path) -> Result<(), FetchError> {
-    match std::fs::rename(new_exe_path, exe_path) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let temp_path = create_temp_file_path(
-                exe_path.parent().unwrap_or_else(|| Path::new(".")),
-                ".__temp",
-            );
-            copy_file(&temp_path, new_exe_path)?;
-            std::fs::rename(&temp_path, exe_path).map_err(|err| {
-                let _ = std::fs::remove_file(&temp_path);
-                FetchError::from(err)
-            })
-        }
+    let dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_path = create_temp_file_path(dir, ".__temp");
+    if let Err(err) = copy_file(&temp_path, new_exe_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
     }
+
+    if let Err(err) = crate::fileutil::atomic_replace_file(&temp_path, exe_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err.into());
+    }
+
+    Ok(())
 }
 
 fn create_temp_file_path(dir: &Path, suffix: &str) -> PathBuf {
@@ -1359,6 +1353,29 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_self_replace_keeps_unpacked_source() {
+        let exe_dir = tempfile::tempdir().unwrap();
+        let unpack_dir = tempfile::tempdir().unwrap();
+        let exe_path = exe_dir.path().join(fetch_filename());
+        let new_exe_path = unpack_dir.path().join(fetch_filename());
+        std::fs::write(&exe_path, b"old executable").unwrap();
+        std::fs::write(&new_exe_path, b"new executable").unwrap();
+
+        self_replace(&exe_path, &new_exe_path).unwrap();
+
+        assert_eq!(std::fs::read(&exe_path).unwrap(), b"new executable");
+        assert_eq!(std::fs::read(&new_exe_path).unwrap(), b"new executable");
+        assert!(std::fs::read_dir(exe_dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".fetch.")
+        }));
+    }
+
     #[test]
     fn windows_self_delete_env_value_round_trips_paths_with_underscores() {
         let path = PathBuf::from(r"C:\Program Files\fetch_cli\fetch.__relocated.exe");
@@ -1610,7 +1627,8 @@ mod tests {
         for (name, filename, want_err) in tests {
             let archive = create_tar_gz(&[(filename, b"content".as_slice(), 0o644, false)]);
             let dir = tempfile::tempdir().unwrap();
-            let err = unpack_artifact(dir.path(), &archive).err();
+            let err =
+                unpack_artifact(dir.path(), "fetch-v1.2.3-linux-amd64.tar.gz", &archive).err();
             assert_eq!(err.is_some(), want_err, "{name}");
             if !want_err {
                 assert!(dir.path().join(filename).exists(), "{name}");
@@ -1627,7 +1645,7 @@ mod tests {
         ]);
         let dir = tempfile::tempdir().unwrap();
 
-        unpack_artifact(dir.path(), &archive).unwrap();
+        unpack_artifact(dir.path(), "fetch-v1.2.3-linux-amd64.tar.gz", &archive).unwrap();
 
         assert!(dir.path().join("bin").join("fetch").exists());
     }
@@ -1641,11 +1659,37 @@ mod tests {
         ]);
         let dir = tempfile::tempdir().unwrap();
 
-        unpack_artifact(dir.path(), &archive).unwrap();
+        unpack_artifact(dir.path(), "fetch-v1.2.3-linux-amd64.tar.gz", &archive).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(dir.path().join("fetch")).unwrap(),
             "short"
+        );
+    }
+
+    #[test]
+    fn test_unpack_artifact_dispatches_zip_by_suffix() {
+        let archive = create_zip(&[("fetch.exe", b"content".as_slice(), false)]);
+        let dir = tempfile::tempdir().unwrap();
+
+        unpack_artifact(dir.path(), "fetch-v1.2.3-windows-amd64.zip", &archive).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("fetch.exe")).unwrap(),
+            "content"
+        );
+    }
+
+    #[test]
+    fn test_unpack_artifact_rejects_unknown_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err =
+            unpack_artifact(dir.path(), "fetch-v1.2.3-plan9-amd64.bin", b"content").unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("unsupported self-update archive format")
         );
     }
 
