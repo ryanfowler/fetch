@@ -351,7 +351,8 @@ fetch --retry 3 --retry-delay 0.5 example.com
 
 ### `--dns-server IP[:PORT]|URL`
 
-Use custom DNS server. Supports UDP DNS and DNS-over-HTTPS.
+Use custom DNS server. Supports UDP DNS and DNS-over-HTTPS for requests and
+DNS/TLS inspection.
 
 ```sh
 fetch --dns-server 8.8.8.8 example.com
@@ -418,6 +419,7 @@ Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP re
 ```sh
 fetch --inspect-tls example.com
 fetch --inspect-tls --http 3 example.com
+fetch --inspect-tls --dns-server 1.1.1.1 example.com
 fetch --inspect-tls --insecure expired.badssl.com
 ```
 

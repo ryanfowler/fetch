@@ -5988,6 +5988,20 @@ fn tls_certificate_validation_inspection_and_bounds_cases() {
     assert!(res.stderr.contains("TLS"));
     assert!(res.stderr.contains("Certificate") || res.stderr.contains("certificate"));
 
+    let dns_addr = start_udp_dns_server("fetch-tls.test.", Ipv4Addr::new(127, 0, 0, 1));
+    let tls_url = Url::parse(&tls.url).unwrap();
+    let dns_tls_url = format!("https://fetch-tls.test:{}", tls_url.port().unwrap());
+    let res = run_fetch(&[
+        "--inspect-tls",
+        "--dns-server",
+        &dns_addr,
+        "--insecure",
+        &dns_tls_url,
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stderr.contains("TLS"));
+    assert!(!res.stderr.contains("--dns-server"));
+
     let res = run_fetch(&["--inspect-tls", "http://example.com"]);
     assert_exit(&res, 1);
     assert!(!res.stderr.is_empty());

@@ -39,7 +39,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         .map(|seconds| crate::http::duration_from_seconds("timeout", seconds))
         .transpose()?;
     let inspection = if let Some(timeout) = timeout {
-        tokio::time::timeout(timeout, inspect(cli, &url, http_version))
+        tokio::time::timeout(timeout, inspect(cli, &url, http_version, Some(timeout)))
             .await
             .map_err(|_| {
                 FetchError::Message(format!(
@@ -48,7 +48,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 ))
             })??
     } else {
-        inspect(cli, &url, http_version).await?
+        inspect(cli, &url, http_version, None).await?
     };
 
     if !cli.silent {
@@ -91,11 +91,12 @@ async fn inspect(
     cli: &Cli,
     url: &Url,
     http_version: Option<HttpVersion>,
+    timeout: Option<Duration>,
 ) -> Result<Inspection, FetchError> {
     if http_version == Some(HttpVersion::Http3) {
-        inspect_quic(cli, url).await
+        inspect_quic(cli, url, timeout).await
     } else {
-        inspect_tcp(cli, url, http_version).await
+        inspect_tcp(cli, url, http_version, timeout).await
     }
 }
 
@@ -103,6 +104,7 @@ async fn inspect_tcp(
     cli: &Cli,
     url: &Url,
     http_version: Option<HttpVersion>,
+    timeout: Option<Duration>,
 ) -> Result<Inspection, FetchError> {
     let host = tls_host(url)?;
     let port = url.port_or_known_default().unwrap_or(443);
@@ -119,7 +121,7 @@ async fn inspect_tcp(
 
     let server_name = ServerName::try_from(host.clone())
         .map_err(|_| FetchError::Message(format!("invalid server name '{host}'")))?;
-    let stream = connect_tcp_host(&host, port).await?;
+    let stream = connect_tcp_host(&host, port, cli.dns_server.as_deref(), timeout).await?;
     let connector = TlsConnector::from(Arc::new(config));
     let stream = connector
         .connect(server_name, stream)
@@ -148,8 +150,13 @@ async fn inspect_tcp(
     })
 }
 
-async fn connect_tcp_host(host: &str, port: u16) -> Result<TcpStream, FetchError> {
-    let addrs = tokio::net::lookup_host((host, port)).await?;
+async fn connect_tcp_host(
+    host: &str,
+    port: u16,
+    dns_server: Option<&str>,
+    timeout: Option<Duration>,
+) -> Result<TcpStream, FetchError> {
+    let addrs = resolve_tls_host(host, port, dns_server, timeout).await?;
     let mut last_err = None;
 
     for addr in addrs {
@@ -164,11 +171,62 @@ async fn connect_tcp_host(host: &str, port: u16) -> Result<TcpStream, FetchError
         .unwrap_or_else(|| FetchError::Message("no addresses found".to_string())))
 }
 
-async fn inspect_quic(cli: &Cli, url: &Url) -> Result<Inspection, FetchError> {
+async fn resolve_tls_host(
+    host: &str,
+    port: u16,
+    dns_server: Option<&str>,
+    timeout: Option<Duration>,
+) -> Result<Vec<SocketAddr>, FetchError> {
+    let Some(dns_server) = dns_server else {
+        return tokio::net::lookup_host((host, port))
+            .await
+            .map(|addrs| addrs.collect())
+            .map_err(FetchError::from);
+    };
+    if host.parse::<IpAddr>().is_ok() {
+        return tokio::net::lookup_host((host, port))
+            .await
+            .map(|addrs| addrs.collect())
+            .map_err(FetchError::from);
+    }
+
+    let addrs = if dns_server.starts_with("http://") || dns_server.starts_with("https://") {
+        let server_url = Url::parse(dns_server).map_err(|err| {
+            FetchError::Message(format!("invalid dns-server '{dns_server}': {err}"))
+        })?;
+        crate::dns::doh::lookup_doh(&server_url, host, timeout)
+            .await
+            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
+    } else {
+        let server_addr = crate::dns::resolver::normalize_udp_dns_server(dns_server)
+            .map_err(|err| FetchError::Message(err.to_string()))?;
+        crate::dns::resolver::lookup_udp(&server_addr, host, timeout)
+            .await
+            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
+    };
+
+    let mut addrs = addrs
+        .into_iter()
+        .map(|addr| SocketAddr::new(addr, port))
+        .collect::<Vec<_>>();
+    addrs.sort_by(|left, right| {
+        left.ip()
+            .cmp(&right.ip())
+            .then(left.port().cmp(&right.port()))
+    });
+    addrs.dedup();
+    Ok(addrs)
+}
+
+async fn inspect_quic(
+    cli: &Cli,
+    url: &Url,
+    timeout: Option<Duration>,
+) -> Result<Inspection, FetchError> {
     let host = tls_host(url)?;
     ensure_quic_protocol_versions(cli)?;
     let port = url.port_or_known_default().unwrap_or(443);
-    let addrs = tokio::net::lookup_host((host.as_str(), port)).await?;
+    let addrs = resolve_tls_host(&host, port, cli.dns_server.as_deref(), timeout).await?;
 
     let ca_certs = load_ca_certs(&cli.ca_cert)?;
     let native_roots = load_native_root_certs();
@@ -1884,7 +1942,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
 
         let inspection = tokio::time::timeout(
             Duration::from_secs(5),
-            inspect_tcp(&cli, &url, Some(HttpVersion::Http2)),
+            inspect_tcp(&cli, &url, Some(HttpVersion::Http2), None),
         )
         .await
         .expect("IPv6 TLS inspection timed out")
@@ -1927,7 +1985,9 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         .unwrap();
         let url = tls_url(&raw_url).unwrap();
 
-        let inspection = inspect(&cli, &url, Some(HttpVersion::Http3)).await.unwrap();
+        let inspection = inspect(&cli, &url, Some(HttpVersion::Http3), None)
+            .await
+            .unwrap();
 
         assert_eq!(inspection.alpn.as_deref(), Some("h3"));
         assert_eq!(inspection.version, Some(ProtocolVersion::TLSv1_3));
