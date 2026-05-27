@@ -12,6 +12,7 @@ use tower::{Layer, Service};
 use url::Url;
 
 use crate::cli::{Cli, HttpVersion};
+use crate::dns::custom;
 use crate::error::FetchError;
 use crate::timing::DnsTiming;
 
@@ -204,23 +205,9 @@ async fn resolve_dns_for_client_inner(
 
     if let Some(dns_server) = cli.dns_server.as_deref() {
         let start = Instant::now();
-        let addrs = if dns_server.starts_with("http://") || dns_server.starts_with("https://") {
-            let server_url = Url::parse(dns_server).map_err(|err| {
-                FetchError::Message(format!("invalid dns-server '{dns_server}': {err}"))
-            })?;
-            crate::dns::doh::lookup_doh(&server_url, host, timeout)
-                .await
-                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-        } else {
-            let server_addr = crate::dns::resolver::normalize_udp_dns_server(dns_server)
-                .map_err(|err| FetchError::Message(err.to_string()))?;
-            crate::dns::resolver::lookup_udp(&server_addr, host, timeout)
-                .await
-                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-        };
-        let addrs = sorted_unique_ips(addrs);
+        let addrs = custom::sorted_unique_ips(custom::lookup_ips(dns_server, host, timeout).await?);
         return Ok(Some(DnsResolution {
-            socket_addrs: crate::dns::doh::socket_addrs_for_override(&addrs),
+            socket_addrs: custom::socket_addrs_for_override(&addrs),
             timing: debug_dns.then(|| DnsTiming {
                 host: host.to_string(),
                 addrs,
@@ -245,8 +232,8 @@ async fn resolve_dns_for_client_inner(
         .await
         .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
         .collect::<Vec<_>>();
-    sort_socket_addrs(&mut socket_addrs);
-    let addrs = sorted_unique_ips(socket_addrs.iter().map(|addr| addr.ip()).collect());
+    custom::sort_socket_addrs(&mut socket_addrs);
+    let addrs = custom::sorted_unique_ips(socket_addrs.iter().map(|addr| addr.ip()).collect());
     Ok(Some(DnsResolution {
         socket_addrs,
         timing: Some(DnsTiming {
@@ -297,27 +284,6 @@ pub(crate) fn http3_local_address(url: &Url, resolution: Option<&DnsResolution>)
         Some(IpAddr::V4(_)) => Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
         Some(IpAddr::V6(_)) => Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
         None => None,
-    }
-}
-
-fn sorted_unique_ips(mut addrs: Vec<IpAddr>) -> Vec<IpAddr> {
-    addrs.sort_by(compare_ip_addrs);
-    addrs.dedup();
-    addrs
-}
-
-fn sort_socket_addrs(addrs: &mut [SocketAddr]) {
-    addrs.sort_by(|left, right| {
-        compare_ip_addrs(&left.ip(), &right.ip()).then_with(|| left.port().cmp(&right.port()))
-    });
-}
-
-fn compare_ip_addrs(left: &IpAddr, right: &IpAddr) -> std::cmp::Ordering {
-    match (left, right) {
-        (IpAddr::V4(left), IpAddr::V4(right)) => left.octets().cmp(&right.octets()),
-        (IpAddr::V6(left), IpAddr::V6(right)) => left.octets().cmp(&right.octets()),
-        (IpAddr::V4(_), IpAddr::V6(_)) => std::cmp::Ordering::Less,
-        (IpAddr::V6(_), IpAddr::V4(_)) => std::cmp::Ordering::Greater,
     }
 }
 

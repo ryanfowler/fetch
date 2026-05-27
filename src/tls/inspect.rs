@@ -190,32 +190,8 @@ async fn resolve_tls_host(
             .map_err(FetchError::from);
     }
 
-    let addrs = if dns_server.starts_with("http://") || dns_server.starts_with("https://") {
-        let server_url = Url::parse(dns_server).map_err(|err| {
-            FetchError::Message(format!("invalid dns-server '{dns_server}': {err}"))
-        })?;
-        crate::dns::doh::lookup_doh(&server_url, host, timeout)
-            .await
-            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-    } else {
-        let server_addr = crate::dns::resolver::normalize_udp_dns_server(dns_server)
-            .map_err(|err| FetchError::Message(err.to_string()))?;
-        crate::dns::resolver::lookup_udp(&server_addr, host, timeout)
-            .await
-            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-    };
-
-    let mut addrs = addrs
-        .into_iter()
-        .map(|addr| SocketAddr::new(addr, port))
-        .collect::<Vec<_>>();
-    addrs.sort_by(|left, right| {
-        left.ip()
-            .cmp(&right.ip())
-            .then(left.port().cmp(&right.port()))
-    });
-    addrs.dedup();
-    Ok(addrs)
+    let addrs = crate::dns::custom::lookup_ips(dns_server, host, timeout).await?;
+    Ok(crate::dns::custom::socket_addrs_with_port(addrs, port))
 }
 
 async fn inspect_quic(

@@ -5,10 +5,11 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 use crate::dns::util::{dns_query_id, udp_dns_timeout};
+use crate::dns::wire;
 
-const DNS_TYPE_A: u16 = 1;
-const DNS_TYPE_AAAA: u16 = 28;
-const DNS_CLASS_IN: u16 = 1;
+const DNS_TYPE_A: u16 = wire::TYPE_A;
+const DNS_TYPE_AAAA: u16 = wire::TYPE_AAAA;
+const DNS_CLASS_IN: u16 = wire::CLASS_IN;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolverError(String);
@@ -65,7 +66,7 @@ pub async fn lookup_udp_type(
     timeout: Duration,
 ) -> Result<Vec<DnsRecord>, ResolverError> {
     let id = dns_query_id();
-    let raw = build_dns_query(id, host, dns_type)?;
+    let raw = wire::build_query(id, host, dns_type).map_err(resolver_error)?;
     let bind_addr = if server_addr.starts_with('[') {
         "[::]:0"
     } else {
@@ -89,7 +90,7 @@ pub async fn lookup_udp_type(
         Ok(Err(err)) => return Err(ResolverError(err.to_string())),
         Err(_) => return Err(ResolverError("DNS lookup timed out".to_string())),
     };
-    parse_dns_response(&buf[..n], id)
+    dns_records_from_response(&buf[..n], id)
 }
 
 pub fn normalize_udp_dns_server(server: &str) -> Result<String, ResolverError> {
@@ -114,180 +115,40 @@ fn dns_server_value_error(server: &str) -> ResolverError {
     ))
 }
 
-fn build_dns_query(id: u16, host: &str, dns_type: u16) -> Result<Vec<u8>, ResolverError> {
-    let mut raw = Vec::with_capacity(512);
-    raw.extend_from_slice(&id.to_be_bytes());
-    raw.extend_from_slice(&0x0100u16.to_be_bytes());
-    raw.extend_from_slice(&1u16.to_be_bytes());
-    raw.extend_from_slice(&0u16.to_be_bytes());
-    raw.extend_from_slice(&0u16.to_be_bytes());
-    raw.extend_from_slice(&0u16.to_be_bytes());
-    write_dns_name(&mut raw, host)?;
-    raw.extend_from_slice(&dns_type.to_be_bytes());
-    raw.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
-    Ok(raw)
+fn dns_records_from_response(
+    raw: &[u8],
+    expected_id: u16,
+) -> Result<Vec<DnsRecord>, ResolverError> {
+    let records = wire::parse_response(raw, expected_id).map_err(resolver_error)?;
+    Ok(records.into_iter().filter_map(ip_record).collect())
 }
 
-fn write_dns_name(raw: &mut Vec<u8>, host: &str) -> Result<(), ResolverError> {
-    let host = host.trim_end_matches('.');
-    if host.is_empty() {
-        raw.push(0);
-        return Ok(());
+fn ip_record(record: wire::ResourceRecord<'_>) -> Option<DnsRecord> {
+    if record.class != DNS_CLASS_IN {
+        return None;
     }
-    for label in host.split('.') {
-        if label.is_empty() || label.len() > 63 {
-            return Err(ResolverError(format!("invalid DNS name: {host}")));
+    let ip = match (record.typ, record.data.len()) {
+        (DNS_TYPE_A, 4) => IpAddr::from([
+            record.data[0],
+            record.data[1],
+            record.data[2],
+            record.data[3],
+        ]),
+        (DNS_TYPE_AAAA, 16) => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(record.data);
+            IpAddr::from(octets)
         }
-        raw.push(label.len() as u8);
-        raw.extend_from_slice(label.as_bytes());
-    }
-    raw.push(0);
-    Ok(())
-}
-
-fn parse_dns_response(raw: &[u8], expected_id: u16) -> Result<Vec<DnsRecord>, ResolverError> {
-    if raw.len() < 12 {
-        return Err(ResolverError("short DNS response".to_string()));
-    }
-    let id = read_u16(raw, 0)?;
-    if id != expected_id {
-        return Err(ResolverError("mismatched DNS response ID".to_string()));
-    }
-    let flags = read_u16(raw, 2)?;
-    let rcode = i32::from(flags & 0x000f);
-    if rcode != 0 {
-        let name = rcode_name(rcode);
-        if name.is_empty() {
-            return Err(ResolverError("no such host".to_string()));
-        }
-        return Err(ResolverError(format!("no such host: {name}")));
-    }
-    if flags & 0x0200 != 0 {
-        return Err(ResolverError("DNS response was truncated".to_string()));
-    }
-
-    let question_count = usize::from(read_u16(raw, 4)?);
-    let answer_count = usize::from(read_u16(raw, 6)?);
-    let mut offset = 12;
-    for _ in 0..question_count {
-        let (_, next) = read_dns_name(raw, offset)?;
-        offset = next + 4;
-        if offset > raw.len() {
-            return Err(ResolverError("short DNS question".to_string()));
-        }
-    }
-
-    let mut records = Vec::new();
-    for _ in 0..answer_count {
-        let (_, next) = read_dns_name(raw, offset)?;
-        offset = next;
-        let typ = read_u16(raw, offset)?;
-        let class = read_u16(raw, offset + 2)?;
-        let ttl = read_u32(raw, offset + 4)?;
-        let rdlen = usize::from(read_u16(raw, offset + 8)?);
-        offset += 10;
-        if offset + rdlen > raw.len() {
-            return Err(ResolverError("short DNS resource".to_string()));
-        }
-        let data = &raw[offset..offset + rdlen];
-        offset += rdlen;
-        if class != DNS_CLASS_IN {
-            continue;
-        }
-        let ip = match (typ, data.len()) {
-            (DNS_TYPE_A, 4) => IpAddr::from([data[0], data[1], data[2], data[3]]),
-            (DNS_TYPE_AAAA, 16) => {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(data);
-                IpAddr::from(octets)
-            }
-            _ => continue,
-        };
-        records.push(DnsRecord { ip, ttl: Some(ttl) });
-    }
-    Ok(records)
-}
-
-fn read_dns_name(packet: &[u8], offset: usize) -> Result<(String, usize), ResolverError> {
-    let mut labels = Vec::new();
-    let mut pos = offset;
-    let mut next = offset;
-    let mut jumped = false;
-    let mut jumps = 0usize;
-
-    loop {
-        if pos >= packet.len() {
-            return Err(ResolverError("short DNS name".to_string()));
-        }
-        let len = packet[pos];
-        if len & 0xc0 == 0xc0 {
-            if pos + 1 >= packet.len() {
-                return Err(ResolverError("short DNS name pointer".to_string()));
-            }
-            let pointer = usize::from(u16::from_be_bytes([len & 0x3f, packet[pos + 1]]));
-            if !jumped {
-                next = pos + 2;
-            }
-            pos = pointer;
-            jumped = true;
-            jumps += 1;
-            if jumps > 128 {
-                return Err(ResolverError("DNS name pointer loop".to_string()));
-            }
-            continue;
-        }
-        if len & 0xc0 != 0 {
-            return Err(ResolverError("invalid DNS name label".to_string()));
-        }
-        pos += 1;
-        if len == 0 {
-            if !jumped {
-                next = pos;
-            }
-            break;
-        }
-        let len = usize::from(len);
-        if pos + len > packet.len() {
-            return Err(ResolverError("short DNS name label".to_string()));
-        }
-        labels.push(String::from_utf8_lossy(&packet[pos..pos + len]).into_owned());
-        pos += len;
-        if !jumped {
-            next = pos;
-        }
-    }
-
-    let name = if labels.is_empty() {
-        ".".to_string()
-    } else {
-        format!("{}.", labels.join("."))
+        _ => return None,
     };
-    Ok((name, next))
+    Some(DnsRecord {
+        ip,
+        ttl: Some(record.ttl),
+    })
 }
 
-fn read_u16(raw: &[u8], offset: usize) -> Result<u16, ResolverError> {
-    let bytes = raw
-        .get(offset..offset + 2)
-        .ok_or_else(|| ResolverError("short DNS message".to_string()))?;
-    Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
-}
-
-fn read_u32(raw: &[u8], offset: usize) -> Result<u32, ResolverError> {
-    let bytes = raw
-        .get(offset..offset + 4)
-        .ok_or_else(|| ResolverError("short DNS message".to_string()))?;
-    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-fn rcode_name(status: i32) -> &'static str {
-    match status {
-        1 => "FormatError",
-        2 => "ServerFailure",
-        3 => "NXDomain",
-        4 => "NotImplemented",
-        5 => "Refused",
-        _ => "",
-    }
+fn resolver_error(err: impl ToString) -> ResolverError {
+    ResolverError(err.to_string())
 }
 
 #[cfg(test)]
