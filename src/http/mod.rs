@@ -34,7 +34,7 @@ use crate::auth::aws_sigv4;
 use crate::auth::digest;
 use crate::cli::{Cli, CompressionMode, HttpVersion};
 use crate::core;
-use crate::duration::{duration_from_seconds, request_timeout_message};
+use crate::duration::{TimeoutBudget, duration_from_seconds, request_timeout_message};
 use crate::error::{FetchError, write_error_with_color, write_warning_with_color};
 use crate::format::content_type::{self, ContentType};
 use crate::format::css;
@@ -111,6 +111,7 @@ impl RequestBodyPayload {
 
 const MAX_BUFFERED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DISCARDED_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_RESPONSE_DRAIN_DURATION: Duration = Duration::from_millis(250);
 const BINARY_RESPONSE_WARNING: &str =
     "the response body appears to be binary\n\nTo output to the terminal anyway, use '--output -'";
 
@@ -284,6 +285,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     RequestAuthorization::None
                 },
             )?;
+            let req = apply_request_timeout(req, request_timeout, request_start)?;
             timing.set_dns(
                 request_client
                     .dns_resolution
@@ -341,6 +343,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     response,
                     DigestRetryContext {
                         client: &request_client.client,
+                        client_build: &client_build,
                         method: request_method,
                         headers: headers.clone(),
                         body: request_body.clone(),
@@ -363,8 +366,14 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 }
                 if attempt < retry_count && should_retry_status(status) {
                     ensure_request_body_replayable(&request_body, "retry")?;
-                    let delay =
+                    let requested_delay =
                         compute_delay(retry_delay, attempt, parse_retry_after(response.headers()));
+                    drain_response_body_bounded(response).await;
+                    let delay = retry_delay_within_timeout(
+                        requested_delay,
+                        request_timeout,
+                        request_start,
+                    )?;
                     print_retry(
                         cli,
                         attempt + 2,
@@ -372,18 +381,14 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         delay,
                         &retry_reason(status),
                     );
-                    drain_response_body_bounded(response).await;
                     tokio::time::sleep(delay).await;
-                    let retry_client_build = client::ClientBuildContext {
-                        mode: client_build.mode,
+                    ensure_retry_delay_completed(
+                        requested_delay,
+                        delay,
                         request_timeout,
-                        connect_timeout,
-                        request_start: Instant::now(),
-                        session: session.as_ref(),
-                        connect_timing: Some(&connect_timing),
-                    };
-                    initial_client =
-                        client::build_client_for_url(cli, &url, &retry_client_build).await?;
+                        request_start,
+                    )?;
+                    initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
                     attempt += 1;
                     continue;
                 }
@@ -402,9 +407,21 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 }
                 if attempt < retry_count && is_retryable_error(&err) {
                     ensure_request_body_replayable(&request_body, "retry")?;
-                    let delay = compute_delay(retry_delay, attempt, Duration::ZERO);
+                    let requested_delay = compute_delay(retry_delay, attempt, Duration::ZERO);
+                    let delay = retry_delay_within_timeout(
+                        requested_delay,
+                        request_timeout,
+                        request_start,
+                    )?;
                     print_retry(cli, attempt + 2, total_attempts, delay, &err.to_string());
                     tokio::time::sleep(delay).await;
+                    ensure_retry_delay_completed(
+                        requested_delay,
+                        delay,
+                        request_timeout,
+                        request_start,
+                    )?;
+                    initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
                     attempt += 1;
                     continue;
                 }
@@ -1096,12 +1113,16 @@ async fn drain_response_body_bounded(mut response: Response) {
 
 async fn drain_response_body_bounded_mut(response: &mut Response) {
     let mut discarded = 0usize;
+    let drain_deadline = tokio::time::Instant::now() + MAX_RESPONSE_DRAIN_DURATION;
     while discarded < MAX_DISCARDED_RESPONSE_BYTES {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
+        if tokio::time::Instant::now() >= drain_deadline {
+            break;
+        }
+        match tokio::time::timeout_at(drain_deadline, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
                 discarded = discarded.saturating_add(chunk.len());
             }
-            Ok(None) | Err(_) => break,
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
         }
     }
 }
@@ -1711,6 +1732,17 @@ fn build_request(
     Ok(req)
 }
 
+fn apply_request_timeout(
+    mut req: RequestBuilder,
+    request_timeout: Option<Duration>,
+    request_start: Instant,
+) -> Result<RequestBuilder, FetchError> {
+    if let Some(timeout) = TimeoutBudget::started_at(request_timeout, request_start).remaining()? {
+        req = req.timeout(timeout);
+    }
+    Ok(req)
+}
+
 enum RequestAuthorization<'a> {
     Cli,
     Digest(&'a str),
@@ -1752,6 +1784,7 @@ fn reqwest_request_version_for_cli(cli: &Cli) -> Result<Option<reqwest::Version>
 
 struct DigestRetryContext<'a> {
     client: &'a Client,
+    client_build: &'a client::ClientBuildContext<'a>,
     method: Method,
     headers: HeaderMap,
     body: RequestBody,
@@ -1762,7 +1795,7 @@ struct DigestRetryContext<'a> {
 }
 
 async fn apply_digest_challenge(
-    mut response: Response,
+    response: Response,
     context: DigestRetryContext<'_>,
     credentials: Option<&(String, String)>,
 ) -> Result<Response, FetchError> {
@@ -1807,8 +1840,18 @@ async fn apply_digest_challenge(
         strip_entity_headers_for_bodyless_redirect(&mut challenged_headers);
     }
 
+    let retry_before_drain = digest_retry_before_drain(&response);
+    let retry_client;
+    let client = if retry_before_drain {
+        retry_client =
+            client::build_client_for_url(context.cli, &challenged_url, context.client_build)
+                .await?;
+        &retry_client.client
+    } else {
+        context.client
+    };
     let retry_request = build_request(
-        context.client,
+        client,
         challenged_method,
         challenged_url,
         challenged_headers,
@@ -1816,14 +1859,13 @@ async fn apply_digest_challenge(
         context.cli,
         RequestAuthorization::Digest(&auth),
     )?;
+    let retry_request = apply_request_timeout(
+        retry_request,
+        context.client_build.request_timeout,
+        context.client_build.request_start,
+    )?;
 
-    if response_body_exceeds_discard_bound(&response) {
-        drain_response_body_bounded_mut(&mut response).await;
-        let retry_response: Result<Response, FetchError> =
-            retry_request.send().await.map_err(Into::into);
-        drop(response);
-        retry_response
-    } else if digest_retry_before_drain(&response) {
+    if retry_before_drain {
         let retry_response: Result<Response, FetchError> =
             retry_request.send().await.map_err(Into::into);
         drop(response);
@@ -2818,6 +2860,32 @@ fn compute_delay(initial_delay: Duration, attempt: usize, retry_after: Duration)
     let delay = Duration::from_secs_f64(jittered.max(0.0));
 
     delay.max(retry_after)
+}
+
+fn retry_delay_within_timeout(
+    delay: Duration,
+    request_timeout: Option<Duration>,
+    request_start: Instant,
+) -> Result<Duration, FetchError> {
+    let Some(remaining) = TimeoutBudget::started_at(request_timeout, request_start).remaining()?
+    else {
+        return Ok(delay);
+    };
+    Ok(delay.min(remaining))
+}
+
+fn ensure_retry_delay_completed(
+    requested_delay: Duration,
+    actual_delay: Duration,
+    request_timeout: Option<Duration>,
+    request_start: Instant,
+) -> Result<(), FetchError> {
+    if actual_delay < requested_delay {
+        return Err(TimeoutBudget::started_at(request_timeout, request_start).timeout_error());
+    }
+    TimeoutBudget::started_at(request_timeout, request_start)
+        .remaining()
+        .map(|_| ())
 }
 
 fn print_retry(
