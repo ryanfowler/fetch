@@ -1,86 +1,74 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
-use reqwest::header::{ACCEPT, USER_AGENT};
-use serde::Deserialize;
 use tokio::net::UdpSocket;
 use url::Url;
 
 use crate::cli::Cli;
 use crate::core::{self, Printer, Sequence};
 use crate::dns::util::{dns_query_id, udp_dns_timeout};
+use crate::dns::wire;
 use crate::error::{FetchError, write_error_with_color, write_warning_with_color};
 
-const DNS_TYPE_A: u16 = 1;
-const DNS_TYPE_NS: u16 = 2;
-const DNS_TYPE_CNAME: u16 = 5;
-const DNS_TYPE_SOA: u16 = 6;
-const DNS_TYPE_MX: u16 = 15;
-const DNS_TYPE_TXT: u16 = 16;
-const DNS_TYPE_AAAA: u16 = 28;
-const DNS_TYPE_SRV: u16 = 33;
-const DNS_TYPE_SVCB: u16 = 64;
-const DNS_TYPE_HTTPS: u16 = 65;
-const DNS_TYPE_CAA: u16 = 257;
-const DNS_CLASS_IN: u16 = 1;
+const DNS_TYPE_A: u16 = wire::TYPE_A;
+const DNS_TYPE_NS: u16 = wire::TYPE_NS;
+const DNS_TYPE_CNAME: u16 = wire::TYPE_CNAME;
+const DNS_TYPE_SOA: u16 = wire::TYPE_SOA;
+const DNS_TYPE_MX: u16 = wire::TYPE_MX;
+const DNS_TYPE_TXT: u16 = wire::TYPE_TXT;
+const DNS_TYPE_AAAA: u16 = wire::TYPE_AAAA;
+const DNS_TYPE_SRV: u16 = wire::TYPE_SRV;
+const DNS_TYPE_SVCB: u16 = wire::TYPE_SVCB;
+const DNS_TYPE_HTTPS: u16 = wire::TYPE_HTTPS;
+const DNS_TYPE_CAA: u16 = wire::TYPE_CAA;
+const DNS_CLASS_IN: u16 = wire::CLASS_IN;
 
 const INSPECT_TYPES: &[QueryType] = &[
     QueryType {
         label: "A",
-        doh_type: "A",
         dns_type: DNS_TYPE_A,
     },
     QueryType {
         label: "AAAA",
-        doh_type: "AAAA",
         dns_type: DNS_TYPE_AAAA,
     },
     QueryType {
         label: "CNAME",
-        doh_type: "CNAME",
         dns_type: DNS_TYPE_CNAME,
     },
     QueryType {
         label: "TXT",
-        doh_type: "TXT",
         dns_type: DNS_TYPE_TXT,
     },
     QueryType {
         label: "MX",
-        doh_type: "MX",
         dns_type: DNS_TYPE_MX,
     },
     QueryType {
         label: "NS",
-        doh_type: "NS",
         dns_type: DNS_TYPE_NS,
     },
     QueryType {
         label: "SOA",
-        doh_type: "SOA",
         dns_type: DNS_TYPE_SOA,
     },
     QueryType {
         label: "SRV",
-        doh_type: "SRV",
         dns_type: DNS_TYPE_SRV,
     },
     QueryType {
         label: "CAA",
-        doh_type: "CAA",
         dns_type: DNS_TYPE_CAA,
     },
     QueryType {
         label: "SVCB",
-        doh_type: "SVCB",
         dns_type: DNS_TYPE_SVCB,
     },
     QueryType {
         label: "HTTPS",
-        doh_type: "HTTPS",
         dns_type: DNS_TYPE_HTTPS,
     },
 ];
@@ -88,7 +76,6 @@ const INSPECT_TYPES: &[QueryType] = &[
 #[derive(Clone, Copy)]
 struct QueryType {
     label: &'static str,
-    doh_type: &'static str,
     dns_type: u16,
 }
 
@@ -220,15 +207,29 @@ async fn lookup(
     }
 
     let udp_timeout = udp_dns_timeout(timeout);
+    let doh_client = match &target {
+        ResolverTarget::Doh { .. } => Some(
+            crate::dns::doh::client(timeout).map_err(|err| FetchError::Message(err.to_string()))?,
+        ),
+        _ => None,
+    };
     let futures = INSPECT_TYPES.iter().copied().map(|query_type| {
-        let target = target.clone();
+        let client = doh_client.as_ref();
+        let target = &target;
         async move {
-            match target {
-                ResolverTarget::Doh { url, .. } => lookup_doh_records(&url, host, query_type).await,
-                ResolverTarget::Udp { addr, .. } => {
-                    lookup_udp_records(&addr, host, query_type, udp_timeout).await
+            match (target, client) {
+                (ResolverTarget::Doh { url, .. }, Some(client)) => {
+                    lookup_doh_records(client, url, host, query_type).await
                 }
-                ResolverTarget::Default { .. } => unreachable!("default resolver handled earlier"),
+                (ResolverTarget::Udp { addr, .. }, _) => {
+                    lookup_udp_records(addr, host, query_type, udp_timeout).await
+                }
+                (ResolverTarget::Default { .. }, _) => {
+                    unreachable!("default resolver handled earlier")
+                }
+                (ResolverTarget::Doh { .. }, None) => {
+                    unreachable!("DoH client initialized above")
+                }
             }
         }
     });
@@ -290,48 +291,16 @@ fn records_from_ip_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<Record>
 }
 
 async fn lookup_doh_records(
+    client: &reqwest::Client,
     server_url: &Url,
     host: &str,
     query_type: QueryType,
 ) -> Result<Vec<Record>, FetchError> {
-    let mut url = server_url.clone();
-    let mut pairs: Vec<(String, String)> = url
-        .query_pairs()
-        .filter(|(key, _)| key != "name" && key != "type")
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect();
-    pairs.push(("name".to_string(), host.to_string()));
-    pairs.push(("type".to_string(), query_type.doh_type.to_string()));
-    url.query_pairs_mut().clear().extend_pairs(pairs);
-
-    let response = reqwest::Client::builder()
-        .use_rustls_tls()
-        .build()?
-        .get(url)
-        .header(ACCEPT, "application/dns-json")
-        .header(USER_AGENT, crate::core::user_agent())
-        .send()
-        .await?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.bytes().await.unwrap_or_default();
-        if body.is_empty() {
-            return Err(format!("http response code: {}", status.as_u16()).into());
-        }
-        return Err(format!("{}: {}", status.as_u16(), String::from_utf8_lossy(&body)).into());
-    }
-
-    let body = response.json::<DohResponse>().await?;
-    if body.status != 0 {
-        let name = rcode_name(body.status);
-        if name.is_empty() {
-            return Err("no DNS records found".into());
-        }
-        return Err(format!("no DNS records found: {name}").into());
-    }
-
-    Ok(body
-        .answer
+    let records =
+        crate::dns::doh::lookup_doh_records_with_client(client, server_url, host, query_type.label)
+            .await
+            .map_err(|err| FetchError::Message(err.to_string()))?;
+    Ok(records
         .into_iter()
         .map(|answer| {
             let typ = type_label(answer.answer_type);
@@ -352,7 +321,8 @@ async fn lookup_udp_records(
     timeout: Duration,
 ) -> Result<Vec<Record>, FetchError> {
     let id = dns_query_id();
-    let raw = build_dns_query(id, host, query_type.dns_type)?;
+    let raw = wire::build_query(id, host, query_type.dns_type)
+        .map_err(|err| FetchError::Message(err.to_string()))?;
     let socket = UdpSocket::bind(if server_addr.starts_with('[') {
         "[::]:0"
     } else {
@@ -368,90 +338,23 @@ async fn lookup_udp_records(
         Ok(Err(err)) => return Err(err.into()),
         Err(_) => return Err("DNS lookup timed out".into()),
     };
-    parse_dns_response(&buf[..n], id)
-}
-
-fn build_dns_query(id: u16, host: &str, dns_type: u16) -> Result<Vec<u8>, FetchError> {
-    let mut raw = Vec::with_capacity(512);
-    raw.extend_from_slice(&id.to_be_bytes());
-    raw.extend_from_slice(&0x0100u16.to_be_bytes());
-    raw.extend_from_slice(&1u16.to_be_bytes());
-    raw.extend_from_slice(&0u16.to_be_bytes());
-    raw.extend_from_slice(&0u16.to_be_bytes());
-    raw.extend_from_slice(&0u16.to_be_bytes());
-    write_dns_name(&mut raw, host)?;
-    raw.extend_from_slice(&dns_type.to_be_bytes());
-    raw.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
-    Ok(raw)
-}
-
-fn write_dns_name(raw: &mut Vec<u8>, host: &str) -> Result<(), FetchError> {
-    let host = host.trim_end_matches('.');
-    if host.is_empty() {
-        raw.push(0);
-        return Ok(());
-    }
-    for label in host.split('.') {
-        if label.is_empty() || label.len() > 63 {
-            return Err(format!("invalid DNS name: {host}").into());
-        }
-        raw.push(label.len() as u8);
-        raw.extend_from_slice(label.as_bytes());
-    }
-    raw.push(0);
-    Ok(())
-}
-
-fn parse_dns_response(raw: &[u8], expected_id: u16) -> Result<Vec<Record>, FetchError> {
-    if raw.len() < 12 {
-        return Err("short DNS response".into());
-    }
-    let id = read_u16(raw, 0)?;
-    if id != expected_id {
-        return Err("mismatched DNS response ID".into());
-    }
-    let flags = read_u16(raw, 2)?;
-    let rcode = i32::from(flags & 0x000f);
-    if rcode != 0 {
-        return Err(format!("no DNS records found: {}", rcode_name(rcode)).into());
-    }
-    if flags & 0x0200 != 0 {
-        return Err("DNS response was truncated".into());
-    }
-
-    let question_count = usize::from(read_u16(raw, 4)?);
-    let answer_count = usize::from(read_u16(raw, 6)?);
-    let mut offset = 12;
-    for _ in 0..question_count {
-        let (_, next) = read_dns_name(raw, offset)?;
-        offset = next + 4;
-        if offset > raw.len() {
-            return Err("short DNS question".into());
-        }
-    }
-
+    let raw_records =
+        wire::parse_response(&buf[..n], id).map_err(|err| FetchError::Message(err.to_string()))?;
     let mut records = Vec::new();
-    for _ in 0..answer_count {
-        let (_, next) = read_dns_name(raw, offset)?;
-        offset = next;
-        let typ = read_u16(raw, offset)?;
-        let class = read_u16(raw, offset + 2)?;
-        let ttl = read_u32(raw, offset + 4)?;
-        let rdlen = usize::from(read_u16(raw, offset + 8)?);
-        offset += 10;
-        if offset + rdlen > raw.len() {
-            return Err("short DNS resource".into());
-        }
-        let data_offset = offset;
-        offset += rdlen;
-        if class != DNS_CLASS_IN {
+    for raw_record in raw_records {
+        if raw_record.class != DNS_CLASS_IN {
             continue;
         }
-        if let Some(value) = resource_value(raw, typ, data_offset, rdlen)? {
+        if let Some(value) = resource_value(
+            &buf[..n],
+            raw_record.typ,
+            raw_record.data_offset,
+            raw_record.data.len(),
+        )? {
             records.push(Record {
-                typ: type_label(typ).to_string(),
+                typ: type_label(raw_record.typ).to_string(),
                 value,
-                ttl,
+                ttl: raw_record.ttl,
                 has_ttl: true,
             });
         }
@@ -475,19 +378,31 @@ fn resource_value(
             octets.copy_from_slice(rdata);
             IpAddr::from(octets).to_string()
         }
-        DNS_TYPE_CNAME | DNS_TYPE_NS => read_dns_name(packet, offset)?.0,
+        DNS_TYPE_CNAME | DNS_TYPE_NS => {
+            wire::read_name(packet, offset)
+                .map_err(|err| FetchError::Message(err.to_string()))?
+                .0
+        }
         DNS_TYPE_TXT => parse_txt_rdata(rdata),
         DNS_TYPE_MX if len >= 3 => {
-            let pref = read_u16(packet, offset)?;
-            let name = read_dns_name(packet, offset + 2)?.0;
+            let pref = wire::read_u16(packet, offset)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            let name = wire::read_name(packet, offset + 2)
+                .map_err(|err| FetchError::Message(err.to_string()))?
+                .0;
             format!("{pref} {name}")
         }
         DNS_TYPE_SOA => parse_soa_rdata(packet, offset)?,
         DNS_TYPE_SRV if len >= 7 => {
-            let priority = read_u16(packet, offset)?;
-            let weight = read_u16(packet, offset + 2)?;
-            let port = read_u16(packet, offset + 4)?;
-            let target = read_dns_name(packet, offset + 6)?.0;
+            let priority = wire::read_u16(packet, offset)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            let weight = wire::read_u16(packet, offset + 2)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            let port = wire::read_u16(packet, offset + 4)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            let target = wire::read_name(packet, offset + 6)
+                .map_err(|err| FetchError::Message(err.to_string()))?
+                .0;
             format!("{priority} {weight} {port} {target}")
         }
         DNS_TYPE_SVCB | DNS_TYPE_HTTPS => {
@@ -516,74 +431,24 @@ fn parse_txt_rdata(raw: &[u8]) -> String {
 }
 
 fn parse_soa_rdata(packet: &[u8], offset: usize) -> Result<String, FetchError> {
-    let (ns, mut next) = read_dns_name(packet, offset)?;
-    let (mbox, next_after_mbox) = read_dns_name(packet, next)?;
+    let (ns, mut next) =
+        wire::read_name(packet, offset).map_err(|err| FetchError::Message(err.to_string()))?;
+    let (mbox, next_after_mbox) =
+        wire::read_name(packet, next).map_err(|err| FetchError::Message(err.to_string()))?;
     next = next_after_mbox;
-    let serial = read_u32(packet, next)?;
-    let refresh = read_u32(packet, next + 4)?;
-    let retry = read_u32(packet, next + 8)?;
-    let expire = read_u32(packet, next + 12)?;
-    let min_ttl = read_u32(packet, next + 16)?;
+    let serial =
+        wire::read_u32(packet, next).map_err(|err| FetchError::Message(err.to_string()))?;
+    let refresh =
+        wire::read_u32(packet, next + 4).map_err(|err| FetchError::Message(err.to_string()))?;
+    let retry =
+        wire::read_u32(packet, next + 8).map_err(|err| FetchError::Message(err.to_string()))?;
+    let expire =
+        wire::read_u32(packet, next + 12).map_err(|err| FetchError::Message(err.to_string()))?;
+    let min_ttl =
+        wire::read_u32(packet, next + 16).map_err(|err| FetchError::Message(err.to_string()))?;
     Ok(format!(
         "{ns} {mbox} serial={serial} refresh={refresh} retry={retry} expire={expire} minttl={min_ttl}"
     ))
-}
-
-fn read_dns_name(packet: &[u8], offset: usize) -> Result<(String, usize), FetchError> {
-    let mut labels = Vec::new();
-    let mut pos = offset;
-    let mut next = offset;
-    let mut jumped = false;
-    let mut jumps = 0usize;
-
-    loop {
-        if pos >= packet.len() {
-            return Err("short DNS name".into());
-        }
-        let len = packet[pos];
-        if len & 0xc0 == 0xc0 {
-            if pos + 1 >= packet.len() {
-                return Err("short DNS name pointer".into());
-            }
-            let pointer = usize::from(u16::from_be_bytes([len & 0x3f, packet[pos + 1]]));
-            if !jumped {
-                next = pos + 2;
-            }
-            pos = pointer;
-            jumped = true;
-            jumps += 1;
-            if jumps > 128 {
-                return Err("DNS name pointer loop".into());
-            }
-            continue;
-        }
-        if len & 0xc0 != 0 {
-            return Err("invalid DNS name label".into());
-        }
-        pos += 1;
-        if len == 0 {
-            if !jumped {
-                next = pos;
-            }
-            break;
-        }
-        let len = usize::from(len);
-        if pos + len > packet.len() {
-            return Err("short DNS name label".into());
-        }
-        labels.push(String::from_utf8_lossy(&packet[pos..pos + len]).into_owned());
-        pos += len;
-        if !jumped {
-            next = pos;
-        }
-    }
-
-    let name = if labels.is_empty() {
-        ".".to_string()
-    } else {
-        format!("{}.", labels.join("."))
-    };
-    Ok((name, next))
 }
 
 fn resolver_target(dns_server: Option<&str>) -> Result<ResolverTarget, FetchError> {
@@ -604,7 +469,8 @@ fn resolver_target(dns_server: Option<&str>) -> Result<ResolverTarget, FetchErro
             })
         }
         Some(server) => {
-            let addr = normalize_udp_dns_server(server)?;
+            let addr = crate::dns::resolver::normalize_udp_dns_server(server)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
             Ok(ResolverTarget::Udp {
                 label: format!("udp {addr}"),
                 addr,
@@ -648,28 +514,6 @@ fn resolver_target_from_resolv_conf(
     ResolverTarget::Default {
         label: "system resolver".to_string(),
     }
-}
-
-fn normalize_udp_dns_server(server: &str) -> Result<String, FetchError> {
-    if server.contains("://") {
-        return Err(format!(
-            "invalid value '{server}' for option '--dns-server': must be in the format <IP[:PORT]>"
-        )
-        .into());
-    }
-    if server.parse::<SocketAddr>().is_ok() {
-        return Ok(server.to_string());
-    }
-    if let Ok(ip) = server.parse::<IpAddr>() {
-        return Ok(match ip {
-            IpAddr::V4(_) => format!("{ip}:53"),
-            IpAddr::V6(_) => format!("[{ip}]:53"),
-        });
-    }
-    Err(format!(
-        "invalid value '{server}' for option '--dns-server': must be in the format <IP[:PORT]>"
-    )
-    .into())
 }
 
 fn render_ip_literal_with_color(
@@ -886,17 +730,6 @@ fn type_label(typ: u16) -> String {
     }
 }
 
-fn rcode_name(status: i32) -> &'static str {
-    match status {
-        1 => "FormatError",
-        2 => "ServerFailure",
-        3 => "NXDomain",
-        4 => "NotImplemented",
-        5 => "Refused",
-        _ => "",
-    }
-}
-
 fn normalize_doh_value(typ: u16, value: &str) -> String {
     let Some(raw) = parse_generic_rdata(value) else {
         return value.to_string();
@@ -1027,20 +860,6 @@ fn format_caa(raw: &[u8]) -> String {
     let tag = String::from_utf8_lossy(&raw[2..2 + tag_len]);
     let value = String::from_utf8_lossy(&raw[2 + tag_len..]);
     format!("{flags} {tag} {value:?}")
-}
-
-fn read_u16(raw: &[u8], offset: usize) -> Result<u16, FetchError> {
-    let bytes = raw
-        .get(offset..offset + 2)
-        .ok_or_else(|| FetchError::Message("short DNS message".to_string()))?;
-    Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
-}
-
-fn read_u32(raw: &[u8], offset: usize) -> Result<u32, FetchError> {
-    let bytes = raw
-        .get(offset..offset + 4)
-        .ok_or_else(|| FetchError::Message("short DNS message".to_string()))?;
-    Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 fn hex_encode(raw: &[u8]) -> String {
@@ -1189,23 +1008,6 @@ impl ResolverTarget {
             Self::Default { label } | Self::Udp { label, .. } | Self::Doh { label, .. } => label,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct DohResponse {
-    #[serde(rename = "Status")]
-    status: i32,
-    #[serde(rename = "Answer", default)]
-    answer: Vec<DohAnswer>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DohAnswer {
-    #[serde(rename = "type")]
-    answer_type: u16,
-    data: String,
-    #[serde(rename = "TTL")]
-    ttl: Option<u32>,
 }
 
 #[cfg(test)]
@@ -1424,7 +1226,6 @@ mod tests {
             "example.com",
             QueryType {
                 label: "A",
-                doh_type: "A",
                 dns_type: DNS_TYPE_A,
             },
             Duration::from_secs(1),

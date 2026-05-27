@@ -244,20 +244,7 @@ async fn resolve_websocket_host(
             .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")));
     };
 
-    let addrs = if dns_server.starts_with("http://") || dns_server.starts_with("https://") {
-        let server_url = Url::parse(dns_server).map_err(|err| {
-            FetchError::Message(format!("invalid dns-server '{dns_server}': {err}"))
-        })?;
-        crate::dns::doh::lookup_doh(&server_url, host, timeout.remaining()?)
-            .await
-            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-    } else {
-        let server_addr = crate::dns::resolver::normalize_udp_dns_server(dns_server)
-            .map_err(|err| FetchError::Message(err.to_string()))?;
-        crate::dns::resolver::lookup_udp(&server_addr, host, timeout.remaining()?)
-            .await
-            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-    };
+    let addrs = crate::dns::custom::lookup_ips(dns_server, host, timeout.remaining()?).await?;
     Ok(addrs
         .into_iter()
         .map(|addr| SocketAddr::new(addr, 0))

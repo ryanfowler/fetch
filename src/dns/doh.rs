@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::time::Duration;
 
 use reqwest::header::{ACCEPT, USER_AGENT};
@@ -28,6 +28,13 @@ pub struct DnsRecord {
     pub ttl: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DohRecord {
+    pub(crate) answer_type: u16,
+    pub(crate) data: String,
+    pub(crate) ttl: Option<u32>,
+}
+
 pub async fn lookup_doh(
     server_url: &Url,
     host: &str,
@@ -37,7 +44,7 @@ pub async fn lookup_doh(
         return Ok(vec![ip]);
     }
 
-    let client = doh_client(timeout)?;
+    let client = client(timeout)?;
     let (a, aaaa) = tokio::join!(
         lookup_doh_type_with_client(&client, server_url, host, "A", DNS_TYPE_A),
         lookup_doh_type_with_client(&client, server_url, host, "AAAA", DNS_TYPE_AAAA)
@@ -66,11 +73,11 @@ pub async fn lookup_doh_type(
     answer_type: u16,
     timeout: Option<Duration>,
 ) -> Result<Vec<DnsRecord>, DnsError> {
-    let client = doh_client(timeout)?;
+    let client = client(timeout)?;
     lookup_doh_type_with_client(&client, server_url, host, dns_type, answer_type).await
 }
 
-fn doh_client(timeout: Option<Duration>) -> Result<reqwest::Client, DnsError> {
+pub(crate) fn client(timeout: Option<Duration>) -> Result<reqwest::Client, DnsError> {
     let mut builder = reqwest::Client::builder().use_rustls_tls();
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
@@ -85,6 +92,16 @@ async fn lookup_doh_type_with_client(
     dns_type: &str,
     answer_type: u16,
 ) -> Result<Vec<DnsRecord>, DnsError> {
+    let records = lookup_doh_records_with_client(client, server_url, host, dns_type).await?;
+    ip_records(records, answer_type)
+}
+
+pub(crate) async fn lookup_doh_records_with_client(
+    client: &reqwest::Client,
+    server_url: &Url,
+    host: &str,
+    dns_type: &str,
+) -> Result<Vec<DohRecord>, DnsError> {
     let url = doh_query_url(server_url, host, dns_type);
 
     let response = client
@@ -115,7 +132,7 @@ async fn lookup_doh_type_with_client(
         .await
         .map_err(|err| DnsError(err.to_string()))?;
 
-    if body.status != 0 || body.answer.is_empty() {
+    if body.status != 0 {
         let name = rcode_name(body.status);
         if name.is_empty() {
             return Err(DnsError("no such host".to_string()));
@@ -123,8 +140,19 @@ async fn lookup_doh_type_with_client(
         return Err(DnsError(format!("no such host: {name}")));
     }
 
-    let records: Vec<DnsRecord> = body
+    Ok(body
         .answer
+        .into_iter()
+        .map(|answer| DohRecord {
+            answer_type: answer.answer_type,
+            data: answer.data,
+            ttl: answer.ttl,
+        })
+        .collect())
+}
+
+fn ip_records(records: Vec<DohRecord>, answer_type: u16) -> Result<Vec<DnsRecord>, DnsError> {
+    let records: Vec<DnsRecord> = records
         .into_iter()
         .filter(|answer| answer.answer_type == answer_type)
         .filter_map(|answer| {
@@ -134,16 +162,11 @@ async fn lookup_doh_type_with_client(
             })
         })
         .collect();
-
     if records.is_empty() {
         return Err(DnsError("no such host".to_string()));
     }
 
     Ok(records)
-}
-
-pub fn socket_addrs_for_override(addrs: &[IpAddr]) -> Vec<SocketAddr> {
-    addrs.iter().map(|addr| SocketAddr::new(*addr, 0)).collect()
 }
 
 fn doh_query_url(server_url: &Url, host: &str, dns_type: &str) -> Url {
@@ -367,7 +390,7 @@ mod tests {
         let delay = Duration::from_millis(250);
         let (url, task) = start_delayed_test_server(delay).await;
 
-        let _ = doh_client(None).unwrap();
+        let _ = client(None).unwrap();
         let start = Instant::now();
         let addrs = lookup_doh(&url, "example.com", None).await.unwrap();
         let elapsed = start.elapsed();
@@ -411,13 +434,6 @@ mod tests {
         assert_eq!(records[0].ip.to_string(), "127.0.0.1");
         assert_eq!(records[0].ttl, Some(123));
         task.abort();
-    }
-
-    #[test]
-    fn socket_addrs_use_zero_port_for_reqwest_override() {
-        let addrs = socket_addrs_for_override(&["127.0.0.1".parse().unwrap()]);
-
-        assert_eq!(addrs, [SocketAddr::new("127.0.0.1".parse().unwrap(), 0)]);
     }
 
     #[test]
