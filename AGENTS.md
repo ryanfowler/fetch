@@ -131,6 +131,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - `--sort-headers` or `sort-headers = true` sorts displayed request/response headers alphabetically by name in verbose output without changing the actual request header order.
 - Default HTTP requests send `Accept: application/json, */*;q=0.5`, preferring JSON while allowing any other response type as a lower-priority fallback.
 - `--basic` and `--digest` credentials preserve exact bytes around the first colon; leading/trailing spaces in usernames or passwords are significant and are not trimmed after CLI or `--from-curl` parsing.
+- `--from-curl` should only no-op curl flags that already match fetch defaults or curl presentation-only progress flags. Unsupported semantic flags such as `-n`/`--netrc`, `-f`/`--fail`, `-N`/`--no-buffer`, `--proto-default`, and `--proto-redir` return clear diagnostics instead of being ignored.
 - The HTTP/2/3 environment-proxy guard mirrors reqwest `NO_PROXY` matching for hosts, domains, IP literals, CIDR ranges, and `*` so env proxies do not incorrectly block direct private-network requests.
 
 Retryable requests use replayable request bodies so retries and 307/308 redirects can resend data without holding unrelated state.
