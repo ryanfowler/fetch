@@ -6,6 +6,8 @@ use base64::Engine;
 use crate::core::Printer;
 use crate::format::json;
 
+const MAX_MSGPACK_NESTING_DEPTH: usize = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MsgPackError(String);
 
@@ -39,7 +41,7 @@ pub fn format_msgpack_to(buf: &[u8], out: &mut Printer) -> Result<(), MsgPackErr
 fn msgpack_to_json(buf: &[u8]) -> Result<String, MsgPackError> {
     let mut parser = MsgPackParser::new(buf);
     let mut out = String::new();
-    parser.write_value(&mut out)?;
+    parser.write_value(&mut out, 0)?;
     if !parser.is_eof() {
         return Err(MsgPackError::new("unexpected trailing MessagePack data"));
     }
@@ -60,12 +62,18 @@ impl<'a> MsgPackParser<'a> {
         self.pos == self.input.len()
     }
 
-    fn write_value(&mut self, out: &mut String) -> Result<(), MsgPackError> {
+    fn write_value(&mut self, out: &mut String, depth: usize) -> Result<(), MsgPackError> {
+        if depth > MAX_MSGPACK_NESTING_DEPTH {
+            return Err(MsgPackError::new(format!(
+                "MessagePack nesting too deep (max {MAX_MSGPACK_NESTING_DEPTH})"
+            )));
+        }
+
         let marker = self.read_u8()?;
         match marker {
             0x00..=0x7f => write!(out, "{marker}").expect("write to string cannot fail"),
-            0x80..=0x8f => self.write_map(out, u32::from(marker & 0x0f))?,
-            0x90..=0x9f => self.write_array(out, u32::from(marker & 0x0f))?,
+            0x80..=0x8f => self.write_map(out, u32::from(marker & 0x0f), depth)?,
+            0x90..=0x9f => self.write_array(out, u32::from(marker & 0x0f), depth)?,
             0xa0..=0xbf => self.write_string(out, usize::from(marker & 0x1f))?,
             0xc0 => out.push_str("null"),
             0xc1 => return Err(MsgPackError::new("reserved MessagePack marker 0xc1")),
@@ -134,19 +142,19 @@ impl<'a> MsgPackParser<'a> {
             }
             0xdc => {
                 let len = u32::from(self.read_u16()?);
-                self.write_array(out, len)?;
+                self.write_array(out, len, depth)?;
             }
             0xdd => {
                 let len = self.read_u32()?;
-                self.write_array(out, len)?;
+                self.write_array(out, len, depth)?;
             }
             0xde => {
                 let len = u32::from(self.read_u16()?);
-                self.write_map(out, len)?;
+                self.write_map(out, len, depth)?;
             }
             0xdf => {
                 let len = self.read_u32()?;
-                self.write_map(out, len)?;
+                self.write_map(out, len, depth)?;
             }
             0xe0..=0xff => {
                 write!(out, "{}", marker as i8).expect("write to string cannot fail");
@@ -155,19 +163,24 @@ impl<'a> MsgPackParser<'a> {
         Ok(())
     }
 
-    fn write_array(&mut self, out: &mut String, len: u32) -> Result<(), MsgPackError> {
+    fn write_array(
+        &mut self,
+        out: &mut String,
+        len: u32,
+        depth: usize,
+    ) -> Result<(), MsgPackError> {
         out.push('[');
         for index in 0..len {
             if index > 0 {
                 out.push(',');
             }
-            self.write_value(out)?;
+            self.write_value(out, depth + 1)?;
         }
         out.push(']');
         Ok(())
     }
 
-    fn write_map(&mut self, out: &mut String, len: u32) -> Result<(), MsgPackError> {
+    fn write_map(&mut self, out: &mut String, len: u32, depth: usize) -> Result<(), MsgPackError> {
         out.push('{');
         for index in 0..len {
             if index > 0 {
@@ -175,7 +188,7 @@ impl<'a> MsgPackParser<'a> {
             }
             self.write_map_key(out)?;
             out.push(':');
-            self.write_value(out)?;
+            self.write_value(out, depth + 1)?;
         }
         out.push('}');
         Ok(())
@@ -414,6 +427,36 @@ mod tests {
         assert!(format_msgpack(&[0xa2, b'a'], false).is_err());
         assert!(format_msgpack(&[0xc1], false).is_err());
         assert!(format_msgpack(&[0x01, 0x02], false).is_err());
+    }
+
+    #[test]
+    fn deeply_nested_msgpack_arrays_are_rejected() {
+        let mut input = vec![0x00];
+        for _ in 0..=MAX_MSGPACK_NESTING_DEPTH {
+            input.insert(0, 0x91);
+        }
+
+        let err = format_msgpack(&input, false).unwrap_err();
+        assert!(
+            err.to_string().contains("MessagePack nesting too deep"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_msgpack_maps_are_rejected() {
+        let mut input = vec![0x00];
+        for _ in 0..=MAX_MSGPACK_NESTING_DEPTH {
+            let mut wrapper = vec![0x81, 0xa1, b'x'];
+            wrapper.extend_from_slice(&input);
+            input = wrapper;
+        }
+
+        let err = format_msgpack(&input, false).unwrap_err();
+        assert!(
+            err.to_string().contains("MessagePack nesting too deep"),
+            "{err}"
+        );
     }
 
     #[test]

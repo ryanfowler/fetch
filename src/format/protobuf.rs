@@ -1,6 +1,8 @@
 use std::fmt;
 use std::fmt::Write as _;
 
+const MAX_PROTOBUF_NESTING_DEPTH: usize = 128;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtobufError(String);
 
@@ -14,11 +16,16 @@ impl std::error::Error for ProtobufError {}
 
 pub fn format_protobuf(buf: &[u8]) -> Result<String, ProtobufError> {
     let mut out = String::new();
-    format_message(buf, &mut out, 0)?;
+    format_message(buf, &mut out, 0, 0)?;
     Ok(out)
 }
 
-fn format_message(mut buf: &[u8], out: &mut String, indent: usize) -> Result<(), ProtobufError> {
+fn format_message(
+    mut buf: &[u8],
+    out: &mut String,
+    indent: usize,
+    depth: usize,
+) -> Result<(), ProtobufError> {
     while !buf.is_empty() {
         let (key, n) = consume_varint(buf)?;
         buf = &buf[n..];
@@ -66,9 +73,9 @@ fn format_message(mut buf: &[u8], out: &mut String, indent: usize) -> Result<(),
                 let value = &buf[..len];
                 buf = &buf[len..];
 
-                if is_valid_protobuf(value) {
+                if depth < MAX_PROTOBUF_NESTING_DEPTH && is_valid_protobuf(value) {
                     out.push_str(" (message) {\n");
-                    format_message(value, out, indent + 1)?;
+                    format_message(value, out, indent + 1, depth + 1)?;
                     write_indent(out, indent);
                     out.push_str("}\n");
                 } else if is_printable_bytes(value) {
@@ -305,6 +312,22 @@ mod tests {
         assert!(output.contains("789"));
         assert_eq!(output.matches('{').count(), 2);
         assert_eq!(output.matches('}').count(), 2);
+    }
+
+    #[test]
+    fn deeply_nested_protobuf_messages_render_remaining_value_as_bytes() {
+        let mut input = append_varint(Vec::new(), 1, 7);
+        for _ in 0..=MAX_PROTOBUF_NESTING_DEPTH {
+            input = append_bytes(Vec::new(), 1, &input);
+        }
+
+        let output = format_protobuf(&input).unwrap();
+        assert_eq!(
+            output.matches("(message)").count(),
+            MAX_PROTOBUF_NESTING_DEPTH
+        );
+        assert!(output.contains("(bytes)"), "{output}");
+        assert!(!output.contains("(varint) 7"), "{output}");
     }
 
     #[test]
