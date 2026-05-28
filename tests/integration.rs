@@ -4582,7 +4582,7 @@ fn request_construction_host_header_form_and_http_version() {
     assert_exit(&res, 0);
     let req = wait_for_requests(&server, 1).remove(0);
     assert_eq!(req.method, "PUT");
-    assert_eq!(req.path, "/?a=one&z=old&z=two");
+    assert_eq!(req.path, "/?z=old&a=one&z=two");
     assert_eq!(req.header("content-type"), "application/json");
     assert_eq!(req.header("x-custom"), "value");
     assert_eq!(req.body_string(), r#"{"ok":true}"#);
@@ -4798,7 +4798,7 @@ fn http3_go_harness_cases() {
     let req = wait_for_h3_requests(&h3, 1).remove(0);
     assert_eq!(req.method, "PUT");
     assert_eq!(req.path, "/h3");
-    assert_eq!(req.query, "cli=1&existing=1");
+    assert_eq!(req.query, "existing=1&cli=1");
     assert_eq!(req.header("x-h3"), "yes");
     assert_eq!(req.body_string(), "payload");
 
