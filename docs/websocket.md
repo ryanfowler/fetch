@@ -24,12 +24,17 @@ fetch ws://echo.websocket.events -j '{"type": "subscribe", "channel": "updates"}
 
 ### Piped Input
 
-Pipe lines from stdin — each line is sent as a separate text message:
+Pipe lines from stdin — each line is sent as a separate text message, including
+empty lines:
 
 ```sh
 echo "hello" | fetch ws://echo.websocket.events
 printf "msg1\nmsg2\n" | fetch ws://echo.websocket.events
 ```
+
+`fetch` connects before reading piped input, streams each line as it arrives, and
+continues printing server messages after stdin reaches EOF until the server
+closes the connection.
 
 When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Use Ctrl+C or Ctrl+D to exit.
 
