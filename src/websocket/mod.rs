@@ -22,7 +22,7 @@ use crate::auth::aws_sigv4;
 use crate::cli::Cli;
 use crate::core;
 use crate::duration::{TimeoutBudget, duration_from_seconds};
-use crate::error::{FetchError, write_warning_with_color};
+use crate::error::{FetchError, write_warnings_with_separator_with_color};
 use crate::format::json;
 
 pub mod interactive;
@@ -37,15 +37,17 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     crate::http::apply_query(&mut url, &cli.query);
 
     let method = effective_method(cli);
+    let mut warnings = Vec::new();
     if !cli.method().eq_ignore_ascii_case("GET") {
-        write_warning(
-            cli,
-            &format!("WebSocket requires GET; ignoring method {}", cli.method()),
-        );
+        warnings.push(format!(
+            "WebSocket requires GET; ignoring method {}",
+            cli.method()
+        ));
     }
     if cli.timing {
-        write_warning(cli, "--timing is not supported for WebSocket connections");
+        warnings.push("--timing is not supported for WebSocket connections".to_string());
     }
+    write_warnings(cli, &warnings);
     let interactive = should_use_interactive(cli)?;
 
     let initial_message = websocket_initial_message(cli)?;
@@ -647,11 +649,14 @@ fn websocket_io_error(err: FetchError) -> WsError {
     WsError::Io(io::Error::other(err.to_string()))
 }
 
-fn write_warning(cli: &Cli, message: &str) {
-    if cli.silent {
+fn write_warnings(cli: &Cli, warnings: &[String]) {
+    if cli.silent || warnings.is_empty() {
         return;
     }
-    write_warning_with_color(message, cli.color.as_deref());
+    write_warnings_with_separator_with_color(
+        warnings.iter().map(String::as_str),
+        cli.color.as_deref(),
+    );
 }
 
 fn should_use_interactive(cli: &Cli) -> Result<bool, FetchError> {

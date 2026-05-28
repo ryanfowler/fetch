@@ -6422,9 +6422,16 @@ fn websocket_noninteractive_go_cases() {
     assert_exit(&res, 1);
     assert!(res.stderr.contains("websocket") || res.stderr.contains("grpc"));
 
-    let res = run_fetch(&[&ws_url, "--method", "POST", "--dry-run"]);
+    let res = run_fetch(&[&ws_url, "--method", "POST", "--timing", "--dry-run"]);
     assert_exit(&res, 0);
     assert!(res.stderr.contains("GET / HTTP/1.1"));
+    assert!(
+        res.stderr.contains(
+            "warning: WebSocket requires GET; ignoring method POST\nwarning: --timing is not supported for WebSocket connections\n\n> GET / HTTP/1.1"
+        ),
+        "{:?}",
+        res.stderr
+    );
 
     let res = run_fetch(&[
         &ws_url,

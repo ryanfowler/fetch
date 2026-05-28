@@ -358,6 +358,10 @@ pub fn write_warning_msg_no_flush(printer: &mut Printer, msg: impl fmt::Display)
     printer.push_str("\n");
 }
 
+pub fn write_warning_separator_no_flush(printer: &mut Printer) {
+    printer.push('\n');
+}
+
 impl std::io::Write for Printer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.buf.extend_from_slice(buf);
@@ -574,6 +578,20 @@ mod tests {
         assert_eq!(
             printer.into_string().unwrap(),
             "error: bad\nwarning: careful\n"
+        );
+    }
+
+    #[test]
+    fn warning_separator_separates_warnings_from_following_output() {
+        let mut printer = Printer::new(false);
+        write_warning_msg_no_flush(&mut printer, "one");
+        write_warning_msg_no_flush(&mut printer, "two");
+        write_warning_separator_no_flush(&mut printer);
+        printer.push_str("next\n");
+
+        assert_eq!(
+            printer.into_string().unwrap(),
+            "warning: one\nwarning: two\n\nnext\n"
         );
     }
 }
