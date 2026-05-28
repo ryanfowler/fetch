@@ -1368,7 +1368,9 @@ mod tests {
         let value: Value = serde_json::from_slice(&build_info_json(false)).unwrap();
 
         assert_eq!(value["fetch"], core::version());
-        assert!(value["rust"].as_str().unwrap_or_default().contains("rustc"));
+        let rust = value["rust"].as_str().unwrap_or_default();
+        assert!(!rust.contains("rustc"));
+        assert!(!rust.contains(char::is_whitespace));
         assert_eq!(
             value["settings"]["target_os"].as_str().unwrap_or_default(),
             std::env::consts::OS
