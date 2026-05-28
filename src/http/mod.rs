@@ -365,6 +365,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     ensure_request_body_replayable(&request_body, "retry SSE without compression")?;
                     headers.remove(ACCEPT_ENCODING);
                     compression = CompressionMode::Off;
+                    drain_response_body_bounded(response).await;
                     continue;
                 }
                 if attempt < retry_count && should_retry_status(status) {
