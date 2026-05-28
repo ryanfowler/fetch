@@ -11,7 +11,12 @@ pub(crate) const TYPE_SRV: u16 = 33;
 pub(crate) const TYPE_SVCB: u16 = 64;
 pub(crate) const TYPE_HTTPS: u16 = 65;
 pub(crate) const TYPE_CAA: u16 = 257;
+pub(crate) const TYPE_OPT: u16 = 41;
 pub(crate) const CLASS_IN: u16 = 1;
+pub(crate) const EDNS_UDP_PAYLOAD_SIZE: u16 = 1232;
+
+const TRUNCATED_RESPONSE: &str = "DNS response was truncated";
+const FLAG_TRUNCATED: u16 = 0x0200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WireError(String);
@@ -23,6 +28,12 @@ impl fmt::Display for WireError {
 }
 
 impl std::error::Error for WireError {}
+
+impl WireError {
+    pub(crate) fn is_truncated(&self) -> bool {
+        self.0 == TRUNCATED_RESPONSE
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ResourceRecord<'a> {
@@ -40,10 +51,11 @@ pub(crate) fn build_query(id: u16, host: &str, dns_type: u16) -> Result<Vec<u8>,
     raw.extend_from_slice(&1u16.to_be_bytes());
     raw.extend_from_slice(&0u16.to_be_bytes());
     raw.extend_from_slice(&0u16.to_be_bytes());
-    raw.extend_from_slice(&0u16.to_be_bytes());
+    raw.extend_from_slice(&1u16.to_be_bytes());
     write_name(&mut raw, host)?;
     raw.extend_from_slice(&dns_type.to_be_bytes());
     raw.extend_from_slice(&CLASS_IN.to_be_bytes());
+    write_opt_record(&mut raw);
     Ok(raw)
 }
 
@@ -59,6 +71,9 @@ pub(crate) fn parse_response<'a>(
         return Err(WireError("mismatched DNS response ID".to_string()));
     }
     let flags = read_u16(raw, 2)?;
+    if flags & FLAG_TRUNCATED != 0 {
+        return Err(WireError(TRUNCATED_RESPONSE.to_string()));
+    }
     let rcode = i32::from(flags & 0x000f);
     if rcode != 0 {
         let name = rcode_name(rcode);
@@ -66,9 +81,6 @@ pub(crate) fn parse_response<'a>(
             return Err(WireError("no such host".to_string()));
         }
         return Err(WireError(format!("no such host: {name}")));
-    }
-    if flags & 0x0200 != 0 {
-        return Err(WireError("DNS response was truncated".to_string()));
     }
 
     let question_count = usize::from(read_u16(raw, 4)?);
@@ -195,6 +207,14 @@ fn write_name(raw: &mut Vec<u8>, host: &str) -> Result<(), WireError> {
     Ok(())
 }
 
+fn write_opt_record(raw: &mut Vec<u8>) {
+    raw.push(0);
+    raw.extend_from_slice(&TYPE_OPT.to_be_bytes());
+    raw.extend_from_slice(&EDNS_UDP_PAYLOAD_SIZE.to_be_bytes());
+    raw.extend_from_slice(&0u32.to_be_bytes());
+    raw.extend_from_slice(&0u16.to_be_bytes());
+}
+
 fn rcode_name(status: i32) -> &'static str {
     match status {
         1 => "FormatError",
@@ -203,5 +223,27 @@ fn rcode_name(status: i32) -> &'static str {
         4 => "NotImplemented",
         5 => "Refused",
         _ => "",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_query_advertises_edns0_udp_payload_size() {
+        let query = build_query(0x1234, "example.com", TYPE_A).unwrap();
+
+        assert_eq!(read_u16(&query, 4).unwrap(), 1);
+        assert_eq!(read_u16(&query, 10).unwrap(), 1);
+
+        let (_, question_end) = read_name(&query, 12).unwrap();
+        let opt = question_end + 4;
+        assert_eq!(query[opt], 0);
+        assert_eq!(read_u16(&query, opt + 1).unwrap(), TYPE_OPT);
+        assert_eq!(read_u16(&query, opt + 3).unwrap(), EDNS_UDP_PAYLOAD_SIZE);
+        assert_eq!(read_u32(&query, opt + 5).unwrap(), 0);
+        assert_eq!(read_u16(&query, opt + 9).unwrap(), 0);
+        assert_eq!(opt + 11, query.len());
     }
 }
