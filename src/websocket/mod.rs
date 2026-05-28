@@ -1,15 +1,17 @@
 use std::future::Future;
-use std::io::{self, Read};
+use std::io::{self, BufRead};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{
     HeaderName as WsHeaderName, HeaderValue as WsHeaderValue,
@@ -26,6 +28,8 @@ use crate::error::{FetchError, write_warnings_with_separator_with_color};
 use crate::format::json;
 
 pub mod interactive;
+
+const STDIN_LINE_CHANNEL_CAPACITY: usize = 16;
 
 pub fn is_websocket_url(raw: &str) -> bool {
     let raw = raw.to_ascii_lowercase();
@@ -57,12 +61,6 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         print_request_metadata(cli, method, &url, Some(request.headers()));
         return Ok(0);
     }
-    let stdin_messages = if interactive {
-        Vec::new()
-    } else {
-        read_stdin_messages()?
-    };
-
     if cli.verbose >= 2 && !cli.silent {
         print_request_metadata(cli, method, &url, Some(request.headers()));
     }
@@ -76,7 +74,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             .await
             .map_err(websocket_error)
     };
-    let (mut stream, response) = request_budget.run(connect).await?;
+    let (stream, response) = request_budget.run(connect).await?;
 
     if cli.verbose > 0 && !cli.silent {
         let status = response.status();
@@ -104,23 +102,20 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         return Ok(0);
     }
 
-    if let Some(message) = initial_message {
-        stream
-            .send(Message::Text(
-                String::from_utf8_lossy(&message).into_owned().into(),
-            ))
-            .await
-            .map_err(websocket_error)?;
+    let (mut sender, mut receiver) = stream.split();
+    let send_messages = send_noninteractive_messages(&mut sender, initial_message);
+    let receive_messages = read_messages(cli, &mut receiver);
+    tokio::pin!(send_messages);
+    tokio::pin!(receive_messages);
+    tokio::select! {
+        send_result = &mut send_messages => {
+            send_result?;
+            receive_messages.await?;
+        }
+        receive_result = &mut receive_messages => {
+            receive_result?;
+        }
     }
-    for message in stdin_messages {
-        stream
-            .send(Message::Text(message.into()))
-            .await
-            .map_err(websocket_error)?;
-    }
-
-    read_messages(cli, &mut stream).await?;
-    let _ = stream.close(None).await;
     Ok(0)
 }
 
@@ -681,19 +676,66 @@ fn websocket_initial_message(cli: &Cli) -> Result<Option<Vec<u8>>, FetchError> {
     )
 }
 
-fn read_stdin_messages() -> Result<Vec<String>, FetchError> {
-    let mut stdin = io::stdin();
+async fn send_noninteractive_messages<S>(
+    sink: &mut S,
+    initial_message: Option<Vec<u8>>,
+) -> Result<(), FetchError>
+where
+    S: Sink<Message, Error = WsError> + Unpin,
+{
+    if let Some(message) = initial_message {
+        sink.send(Message::Text(
+            String::from_utf8_lossy(&message).into_owned().into(),
+        ))
+        .await
+        .map_err(websocket_error)?;
+    }
     if core::stdio().stdin_is_terminal() {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
-    let mut input = String::new();
-    stdin.read_to_string(&mut input)?;
-    Ok(input
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect())
+    let mut stdin_lines = spawn_stdin_line_reader();
+    while let Some(line) = stdin_lines.recv().await {
+        sink.send(Message::Text(line?.into()))
+            .await
+            .map_err(websocket_error)?;
+    }
+    let _ = sink.close().await;
+    Ok(())
+}
+
+fn spawn_stdin_line_reader() -> mpsc::Receiver<Result<String, io::Error>> {
+    let (tx, rx) = mpsc::channel(STDIN_LINE_CHANNEL_CAPACITY);
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        let mut reader = io::BufReader::new(stdin.lock());
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    strip_line_ending(&mut line);
+                    if tx.blocking_send(Ok(line)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.blocking_send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
+
+fn strip_line_ending(line: &mut String) {
+    if line.ends_with('\n') {
+        line.pop();
+    }
+    if line.ends_with('\r') {
+        line.pop();
+    }
 }
 
 fn build_handshake_request(

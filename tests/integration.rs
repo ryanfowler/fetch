@@ -2280,7 +2280,7 @@ fn start_ws_echo_server(
                             format!("echo: {msg}")
                         };
                         let _ = stream.write_all(&ws_text_frame(reply.as_bytes()));
-                        let _ = stream.write_all(&ws_close_frame(b"done"));
+                        write_ws_close_and_drain(&mut stream, b"done");
                     });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2368,7 +2368,7 @@ fn start_wss_echo_server(
                             format!("echo: {msg}")
                         };
                         let _ = tls.write_all(&ws_text_frame(reply.as_bytes()));
-                        let _ = tls.write_all(&ws_close_frame(b"done"));
+                        write_ws_close_and_drain(tls, b"done");
                     });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2418,13 +2418,12 @@ fn start_ws_multi_echo_server(messages: usize) -> String {
                             return;
                         }
                         for _ in 0..messages {
-                            let msg = read_ws_text(&mut stream);
-                            if msg.is_empty() {
+                            let Some(msg) = read_ws_text_frame(&mut stream) else {
                                 return;
-                            }
+                            };
                             let _ = stream.write_all(&ws_text_frame(msg.as_bytes()));
                         }
-                        let _ = stream.write_all(&ws_close_frame(b"done"));
+                        write_ws_close_and_drain(&mut stream, b"done");
                     });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2478,7 +2477,7 @@ fn start_ws_push_server(
                         let _ = stream.write_all(&ws_text_frame(br#"{"hello":"websocket"}"#));
                         let _ = stream.write_all(&ws_binary_frame(b"\x00\x01\x02\x03"));
                         let _ = stream.write_all(&ws_text_frame(b"plain text"));
-                        let _ = stream.write_all(&ws_close_frame(b"done"));
+                        write_ws_close_and_drain(&mut stream, b"done");
                     });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2492,37 +2491,46 @@ fn start_ws_push_server(
 }
 
 fn read_ws_text(reader: &mut impl Read) -> String {
+    read_ws_text_frame(reader).unwrap_or_default()
+}
+
+fn read_ws_text_frame(reader: &mut impl Read) -> Option<String> {
     let mut header = [0_u8; 2];
     if reader.read_exact(&mut header).is_err() {
-        return String::new();
+        return None;
     }
     let opcode = header[0] & 0x0f;
-    if opcode == 0x8 {
-        return String::new();
-    }
     let masked = header[1] & 0x80 != 0;
     let mut len = (header[1] & 0x7f) as usize;
     if len == 126 {
         let mut raw = [0_u8; 2];
         if reader.read_exact(&mut raw).is_err() {
-            return String::new();
+            return None;
         }
         len = u16::from_be_bytes(raw) as usize;
     }
     let mut mask = [0_u8; 4];
     if masked && reader.read_exact(&mut mask).is_err() {
-        return String::new();
+        return None;
     }
     let mut payload = vec![0; len];
     if reader.read_exact(&mut payload).is_err() {
-        return String::new();
+        return None;
     }
     if masked {
         for (i, byte) in payload.iter_mut().enumerate() {
             *byte ^= mask[i % 4];
         }
     }
-    String::from_utf8_lossy(&payload).into_owned()
+    if opcode == 0x8 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&payload).into_owned())
+}
+
+fn write_ws_close_and_drain<T: Read + Write>(stream: &mut T, reason: &[u8]) {
+    let _ = stream.write_all(&ws_close_frame(reason));
+    let _ = read_ws_text_frame(stream);
 }
 
 fn ws_text_frame(payload: &[u8]) -> Vec<u8> {
@@ -6595,6 +6603,23 @@ fn websocket_noninteractive_go_cases() {
     assert!(res.stdout.contains("line1"));
     assert!(res.stdout.contains("line2"));
 
+    let empty_line_url = start_ws_multi_echo_server(3);
+    let res = run_fetch_opts(
+        FetchOpts {
+            stdin: Some("line1\n\nline3\n".to_string()),
+            ..Default::default()
+        },
+        &[
+            &empty_line_url,
+            "--format",
+            "off",
+            "--ws-interactive",
+            "off",
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "line1\n\nline3\n");
+
     let (auth_url, auth_seen) = start_ws_echo_server(|req| {
         if req.header("authorization") == "Bearer token" {
             Ok(())
@@ -6647,6 +6672,50 @@ fn websocket_noninteractive_go_cases() {
     ]);
     assert_exit(&res, 0);
     assert!(res.stderr.contains("GET") || res.stderr.contains("method"));
+}
+
+#[test]
+fn websocket_streams_stdin_before_eof() {
+    let ws_url = start_ws_multi_echo_server(1);
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([&ws_url, "--format", "off", "--ws-interactive", "off"]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.env("NO_COLOR", "");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let mut child = cmd.spawn().expect("spawn websocket stdin fetch");
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let stdout = start_read_capture(child.stdout.take().expect("child stdout"));
+    let stderr = start_read_capture(child.stderr.take().expect("child stderr"));
+
+    stdin.write_all(b"line before eof\n").unwrap();
+    stdin.flush().unwrap();
+    let status = wait_child(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "fetch did not complete while stdin remained open; stdout:\n{}\nstderr:\n{}",
+                stdout.output(),
+                stderr.output()
+            )
+        })
+        .expect("wait websocket stdin fetch");
+    assert!(
+        status.success(),
+        "fetch exited with {status}; stdout:\n{}\nstderr:\n{}",
+        stdout.output(),
+        stderr.output()
+    );
+    assert!(stdout.output().contains("line before eof"));
+    drop(stdin);
+    stdout.close();
+    stderr.close();
 }
 
 #[test]
