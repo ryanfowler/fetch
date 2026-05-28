@@ -1,7 +1,7 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use quinn::crypto::rustls::{HandshakeData, QuicClientConfig};
 use rustls::client::WebPkiServerVerifier;
@@ -20,6 +20,7 @@ use crate::duration::{TimeoutBudget, duration_from_seconds};
 use crate::error::{FetchError, write_warning_with_separator_with_color};
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
+    let request_start = Instant::now();
     let url = tls_url(cli.url.as_deref().expect("URL checked by app"))?;
     let ignored = ignored_inspection_flags(cli);
     if !ignored.is_empty() && !cli.silent {
@@ -32,12 +33,10 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let http_version =
         crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?;
 
-    let timeout = cli
-        .timeout
-        .map(|seconds| duration_from_seconds("timeout", seconds))
-        .transpose()?;
-    let inspection = TimeoutBudget::new(timeout)
-        .run(inspect(cli, &url, http_version, timeout))
+    let request_timeout = inspection_request_timeout(cli)?;
+    let connect_timeout = inspection_connect_timeout(cli, request_timeout, request_start)?;
+    let inspection = TimeoutBudget::started_at(request_timeout, request_start)
+        .run(inspect(cli, &url, http_version, connect_timeout))
         .await?;
 
     if !cli.silent {
@@ -46,6 +45,24 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         printer.flush_to(&mut std::io::stderr())?;
     }
     Ok(0)
+}
+
+fn inspection_request_timeout(cli: &Cli) -> Result<Option<Duration>, FetchError> {
+    cli.timeout
+        .map(|seconds| duration_from_seconds("timeout", seconds))
+        .transpose()
+}
+
+fn inspection_connect_timeout(
+    cli: &Cli,
+    request_timeout: Option<Duration>,
+    request_start: Instant,
+) -> Result<TimeoutBudget, FetchError> {
+    let connect_timeout = cli
+        .connect_timeout
+        .map(|seconds| duration_from_seconds("connect-timeout", seconds))
+        .transpose()?;
+    TimeoutBudget::for_connect(connect_timeout, request_timeout, request_start)
 }
 
 fn tls_url(raw: &str) -> Result<Url, FetchError> {
@@ -76,7 +93,7 @@ async fn inspect(
     cli: &Cli,
     url: &Url,
     http_version: Option<HttpVersion>,
-    timeout: Option<Duration>,
+    timeout: TimeoutBudget,
 ) -> Result<Inspection, FetchError> {
     if http_version == Some(HttpVersion::Http3) {
         inspect_quic(cli, url, timeout).await
@@ -89,7 +106,7 @@ async fn inspect_tcp(
     cli: &Cli,
     url: &Url,
     http_version: Option<HttpVersion>,
-    timeout: Option<Duration>,
+    timeout: TimeoutBudget,
 ) -> Result<Inspection, FetchError> {
     let host = tls_host(url)?;
     let port = url.port_or_known_default().unwrap_or(443);
@@ -108,10 +125,14 @@ async fn inspect_tcp(
         .map_err(|_| FetchError::Message(format!("invalid server name '{host}'")))?;
     let stream = connect_tcp_host(&host, port, cli.dns_server.as_deref(), timeout).await?;
     let connector = TlsConnector::from(Arc::new(config));
-    let stream = connector
-        .connect(server_name, stream)
-        .await
-        .map_err(go_style_tls_inspect_error)?;
+    let stream = timeout
+        .run(async move {
+            connector
+                .connect(server_name, stream)
+                .await
+                .map_err(go_style_tls_inspect_error)
+        })
+        .await?;
     let (_, conn) = stream.get_ref();
 
     let mut peer_chain = Vec::new();
@@ -139,50 +160,66 @@ async fn connect_tcp_host(
     host: &str,
     port: u16,
     dns_server: Option<&str>,
-    timeout: Option<Duration>,
+    timeout: TimeoutBudget,
 ) -> Result<TcpStream, FetchError> {
     let addrs = resolve_tls_host(host, port, dns_server, timeout).await?;
     let mut last_err = None;
 
     for addr in addrs {
-        match TcpStream::connect(addr).await {
+        match timeout
+            .run(async move { TcpStream::connect(addr).await.map_err(FetchError::from) })
+            .await
+        {
             Ok(stream) => return Ok(stream),
             Err(err) => last_err = Some(err),
         }
     }
 
-    Err(last_err
-        .map(FetchError::from)
-        .unwrap_or_else(|| FetchError::Message("no addresses found".to_string())))
+    Err(last_err.unwrap_or_else(|| FetchError::Message("no addresses found".to_string())))
 }
 
 async fn resolve_tls_host(
     host: &str,
     port: u16,
     dns_server: Option<&str>,
-    timeout: Option<Duration>,
+    timeout: TimeoutBudget,
 ) -> Result<Vec<SocketAddr>, FetchError> {
     let Some(dns_server) = dns_server else {
-        return tokio::net::lookup_host((host, port))
-            .await
-            .map(|addrs| addrs.collect())
-            .map_err(FetchError::from);
+        return timeout
+            .run(async {
+                tokio::net::lookup_host((host, port))
+                    .await
+                    .map(|addrs| addrs.collect())
+                    .map_err(FetchError::from)
+            })
+            .await;
     };
     if host.parse::<IpAddr>().is_ok() {
-        return tokio::net::lookup_host((host, port))
-            .await
-            .map(|addrs| addrs.collect())
-            .map_err(FetchError::from);
+        return timeout
+            .run(async {
+                tokio::net::lookup_host((host, port))
+                    .await
+                    .map(|addrs| addrs.collect())
+                    .map_err(FetchError::from)
+            })
+            .await;
     }
 
-    let addrs = crate::dns::custom::lookup_ips(dns_server, host, timeout).await?;
+    let dns_timeout = timeout.remaining()?;
+    let addrs = timeout
+        .run(crate::dns::custom::lookup_ips(
+            dns_server,
+            host,
+            dns_timeout,
+        ))
+        .await?;
     Ok(crate::dns::custom::socket_addrs_with_port(addrs, port))
 }
 
 async fn inspect_quic(
     cli: &Cli,
     url: &Url,
-    timeout: Option<Duration>,
+    timeout: TimeoutBudget,
 ) -> Result<Inspection, FetchError> {
     let host = tls_host(url)?;
     ensure_quic_protocol_versions(cli)?;
@@ -210,6 +247,7 @@ async fn inspect_quic(
             &trusted_roots,
             !cli.insecure,
             &ocsp_capture,
+            timeout,
         )
         .await
         {
@@ -238,6 +276,7 @@ async fn inspect_quic_addr(
     trusted_roots: &[ParsedCert],
     verified: bool,
     ocsp_capture: &OcspCapture,
+    timeout: TimeoutBudget,
 ) -> Result<Inspection, FetchError> {
     let bind_addr = if addr.is_ipv4() {
         "0.0.0.0:0"
@@ -250,11 +289,16 @@ async fn inspect_quic_addr(
     let mut endpoint = quinn::Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(quic_config);
 
-    let connection = endpoint
+    let connecting = endpoint
         .connect(addr, host)
-        .map_err(|err| FetchError::Message(err.to_string()))?
-        .await
         .map_err(|err| FetchError::Message(err.to_string()))?;
+    let connection = timeout
+        .run(async {
+            connecting
+                .await
+                .map_err(|err| FetchError::Message(err.to_string()))
+        })
+        .await?;
     let alpn = quic_alpn(&connection);
     let chain =
         certificate_chain_for_display(quic_peer_certificates(&connection), trusted_roots, verified);
@@ -1800,7 +1844,12 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
 
         let inspection = tokio::time::timeout(
             Duration::from_secs(5),
-            inspect_tcp(&cli, &url, Some(HttpVersion::Http2), None),
+            inspect_tcp(
+                &cli,
+                &url,
+                Some(HttpVersion::Http2),
+                TimeoutBudget::new(None),
+            ),
         )
         .await
         .expect("IPv6 TLS inspection timed out")
@@ -1843,9 +1892,14 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         .unwrap();
         let url = tls_url(&raw_url).unwrap();
 
-        let inspection = inspect(&cli, &url, Some(HttpVersion::Http3), None)
-            .await
-            .unwrap();
+        let inspection = inspect(
+            &cli,
+            &url,
+            Some(HttpVersion::Http3),
+            TimeoutBudget::new(None),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(inspection.alpn.as_deref(), Some("h3"));
         assert_eq!(inspection.version, Some(ProtocolVersion::TLSv1_3));

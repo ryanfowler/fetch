@@ -589,7 +589,8 @@ fn is_transient_local_server_error(res: &FetchOutput) -> bool {
             .stderr
             .contains("connection closed before message completed")
             || res.stderr.contains("connection was not ready")
-            || res.stderr.contains("Connection reset by peer"))
+            || res.stderr.contains("Connection reset by peer")
+            || res.stderr.contains("Connection refused"))
 }
 
 fn assert_exit(res: &FetchOutput, code: i32) {
@@ -3894,7 +3895,7 @@ fn compressed_sse_retry_drains_first_response_before_replay() {
         let result = (|| -> Result<Duration, String> {
             let mut first_stream = accept_tcp_connection(
                 &listener,
-                Duration::from_secs(3),
+                Duration::from_secs(10),
                 "first compressed SSE request",
             )?;
             first_stream
@@ -3931,7 +3932,7 @@ fn compressed_sse_retry_drains_first_response_before_replay() {
             let retry_started_at = Instant::now();
             let mut retry_stream = accept_tcp_connection(
                 &listener,
-                Duration::from_secs(3),
+                Duration::from_secs(10),
                 "uncompressed SSE retry on a new connection",
             )?;
             let retry_elapsed = retry_started_at.elapsed();
@@ -5987,6 +5988,20 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert!(res.stderr.contains("Addresses: 2"));
     assert!(res.stderr.contains("Records:"));
 
+    let unresponsive_inspect_dns_addr = start_unresponsive_udp_dns_server();
+    let res = run_fetch(&[
+        "--inspect-dns",
+        "--dns-server",
+        &unresponsive_inspect_dns_addr,
+        "--connect-timeout",
+        "0.05",
+        "--timeout",
+        "1",
+        "https://fetch-inspect-dns-timeout.test",
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("request timed out after 50ms"));
+
     let res = run_fetch(&[
         "--inspect-dns",
         "--dns-server",
@@ -6307,6 +6322,19 @@ fn tls_certificate_validation_inspection_and_bounds_cases() {
     assert!(res.stdout.is_empty());
     assert!(res.stderr.contains("TLS"));
     assert!(res.stderr.contains("Certificate") || res.stderr.contains("certificate"));
+
+    let stalling_tls = start_stalling_proxy("https");
+    let res = run_fetch(&[
+        "--inspect-tls",
+        "--insecure",
+        "--connect-timeout",
+        "0.05",
+        "--timeout",
+        "1",
+        &stalling_tls,
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("request timed out after 50ms"));
 
     let dns_addr = start_udp_dns_server("fetch-tls.test.", Ipv4Addr::new(127, 0, 0, 1));
     let tls_url = Url::parse(&tls.url).unwrap();

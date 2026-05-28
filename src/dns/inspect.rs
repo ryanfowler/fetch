@@ -132,6 +132,7 @@ enum ResolverTarget {
 }
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
+    let request_start = Instant::now();
     let url = crate::http::normalize_url(cli.url.as_deref().expect("URL checked by app"))?;
     let ignored = ignored_inspection_flags(cli);
     if !ignored.is_empty() {
@@ -141,17 +142,15 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         );
     }
 
-    let timeout = cli
-        .timeout
-        .map(|seconds| duration_from_seconds("timeout", seconds))
-        .transpose()?;
+    let request_timeout = inspection_request_timeout(cli)?;
+    let connect_timeout = inspection_connect_timeout(cli, request_timeout, request_start)?;
     let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
-    let inspected = TimeoutBudget::new(timeout)
+    let inspected = connect_timeout
         .run(inspect_to(
             &url,
             cli.dns_server.as_deref(),
             &mut printer,
-            timeout,
+            connect_timeout,
         ))
         .await;
 
@@ -167,6 +166,24 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     }
 }
 
+fn inspection_request_timeout(cli: &Cli) -> Result<Option<Duration>, FetchError> {
+    cli.timeout
+        .map(|seconds| duration_from_seconds("timeout", seconds))
+        .transpose()
+}
+
+fn inspection_connect_timeout(
+    cli: &Cli,
+    request_timeout: Option<Duration>,
+    request_start: Instant,
+) -> Result<TimeoutBudget, FetchError> {
+    let connect_timeout = cli
+        .connect_timeout
+        .map(|seconds| duration_from_seconds("connect-timeout", seconds))
+        .transpose()?;
+    TimeoutBudget::for_connect(connect_timeout, request_timeout, request_start)
+}
+
 #[cfg(test)]
 async fn inspect(url: &Url, dns_server: Option<&str>) -> Result<String, FetchError> {
     let (out, _) = inspect_with_code(url, dns_server).await?;
@@ -179,7 +196,7 @@ async fn inspect_with_code(
     dns_server: Option<&str>,
 ) -> Result<(String, i32), FetchError> {
     let mut out = Printer::new(false);
-    let code = inspect_to(url, dns_server, &mut out, None).await?;
+    let code = inspect_to(url, dns_server, &mut out, TimeoutBudget::new(None)).await?;
     Ok((
         out.into_string().expect("DNS inspection output is UTF-8"),
         code,
@@ -190,7 +207,7 @@ async fn inspect_to(
     url: &Url,
     dns_server: Option<&str>,
     out: &mut Printer,
-    timeout: Option<Duration>,
+    timeout: TimeoutBudget,
 ) -> Result<i32, FetchError> {
     let host = url
         .host_str()
@@ -213,7 +230,7 @@ async fn lookup(
     host: &str,
     target: ResolverTarget,
     start: Instant,
-    timeout: Option<Duration>,
+    timeout: TimeoutBudget,
 ) -> Result<Inspection, FetchError> {
     let mut out = Inspection {
         host: host.to_string(),
@@ -225,7 +242,7 @@ async fn lookup(
     };
 
     if matches!(target, ResolverTarget::Default { .. }) {
-        let records = lookup_default_resolver_records(host).await?;
+        let records = timeout.run(lookup_default_resolver_records(host)).await?;
         out.duration = start.elapsed();
         for record in records {
             out.records
@@ -239,10 +256,12 @@ async fn lookup(
         return Ok(out);
     }
 
-    let udp_timeout = udp_dns_timeout(timeout);
+    let remaining_timeout = timeout.remaining()?;
+    let udp_timeout = udp_dns_timeout(remaining_timeout);
     let doh_client = match &target {
         ResolverTarget::Doh { .. } => Some(
-            crate::dns::doh::client(timeout).map_err(|err| FetchError::Message(err.to_string()))?,
+            crate::dns::doh::client(remaining_timeout)
+                .map_err(|err| FetchError::Message(err.to_string()))?,
         ),
         _ => None,
     };
@@ -267,7 +286,9 @@ async fn lookup(
             (query_type, result)
         }
     });
-    let results = join_all(futures).await;
+    let results = timeout
+        .run(async { Ok::<_, FetchError>(join_all(futures).await) })
+        .await?;
 
     let mut first_err = None;
     let mut truncated_types = Vec::new();
@@ -1218,7 +1239,7 @@ mod tests {
                 url: server_url,
             },
             Instant::now(),
-            None,
+            TimeoutBudget::new(None),
         )
         .await
         .unwrap();
@@ -1258,7 +1279,7 @@ mod tests {
                 url: server_url,
             },
             Instant::now(),
-            None,
+            TimeoutBudget::new(None),
         )
         .await
         .unwrap();
