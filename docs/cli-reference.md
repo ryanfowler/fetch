@@ -353,7 +353,8 @@ fetch --retry 3 --retry-delay 0.5 example.com
 ### `--dns-server IP[:PORT]|URL`
 
 Use custom DNS server. Supports UDP DNS and DNS-over-HTTPS for requests and
-DNS/TLS inspection.
+DNS/TLS inspection. UDP DNS queries advertise EDNS(0) and retry truncated
+responses over TCP.
 
 ```sh
 fetch --dns-server 8.8.8.8 example.com
@@ -363,7 +364,7 @@ fetch --dns-server https://1.1.1.1/dns-query example.com
 
 ### `--inspect-dns`
 
-Inspect DNS resolution for the URL hostname only (no HTTP request is made). Displays the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, along with per-record TTLs, address count, record count, and lookup duration.
+Inspect DNS resolution for the URL hostname only (no HTTP request is made). Displays the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, along with per-record TTLs, address count, record count, and lookup duration. UDP DNS inspection advertises EDNS(0) and retries truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, `fetch` warns that the results are incomplete and exits with a non-zero status.
 
 ```sh
 fetch --inspect-dns example.com

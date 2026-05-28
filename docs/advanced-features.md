@@ -23,6 +23,8 @@ fetch --dns-server 1.1.1.1:53 example.com
 fetch --dns-server "[2001:4860:4860::8888]:53" example.com
 ```
 
+UDP DNS queries advertise EDNS(0) and retry truncated responses over TCP.
+
 ### DNS-over-HTTPS (DoH)
 
 Use HTTPS URL for encrypted DNS queries:
@@ -47,7 +49,7 @@ fetch --inspect-dns example.com
 fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 ```
 
-The output shows the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, address count, record count, lookup duration, and per-record TTLs.
+The output shows the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, address count, record count, lookup duration, and per-record TTLs. UDP DNS inspection advertises EDNS(0) and retries truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, `fetch` warns that the results are incomplete and exits with a non-zero status.
 
 ### Configuration File
 

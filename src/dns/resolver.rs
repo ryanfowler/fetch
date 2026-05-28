@@ -2,8 +2,6 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use tokio::net::UdpSocket;
-
 use crate::dns::util::{dns_query_id, udp_dns_timeout};
 use crate::dns::wire;
 
@@ -67,30 +65,19 @@ pub async fn lookup_udp_type(
 ) -> Result<Vec<DnsRecord>, ResolverError> {
     let id = dns_query_id();
     let raw = wire::build_query(id, host, dns_type).map_err(resolver_error)?;
-    let bind_addr = if server_addr.starts_with('[') {
-        "[::]:0"
-    } else {
-        "0.0.0.0:0"
-    };
-    let socket = UdpSocket::bind(bind_addr)
+    let response = crate::dns::transport::query_udp(server_addr, &raw, timeout)
         .await
-        .map_err(|err| ResolverError(err.to_string()))?;
-    socket
-        .connect(server_addr)
-        .await
-        .map_err(|err| ResolverError(err.to_string()))?;
-    socket
-        .send(&raw)
-        .await
-        .map_err(|err| ResolverError(err.to_string()))?;
-
-    let mut buf = vec![0u8; 4096];
-    let n = match tokio::time::timeout(timeout, socket.recv(&mut buf)).await {
-        Ok(Ok(n)) => n,
-        Ok(Err(err)) => return Err(ResolverError(err.to_string())),
-        Err(_) => return Err(ResolverError("DNS lookup timed out".to_string())),
-    };
-    dns_records_from_response(&buf[..n], id)
+        .map_err(resolver_error)?;
+    match dns_records_from_response(&response, id) {
+        Ok(records) => Ok(records),
+        Err(err) if err.is_truncated() => {
+            let response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
+                .await
+                .map_err(resolver_error)?;
+            dns_records_from_response(&response, id).map_err(resolver_error)
+        }
+        Err(err) => Err(resolver_error(err)),
+    }
 }
 
 pub fn normalize_udp_dns_server(server: &str) -> Result<String, ResolverError> {
@@ -118,8 +105,8 @@ fn dns_server_value_error(server: &str) -> ResolverError {
 fn dns_records_from_response(
     raw: &[u8],
     expected_id: u16,
-) -> Result<Vec<DnsRecord>, ResolverError> {
-    let records = wire::parse_response(raw, expected_id).map_err(resolver_error)?;
+) -> Result<Vec<DnsRecord>, wire::WireError> {
+    let records = wire::parse_response(raw, expected_id)?;
     Ok(records.into_iter().filter_map(ip_record).collect())
 }
 
@@ -154,7 +141,8 @@ fn resolver_error(err: impl ToString) -> ResolverError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::UdpSocket as StdUdpSocket;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream as StdTcpStream, UdpSocket as StdUdpSocket};
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -206,6 +194,20 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].ip.to_string(), "127.0.0.1");
         assert_eq!(records[0].ttl, Some(42));
+        stop();
+    }
+
+    #[tokio::test]
+    async fn lookup_udp_type_falls_back_to_tcp_on_truncated_udp_response() {
+        let (addr, stop) = start_truncated_udp_tcp_server();
+
+        let records = lookup_udp_type(&addr, "example.com", DNS_TYPE_A, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].ip.to_string(), "203.0.113.10");
+        assert_eq!(records[0].ttl, Some(55));
         stop();
     }
 
@@ -397,6 +399,112 @@ mod tests {
                 .send_to(&[0], "127.0.0.1:9");
             handle.join().unwrap();
         })
+    }
+
+    fn start_truncated_udp_tcp_server() -> (String, impl FnOnce()) {
+        let udp_socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        udp_socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let addr = udp_socket.local_addr().unwrap();
+        let tcp_listener = TcpListener::bind(addr).unwrap();
+        tcp_listener.set_nonblocking(true).unwrap();
+        let done = Arc::new(Mutex::new(false));
+
+        let udp_done = done.clone();
+        let udp_handle = thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            loop {
+                if *udp_done.lock().unwrap() {
+                    return;
+                }
+                let Ok((n, peer)) = udp_socket.recv_from(&mut buf) else {
+                    continue;
+                };
+                if n < 12 {
+                    continue;
+                }
+                let response = truncated_response(&buf[..n]);
+                let _ = udp_socket.send_to(&response, peer);
+            }
+        });
+
+        let tcp_done = done.clone();
+        let tcp_handle = thread::spawn(move || {
+            loop {
+                if *tcp_done.lock().unwrap() {
+                    return;
+                }
+                match tcp_listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let Some(query) = read_tcp_query(&mut stream) else {
+                            continue;
+                        };
+                        let mut response = success_response(&query);
+                        let mut framed = Vec::with_capacity(response.len() + 2);
+                        framed.extend_from_slice(&(response.len() as u16).to_be_bytes());
+                        framed.append(&mut response);
+                        let _ = stream.write_all(&framed);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
+
+        (addr.to_string(), move || {
+            *done.lock().unwrap() = true;
+            let _ = StdUdpSocket::bind("127.0.0.1:0")
+                .unwrap()
+                .send_to(&[0], addr);
+            let _ = StdTcpStream::connect(addr);
+            udp_handle.join().unwrap();
+            tcp_handle.join().unwrap();
+        })
+    }
+
+    fn truncated_response(query: &[u8]) -> Vec<u8> {
+        let question_name_end = question_end(query).unwrap_or(12);
+        let question_end = (question_name_end + 4).min(query.len());
+        let mut response = Vec::new();
+        response.extend_from_slice(&query[0..2]);
+        response.extend_from_slice(&0x8380u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&query[12..question_end]);
+        response
+    }
+
+    fn success_response(query: &[u8]) -> Vec<u8> {
+        let query_type = read_question_type(query).unwrap_or_default();
+        let question_name_end = question_end(query).unwrap_or(12);
+        let question_end = (question_name_end + 4).min(query.len());
+        let mut response = Vec::new();
+        response.extend_from_slice(&query[0..2]);
+        let answer_count = u16::from(query_type == DNS_TYPE_A);
+        response.extend_from_slice(&0x8180u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&answer_count.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&query[12..question_end]);
+        if query_type == DNS_TYPE_A {
+            write_answer(&mut response, DNS_TYPE_A, 55, &[203, 0, 113, 10]);
+        }
+        response
+    }
+
+    fn read_tcp_query(stream: &mut StdTcpStream) -> Option<Vec<u8>> {
+        let mut len_buf = [0u8; 2];
+        stream.read_exact(&mut len_buf).ok()?;
+        let len = usize::from(u16::from_be_bytes(len_buf));
+        let mut query = vec![0u8; len];
+        stream.read_exact(&mut query).ok()?;
+        Some(query)
     }
 
     fn write_answer(response: &mut Vec<u8>, dns_type: u16, ttl: u32, data: &[u8]) {
