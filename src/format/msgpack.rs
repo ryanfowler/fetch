@@ -225,17 +225,14 @@ impl<'a> MsgPackParser<'a> {
     }
 
     fn write_map_key_bytes(&mut self, out: &mut String, len: usize) -> Result<(), MsgPackError> {
-        if len == 0 {
-            return Err(MsgPackError::new("empty MessagePack map key"));
-        }
         let bytes = self.read_exact(len)?;
-        write_json_string(out, bytes);
+        write_json_string(out, bytes)?;
         Ok(())
     }
 
     fn write_string(&mut self, out: &mut String, len: usize) -> Result<(), MsgPackError> {
         let bytes = self.read_exact(len)?;
-        write_json_string(out, bytes);
+        write_json_string(out, bytes)?;
         Ok(())
     }
 
@@ -310,9 +307,11 @@ impl<'a> MsgPackParser<'a> {
     }
 }
 
-fn write_json_string(out: &mut String, bytes: &[u8]) {
+fn write_json_string(out: &mut String, bytes: &[u8]) -> Result<(), MsgPackError> {
+    let value = std::str::from_utf8(bytes)
+        .map_err(|err| MsgPackError::new(format!("invalid UTF-8 in MessagePack str: {err}")))?;
+
     out.push('"');
-    let value = String::from_utf8_lossy(bytes);
     for c in value.chars() {
         match c {
             '\u{08}' => out.push_str(r"\b"),
@@ -334,6 +333,7 @@ fn write_json_string(out: &mut String, bytes: &[u8]) {
         }
     }
     out.push('"');
+    Ok(())
 }
 
 fn write_json_map_key_number(out: &mut String, value: impl fmt::Display) {
@@ -386,10 +386,27 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_is_replaced_like_go_msgp_json() {
-        let input = [0xa1, 0xe0];
+    fn empty_string_map_keys_are_allowed() {
+        let input = [0x81, 0xa0, 0x01];
         let got = String::from_utf8(format_msgpack(&input, false).unwrap()).unwrap();
-        assert_eq!(got, "\"\u{fffd}\"\n");
+        assert_eq!(got, "{\n  \"\": 1\n}\n");
+    }
+
+    #[test]
+    fn invalid_utf8_str_is_rejected() {
+        let input = [0xa1, 0xe0];
+        let err = format_msgpack(&input, false).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid UTF-8 in MessagePack str"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn binary_values_are_base64_encoded_without_utf8_validation() {
+        let input = [0xc4, 0x01, 0xe0];
+        let got = String::from_utf8(format_msgpack(&input, false).unwrap()).unwrap();
+        assert_eq!(got, "\"4A==\"\n");
     }
 
     #[test]
