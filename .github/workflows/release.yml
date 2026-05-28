@@ -16,6 +16,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.96.0"
   LINUX_GLIBC_VERSION: "2.28"
   RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
@@ -71,8 +72,9 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.rust_target }}
 
       - name: Setup Zig
