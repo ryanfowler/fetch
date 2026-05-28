@@ -35,7 +35,10 @@ use crate::auth::digest;
 use crate::cli::{Cli, CompressionMode, HttpVersion};
 use crate::core;
 use crate::duration::{TimeoutBudget, duration_from_seconds, request_timeout_message};
-use crate::error::{FetchError, write_error_with_color, write_warning_with_color};
+use crate::error::{
+    FetchError, write_error_with_color, write_warning_with_color,
+    write_warning_with_separator_with_color,
+};
 use crate::format::content_type::{self, ContentType};
 use crate::format::css;
 use crate::format::csv;
@@ -447,7 +450,7 @@ pub(crate) fn load_session(cli: &Cli) -> Result<Option<crate::session::Session>,
     let loaded =
         crate::session::Session::load(name).map_err(|err| FetchError::Message(err.to_string()))?;
     if let Some(warning) = loaded.warning {
-        write_warning(
+        write_warning_before_output(
             cli,
             &format!("session '{name}' is corrupted, starting fresh: {warning}"),
         );
@@ -470,6 +473,12 @@ fn save_session(cli: &Cli, session: Option<&crate::session::Session>) {
 fn write_warning(cli: &Cli, message: &str) {
     if !cli.silent {
         write_warning_with_color(message, cli.color.as_deref());
+    }
+}
+
+fn write_warning_before_output(cli: &Cli, message: &str) {
+    if !cli.silent {
+        write_warning_with_separator_with_color(message, cli.color.as_deref());
     }
 }
 

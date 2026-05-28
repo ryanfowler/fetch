@@ -10,7 +10,7 @@ use crate::core::{self, Printer, Sequence};
 use crate::dns::util::{dns_query_id, udp_dns_timeout};
 use crate::dns::wire;
 use crate::duration::{TimeoutBudget, duration_from_seconds};
-use crate::error::{FetchError, write_error_with_color, write_warning_with_color};
+use crate::error::{FetchError, write_error_with_color, write_warning_with_separator_with_color};
 
 const DNS_TYPE_A: u16 = wire::TYPE_A;
 const DNS_TYPE_NS: u16 = wire::TYPE_NS;
@@ -135,7 +135,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let url = crate::http::normalize_url(cli.url.as_deref().expect("URL checked by app"))?;
     let ignored = ignored_inspection_flags(cli);
     if !ignored.is_empty() {
-        write_warning_with_color(
+        write_warning_with_separator_with_color(
             format!("--inspect-dns ignores: {}", ignored.join(", ")),
             cli.color.as_deref(),
         );

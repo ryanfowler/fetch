@@ -13,7 +13,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::cli::Cli;
 use crate::core;
-use crate::error::{FetchError, write_warning_with_color};
+use crate::error::{FetchError, write_warning_with_separator_with_color};
 use crate::output::progress::{self, BarCounter, ProgressPrinter, SpinnerCounter};
 
 #[cfg(any(windows, test))]
@@ -996,7 +996,7 @@ fn acquire_update_lock(
         }
 
         if attempt == 0 && !silent {
-            write_warning_with_color("waiting on lock to begin updating", color);
+            write_warning_with_separator_with_color("waiting on lock to begin updating", color);
         }
         let multiplier = (attempt + 1).min(10) as u64;
         thread::sleep(Duration::from_millis(multiplier * 50));

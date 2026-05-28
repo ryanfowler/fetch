@@ -377,6 +377,30 @@ pub fn write_warning_with_color(msg: impl std::fmt::Display, color: Option<&str>
     flush_stderr(printer);
 }
 
+pub fn write_warning_with_separator_with_color(msg: impl std::fmt::Display, color: Option<&str>) {
+    let mut printer = Printer::stderr(color);
+    core::write_warning_msg_no_flush(&mut printer, msg);
+    core::write_warning_separator_no_flush(&mut printer);
+    flush_stderr(printer);
+}
+
+pub fn write_warnings_with_separator_with_color<I, M>(warnings: I, color: Option<&str>)
+where
+    I: IntoIterator<Item = M>,
+    M: std::fmt::Display,
+{
+    let mut printer = Printer::stderr(color);
+    let mut wrote_warning = false;
+    for warning in warnings {
+        core::write_warning_msg_no_flush(&mut printer, warning);
+        wrote_warning = true;
+    }
+    if wrote_warning {
+        core::write_warning_separator_no_flush(&mut printer);
+        flush_stderr(printer);
+    }
+}
+
 fn flush_stderr(mut printer: Printer) {
     let mut stderr = std::io::stderr();
     let _ = printer.flush_to(&mut stderr);

@@ -17,13 +17,13 @@ use url::Url;
 use crate::cli::{Cli, HttpVersion};
 use crate::core::{self, Printer, Sequence};
 use crate::duration::{TimeoutBudget, duration_from_seconds};
-use crate::error::{FetchError, write_warning_with_color};
+use crate::error::{FetchError, write_warning_with_separator_with_color};
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let url = tls_url(cli.url.as_deref().expect("URL checked by app"))?;
     let ignored = ignored_inspection_flags(cli);
     if !ignored.is_empty() && !cli.silent {
-        write_warning_with_color(
+        write_warning_with_separator_with_color(
             format!("--inspect-tls ignores: {}", ignored.join(", ")),
             cli.color.as_deref(),
         );
