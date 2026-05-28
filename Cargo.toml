@@ -19,7 +19,7 @@ strip = true
 anyhow = "1"
 async-compression = { version = "0.4", features = ["brotli", "gzip", "tokio", "zstd"] }
 base64 = "0.22"
-brotli = "8.0.2"
+brotli = "8.0.3"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 cookie = "0.18"
