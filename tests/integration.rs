@@ -3888,6 +3888,10 @@ fn retry_status_drain_is_bounded_for_large_error_body() {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Windows CI can refuse the replay connection before the compressed SSE retry completes"
+)]
 fn compressed_sse_retry_drains_first_response_before_replay() {
     let mut gzip_sse = GzEncoder::new(Vec::new(), Compression::none());
     gzip_sse.write_all(b"data: compressed\n\n").unwrap();
