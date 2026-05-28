@@ -235,6 +235,10 @@ fn parse_long_flag(
     has_value: bool,
     rest: &[String],
 ) -> Result<usize, String> {
+    if let Some(message) = unsupported_semantic_long_flag(name) {
+        return Err(message);
+    }
+
     let consume_arg = |flag_name: &str| -> Result<(String, usize), String> {
         if has_value {
             Ok((value.clone(), 0))
@@ -497,20 +501,78 @@ fn parse_long_flag(
             parsed.silent = true;
             Ok(0)
         }
-        "fail" | "fail-with-body" => Ok(0),
-        "show-error" | "compressed" | "no-buffer" | "no-keepalive" | "progress-bar"
-        | "no-progress-meter" | "netrc" => Ok(0),
+        name if long_flag_matches_fetch_default(name) => Ok(0),
+        name if long_flag_is_curl_presentation_only(name) => Ok(0),
         "proto" => {
             let (value, consumed) = consume_arg(name)?;
             parsed.allowed_proto = value;
             Ok(consumed)
         }
-        "proto-default" | "proto-redir" => {
-            let (_value, consumed) = consume_arg(name)?;
-            Ok(consumed)
-        }
         _ => Err(format!("unsupported curl flag '--{name}'")),
     }
+}
+
+fn long_flag_matches_fetch_default(name: &str) -> bool {
+    matches!(
+        name,
+        "compressed" | "fail-with-body" | "no-keepalive" | "show-error"
+    )
+}
+
+fn long_flag_is_curl_presentation_only(name: &str) -> bool {
+    matches!(name, "no-progress-meter" | "progress-bar")
+}
+
+fn unsupported_semantic_long_flag(name: &str) -> Option<String> {
+    match name {
+        "fail" => Some(unsupported_fail_flag("--fail")),
+        "netrc" => Some(unsupported_netrc_flag("--netrc")),
+        "no-buffer" => Some(unsupported_no_buffer_flag("--no-buffer")),
+        "proto-default" => Some(
+            "curl --proto-default is not supported by --from-curl; specify the URL scheme explicitly"
+                .to_string(),
+        ),
+        "proto-redir" => Some(
+            "curl --proto-redir is not supported by --from-curl; fetch only follows HTTP(S) redirects and --from-curl cannot further restrict them"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+fn short_flag_matches_fetch_default(flag: char) -> bool {
+    matches!(flag, 'S')
+}
+
+fn short_flag_is_curl_presentation_only(flag: char) -> bool {
+    matches!(flag, '#')
+}
+
+fn unsupported_semantic_short_flag(flag: char) -> Option<String> {
+    match flag {
+        'f' => Some(unsupported_fail_flag("-f")),
+        'n' => Some(unsupported_netrc_flag("-n/--netrc")),
+        'N' => Some(unsupported_no_buffer_flag("-N/--no-buffer")),
+        _ => None,
+    }
+}
+
+fn unsupported_fail_flag(flag: &str) -> String {
+    format!(
+        "curl {flag} is not supported by --from-curl; fetch already exits non-zero for HTTP error statuses but does not suppress the response body"
+    )
+}
+
+fn unsupported_netrc_flag(flag: &str) -> String {
+    format!(
+        "curl {flag} is not supported by --from-curl; use --basic USER:PASS, --bearer TOKEN, or an explicit Authorization header (-H 'Authorization: ...') instead"
+    )
+}
+
+fn unsupported_no_buffer_flag(flag: &str) -> String {
+    format!(
+        "curl {flag} is not supported by --from-curl; fetch does not implement curl's unbuffered output mode"
+    )
 }
 
 fn parse_short_flags(
@@ -622,9 +684,15 @@ fn parse_short_flags(
             'G' => parsed.get_flag = true,
             'v' => parsed.verbose = parsed.verbose.saturating_add(1),
             's' => parsed.silent = true,
-            'S' | 'N' | 'n' | 'f' | '#' => {}
             '0' => parsed.http_version = "1.0".to_string(),
-            _ => return Err(format!("unsupported curl flag '-{flag}'")),
+            flag if short_flag_matches_fetch_default(flag) => {}
+            flag if short_flag_is_curl_presentation_only(flag) => {}
+            flag => {
+                if let Some(message) = unsupported_semantic_short_flag(flag) {
+                    return Err(message);
+                }
+                return Err(format!("unsupported curl flag '-{flag}'"));
+            }
         }
 
         i += 1;
@@ -851,6 +919,66 @@ mod tests {
         let parsed =
             parse(r#"curl --aws-sigv4 "aws:amz:us-east-1:s3" https://example.com"#).unwrap();
         assert_eq!(parsed.aws_sigv4, "aws:amz:us-east-1:s3");
+    }
+
+    #[test]
+    fn test_parse_default_matching_and_unsupported_semantic_flags() {
+        let parsed = parse(
+            "curl --compressed --show-error --fail-with-body --no-keepalive --no-progress-meter --progress-bar -S -# https://example.com",
+        )
+        .unwrap();
+        assert_eq!(parsed.url, "https://example.com");
+
+        for (command, flag, want) in [
+            (
+                "curl --fail https://example.com",
+                "--fail",
+                "does not suppress the response body",
+            ),
+            (
+                "curl -f https://example.com",
+                "-f",
+                "does not suppress the response body",
+            ),
+            (
+                "curl --no-buffer https://example.com",
+                "--no-buffer",
+                "unbuffered output mode",
+            ),
+            (
+                "curl -N https://example.com",
+                "-N/--no-buffer",
+                "unbuffered output mode",
+            ),
+            (
+                "curl --proto-default https https://example.com",
+                "--proto-default",
+                "specify the URL scheme explicitly",
+            ),
+            (
+                "curl --proto-redir =https https://example.com",
+                "--proto-redir",
+                "cannot further restrict",
+            ),
+        ] {
+            let err = parse(command).unwrap_err();
+            assert!(err.contains(flag), "{command}: {err}");
+            assert!(err.contains(want), "{command}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_parse_netrc_is_rejected_with_auth_advice() {
+        for (command, flag) in [
+            ("curl --netrc https://example.com", "--netrc"),
+            ("curl -n https://example.com", "-n/--netrc"),
+        ] {
+            let err = parse(command).unwrap_err();
+            assert!(err.contains(flag), "{command}: {err}");
+            assert!(err.contains("--basic"), "{command}: {err}");
+            assert!(err.contains("--bearer"), "{command}: {err}");
+            assert!(err.contains("Authorization"), "{command}: {err}");
+        }
     }
 
     #[test]

@@ -4523,6 +4523,16 @@ fn from_curl_parses_common_forms_and_errors() {
     let res = run_fetch(&["--from-curl", "curl --not-a-real-flag http://example.com"]);
     assert_exit(&res, 1);
     assert!(res.stderr.contains("unsupported curl flag"));
+
+    let netrc_server = TestServer::start(|_| TestResponse::ok("netrc should not be requested"));
+    let curl = format!("curl --netrc {}", netrc_server.url);
+    let res = run_fetch(&["--from-curl", &curl]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("--netrc"));
+    assert!(res.stderr.contains("--basic"));
+    assert!(res.stderr.contains("--bearer"));
+    assert!(res.stderr.contains("Authorization"));
+    assert!(netrc_server.requests().is_empty());
 }
 
 #[test]

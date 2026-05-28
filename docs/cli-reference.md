@@ -646,23 +646,26 @@ fetch --from-curl 'https://example.com'
 
 **Supported curl flags:**
 
-| Category     | Curl Flags                                                                                                                                    |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Request      | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G`                                         |
-| Auth         | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                            |
-| TLS          | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.2`, `--tlsv1.3`, `--tls-max`                                                               |
-| Output       | `-o`, `-O`, `-J`                                                                                                                              |
-| Network      | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r`            |
-| HTTP version | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                                       |
-| Headers      | `-A`, `-e`, `-b`                                                                                                                              |
-| Verbosity    | `-v`, `-s`                                                                                                                                    |
-| Protocol     | `--proto` (restricts allowed protocols; errors if URL scheme is not allowed)                                                                  |
-| No-ops       | `--compressed`, `-S`, `-N`, `--no-keepalive`, `-#`, `--no-progress-meter`, `-n`, `-f`, `--fail-with-body`, `--proto-default`, `--proto-redir` |
+| Category                   | Curl Flags                                                                                                                         |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Request                    | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G`                              |
+| Auth                       | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                 |
+| TLS                        | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.2`, `--tlsv1.3`, `--tls-max`                                                    |
+| Output                     | `-o`, `-O`, `-J`                                                                                                                   |
+| Network                    | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r` |
+| HTTP version               | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                            |
+| Headers                    | `-A`, `-e`, `-b`                                                                                                                   |
+| Verbosity                  | `-v`, `-s`                                                                                                                         |
+| Protocol                   | `--proto` (restricts allowed protocols; errors if URL scheme is not allowed)                                                       |
+| Default-compatible no-ops  | `--compressed`, `-S`/`--show-error`, `--fail-with-body`, `--no-keepalive`                                                          |
+| Presentation compatibility | `-#`/`--progress-bar`, `--no-progress-meter`                                                                                       |
 
 **Notes:**
 
 - `-b`/`--cookie` only supports inline cookie strings (e.g., `-b 'name=value'`). Cookie jar files are not supported and will return an error.
 - `--data-urlencode` supports `@filename` and `name@filename` forms for reading and URL-encoding file contents.
+- `-n`/`--netrc` is not supported. Use `--basic`, `--bearer`, or an explicit `Authorization` header instead.
+- Semantic curl flags that `fetch` cannot faithfully translate, such as `-f`/`--fail`, `-N`/`--no-buffer`, `--proto-default`, and `--proto-redir`, return an error instead of being ignored.
 
 Unknown curl flags return an error.
 
