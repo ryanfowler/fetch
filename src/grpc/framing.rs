@@ -38,7 +38,7 @@ pub fn unframe(data: &[u8]) -> Result<Frame, FrameError> {
         ));
     }
 
-    let compressed = data[0] != 0;
+    let compressed = compressed_flag(data[0])?;
     let length = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
     validate_length(length as usize)?;
 
@@ -106,7 +106,7 @@ impl FrameDecoder {
             chunk = &chunk[take..];
 
             if self.header_len == FRAME_HEADER_LEN {
-                let compressed = self.header[0] != 0;
+                let compressed = compressed_flag(self.header[0])?;
                 let length = u32::from_be_bytes([
                     self.header[1],
                     self.header[2],
@@ -155,6 +155,16 @@ fn validate_length(length: usize) -> Result<(), FrameError> {
         )));
     }
     Ok(())
+}
+
+fn compressed_flag(byte: u8) -> Result<bool, FrameError> {
+    match byte {
+        0 => Ok(false),
+        1 => Ok(true),
+        flag => Err(FrameError(format!(
+            "invalid gRPC compressed flag {flag}; expected 0 or 1"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -264,6 +274,18 @@ mod tests {
     }
 
     #[test]
+    fn test_unframe_invalid_compressed_flag_rejected() {
+        for flag in [2, 255] {
+            let input = [flag, 0x00, 0x00, 0x00, 0x00];
+            let err = unframe(&input).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("invalid gRPC compressed flag {flag}; expected 0 or 1")
+            );
+        }
+    }
+
+    #[test]
     fn test_read_frames() {
         let one = frame(&[0x01, 0x02, 0x03], false).unwrap();
         let two = frame(&[0x04], true).unwrap();
@@ -288,6 +310,20 @@ mod tests {
         let header = [0x00, 0x04, 0x00, 0x00, 0x01];
         let err = decoder.push(&header).unwrap_err();
         assert!(err.to_string().contains("gRPC message too large"));
+    }
+
+    #[test]
+    fn test_frame_decoder_rejects_invalid_compressed_flag() {
+        for flag in [2, 255] {
+            let mut decoder = FrameDecoder::new();
+            let header = [flag, 0x00, 0x00, 0x00, 0x00];
+            assert!(decoder.push(&header[..2]).unwrap().is_empty());
+            let err = decoder.push(&header[2..]).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("invalid gRPC compressed flag {flag}; expected 0 or 1")
+            );
+        }
     }
 
     #[test]
