@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::{Cursor, ErrorKind, Read, Write};
@@ -3001,28 +3000,11 @@ pub(crate) fn apply_query(url: &mut Url, query: &[String]) {
         return;
     }
 
-    let mut values = BTreeMap::<String, Vec<String>>::new();
-    for (key, val) in url.query_pairs() {
-        values
-            .entry(key.into_owned())
-            .or_default()
-            .push(val.into_owned());
-    }
+    let mut pairs = url.query_pairs_mut();
     for raw in query {
         let (key, val) = raw.split_once('=').unwrap_or((raw, ""));
-        values
-            .entry(key.trim().to_string())
-            .or_default()
-            .push(val.to_string());
+        pairs.append_pair(key.trim(), val);
     }
-
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (key, vals) in values {
-        for val in vals {
-            serializer.append_pair(&key, &val);
-        }
-    }
-    url.set_query(Some(&serializer.finish()));
 }
 
 pub(crate) fn apply_headers(headers: &mut HeaderMap, values: &[String]) -> Result<(), FetchError> {
@@ -3579,7 +3561,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_query_sorts_and_encodes_like_go_url_values() {
+    fn apply_query_appends_and_encodes_in_order() {
         let mut url = Url::parse("https://example.com/path?z=old&space=hello+world").unwrap();
         apply_query(
             &mut url,
@@ -3594,7 +3576,7 @@ mod tests {
 
         assert_eq!(
             url.as_str(),
-            "https://example.com/path?a=one&blank=&space=hello+world&space=second+value&spaced=+hello+&z=old&z=two"
+            "https://example.com/path?z=old&space=hello+world&a=one&z=two&blank=&space=second+value&spaced=+hello+"
         );
     }
 
