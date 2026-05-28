@@ -393,7 +393,7 @@ async fn lookup_udp_records(
         .await
         .map_err(QueryError::other)?;
     let raw_records = match wire::parse_response(&response, id) {
-        Ok(_) => wire::parse_response(&response, id).map_err(QueryError::other)?,
+        Ok(records) => records,
         Err(err) if err.is_truncated() => {
             response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
                 .await
