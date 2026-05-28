@@ -12,7 +12,8 @@ fn main() {
 
     set_env(
         "FETCH_RUSTC_VERSION",
-        command_output("rustc", &["--version"]),
+        command_output("rustc", &["--version"])
+            .and_then(|version| rustc_release_version(&version).map(str::to_string)),
     );
     set_env("FETCH_VERSION", Some(build_version()));
     if let Ok(profile) = env::var("PROFILE") {
@@ -73,4 +74,12 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn rustc_release_version(version: &str) -> Option<&str> {
+    version
+        .strip_prefix("rustc ")?
+        .split_whitespace()
+        .next()
+        .filter(|version| !version.is_empty())
 }
