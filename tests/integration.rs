@@ -3806,6 +3806,57 @@ fn retry_status_rejects_stdin_body_replay() {
 }
 
 #[test]
+fn retry_after_bodyless_redirect_rejects_original_stdin_body_replay() {
+    let server = TestServer::start(|req| match req.path.as_str() {
+        "/start" => TestResponse::status(303, "See Other", "")
+            .header("Location", "/final")
+            .header("Connection", "keep-alive"),
+        "/final" => TestResponse::status(503, "Service Unavailable", "retry")
+            .header("Connection", "keep-alive"),
+        _ => TestResponse::status(404, "Not Found", "missing"),
+    });
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            stdin: Some("payload".to_string()),
+            ..Default::default()
+        },
+        &[
+            &format!("{}/start", server.url),
+            "-m",
+            "POST",
+            "--retry",
+            "1",
+            "--retry-delay",
+            FAST_RETRY_DELAY,
+            "--data",
+            "@-",
+        ],
+    );
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("request body from stdin cannot be replayed for retry"),
+        "stderr:\n{}",
+        res.stderr
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "requests: {requests:?}");
+    assert_eq!(requests[0].path, "/start");
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].body_string(), "payload");
+    assert_eq!(requests[1].path, "/final");
+    assert_eq!(requests[1].method, "GET");
+    assert!(requests[1].body.is_empty());
+    assert_eq!(
+        requests.iter().filter(|req| req.path == "/start").count(),
+        1,
+        "unexpected second initial request: {requests:?}"
+    );
+}
+
+#[test]
 #[cfg_attr(
     windows,
     ignore = "Windows can report a socket abort when the bounded retry drain abandons a large body"

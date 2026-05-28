@@ -225,6 +225,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let retry_count = cli.retry();
     let retry_delay = duration_from_seconds("retry-delay", cli.retry_delay())?;
     let total_attempts = total_attempts_for_retry(retry_count)?;
+    let original_body_replayable = request_body_replayable(&body);
     let mut attempt = 0;
     let result = loop {
         let mut request_method = method.clone();
@@ -361,14 +362,17 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 let retry_sse_uncompressed =
                     should_retry_sse_without_compression(&response, compression);
                 if retry_sse_uncompressed {
-                    ensure_request_body_replayable(&request_body, "retry SSE without compression")?;
+                    ensure_body_replayable(
+                        original_body_replayable,
+                        "retry SSE without compression",
+                    )?;
                     headers.remove(ACCEPT_ENCODING);
                     compression = CompressionMode::Off;
                     drain_response_body_bounded(response).await;
                     continue;
                 }
                 if attempt < retry_count && should_retry_status(status) {
-                    ensure_request_body_replayable(&request_body, "retry")?;
+                    ensure_body_replayable(original_body_replayable, "retry")?;
                     let requested_delay =
                         compute_delay(retry_delay, attempt, parse_retry_after(response.headers()));
                     drain_response_body_bounded(response).await;
@@ -409,7 +413,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     break Err(FetchError::Runtime(message));
                 }
                 if attempt < retry_count && is_retryable_error(&err) {
-                    ensure_request_body_replayable(&request_body, "retry")?;
+                    ensure_body_replayable(original_body_replayable, "retry")?;
                     let requested_delay = compute_delay(retry_delay, attempt, Duration::ZERO);
                     let delay = retry_delay_within_timeout(
                         requested_delay,
@@ -2688,7 +2692,11 @@ fn request_body_source_uses_stdin(source: &RequestBodySource) -> bool {
 }
 
 fn ensure_request_body_replayable(body: &RequestBody, action: &str) -> Result<(), FetchError> {
-    if request_body_replayable(body) {
+    ensure_body_replayable(request_body_replayable(body), action)
+}
+
+fn ensure_body_replayable(replayable: bool, action: &str) -> Result<(), FetchError> {
+    if replayable {
         return Ok(());
     }
     Err(FetchError::Runtime(format!(
