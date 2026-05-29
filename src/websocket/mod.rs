@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -31,6 +31,12 @@ use crate::format::json;
 pub mod interactive;
 
 const STDIN_LINE_CHANNEL_CAPACITY: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MessageOutput {
+    Continue,
+    Closed,
+}
 
 pub fn is_websocket_url(raw: &str) -> bool {
     let raw = raw.to_ascii_lowercase();
@@ -963,7 +969,11 @@ where
     while let Some(message) = stream.next().await {
         match message.map_err(websocket_error)? {
             Message::Text(text) => {
-                write_text_message(cli, text.as_str().as_bytes(), stdout_is_terminal)?
+                if write_text_message(cli, text.as_str().as_bytes(), stdout_is_terminal)?
+                    == MessageOutput::Closed
+                {
+                    return Ok(());
+                }
             }
             Message::Binary(bytes) => write_binary_indicator(cli, bytes.len()),
             Message::Close(_) => return Ok(()),
@@ -973,16 +983,39 @@ where
     Ok(())
 }
 
-fn write_text_message(cli: &Cli, bytes: &[u8], stdout_is_terminal: bool) -> Result<(), FetchError> {
+fn write_text_message(
+    cli: &Cli,
+    bytes: &[u8],
+    stdout_is_terminal: bool,
+) -> Result<MessageOutput, FetchError> {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
     if should_format(cli, stdout_is_terminal) {
         let mut formatted = core::Printer::new(use_color(cli, stdout_is_terminal));
         if json::format_json_line_to(bytes, &mut formatted).is_ok() {
-            print!("{}", String::from_utf8_lossy(&formatted.into_bytes()));
-            return Ok(());
+            return write_stdout_message(&mut stdout, &formatted.into_bytes(), false);
         }
     }
-    println!("{}", String::from_utf8_lossy(bytes));
-    Ok(())
+    write_stdout_message(&mut stdout, bytes, true)
+}
+
+fn write_stdout_message(
+    stdout: &mut impl Write,
+    bytes: &[u8],
+    append_newline: bool,
+) -> Result<MessageOutput, FetchError> {
+    let result = stdout.write_all(bytes).and_then(|()| {
+        if append_newline {
+            stdout.write_all(b"\n")?;
+        }
+        stdout.flush()
+    });
+
+    match result {
+        Ok(()) => Ok(MessageOutput::Continue),
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(MessageOutput::Closed),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn should_format(cli: &Cli, stdout_is_terminal: bool) -> bool {
@@ -1130,6 +1163,29 @@ mod tests {
 
         let off_cli = Cli::try_parse_from(["fetch", "--color", "off", "ws://example.com"]).unwrap();
         assert!(!use_color(&off_cli, true));
+    }
+
+    #[test]
+    fn websocket_stdout_message_treats_broken_pipe_as_closed() {
+        struct BrokenPipeWriter;
+
+        impl std::io::Write for BrokenPipeWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "stdout closed",
+                ))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = BrokenPipeWriter;
+        let output = write_stdout_message(&mut writer, b"hello", true).unwrap();
+
+        assert_eq!(output, MessageOutput::Closed);
     }
 
     #[test]
