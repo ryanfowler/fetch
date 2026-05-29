@@ -66,6 +66,7 @@ pub mod multipart;
 pub(crate) type RequestBody = Option<RequestBodyPayload>;
 pub(crate) type MaterializedRequestBody = Option<(Vec<u8>, Option<String>)>;
 type AsyncReadBox = Pin<Box<dyn AsyncRead + Send>>;
+type ResponseTrailers = Arc<Mutex<HeaderMap>>;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RequestBodyPayload {
@@ -1104,10 +1105,7 @@ async fn read_decoded_response_body_limited(
     loop {
         let n = reader.read(&mut buf).await?;
         if n == 0 {
-            let trailers = trailers
-                .lock()
-                .map(|trailers| trailers.clone())
-                .unwrap_or_default();
+            let trailers = captured_trailers(&trailers);
             return Ok((bytes, trailers));
         }
         if bytes.len().saturating_add(n) > MAX_BUFFERED_RESPONSE_BYTES {
@@ -1146,6 +1144,19 @@ struct StreamedOutput {
     clipboard: Option<clipboard::CopyOutcome>,
 }
 
+trait StdoutStreamFormatter {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, FetchError>;
+
+    fn finish(&mut self) -> Result<Vec<Vec<u8>>, FetchError>;
+}
+
+fn captured_trailers(trailers: &ResponseTrailers) -> HeaderMap {
+    trailers
+        .lock()
+        .map(|trailers| trailers.clone())
+        .unwrap_or_default()
+}
+
 async fn stream_response_to_discard(
     response: Response,
     response_headers: HeaderMap,
@@ -1155,10 +1166,7 @@ async fn stream_response_to_discard(
     let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
     let mut sink = tokio::io::sink();
     let bytes_written = copy_async_reader_to_writer(&mut reader, &mut sink, None).await?;
-    let trailers = trailers
-        .lock()
-        .map(|trailers| trailers.clone())
-        .unwrap_or_default();
+    let trailers = captured_trailers(&trailers);
     Ok(StreamedOutput {
         trailers,
         bytes_written,
@@ -1185,10 +1193,7 @@ async fn stream_response_to_stdout(
         copy_async_reader_to_stdout_target(&mut reader, target, &[], capture.as_mut()).await?
     };
     let clipboard = capture.map(clipboard::Capture::copy);
-    let trailers = trailers
-        .lock()
-        .map(|trailers| trailers.clone())
-        .unwrap_or_default();
+    let trailers = captured_trailers(&trailers);
     Ok(StreamedOutput {
         trailers,
         bytes_written,
@@ -1203,50 +1208,14 @@ async fn stream_response_to_formatted_sse_stdout(
     copy: bool,
     use_color: bool,
 ) -> Result<StreamedOutput, FetchError> {
-    let (reader, trailers) = async_response_reader(response);
-    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
-    let mut stdout = tokio::io::stdout();
-    let mut capture = copy.then(clipboard::Capture::default);
-    let mut formatter = sse::EventStreamFormatter::new();
-    let mut pending = Vec::new();
-    let mut buf = vec![0; 16 * 1024];
-    let mut bytes_read = 0i64;
-
-    loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            let formatted = finish_sse_stream_formatter(&mut pending, &mut formatter, use_color)
-                .map_err(|err| {
-                    FetchError::Message(format!("invalid UTF-8 in event stream: {err}"))
-                })?;
-            if !formatted.is_empty() {
-                stdout.write_all(formatted.as_bytes()).await?;
-            }
-            stdout.flush().await?;
-            let clipboard = capture.map(clipboard::Capture::copy);
-            let trailers = trailers
-                .lock()
-                .map(|trailers| trailers.clone())
-                .unwrap_or_default();
-            return Ok(StreamedOutput {
-                trailers,
-                bytes_written: bytes_read,
-                clipboard,
-            });
-        }
-
-        if let Some(capture) = capture.as_mut() {
-            capture.push(&buf[..n]);
-        }
-        bytes_read = bytes_read.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
-        pending.extend_from_slice(&buf[..n]);
-        let formatted = push_sse_stream_bytes(&mut pending, &mut formatter, use_color)
-            .map_err(|err| FetchError::Message(format!("invalid UTF-8 in event stream: {err}")))?;
-        if !formatted.is_empty() {
-            stdout.write_all(formatted.as_bytes()).await?;
-            stdout.flush().await?;
-        }
-    }
+    stream_formatted_response_to_stdout(
+        response,
+        response_headers,
+        compression,
+        copy,
+        FormattedSseStream::new(use_color),
+    )
+    .await
 }
 
 async fn stream_response_to_formatted_ndjson_stdout(
@@ -1256,67 +1225,31 @@ async fn stream_response_to_formatted_ndjson_stdout(
     copy: bool,
     use_color: bool,
 ) -> Result<StreamedOutput, FetchError> {
-    let (reader, trailers) = async_response_reader(response);
-    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
-    let mut stdout = tokio::io::stdout();
-    let mut capture = copy.then(clipboard::Capture::default);
-    let mut pending = Vec::new();
-    let mut buf = vec![0; 16 * 1024];
-    let mut bytes_read = 0i64;
-
-    loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            if !pending.is_empty() {
-                write_formatted_ndjson_record(&mut stdout, &pending, use_color, false).await?;
-            }
-            stdout.flush().await?;
-            let clipboard = capture.map(clipboard::Capture::copy);
-            let trailers = trailers
-                .lock()
-                .map(|trailers| trailers.clone())
-                .unwrap_or_default();
-            return Ok(StreamedOutput {
-                trailers,
-                bytes_written: bytes_read,
-                clipboard,
-            });
-        }
-
-        if let Some(capture) = capture.as_mut() {
-            capture.push(&buf[..n]);
-        }
-        bytes_read = bytes_read.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
-        pending.extend_from_slice(&buf[..n]);
-        while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
-            let mut record = pending.drain(..=newline).collect::<Vec<_>>();
-            record.pop();
-            write_formatted_ndjson_record(&mut stdout, &record, use_color, true).await?;
-            stdout.flush().await?;
-        }
-    }
+    stream_formatted_response_to_stdout(
+        response,
+        response_headers,
+        compression,
+        copy,
+        FormattedNdjsonStream::new(use_color),
+    )
+    .await
 }
 
-async fn write_formatted_ndjson_record(
-    stdout: &mut tokio::io::Stdout,
-    record: &[u8],
-    use_color: bool,
-    terminated: bool,
-) -> Result<(), FetchError> {
+fn formatted_ndjson_record(record: &[u8], use_color: bool, terminated: bool) -> Option<Vec<u8>> {
     if record.iter().all(u8::is_ascii_whitespace) {
-        return Ok(());
+        return None;
     }
     let mut formatted = core::Printer::new(use_color);
     match json::format_json_line_to(record, &mut formatted) {
-        Ok(()) => stdout.write_all(&formatted.into_bytes()).await?,
+        Ok(()) => Some(formatted.into_bytes()),
         Err(_) => {
-            stdout.write_all(record).await?;
+            let mut output = record.to_vec();
             if terminated {
-                stdout.write_all(b"\n").await?;
+                output.push(b'\n');
             }
+            Some(output)
         }
     }
-    Ok(())
 }
 
 async fn stream_response_to_formatted_grpc_stdout(
@@ -1326,30 +1259,35 @@ async fn stream_response_to_formatted_grpc_stdout(
     copy: bool,
     grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
 ) -> Result<StreamedOutput, FetchError> {
+    let formatter = FormattedGrpcStream::new(&response_headers, grpc_response_desc);
+    stream_formatted_response_to_stdout(response, response_headers, compression, copy, formatter)
+        .await
+}
+
+async fn stream_formatted_response_to_stdout<F>(
+    response: Response,
+    response_headers: HeaderMap,
+    compression: CompressionMode,
+    copy: bool,
+    mut formatter: F,
+) -> Result<StreamedOutput, FetchError>
+where
+    F: StdoutStreamFormatter,
+{
     let (reader, trailers) = async_response_reader(response);
     let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
     let mut stdout = tokio::io::stdout();
     let mut capture = copy.then(clipboard::Capture::default);
-    let mut decoder = crate::grpc::framing::FrameDecoder::new();
-    let grpc_message_encoding = grpc_encoding::MessageEncoding::from_headers(&response_headers);
     let mut buf = vec![0; 16 * 1024];
     let mut bytes_read = 0i64;
-    let mut frame_index = 0usize;
-    let mut descriptor_wrote_any = false;
-    let mut descriptor_output_ends_with_newline = true;
 
     loop {
         let n = reader.read(&mut buf).await?;
         if n == 0 {
-            decoder
-                .finish()
-                .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
+            write_formatted_stream_outputs(&mut stdout, formatter.finish()?, false).await?;
             stdout.flush().await?;
             let clipboard = capture.map(clipboard::Capture::copy);
-            let trailers = trailers
-                .lock()
-                .map(|trailers| trailers.clone())
-                .unwrap_or_default();
+            let trailers = captured_trailers(&trailers);
             return Ok(StreamedOutput {
                 trailers,
                 bytes_written: bytes_read,
@@ -1361,32 +1299,171 @@ async fn stream_response_to_formatted_grpc_stdout(
             capture.push(&buf[..n]);
         }
         bytes_read = bytes_read.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
-        let frames = decoder
-            .push(&buf[..n])
-            .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
-        for frame in frames {
-            if let Some(desc) = grpc_response_desc.as_ref() {
-                let formatted =
-                    proto::format_grpc_frame_with_descriptor(&frame, desc, &grpc_message_encoding)
-                        .map_err(|err| FetchError::Message(err.to_string()))?;
-                if descriptor_wrote_any && !descriptor_output_ends_with_newline {
-                    stdout.write_all(b"\n").await?;
-                }
-                stdout.write_all(formatted.as_bytes()).await?;
-                stdout.flush().await?;
-                descriptor_output_ends_with_newline = formatted.ends_with('\n');
-                descriptor_wrote_any = true;
-            } else {
-                if frame_index > 0 {
-                    stdout.write_all(b"\n").await?;
-                }
-                let formatted = grpc_format::format_grpc_frame(&frame, &grpc_message_encoding)
-                    .map_err(|err| FetchError::Message(err.to_string()))?;
-                stdout.write_all(formatted.as_bytes()).await?;
-                stdout.flush().await?;
-                frame_index += 1;
+        write_formatted_stream_outputs(&mut stdout, formatter.push_chunk(&buf[..n])?, true).await?;
+    }
+}
+
+async fn write_formatted_stream_outputs(
+    stdout: &mut tokio::io::Stdout,
+    outputs: Vec<Vec<u8>>,
+    flush_after_each: bool,
+) -> Result<(), FetchError> {
+    for output in outputs {
+        if output.is_empty() {
+            continue;
+        }
+        stdout.write_all(&output).await?;
+        if flush_after_each {
+            stdout.flush().await?;
+        }
+    }
+    Ok(())
+}
+
+struct FormattedSseStream {
+    formatter: sse::EventStreamFormatter,
+    pending: Vec<u8>,
+    use_color: bool,
+}
+
+impl FormattedSseStream {
+    fn new(use_color: bool) -> Self {
+        Self {
+            formatter: sse::EventStreamFormatter::new(),
+            pending: Vec::new(),
+            use_color,
+        }
+    }
+}
+
+impl StdoutStreamFormatter for FormattedSseStream {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, FetchError> {
+        self.pending.extend_from_slice(chunk);
+        let formatted =
+            push_sse_stream_bytes(&mut self.pending, &mut self.formatter, self.use_color)
+                .map_err(invalid_sse_utf8_error)?;
+        Ok(vec![formatted.into_bytes()])
+    }
+
+    fn finish(&mut self) -> Result<Vec<Vec<u8>>, FetchError> {
+        let formatted =
+            finish_sse_stream_formatter(&mut self.pending, &mut self.formatter, self.use_color)
+                .map_err(invalid_sse_utf8_error)?;
+        Ok(vec![formatted.into_bytes()])
+    }
+}
+
+fn invalid_sse_utf8_error(err: std::str::Utf8Error) -> FetchError {
+    FetchError::Message(format!("invalid UTF-8 in event stream: {err}"))
+}
+
+struct FormattedNdjsonStream {
+    pending: Vec<u8>,
+    use_color: bool,
+}
+
+impl FormattedNdjsonStream {
+    fn new(use_color: bool) -> Self {
+        Self {
+            pending: Vec::new(),
+            use_color,
+        }
+    }
+}
+
+impl StdoutStreamFormatter for FormattedNdjsonStream {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, FetchError> {
+        self.pending.extend_from_slice(chunk);
+        let mut outputs = Vec::new();
+        while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let mut record = self.pending.drain(..=newline).collect::<Vec<_>>();
+            record.pop();
+            if let Some(output) = formatted_ndjson_record(&record, self.use_color, true) {
+                outputs.push(output);
             }
         }
+        Ok(outputs)
+    }
+
+    fn finish(&mut self) -> Result<Vec<Vec<u8>>, FetchError> {
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        let record = std::mem::take(&mut self.pending);
+        Ok(formatted_ndjson_record(&record, self.use_color, false)
+            .into_iter()
+            .collect())
+    }
+}
+
+struct FormattedGrpcStream {
+    decoder: crate::grpc::framing::FrameDecoder,
+    grpc_message_encoding: grpc_encoding::MessageEncoding,
+    grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
+    frame_index: usize,
+    descriptor_wrote_any: bool,
+    descriptor_output_ends_with_newline: bool,
+}
+
+impl FormattedGrpcStream {
+    fn new(
+        response_headers: &HeaderMap,
+        grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
+    ) -> Self {
+        Self {
+            decoder: crate::grpc::framing::FrameDecoder::new(),
+            grpc_message_encoding: grpc_encoding::MessageEncoding::from_headers(response_headers),
+            grpc_response_desc,
+            frame_index: 0,
+            descriptor_wrote_any: false,
+            descriptor_output_ends_with_newline: true,
+        }
+    }
+
+    fn format_frame(&mut self, frame: &crate::grpc::framing::Frame) -> Result<Vec<u8>, FetchError> {
+        if let Some(desc) = self.grpc_response_desc.as_ref() {
+            let formatted =
+                proto::format_grpc_frame_with_descriptor(frame, desc, &self.grpc_message_encoding)
+                    .map_err(|err| FetchError::Message(err.to_string()))?;
+            let mut output = Vec::new();
+            if self.descriptor_wrote_any && !self.descriptor_output_ends_with_newline {
+                output.push(b'\n');
+            }
+            output.extend_from_slice(formatted.as_bytes());
+            self.descriptor_output_ends_with_newline = formatted.ends_with('\n');
+            self.descriptor_wrote_any = true;
+            return Ok(output);
+        }
+
+        let formatted = grpc_format::format_grpc_frame(frame, &self.grpc_message_encoding)
+            .map_err(|err| FetchError::Message(err.to_string()))?;
+        let mut output = Vec::new();
+        if self.frame_index > 0 {
+            output.push(b'\n');
+        }
+        output.extend_from_slice(formatted.as_bytes());
+        self.frame_index += 1;
+        Ok(output)
+    }
+}
+
+impl StdoutStreamFormatter for FormattedGrpcStream {
+    fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, FetchError> {
+        let frames = self
+            .decoder
+            .push(chunk)
+            .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
+        frames
+            .iter()
+            .map(|frame| self.format_frame(frame))
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    fn finish(&mut self) -> Result<Vec<Vec<u8>>, FetchError> {
+        self.decoder
+            .finish()
+            .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
+        Ok(Vec::new())
     }
 }
 
@@ -1458,10 +1535,7 @@ async fn stream_response_to_output(
             .map_err(|err| FetchError::Message(err.to_string()))?
     };
     let clipboard = capture.map(clipboard::Capture::copy);
-    let trailers = trailers
-        .lock()
-        .map(|trailers| trailers.clone())
-        .unwrap_or_default();
+    let trailers = captured_trailers(&trailers);
     Ok(StreamedOutput {
         trailers,
         bytes_written,
@@ -1492,7 +1566,7 @@ impl AsyncRead for AsyncClipboardTeeReader<'_> {
     }
 }
 
-fn async_response_reader(response: Response) -> (AsyncReadBox, Arc<Mutex<HeaderMap>>) {
+fn async_response_reader(response: Response) -> (AsyncReadBox, ResponseTrailers) {
     let response: http::Response<reqwest::Body> = response.into();
     let body = response.into_body();
     let trailers = Arc::new(Mutex::new(HeaderMap::new()));
