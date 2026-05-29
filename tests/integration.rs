@@ -2490,6 +2490,59 @@ fn start_ws_push_server(
     url
 }
 
+fn start_ws_hold_open_push_server(
+    message: impl Into<Vec<u8>>,
+) -> (String, mpsc::Sender<()>, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket hold-open server");
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let message = message.into();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => return,
+            }
+        };
+        let _ = stream.set_nonblocking(false);
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let Some(req) = read_request(&mut reader) else {
+            return;
+        };
+        let key = req.header("sec-websocket-key");
+        let mut sha = Sha1::new();
+        sha.update(key.as_bytes());
+        sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        let accept = base64::engine::general_purpose::STANDARD.encode(sha.finalize());
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        );
+        if stream.write_all(response.as_bytes()).is_err() {
+            return;
+        }
+        if stream
+            .write_all(&ws_text_frame(&message))
+            .and_then(|()| stream.flush())
+            .is_err()
+        {
+            return;
+        }
+        loop {
+            match shutdown_rx.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        let _ = stream.write_all(&ws_close_frame(b"done"));
+    });
+    (url, shutdown_tx, join)
+}
+
 fn read_ws_text(reader: &mut impl Read) -> String {
     read_ws_text_frame(reader).unwrap_or_default()
 }
@@ -6855,6 +6908,59 @@ fn websocket_streams_stdin_before_eof() {
     drop(stdin);
     stdout.close();
     stderr.close();
+}
+
+#[test]
+fn websocket_flushes_noninteractive_stdout_while_socket_stays_open() {
+    let (ws_url, shutdown, server) = start_ws_hold_open_push_server(b"message before close");
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([&ws_url, "--format", "off", "--ws-interactive", "off"]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.env("NO_COLOR", "");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let mut child = cmd.spawn().expect("spawn hold-open websocket fetch");
+    let _stdin = child.stdin.take().expect("child stdin");
+    let stdout = start_read_capture(child.stdout.take().expect("child stdout"));
+    let stderr = start_read_capture(child.stderr.take().expect("child stderr"));
+
+    stdout.wait_for("message before close\n", Duration::from_secs(2));
+    assert!(
+        child
+            .try_wait()
+            .expect("poll hold-open websocket")
+            .is_none(),
+        "fetch exited before the WebSocket closed; stdout:\n{}\nstderr:\n{}",
+        stdout.output(),
+        stderr.output()
+    );
+
+    let _ = shutdown.send(());
+    let status = wait_child(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "fetch did not exit after WebSocket close; stdout:\n{}\nstderr:\n{}",
+                stdout.output(),
+                stderr.output()
+            )
+        })
+        .expect("wait hold-open websocket fetch");
+    assert!(
+        status.success(),
+        "fetch exited with {status}; stdout:\n{}\nstderr:\n{}",
+        stdout.output(),
+        stderr.output()
+    );
+    stdout.close();
+    stderr.close();
+    server.join().expect("join hold-open websocket server");
 }
 
 #[test]
