@@ -6057,6 +6057,11 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert!(res.stderr.contains("Addresses: 2"));
     assert!(res.stderr.contains("Records:"));
 
+    let res = run_fetch(&["--silent", "--inspect-dns", "--data", "hi", "127.0.0.1"]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(res.stderr.is_empty());
+
     let unresponsive_inspect_dns_addr = start_unresponsive_udp_dns_server();
     let res = run_fetch(&[
         "--inspect-dns",
