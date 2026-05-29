@@ -6741,6 +6741,74 @@ fn websocket_noninteractive_go_cases() {
 }
 
 #[test]
+fn websocket_verbose_prints_response_metadata() {
+    let (ws_url, seen) = start_ws_echo_server(|_| Ok(()));
+
+    let res = run_fetch(&[
+        &ws_url,
+        "-d",
+        "verbose websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+        "-v",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "verbose websocket"
+    );
+    assert!(res.stderr.contains("HTTP/1.1 101 Switching Protocols"));
+    assert!(res.stderr.contains("upgrade: websocket"));
+    assert!(res.stderr.contains("connection: Upgrade"));
+    assert!(res.stderr.contains("sec-websocket-accept:"));
+    assert!(!res.stderr.contains("> GET"));
+    assert!(!res.stderr.contains("< HTTP/1.1"));
+
+    let res = run_fetch(&[
+        &ws_url,
+        "-d",
+        "prefixed websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+        "-vv",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "prefixed websocket"
+    );
+    assert!(res.stderr.contains("> GET / HTTP/1.1"));
+    assert!(res.stderr.contains("< HTTP/1.1 101 Switching Protocols"));
+    assert!(res.stderr.contains("< upgrade: websocket"));
+
+    let res = run_fetch(&[
+        &ws_url,
+        "-d",
+        "sorted websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+        "-v",
+        "--sort-headers",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "sorted websocket"
+    );
+    let connection = res.stderr.find("connection: Upgrade").unwrap();
+    let accept = res.stderr.find("sec-websocket-accept:").unwrap();
+    let upgrade = res.stderr.find("upgrade: websocket").unwrap();
+    assert!(connection < accept);
+    assert!(accept < upgrade);
+}
+
+#[test]
 fn websocket_streams_stdin_before_eof() {
     let ws_url = start_ws_multi_echo_server(1);
     let mut cmd = Command::new(fetch_bin());
