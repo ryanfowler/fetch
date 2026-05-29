@@ -302,7 +302,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     if let Some(redirect) = redirect_target(cli, &response, redirect_count)? {
                         timing.mark_response_headers();
                         timing.set_connect(connect_timing.duration());
-                        print_redirect_status(cli, response.status());
+                        print_redirect_status(cli, &response);
                         redirect_statuses.push(response.status());
                         let redirected =
                             redirected_request(request_method, request_body, response.status())?;
@@ -2709,13 +2709,14 @@ fn ensure_body_replayable(replayable: bool, action: &str) -> Result<(), FetchErr
     )))
 }
 
-fn print_redirect_status(cli: &Cli, status: StatusCode) {
+fn print_redirect_status(cli: &Cli, response: &Response) {
     if cli.verbose < 2 || cli.silent {
         return;
     }
+    let status = response.status();
     let mut printer = core::Printer::stderr(cli.color.as_deref());
     printer.write_response_prefix();
-    printer.write_styled("HTTP/1.1", &[core::Sequence::Dim]);
+    printer.write_styled(version_label(response.version()), &[core::Sequence::Dim]);
     printer.push_str(" ");
     let status_color = color_for_status(status.as_u16());
     printer.write_styled(
