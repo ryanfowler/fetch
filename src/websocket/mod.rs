@@ -14,7 +14,8 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{
-    HeaderName as WsHeaderName, HeaderValue as WsHeaderValue,
+    HeaderMap as WsHeaderMap, HeaderName as WsHeaderName, HeaderValue as WsHeaderValue,
+    Version as WsVersion,
 };
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{Connector, client_async_tls_with_config};
@@ -76,14 +77,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     };
     let (stream, response) = request_budget.run(connect).await?;
 
-    if cli.verbose > 0 && !cli.silent {
-        let status = response.status();
-        eprintln!(
-            "HTTP/1.1 {} {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("")
-        );
-    }
+    print_response_metadata(cli, &response);
 
     if interactive
         && let Some(size) = core::terminal_size()
@@ -830,26 +824,135 @@ fn websocket_signing_url(url: &Url) -> Result<Url, FetchError> {
     Ok(signed)
 }
 
-fn print_request_metadata(
-    cli: &Cli,
-    method: &str,
-    url: &Url,
-    headers: Option<&tokio_tungstenite::tungstenite::http::HeaderMap>,
-) {
+fn print_request_metadata(cli: &Cli, method: &str, url: &Url, headers: Option<&WsHeaderMap>) {
     if cli.silent {
         return;
     }
-    eprintln!("> {method} {} HTTP/1.1", crate::http::request_target(url));
+    let debug = cli.verbose >= 2 || cli.dry_run;
+    let mut printer = core::Printer::stderr(cli.color.as_deref());
+    if debug {
+        printer.write_request_prefix();
+    }
+    printer.write_styled(method, &[core::Sequence::Bold, core::Sequence::Yellow]);
+    printer.push_str(" ");
+    printer.write_styled(
+        &crate::http::request_target(url),
+        &[core::Sequence::Bold, core::Sequence::Cyan],
+    );
+    printer.push_str(" ");
+    printer.write_styled("HTTP/1.1", &[core::Sequence::Dim]);
+    printer.push_str("\n");
     if let Some(headers) = headers {
-        for (name, value) in headers {
-            if let Ok(value) = value.to_str() {
-                eprintln!("> {}: {value}", name.as_str().to_ascii_lowercase());
+        let mut lines = header_lines(headers);
+        if cli.sort_headers {
+            sort_header_lines(&mut lines);
+        }
+        for (name, value) in lines {
+            if debug {
+                printer.write_request_prefix();
             }
+            printer.write_styled(&name, &[core::Sequence::Bold, core::Sequence::Blue]);
+            printer.push_str(": ");
+            printer.push_str(&value);
+            printer.push_str("\n");
         }
     }
-    if cli.verbose >= 2 || cli.dry_run {
-        eprintln!("> ");
+    if debug {
+        printer.write_request_prefix();
+        printer.push_str("\n");
     }
+    flush_stderr(printer);
+}
+
+fn print_response_metadata(
+    cli: &Cli,
+    response: &tokio_tungstenite::tungstenite::handshake::client::Response,
+) {
+    if cli.verbose == 0 || cli.silent {
+        return;
+    }
+
+    let status = response.status();
+    let mut printer = core::Printer::stderr(cli.color.as_deref());
+    if cli.verbose >= 2 {
+        printer.write_response_prefix();
+    }
+    printer.write_styled(ws_version_label(response.version()), &[core::Sequence::Dim]);
+    printer.push_str(" ");
+    let status_color = color_for_status(status.as_u16());
+    printer.write_styled(
+        &status.as_u16().to_string(),
+        &[status_color, core::Sequence::Bold],
+    );
+    let reason = status.canonical_reason().unwrap_or("");
+    if !reason.is_empty() {
+        printer.push_str(" ");
+        printer.write_styled(reason, &[status_color]);
+    }
+    printer.push_str("\n");
+
+    let mut lines = header_lines(response.headers());
+    if cli.sort_headers {
+        sort_header_lines(&mut lines);
+    }
+    for (name, value) in lines {
+        if cli.verbose >= 2 {
+            printer.write_response_prefix();
+        }
+        printer.write_styled(&name, &[core::Sequence::Bold, core::Sequence::Cyan]);
+        printer.push_str(": ");
+        printer.push_str(&value);
+        printer.push_str("\n");
+    }
+    if cli.verbose >= 2 {
+        printer.write_response_prefix();
+    }
+    printer.push_str("\n");
+    flush_stderr(printer);
+}
+
+fn header_lines(headers: &WsHeaderMap) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (name, value) in headers {
+        if let Ok(value) = value.to_str() {
+            out.push((name.as_str().to_ascii_lowercase(), value.to_string()));
+        }
+    }
+    out
+}
+
+fn sort_header_lines(lines: &mut [(String, String)]) {
+    lines.sort_by(
+        |(left, _), (right, _)| match (left.starts_with(':'), right.starts_with(':')) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => left.cmp(right),
+        },
+    );
+}
+
+fn ws_version_label(version: WsVersion) -> &'static str {
+    match version {
+        WsVersion::HTTP_09 => "HTTP/0.9",
+        WsVersion::HTTP_10 => "HTTP/1.0",
+        WsVersion::HTTP_11 => "HTTP/1.1",
+        WsVersion::HTTP_2 => "HTTP/2.0",
+        WsVersion::HTTP_3 => "HTTP/3.0",
+        _ => "HTTP/?",
+    }
+}
+
+fn color_for_status(code: u16) -> core::Sequence {
+    match code {
+        200..=299 => core::Sequence::Green,
+        300..=399 => core::Sequence::Yellow,
+        _ => core::Sequence::Red,
+    }
+}
+
+fn flush_stderr(mut printer: core::Printer) {
+    let mut stderr = std::io::stderr();
+    let _ = printer.flush_to(&mut stderr);
 }
 
 async fn read_messages<S>(cli: &Cli, stream: &mut S) -> Result<(), FetchError>
