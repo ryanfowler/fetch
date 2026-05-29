@@ -730,6 +730,13 @@ fn apply_proto_restriction(raw_url: &str, allowed_proto: &str) -> Result<String,
         }
     }
 
+    if !allow_http && !allow_https {
+        return Err(format!(
+            "protocols 'http' and 'https' not allowed by --proto {allowed_proto:?}"
+        )
+        .into());
+    }
+
     if allow_https && !allow_http {
         Ok(format!("https://{raw_url}"))
     } else if allow_http && !allow_https {
@@ -1125,6 +1132,39 @@ mod tests {
 
         let err = apply_from_curl(&mut cli).unwrap_err().to_string();
         assert!(err.contains("not allowed by --proto"));
+    }
+
+    #[test]
+    fn from_curl_proto_restriction_rejects_schemeless_when_no_supported_scheme_is_allowed() {
+        for command in [
+            "curl --proto '=ftp' example.com",
+            "curl --proto '=-http,-https' example.com",
+        ] {
+            let mut cli = Cli::try_parse_from(["fetch", "--from-curl", command]).unwrap();
+
+            let err = apply_from_curl(&mut cli).unwrap_err().to_string();
+            assert!(err.contains("protocols 'http' and 'https' not allowed by --proto"));
+        }
+    }
+
+    #[test]
+    fn from_curl_proto_restriction_defaults_schemeless_urls_to_allowed_scheme() {
+        for (command, want_url) in [
+            (
+                "curl --proto '=https' example.com/path",
+                "https://example.com/path",
+            ),
+            (
+                "curl --proto '=http' example.com/path",
+                "http://example.com/path",
+            ),
+        ] {
+            let mut cli = Cli::try_parse_from(["fetch", "--from-curl", command]).unwrap();
+
+            apply_from_curl(&mut cli).unwrap();
+
+            assert_eq!(cli.url.as_deref(), Some(want_url));
+        }
     }
 
     #[test]
