@@ -95,6 +95,12 @@ Specify WebSocket subprotocols via the `Sec-WebSocket-Protocol` header:
 fetch -H "Sec-WebSocket-Protocol: graphql-ws" wss://api.example.com/graphql
 ```
 
+## Network Options
+
+WebSocket connections honor `--dns-server` for direct TCP connections and for
+local target resolution through plain `socks5://` proxies. Use `socks5h://` when
+the SOCKS proxy should resolve the target hostname remotely.
+
 ## Timeout
 
 The `--timeout` flag applies to the WebSocket handshake only. The connection stays open until the server closes or stdin EOF:
