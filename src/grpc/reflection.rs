@@ -379,13 +379,18 @@ fn read_varint(raw: &mut &[u8]) -> Result<u64, WireError> {
 }
 
 fn read_bytes(raw: &mut &[u8]) -> Result<Vec<u8>, WireError> {
-    let len = read_varint(raw)? as usize;
-    if raw.len() < len {
-        return Err(WireError("unexpected EOF while reading bytes".to_string()));
-    }
+    let len = read_len(raw, "unexpected EOF while reading bytes")?;
     let out = raw[..len].to_vec();
     *raw = &raw[len..];
     Ok(out)
+}
+
+fn read_len(raw: &mut &[u8], eof_message: &'static str) -> Result<usize, WireError> {
+    let len = read_varint(raw)?;
+    if len > raw.len() as u64 {
+        return Err(WireError(eof_message.to_string()));
+    }
+    Ok(len as usize)
 }
 
 fn read_string(raw: &mut &[u8]) -> Result<String, WireError> {
@@ -399,7 +404,7 @@ fn skip_value(wire: u8, raw: &mut &[u8]) -> Result<(), WireError> {
         }
         WIRE_64BIT => skip(raw, 8)?,
         WIRE_BYTES => {
-            let len = read_varint(raw)? as usize;
+            let len = read_len(raw, "unexpected EOF while skipping field")?;
             skip(raw, len)?;
         }
         WIRE_32BIT => skip(raw, 4)?,
@@ -481,6 +486,23 @@ mod tests {
 
         assert!(parse_reflection_list_response(&[]).is_err());
         assert!(parse_reflection_file_descriptor_response(&[]).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_reflection_wire_lengths_before_casting() {
+        let oversized = u64::from(u32::MAX) + 1;
+
+        let mut bytes_field = Vec::new();
+        append_varint(&mut bytes_field, oversized);
+        let mut raw = bytes_field.as_slice();
+        let err = read_bytes(&mut raw).unwrap_err();
+        assert_eq!(err.to_string(), "unexpected EOF while reading bytes");
+
+        let mut skipped_field = Vec::new();
+        append_varint(&mut skipped_field, oversized);
+        let mut raw = skipped_field.as_slice();
+        let err = skip_value(WIRE_BYTES, &mut raw).unwrap_err();
+        assert_eq!(err.to_string(), "unexpected EOF while skipping field");
     }
 
     #[test]
