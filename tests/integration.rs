@@ -4990,6 +4990,7 @@ fn http3_go_harness_cases() {
         &format!("{}/start", redirect.url),
         "--http",
         "3",
+        "-vv",
         "--ca-cert",
         redirect.ca_cert_path.to_str().unwrap(),
         "--method",
@@ -4999,6 +5000,8 @@ fn http3_go_harness_cases() {
     ]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "h3 redirected");
+    assert!(res.stderr.contains("< HTTP/3.0 307 Temporary Redirect"));
+    assert!(!res.stderr.contains("< HTTP/1.1 307 Temporary Redirect"));
     assert!(res.stderr.contains("HTTP/3.0 200 OK"));
     let requests = wait_for_h3_requests(&redirect, 2);
     assert_eq!(requests[0].path, "/start");
