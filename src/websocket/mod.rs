@@ -387,12 +387,13 @@ async fn connect_proxy_tcp(
 }
 
 fn proxy_basic_auth(proxy_url: &Url) -> Result<Option<String>, FetchError> {
-    let Some(password) = proxy_url.password() else {
+    if proxy_url.username().is_empty() && proxy_url.password().is_none() {
         return Ok(None);
-    };
+    }
     let username = percent_encoding::percent_decode_str(proxy_url.username())
         .decode_utf8()
         .map_err(|err| FetchError::Message(format!("invalid proxy username: {err}")))?;
+    let password = proxy_url.password().unwrap_or("");
     let password = percent_encoding::percent_decode_str(password)
         .decode_utf8()
         .map_err(|err| FetchError::Message(format!("invalid proxy password: {err}")))?;
@@ -952,6 +953,44 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer token")
         );
+    }
+
+    #[test]
+    fn proxy_basic_auth_treats_missing_password_as_empty() {
+        let proxy_url = Url::parse("http://user@proxy.example:8080").unwrap();
+
+        assert_eq!(
+            proxy_basic_auth(&proxy_url).unwrap(),
+            Some("Basic dXNlcjo=".to_string())
+        );
+    }
+
+    #[test]
+    fn proxy_basic_auth_preserves_explicit_empty_password() {
+        let proxy_url = Url::parse("http://user:@proxy.example:8080").unwrap();
+
+        assert_eq!(
+            proxy_basic_auth(&proxy_url).unwrap(),
+            Some("Basic dXNlcjo=".to_string())
+        );
+    }
+
+    #[test]
+    fn proxy_basic_auth_percent_decodes_credentials() {
+        let proxy_url = Url::parse("http://us%20er:p%40ss%3Aword@proxy.example:8080").unwrap();
+        let expected = base64::engine::general_purpose::STANDARD.encode("us er:p@ss:word");
+
+        assert_eq!(
+            proxy_basic_auth(&proxy_url).unwrap(),
+            Some(format!("Basic {expected}"))
+        );
+    }
+
+    #[test]
+    fn proxy_basic_auth_skips_proxy_without_credentials() {
+        let proxy_url = Url::parse("http://proxy.example:8080").unwrap();
+
+        assert_eq!(proxy_basic_auth(&proxy_url).unwrap(), None);
     }
 
     #[test]
