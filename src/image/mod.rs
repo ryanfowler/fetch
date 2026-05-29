@@ -626,7 +626,7 @@ fn parse_orientation<R: Read>(mut reader: R) -> u16 {
             _ => return 0,
         };
         if marker == 0xffe1 {
-            let mut segment = reader.take(length as u64);
+            let mut segment = reader.take(u64::from(length - 2));
             return parse_exif_segment(&mut segment, &mut scratch);
         }
         if discard_bytes(&mut reader, &mut scratch, u64::from(length - 2)).is_err() {
@@ -1088,6 +1088,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_orientation_stops_at_app1_segment_boundary() {
+        let mut app1 = exif_orientation_entry_prefix();
+        let mut bytes = jpeg_with_app1(&app1);
+        bytes.extend_from_slice(&6_u16.to_be_bytes());
+
+        assert_eq!(parse_orientation(Cursor::new(bytes)), 0);
+
+        app1.extend_from_slice(&6_u16.to_be_bytes());
+        assert_eq!(parse_orientation(Cursor::new(jpeg_with_app1(&app1))), 6);
+    }
+
+    #[test]
     fn orientation_rotates_image_like_go() {
         let img = DynamicImage::ImageRgba8({
             let mut img = RgbaImage::new(2, 1);
@@ -1144,8 +1156,22 @@ mod tests {
     }
 
     fn jpeg_with_orientation(orientation: u16) -> Vec<u8> {
+        let mut app1 = exif_orientation_entry_prefix();
+        app1.extend_from_slice(&orientation.to_be_bytes());
+        app1.extend_from_slice(&0_u16.to_be_bytes());
+        jpeg_with_app1(&app1)
+    }
+
+    fn jpeg_with_app1(app1: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xffd8_u16.to_be_bytes());
+        bytes.extend_from_slice(&0xffe1_u16.to_be_bytes());
+        bytes.extend_from_slice(&u16::try_from(app1.len() + 2).unwrap().to_be_bytes());
+        bytes.extend_from_slice(app1);
+        bytes
+    }
+
+    fn exif_orientation_entry_prefix() -> Vec<u8> {
         let mut app1 = Vec::new();
         app1.extend_from_slice(b"Exif\0\0");
         app1.extend_from_slice(&0x4d4d_u16.to_be_bytes());
@@ -1155,11 +1181,6 @@ mod tests {
         app1.extend_from_slice(&0x0112_u16.to_be_bytes());
         app1.extend_from_slice(&3_u16.to_be_bytes());
         app1.extend_from_slice(&1_u32.to_be_bytes());
-        app1.extend_from_slice(&orientation.to_be_bytes());
-        app1.extend_from_slice(&0_u16.to_be_bytes());
-        bytes.extend_from_slice(&0xffe1_u16.to_be_bytes());
-        bytes.extend_from_slice(&u16::try_from(app1.len() + 2).unwrap().to_be_bytes());
-        bytes.extend_from_slice(&app1);
-        bytes
+        app1
     }
 }
