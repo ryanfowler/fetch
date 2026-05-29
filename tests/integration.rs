@@ -6905,6 +6905,67 @@ fn websocket_custom_dns_and_proxy_cases() {
         "socks websocket"
     );
     assert!(res.stdout.contains("echo: socks websocket"));
+
+    let (socks_dns_target_url, socks_dns_seen_ws) = start_ws_echo_server(|req| {
+        if req.header("host").starts_with("ws-socks-dns.test:") {
+            Ok(())
+        } else {
+            Err(format!("unexpected host: {}", req.header("host")))
+        }
+    });
+    let socks_dns_port = Url::parse(&socks_dns_target_url).unwrap().port().unwrap();
+    let socks_dns_target_addr = url_host_port(&socks_dns_target_url);
+    let (socks_dns_proxy_url, socks_dns_seen) = start_socks5_proxy(socks_dns_target_addr.clone());
+    let socks_dns_addr = start_udp_dns_server("ws-socks-dns.test.", Ipv4Addr::new(127, 0, 0, 1));
+    let res = run_fetch(&[
+        "--dns-server",
+        &socks_dns_addr,
+        "--proxy",
+        &socks_dns_proxy_url,
+        &format!("ws://ws-socks-dns.test:{socks_dns_port}"),
+        "-d",
+        "socks dns websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 0);
+    assert_socks_seen(&socks_dns_seen, &socks_dns_target_addr);
+    assert_eq!(
+        socks_dns_seen_ws
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap(),
+        "socks dns websocket"
+    );
+    assert!(res.stdout.contains("echo: socks dns websocket"));
+
+    let socks_dns_proxy_url = socks_dns_proxy_url.replacen("socks5://", "socks5h://", 1);
+    let res = run_fetch(&[
+        "--dns-server",
+        &socks_dns_addr,
+        "--proxy",
+        &socks_dns_proxy_url,
+        &format!("ws://ws-socks-dns.test:{socks_dns_port}"),
+        "-d",
+        "socks remote dns websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 0);
+    assert_socks_seen(
+        &socks_dns_seen,
+        &format!("ws-socks-dns.test:{socks_dns_port}"),
+    );
+    assert_eq!(
+        socks_dns_seen_ws
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap(),
+        "socks remote dns websocket"
+    );
+    assert!(res.stdout.contains("echo: socks remote dns websocket"));
 }
 
 #[test]

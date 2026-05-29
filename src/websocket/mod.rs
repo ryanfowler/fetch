@@ -189,7 +189,7 @@ async fn dial_websocket(
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
     if let Some(proxy) = cli.proxy.as_deref() {
-        return dial_proxy(proxy, url, timeout).await;
+        return dial_proxy(proxy, url, cli.dns_server.as_deref(), timeout).await;
     }
     let stream = connect_tcp(url, cli.dns_server.as_deref(), timeout).await?;
     Ok(Box::pin(stream))
@@ -259,12 +259,13 @@ async fn connect_first(addrs: Vec<SocketAddr>) -> Result<TcpStream, FetchError> 
 async fn dial_proxy(
     proxy: &str,
     target: &Url,
+    dns_server: Option<&str>,
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
     let proxy_url = parse_proxy_url(proxy)?;
     match proxy_url.scheme() {
         "http" | "https" => dial_http_proxy(proxy, &proxy_url, target, timeout).await,
-        "socks5" | "socks5h" => dial_socks5_proxy(&proxy_url, target, timeout).await,
+        "socks5" | "socks5h" => dial_socks5_proxy(&proxy_url, target, dns_server, timeout).await,
         scheme => Err(FetchError::Message(format!(
             "invalid proxy '{proxy}': unsupported proxy scheme '{scheme}'"
         ))),
@@ -405,6 +406,7 @@ fn proxy_basic_auth(proxy_url: &Url) -> Result<Option<String>, FetchError> {
 async fn dial_socks5_proxy(
     proxy_url: &Url,
     target: &Url,
+    dns_server: Option<&str>,
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
     let mut stream = connect_proxy_tcp(proxy_url, timeout).await?;
@@ -491,7 +493,13 @@ async fn dial_socks5_proxy(
     let mut request = vec![0x05, 0x01, 0x00];
     timeout_fetch(
         timeout,
-        write_socks5_target(&mut request, proxy_url.scheme() == "socks5h", target),
+        write_socks5_target(
+            &mut request,
+            proxy_url.scheme() == "socks5h",
+            target,
+            dns_server,
+            timeout,
+        ),
     )
     .await?;
     timeout_fetch(timeout, async {
@@ -520,6 +528,8 @@ async fn write_socks5_target(
     request: &mut Vec<u8>,
     remote_dns: bool,
     target: &Url,
+    dns_server: Option<&str>,
+    timeout: TimeoutBudget,
 ) -> Result<(), FetchError> {
     let host = target
         .host_str()
@@ -540,9 +550,9 @@ async fn write_socks5_target(
     } else if let Ok(ip) = host.parse::<IpAddr>() {
         write_socks5_ip(request, ip);
     } else {
-        let addr = tokio::net::lookup_host((host, port))
-            .await
-            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
+        let addr = resolve_websocket_host(host, dns_server, timeout)
+            .await?
+            .into_iter()
             .next()
             .ok_or_else(|| FetchError::Runtime(format!("lookup {host}: no addresses")))?;
         write_socks5_ip(request, addr.ip());
