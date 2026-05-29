@@ -640,6 +640,16 @@ fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
         .and_then(|url| url.split_once("://").map(|(scheme, _)| scheme))
         .unwrap_or("ws")
         .to_ascii_lowercase();
+    if let Some(version) =
+        crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?
+        && version != crate::cli::HttpVersion::Http1
+    {
+        return Err(format!(
+            "WebSocket requires HTTP/1.1; {} is not supported",
+            version.label()
+        )
+        .into());
+    }
     let conflicting_flag = if cli.clobber {
         Some("clobber")
     } else if cli.copy {
@@ -1276,6 +1286,22 @@ mod tests {
             err,
             "'wss://' scheme and '--digest' flag cannot be used together"
         );
+    }
+
+    #[test]
+    fn websocket_rejects_non_http1_versions() {
+        for http in ["2", "3"] {
+            let cli = Cli::try_parse_from(["fetch", "ws://example.com", "--http", http]).unwrap();
+            let err = validate_websocket_exclusives(&cli).unwrap_err().to_string();
+
+            assert_eq!(
+                err,
+                format!("WebSocket requires HTTP/1.1; HTTP/{http}.0 is not supported")
+            );
+        }
+
+        let cli = Cli::try_parse_from(["fetch", "ws://example.com", "--http", "1"]).unwrap();
+        validate_websocket_exclusives(&cli).unwrap();
     }
 
     #[test]

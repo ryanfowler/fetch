@@ -6714,6 +6714,11 @@ fn websocket_noninteractive_go_cases() {
     assert_exit(&res, 1);
     assert!(res.stderr.contains("websocket") || res.stderr.contains("grpc"));
 
+    let res = run_fetch(&["--http", "3", "ws://127.0.0.1:1"]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("WebSocket requires HTTP/1.1"));
+    assert!(res.stderr.contains("HTTP/3.0 is not supported"));
+
     let res = run_fetch(&[&ws_url, "--method", "POST", "--timing", "--dry-run"]);
     assert_exit(&res, 0);
     assert!(res.stderr.contains("GET / HTTP/1.1"));
