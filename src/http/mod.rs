@@ -576,7 +576,7 @@ fn print_request_metadata(
     printer.push_str("\n");
     let mut lines = header_lines(headers);
     lines.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
-    if let Some(len) = request_body_content_len(body) {
+    if let Some(len) = inferred_request_body_content_len(headers, body) {
         lines.push(("content-length".to_string(), len.to_string()));
     }
     let host = headers
@@ -1710,9 +1710,7 @@ fn build_request(
     cli: &Cli,
     authorization: RequestAuthorization<'_>,
 ) -> Result<RequestBuilder, FetchError> {
-    if let Some(len) = request_body_content_len(&body)
-        && !headers.contains_key(CONTENT_LENGTH)
-    {
+    if let Some(len) = inferred_request_body_content_len(&headers, &body) {
         headers.insert(
             CONTENT_LENGTH,
             HeaderValue::from_str(&len.to_string())
@@ -2114,6 +2112,13 @@ fn request_body_content_len(body: &RequestBody) -> Option<u64> {
             ..
         } => None,
     }
+}
+
+fn inferred_request_body_content_len(headers: &HeaderMap, body: &RequestBody) -> Option<u64> {
+    if headers.contains_key(CONTENT_LENGTH) || headers.contains_key(TRANSFER_ENCODING) {
+        return None;
+    }
+    request_body_content_len(body)
 }
 
 fn request_body_to_reqwest_body(body: RequestBodyPayload) -> Result<Body, FetchError> {

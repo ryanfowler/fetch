@@ -3081,6 +3081,25 @@ fn request_construction_and_data_sources() {
     let req = wait_for_requests(&server, 4).remove(3);
     assert_eq!(req.body_string(), "temp file data");
     assert_eq!(req.header("content-length"), "14");
+
+    let res = run_fetch(&[&server.url, "--data", "hello", "-H", "Content-Length: 5"]);
+    assert_exit(&res, 0);
+    let req = wait_for_requests(&server, 5).remove(4);
+    assert_eq!(req.body_string(), "hello");
+    assert_eq!(req.header("content-length"), "5");
+
+    let res = run_fetch(&[
+        &server.url,
+        "--data",
+        "chunked body",
+        "-H",
+        "Transfer-Encoding: chunked",
+    ]);
+    assert_exit(&res, 0);
+    let req = wait_for_requests(&server, 6).remove(5);
+    assert_eq!(req.body_string(), "chunked body");
+    assert_eq!(req.header("transfer-encoding"), "chunked");
+    assert!(req.header("content-length").is_empty());
 }
 
 #[test]
@@ -3123,6 +3142,31 @@ fn dry_run_prints_effective_request_without_network() {
     assert!(content_type < host);
     assert!(host < user_agent);
     assert!(user_agent < zeta);
+
+    let res = run_fetch(&[
+        "localhost:3000",
+        "--data",
+        "hello",
+        "-H",
+        "Content-Length: 99",
+        "--dry-run",
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stderr.contains("content-length: 99\n"));
+    assert!(!res.stderr.contains("content-length: 5\n"));
+    assert_eq!(res.stderr.matches("content-length:").count(), 1);
+
+    let res = run_fetch(&[
+        "localhost:3000",
+        "--data",
+        "hello",
+        "-H",
+        "Transfer-Encoding: chunked",
+        "--dry-run",
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stderr.contains("transfer-encoding: chunked\n"));
+    assert!(!res.stderr.contains("content-length:"));
 }
 
 #[test]
