@@ -784,13 +784,11 @@ fn url_encode_value(value: &str) -> DataValue {
 }
 
 pub fn query_escape(value: &str) -> String {
-    let mut serializer = form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("", value);
-    serializer
-        .finish()
-        .strip_prefix('=')
-        .expect("empty key appends leading equals")
-        .to_string()
+    query_escape_bytes(value.as_bytes())
+}
+
+pub fn query_escape_bytes(value: &[u8]) -> String {
+    form_urlencoded::byte_serialize(value).collect()
 }
 
 pub fn parse_allowed_proto(value: &str) -> (bool, bool) {
@@ -1043,6 +1041,8 @@ mod tests {
 
     #[test]
     fn test_url_encode_value() {
+        assert_eq!(query_escape_bytes(&[b'a', b' ', 0xff]), "a+%FF");
+
         let value = url_encode_value("key=hello world");
         assert_eq!(value.value, "key=hello+world");
         assert!(!value.is_urlencode);

@@ -770,24 +770,22 @@ fn read_body_value(value: &str) -> Result<Vec<u8>, FetchError> {
 
 fn url_encode_from_value(value: &str) -> Result<String, FetchError> {
     if let Some(path) = value.strip_prefix('@') {
-        return Ok(from_curl::query_escape(&read_file_for_urlencode(path)?));
+        let bytes = read_file_for_urlencode(path)?;
+        return Ok(from_curl::query_escape_bytes(&bytes));
     }
 
     if let Some((name, path)) = value.split_once('@')
         && !name.is_empty()
     {
-        return Ok(format!(
-            "{name}={}",
-            from_curl::query_escape(&read_file_for_urlencode(path)?)
-        ));
+        let bytes = read_file_for_urlencode(path)?;
+        return Ok(format!("{name}={}", from_curl::query_escape_bytes(&bytes)));
     }
 
     Ok(from_curl::query_escape(value))
 }
 
-fn read_file_for_urlencode(path: &str) -> Result<String, FetchError> {
-    let bytes = std::fs::read(expand_home(path))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+fn read_file_for_urlencode(path: &str) -> Result<Vec<u8>, FetchError> {
+    Ok(std::fs::read(expand_home(path))?)
 }
 
 fn expand_home(path: &str) -> String {
@@ -1045,24 +1043,25 @@ mod tests {
     }
 
     #[test]
-    fn from_curl_data_urlencode_file_reads_and_encodes_contents() {
+    fn from_curl_data_urlencode_file_preserves_non_utf8_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("payload.txt");
-        std::fs::write(&path, "hello world&foo=bar").unwrap();
+        let named_path = dir.path().join("named.bin");
+        std::fs::write(&path, b"hello \xff&=").unwrap();
+        std::fs::write(&named_path, b"a \xff").unwrap();
         let command = format!(
-            "curl --data-urlencode '@{}' https://example.com",
-            path.display()
+            "curl --data-urlencode '@{}' --data-urlencode 'field@{}' https://example.com",
+            path.display(),
+            named_path.display()
         );
         let mut cli = Cli::try_parse_from(["fetch", "--from-curl", &command]).unwrap();
 
         apply_from_curl(&mut cli).unwrap();
 
-        assert_eq!(cli.data.as_deref(), Some("hello+world%26foo%3Dbar"));
+        let expected = "hello+%FF%26%3D&field=a+%FF";
+        assert_eq!(cli.data.as_deref(), Some(expected));
         assert!(cli.data_is_literal);
-        assert_eq!(
-            cli.data_literal_bytes.as_deref(),
-            Some(b"hello+world%26foo%3Dbar".as_slice())
-        );
+        assert_eq!(cli.data_literal_bytes.as_deref(), Some(expected.as_bytes()));
     }
 
     #[test]
