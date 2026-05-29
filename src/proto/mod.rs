@@ -14,6 +14,8 @@ use crate::error::FetchError;
 use crate::grpc::encoding::{self, MessageEncoding};
 use crate::grpc::framing;
 
+const MAX_GRPC_JSON_PENDING_BYTES: usize = framing::MAX_MESSAGE_SIZE;
+
 #[derive(Debug, Clone)]
 pub struct Schema {
     pool: DescriptorPool,
@@ -460,11 +462,23 @@ pub(crate) fn json_reader_to_grpc_frame_stream<R>(
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
+    json_reader_to_grpc_frame_stream_with_limit(reader, desc, MAX_GRPC_JSON_PENDING_BYTES)
+}
+
+fn json_reader_to_grpc_frame_stream_with_limit<R>(
+    reader: R,
+    desc: MessageDescriptor,
+    max_pending_json_bytes: usize,
+) -> impl futures_util::Stream<Item = Result<Bytes, std::io::Error>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     struct State<R> {
         reader: R,
         desc: MessageDescriptor,
         pending: Vec<u8>,
         eof: bool,
+        max_pending_json_bytes: usize,
     }
 
     futures_util::stream::try_unfold(
@@ -473,9 +487,13 @@ where
             desc,
             pending: Vec::new(),
             eof: false,
+            max_pending_json_bytes,
         },
         |mut state| async move {
             loop {
+                discard_leading_json_whitespace(&mut state.pending);
+                validate_grpc_json_pending_len(state.pending.len(), state.max_pending_json_bytes)
+                    .map_err(std::io::Error::other)?;
                 match parse_next_json_value(&state.pending, state.eof) {
                     Ok(JsonParse::Message { value, consumed }) => {
                         state.pending.drain(..consumed);
@@ -519,6 +537,13 @@ pub(crate) fn stdin_json_to_grpc_frame_stream(
         let mut buf = [0_u8; READ_BUF_LEN];
 
         loop {
+            discard_leading_json_whitespace(&mut pending);
+            if let Err(err) =
+                validate_grpc_json_pending_len(pending.len(), MAX_GRPC_JSON_PENDING_BYTES)
+            {
+                let _ = tx.blocking_send(Err(std::io::Error::other(err)));
+                break;
+            }
             match parse_next_json_value(&pending, eof) {
                 Ok(JsonParse::Message { value, consumed }) => {
                     pending.drain(..consumed);
@@ -555,6 +580,25 @@ pub(crate) fn stdin_json_to_grpc_frame_stream(
     futures_util::stream::unfold(rx, |mut rx| async {
         rx.recv().await.map(|item| (item, rx))
     })
+}
+
+fn discard_leading_json_whitespace(pending: &mut Vec<u8>) {
+    match pending.iter().position(|byte| !byte.is_ascii_whitespace()) {
+        Some(0) => {}
+        Some(first_non_whitespace) => {
+            pending.drain(..first_non_whitespace);
+        }
+        None => pending.clear(),
+    }
+}
+
+fn validate_grpc_json_pending_len(len: usize, max: usize) -> Result<(), ProtoError> {
+    if len > max {
+        return Err(ProtoError::Message(format!(
+            "gRPC JSON message exceeds {max} bytes before a complete JSON value"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -906,6 +950,7 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use futures_util::TryStreamExt;
     use prost_types::{
         DescriptorProto, EnumDescriptorProto, EnumValueDescriptorProto, FieldDescriptorProto,
         FileDescriptorProto, FileDescriptorSet, MessageOptions, MethodDescriptorProto,
@@ -1356,6 +1401,37 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data, b"\x0a\x03one");
         assert_eq!(frames[1].data, b"\x0a\x03two");
+    }
+
+    #[tokio::test]
+    async fn json_reader_to_grpc_frame_stream_errors_on_oversized_unterminated_message() {
+        let schema = Schema::from_descriptor_set(&stream_descriptor_set()).unwrap();
+        let method = schema
+            .find_method("streampkg.StreamService/ClientStream")
+            .unwrap();
+        let reader = std::io::Cursor::new(vec![b'['; 64]);
+        let stream = json_reader_to_grpc_frame_stream_with_limit(reader, method.input(), 32);
+        futures_util::pin_mut!(stream);
+
+        let err = stream.try_next().await.unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "gRPC JSON message exceeds 32 bytes before a complete JSON value"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_reader_to_grpc_frame_stream_discards_whitespace_only_input() {
+        let schema = Schema::from_descriptor_set(&stream_descriptor_set()).unwrap();
+        let method = schema
+            .find_method("streampkg.StreamService/ClientStream")
+            .unwrap();
+        let reader = std::io::Cursor::new(vec![b' '; 64]);
+        let stream = json_reader_to_grpc_frame_stream_with_limit(reader, method.input(), 8);
+        futures_util::pin_mut!(stream);
+
+        assert!(stream.try_next().await.unwrap().is_none());
     }
 
     #[test]
