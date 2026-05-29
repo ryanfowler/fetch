@@ -583,6 +583,32 @@ fn run_fetch_once(opts: FetchOpts, args: &[&str]) -> FetchOutput {
     }
 }
 
+#[cfg(unix)]
+fn run_fetch_with_closed_stdout(args: &[&str]) -> FetchOutput {
+    let mut fds = [0 as RawFd; 2];
+    let pipe_status = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    assert_eq!(pipe_status, 0, "create closed stdout pipe");
+    let close_status = unsafe { libc::close(fds[0]) };
+    assert_eq!(close_status, 0, "close stdout pipe reader");
+
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args(args);
+    cmd.stdout(unsafe { Stdio::from_raw_fd(fds[1]) });
+    cmd.stderr(Stdio::piped());
+    cmd.env("NO_COLOR", "");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let out = cmd.output().expect("run fetch with closed stdout");
+    FetchOutput {
+        status: out.status,
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
 fn is_transient_local_server_error(res: &FetchOutput) -> bool {
     res.status.code() == Some(1)
         && (res
@@ -599,6 +625,26 @@ fn assert_exit(res: &FetchOutput, code: i32) {
         Some(code),
         "unexpected exit code\nstdout:\n{}\nstderr:\n{}",
         res.stdout,
+        res.stderr
+    );
+}
+
+#[cfg(unix)]
+fn assert_no_closed_stdout_panic(res: &FetchOutput) {
+    assert_ne!(
+        res.status.code(),
+        Some(101),
+        "closed stdout caused a panic\nstderr:\n{}",
+        res.stderr
+    );
+    assert!(
+        !res.stderr.contains("failed printing to stdout"),
+        "stderr contains stdout panic message:\n{}",
+        res.stderr
+    );
+    assert!(
+        !res.stderr.contains("panicked"),
+        "stderr contains panic output:\n{}",
         res.stderr
     );
 }
@@ -3047,6 +3093,49 @@ fn shell_completion_matches_go_harness() {
     let res = run_fetch(&["--complete", "powershell"]);
     assert_exit(&res, 1);
     assert!(res.stderr.contains("completions not supported"));
+}
+
+#[cfg(unix)]
+#[test]
+fn metadata_and_grpc_discovery_handle_closed_stdout_without_panic() {
+    for args in [
+        vec!["--help"],
+        vec!["--version"],
+        vec!["--complete", "bash"],
+    ] {
+        let res = run_fetch_with_closed_stdout(&args);
+        assert_no_closed_stdout_panic(&res);
+    }
+
+    let dir = TempDir::new().unwrap();
+    let health_desc = write_health_descriptor_set(dir.path());
+    let health_desc = health_desc.to_str().unwrap();
+    for args in [
+        vec!["--grpc-list", "--proto-desc", health_desc],
+        vec![
+            "--grpc-describe",
+            "grpc.health.v1.Health",
+            "--proto-desc",
+            health_desc,
+            "http://127.0.0.1:1",
+        ],
+    ] {
+        let res = run_fetch_with_closed_stdout(&args);
+        assert_no_closed_stdout_panic(&res);
+    }
+
+    let server = start_reflection_grpc_h2c_server(true);
+    for args in [
+        vec!["--grpc-list", &server.url],
+        vec![
+            "--grpc-describe",
+            "grpc.health.v1.Health/Check",
+            &server.url,
+        ],
+    ] {
+        let res = run_fetch_with_closed_stdout(&args);
+        assert_no_closed_stdout_panic(&res);
+    }
 }
 
 #[test]

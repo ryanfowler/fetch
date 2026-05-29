@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::sync::OnceLock;
 
 pub const DEFAULT_ACCEPT_HEADER: &str = "application/json, */*;q=0.5";
@@ -193,6 +193,11 @@ pub fn color_enabled(setting: Option<&str>, is_terminal: bool) -> bool {
 
 pub fn format_enabled(setting: Option<&str>, is_terminal: bool) -> bool {
     Format::from_setting(setting).enabled(is_terminal)
+}
+
+pub fn write_stdout(bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(bytes.as_ref())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
