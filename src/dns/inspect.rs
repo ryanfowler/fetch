@@ -124,6 +124,26 @@ struct Inspection {
     exit_code: i32,
 }
 
+#[derive(Debug)]
+enum InspectionOutput {
+    IpLiteral {
+        host: String,
+        ip: IpAddr,
+        resolver: String,
+        duration: Duration,
+    },
+    Lookup(Inspection),
+}
+
+impl InspectionOutput {
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::IpLiteral { .. } => 0,
+            Self::Lookup(result) => result.exit_code,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ResolverTarget {
     Default { label: String },
@@ -135,7 +155,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let request_start = Instant::now();
     let url = crate::http::normalize_url(cli.url.as_deref().expect("URL checked by app"))?;
     let ignored = ignored_inspection_flags(cli);
-    if !ignored.is_empty() {
+    if !ignored.is_empty() && !cli.silent {
         write_warning_with_separator_with_color(
             format!("--inspect-dns ignores: {}", ignored.join(", ")),
             cli.color.as_deref(),
@@ -144,20 +164,22 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     let request_timeout = inspection_request_timeout(cli)?;
     let connect_timeout = inspection_connect_timeout(cli, request_timeout, request_start)?;
-    let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
     let inspected = connect_timeout
-        .run(inspect_to(
+        .run(inspect_result(
             &url,
             cli.dns_server.as_deref(),
-            &mut printer,
             connect_timeout,
         ))
         .await;
 
     match inspected {
-        Ok(code) => {
-            printer.flush_to(&mut std::io::stderr())?;
-            Ok(code)
+        Ok(output) => {
+            if !cli.silent {
+                let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
+                render_inspection_output_to(&output, &mut printer);
+                printer.flush_to(&mut std::io::stderr())?;
+            }
+            Ok(output.exit_code())
         }
         Err(err) => {
             write_error_with_color(err, cli.color.as_deref());
@@ -203,12 +225,23 @@ async fn inspect_with_code(
     ))
 }
 
+#[cfg(test)]
 async fn inspect_to(
     url: &Url,
     dns_server: Option<&str>,
     out: &mut Printer,
     timeout: TimeoutBudget,
 ) -> Result<i32, FetchError> {
+    let result = inspect_result(url, dns_server, timeout).await?;
+    render_inspection_output_to(&result, out);
+    Ok(result.exit_code())
+}
+
+async fn inspect_result(
+    url: &Url,
+    dns_server: Option<&str>,
+    timeout: TimeoutBudget,
+) -> Result<InspectionOutput, FetchError> {
     let host = url
         .host_str()
         .filter(|host| !host.is_empty())
@@ -217,13 +250,16 @@ async fn inspect_to(
     let start = Instant::now();
 
     if let Ok(ip) = host.parse::<IpAddr>() {
-        render_ip_literal_to(out, host, ip, target.label(), start.elapsed());
-        return Ok(0);
+        return Ok(InspectionOutput::IpLiteral {
+            host: host.to_string(),
+            ip,
+            resolver: target.label().to_string(),
+            duration: start.elapsed(),
+        });
     }
 
     let result = lookup(host, target, start, timeout).await?;
-    render_to(&result, out);
-    Ok(result.exit_code)
+    Ok(InspectionOutput::Lookup(result))
 }
 
 async fn lookup(
@@ -596,6 +632,18 @@ fn render_ip_literal_to(
     out.push_str("Duration: ");
     out.write_styled(&format_duration(duration), &[Sequence::Dim]);
     out.push_str("\n");
+}
+
+fn render_inspection_output_to(result: &InspectionOutput, out: &mut Printer) {
+    match result {
+        InspectionOutput::IpLiteral {
+            host,
+            ip,
+            resolver,
+            duration,
+        } => render_ip_literal_to(out, host, *ip, resolver, *duration),
+        InspectionOutput::Lookup(result) => render_to(result, out),
+    }
 }
 
 #[cfg(test)]
