@@ -65,9 +65,9 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
     let Some(symbol) = cli.grpc_describe.as_deref() else {
         return Err("gRPC discovery requires --grpc-list or --grpc-describe".into());
     };
-    let schema =
-        schema_for_symbol(cli, &url, &client, &normalize_reflection_symbol(symbol)).await?;
-    print!("{}", crate::proto::describe_symbol(&schema, symbol)?);
+    let symbol = normalize_reflection_symbol(symbol);
+    let schema = schema_for_symbol(cli, &url, &client, &symbol).await?;
+    print!("{}", crate::proto::describe_symbol(&schema, &symbol)?);
     Ok(0)
 }
 
@@ -313,7 +313,7 @@ fn service_from_path(path: &str) -> Result<&str, FetchError> {
 }
 
 fn normalize_reflection_symbol(symbol: &str) -> String {
-    let symbol = symbol.trim_start_matches('/');
+    let symbol = crate::proto::normalize_symbol_name(symbol);
     if let Some((service, method)) = symbol.rsplit_once('/') {
         format!("{service}.{method}")
     } else {
@@ -488,6 +488,19 @@ mod tests {
         assert_eq!(
             normalize_reflection_symbol("grpc.health.v1.Health/Check"),
             "grpc.health.v1.Health.Check"
+        );
+    }
+
+    #[test]
+    fn normalize_reflection_symbol_trims_leading_dot() {
+        assert_eq!(normalize_reflection_symbol(".pkg.Service"), "pkg.Service");
+        assert_eq!(
+            normalize_reflection_symbol(".pkg.Service.Method"),
+            "pkg.Service.Method"
+        );
+        assert_eq!(
+            normalize_reflection_symbol(".pkg.Service/Method"),
+            "pkg.Service.Method"
         );
     }
 }

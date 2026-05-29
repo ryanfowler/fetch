@@ -67,11 +67,11 @@ impl Schema {
     }
 
     pub fn find_service(&self, name: &str) -> Option<ServiceDescriptor> {
-        self.pool.get_service_by_name(name.trim_start_matches('.'))
+        self.pool.get_service_by_name(normalize_symbol_name(name))
     }
 
     pub fn find_message(&self, name: &str) -> Option<MessageDescriptor> {
-        self.pool.get_message_by_name(name.trim_start_matches('.'))
+        self.pool.get_message_by_name(normalize_symbol_name(name))
     }
 
     pub fn messages(&self) -> Vec<String> {
@@ -108,6 +108,7 @@ pub fn execute_local_discovery(cli: &crate::cli::Cli) -> Result<i32, FetchError>
     }
 
     if let Some(symbol) = cli.grpc_describe.as_deref() {
+        let symbol = normalize_symbol_name(symbol);
         print!("{}", describe_symbol(&schema, symbol)?);
         return Ok(0);
     }
@@ -260,6 +261,7 @@ pub fn format_grpc_frame_with_descriptor(
 }
 
 pub fn describe_symbol(schema: &Schema, symbol: &str) -> Result<String, FetchError> {
+    let symbol = normalize_symbol_name(symbol);
     if symbol.contains('/') {
         let method = schema
             .find_method(symbol)
@@ -277,6 +279,10 @@ pub fn describe_symbol(schema: &Schema, symbol: &str) -> Result<String, FetchErr
         return Ok(render_message_description(&message));
     }
     Err(format!("symbol not found: {symbol}").into())
+}
+
+pub fn normalize_symbol_name(symbol: &str) -> &str {
+    symbol.trim_start_matches(['/', '.'])
 }
 
 fn render_service_description(service: &ServiceDescriptor) -> String {
@@ -705,7 +711,7 @@ fn json_value_to_grpc_frame(
 }
 
 fn split_method_name(full_name: &str) -> Result<(&str, &str), ProtoError> {
-    let full_name = full_name.trim_start_matches('/');
+    let full_name = normalize_symbol_name(full_name);
     if let Some((service, method)) = full_name.rsplit_once('/') {
         if !service.is_empty() && !method.is_empty() {
             return Ok((service, method));
@@ -1429,6 +1435,22 @@ mod tests {
         let message = describe_symbol(&schema, "streampkg.StreamRequest").unwrap();
         assert!(message.contains("message streampkg.StreamRequest"));
         assert!(message.contains("1  value  optional  string"));
+    }
+
+    #[test]
+    fn describe_symbol_normalizes_leading_dot_for_services_and_methods() {
+        let schema = Schema::from_descriptor_set(&stream_descriptor_set()).unwrap();
+
+        let service = describe_symbol(&schema, ".streampkg.StreamService").unwrap();
+        assert!(service.contains("service streampkg.StreamService"));
+
+        let dotted_method =
+            describe_symbol(&schema, ".streampkg.StreamService.ClientStream").unwrap();
+        assert!(dotted_method.contains("method streampkg.StreamService/ClientStream"));
+
+        let slash_method =
+            describe_symbol(&schema, ".streampkg.StreamService/ClientStream").unwrap();
+        assert!(slash_method.contains("method streampkg.StreamService/ClientStream"));
     }
 
     #[test]
