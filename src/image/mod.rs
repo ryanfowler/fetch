@@ -1,6 +1,6 @@
 use std::env;
 use std::fmt;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
@@ -14,6 +14,7 @@ use base64::Engine;
 const IMAGE_DIMENSION_LIMIT: u32 = 8192;
 const IMAGE_DECODE_MAX_ALLOC_BYTES: u64 =
     IMAGE_DIMENSION_LIMIT as u64 * IMAGE_DIMENSION_LIMIT as u64 * 4;
+const TEMP_IMAGE_DIR_CREATE_ATTEMPTS: u32 = 100;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImageError {
@@ -312,9 +313,24 @@ impl TempImageDir {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let path = env::temp_dir().join(format!("fetch-image-{}-{stamp}", std::process::id()));
-        create_temp_image_dir(&path)?;
-        Ok(Self { path })
+        Self::create_with_stamp(&env::temp_dir(), stamp)
+    }
+
+    fn create_with_stamp(dir: &Path, stamp: u128) -> std::io::Result<Self> {
+        let pid = std::process::id();
+        for attempt in 0..TEMP_IMAGE_DIR_CREATE_ATTEMPTS {
+            let path = dir.join(format!("fetch-image-{pid}-{stamp}-{attempt}"));
+            match create_temp_image_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "unable to create unique temporary image directory",
+        ))
     }
 }
 
@@ -1068,6 +1084,25 @@ mod tests {
         let file_mode = std::fs::metadata(&image_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(file_mode, 0o600);
         assert_eq!(std::fs::read(&image_path).unwrap(), b"secret image bytes");
+    }
+
+    #[test]
+    fn external_decode_temp_dir_creation_retries_existing_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let stamp = 42;
+        let stale = root
+            .path()
+            .join(format!("fetch-image-{}-{stamp}-0", std::process::id()));
+        create_temp_image_dir(&stale).unwrap();
+
+        let dir = TempImageDir::create_with_stamp(root.path(), stamp).unwrap();
+        let expected = format!("fetch-image-{}-{stamp}-1", std::process::id());
+
+        assert_eq!(
+            dir.path.file_name().and_then(|name| name.to_str()),
+            Some(expected.as_str())
+        );
+        assert!(stale.exists());
     }
 
     #[test]
