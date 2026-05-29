@@ -509,6 +509,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn http3_local_address_matches_ip_literal_family() {
@@ -593,5 +594,33 @@ mod tests {
         reqwest::Proxy::all("socks5://127.0.0.1:1080").unwrap();
         reqwest::Proxy::http("socks5://127.0.0.1:1080").unwrap();
         reqwest::Proxy::all("socks5h://localhost:1080").unwrap();
+    }
+    #[test]
+    fn regular_http_rejects_legacy_tls_versions_on_rustls_path() {
+        let cli =
+            Cli::try_parse_from(["fetch", "--min-tls", "1.0", "https://example.com"]).unwrap();
+
+        let err = configure_tls(Client::builder().use_rustls_tls(), &cli).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid value '1.0' for option '--min-tls': must be one of [1.2, 1.3]"
+        );
+
+        let cli =
+            Cli::try_parse_from(["fetch", "--max-tls", "1.1", "https://example.com"]).unwrap();
+
+        let err = configure_tls(Client::builder().use_rustls_tls(), &cli).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid value '1.1' for option '--max-tls': must be one of [1.2, 1.3]"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_configures_reqwest_builder_on_unix() {
+        assert!(configure_unix_socket(Client::builder(), Some("/tmp/fetch.sock")).is_ok());
     }
 }
