@@ -560,14 +560,43 @@ fn filename_from_url_path(url: &Url) -> Option<String> {
 }
 
 fn sanitize_filename(filename: &str) -> Result<String, OutputError> {
-    let Some(base) = Path::new(filename).file_name() else {
+    let Some(base) = filename.rsplit(['/', '\\']).next() else {
         return Err(OutputError::InvalidFilename(filename.to_string()));
     };
-    let base = base.to_string_lossy();
-    if base.is_empty() || base == "." || base == ".." {
+    if base.is_empty()
+        || base == "."
+        || base == ".."
+        || base.chars().any(char::is_control)
+        || looks_like_windows_drive_path(base)
+        || is_windows_reserved_filename(base)
+    {
         return Err(OutputError::InvalidFilename(filename.to_string()));
     }
-    Ok(base.into_owned())
+    Ok(base.to_string())
+}
+
+fn looks_like_windows_drive_path(filename: &str) -> bool {
+    let mut chars = filename.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic()
+    )
+}
+
+fn is_windows_reserved_filename(filename: &str) -> bool {
+    let name = filename
+        .split_once('.')
+        .map_or(filename, |(before_dot, _)| before_dot)
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+
+    let bytes = name.as_bytes();
+    matches!(
+        name.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || (bytes.len() == 4
+        && (bytes.starts_with(b"COM") || bytes.starts_with(b"LPT"))
+        && matches!(bytes[3], b'1'..=b'9'))
 }
 
 fn content_disposition_filename(headers: &HeaderMap) -> Option<String> {
@@ -744,13 +773,31 @@ mod tests {
                 "../../../tmp/file.txt",
                 Ok("file.txt"),
             ),
+            ("backslash path", r"dir\file.txt", Ok("file.txt")),
+            (
+                "mixed slash and backslash path",
+                r"dir/subdir\file.txt",
+                Ok("file.txt"),
+            ),
+            (
+                "mixed backslash and slash path",
+                r"dir\subdir/file.txt",
+                Ok("file.txt"),
+            ),
             ("absolute path", "/tmp/file.txt", Ok("file.txt")),
+            ("absolute windows path", r"C:\tmp\file.txt", Ok("file.txt")),
             ("nested path", "dir/subdir/file.txt", Ok("file.txt")),
             ("empty string", "", Err(())),
             ("single dot", ".", Err(())),
             ("double dot", "..", Err(())),
+            ("path ending with slash", "dir/", Err(())),
+            ("path ending with backslash", r"dir\", Err(())),
+            ("control character", "bad\nname.txt", Err(())),
+            ("windows reserved name", "CON", Err(())),
+            ("windows reserved name with extension", "nul.txt", Err(())),
+            ("windows drive-relative path", "C:evil.txt", Err(())),
+            ("windows drive prefix", "D:", Err(())),
             ("hidden file", ".hidden", Ok(".hidden")),
-            ("path with trailing slash", "dir/", Ok("dir")),
         ];
 
         for (name, input, expected) in tests {
@@ -822,6 +869,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(path, "malicious.txt");
+    }
+
+    #[test]
+    fn remote_header_name_sanitizes_mixed_content_disposition_separators() {
+        let url = Url::parse("http://example.com/fallback.txt").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_DISPOSITION,
+            r#"attachment; filename="dir/subdir\\evil.txt""#.parse().unwrap(),
+        );
+
+        let path = resolve_output_path(None, true, true, &url, &headers)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(path, "evil.txt");
     }
 
     #[test]
