@@ -93,8 +93,14 @@ async fn list_services(cli: &Cli, url: &Url, client: &Client) -> Result<Vec<Stri
                 let Some(first) = frames.first() else {
                     return Err(reflection_unavailable("empty reflection response"));
                 };
-                let mut names = parse_reflection_list_response(first)
-                    .map_err(|err| reflection_unavailable(&err.to_string()))?;
+                let mut names = match parse_reflection_list_response(first) {
+                    Ok(names) => names,
+                    Err(err) if index == 0 && err.is_unimplemented_reflection_error() => {
+                        last_unimplemented = Some(err.to_string());
+                        continue;
+                    }
+                    Err(err) => return Err(reflection_unavailable(&err.to_string())),
+                };
                 names.sort();
                 return Ok(names);
             }
@@ -118,7 +124,7 @@ async fn schema_for_symbol(
     symbol: &str,
 ) -> Result<Schema, FetchError> {
     let mut last_unimplemented = None;
-    for (index, path) in REFLECTION_PROTOCOLS.iter().enumerate() {
+    'protocols: for (index, path) in REFLECTION_PROTOCOLS.iter().enumerate() {
         match invoke(
             cli,
             url,
@@ -131,8 +137,14 @@ async fn schema_for_symbol(
             Ok(frames) => {
                 let mut files = Vec::new();
                 for frame in frames {
-                    let mut descriptors = parse_reflection_file_descriptor_response(&frame)
-                        .map_err(|err| reflection_unavailable(&err.to_string()))?;
+                    let mut descriptors = match parse_reflection_file_descriptor_response(&frame) {
+                        Ok(descriptors) => descriptors,
+                        Err(err) if index == 0 && err.is_unimplemented_reflection_error() => {
+                            last_unimplemented = Some(err.to_string());
+                            continue 'protocols;
+                        }
+                        Err(err) => return Err(reflection_unavailable(&err.to_string())),
+                    };
                     files.append(&mut descriptors);
                 }
                 return Schema::from_file_descriptor_protos(&files)
@@ -226,12 +238,14 @@ fn parse_reflection_list_response(raw: &[u8]) -> Result<Vec<String>, WireError> 
         match (field, wire) {
             (6, WIRE_BYTES) => names = Some(parse_reflection_service_list(&read_bytes(&mut raw)?)?),
             (7, WIRE_BYTES) => {
-                return Err(WireError(parse_reflection_error(&read_bytes(&mut raw)?)));
+                return Err(WireError::reflection(parse_reflection_error(&read_bytes(
+                    &mut raw,
+                )?)));
             }
             _ => skip_value(wire, &mut raw)?,
         }
     }
-    names.ok_or_else(|| WireError("missing list services response".to_string()))
+    names.ok_or_else(|| WireError::message("missing list services response".to_string()))
 }
 
 fn parse_reflection_service_list(raw: &[u8]) -> Result<Vec<String>, WireError> {
@@ -257,7 +271,7 @@ fn parse_reflection_service_name(raw: &[u8]) -> Result<String, WireError> {
         }
         skip_value(wire, &mut raw)?;
     }
-    Err(WireError(
+    Err(WireError::message(
         "reflection service response missing service name".to_string(),
     ))
 }
@@ -272,12 +286,14 @@ fn parse_reflection_file_descriptor_response(raw: &[u8]) -> Result<Vec<Vec<u8>>,
                 files = Some(parse_reflection_descriptor_list(&read_bytes(&mut raw)?)?)
             }
             (7, WIRE_BYTES) => {
-                return Err(WireError(parse_reflection_error(&read_bytes(&mut raw)?)));
+                return Err(WireError::reflection(parse_reflection_error(&read_bytes(
+                    &mut raw,
+                )?)));
             }
             _ => skip_value(wire, &mut raw)?,
         }
     }
-    files.ok_or_else(|| WireError("missing file descriptor response".to_string()))
+    files.ok_or_else(|| WireError::message("missing file descriptor response".to_string()))
 }
 
 fn parse_reflection_descriptor_list(raw: &[u8]) -> Result<Vec<Vec<u8>>, WireError> {
@@ -294,20 +310,35 @@ fn parse_reflection_descriptor_list(raw: &[u8]) -> Result<Vec<Vec<u8>>, WireErro
     Ok(files)
 }
 
-fn parse_reflection_error(raw: &[u8]) -> String {
+fn parse_reflection_error(raw: &[u8]) -> ReflectionErrorResponse {
     let mut raw = raw;
+    let mut code = None;
     let mut message = None;
     while !raw.is_empty() {
         let Ok((field, wire)) = read_key(&mut raw) else {
             break;
         };
-        if field == 2 && wire == WIRE_BYTES {
-            message = read_string(&mut raw).ok();
-        } else if skip_value(wire, &mut raw).is_err() {
-            break;
+        match (field, wire) {
+            (1, WIRE_VARINT) => {
+                let Ok(raw_code) = read_varint(&mut raw) else {
+                    break;
+                };
+                if raw_code <= i32::MAX as u64 {
+                    code = Some(status::Code(raw_code as i32));
+                }
+            }
+            (2, WIRE_BYTES) => message = read_string(&mut raw).ok(),
+            _ => {
+                if skip_value(wire, &mut raw).is_err() {
+                    break;
+                }
+            }
         }
     }
-    message.unwrap_or_else(|| "reflection request failed".to_string())
+    ReflectionErrorResponse {
+        code,
+        message: message.unwrap_or_default(),
+    }
 }
 
 fn service_from_path(path: &str) -> Result<&str, FetchError> {
@@ -337,7 +368,11 @@ fn reflection_unavailable(reason: &str) -> FetchError {
 }
 
 fn is_unimplemented_error(err: &FetchError) -> bool {
-    err.to_string().contains("UNIMPLEMENTED")
+    contains_unimplemented(&err.to_string())
+}
+
+fn contains_unimplemented(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("unimplemented")
 }
 
 const WIRE_VARINT: u8 = 0;
@@ -376,7 +411,9 @@ fn read_varint(raw: &mut &[u8]) -> Result<u64, WireError> {
     let mut value = 0_u64;
     for shift in (0..64).step_by(7) {
         let Some((&byte, rest)) = raw.split_first() else {
-            return Err(WireError("unexpected EOF while reading varint".to_string()));
+            return Err(WireError::message(
+                "unexpected EOF while reading varint".to_string(),
+            ));
         };
         *raw = rest;
         value |= u64::from(byte & 0x7f) << shift;
@@ -384,7 +421,7 @@ fn read_varint(raw: &mut &[u8]) -> Result<u64, WireError> {
             return Ok(value);
         }
     }
-    Err(WireError("varint overflows uint64".to_string()))
+    Err(WireError::message("varint overflows uint64".to_string()))
 }
 
 fn read_bytes(raw: &mut &[u8]) -> Result<Vec<u8>, WireError> {
@@ -397,13 +434,14 @@ fn read_bytes(raw: &mut &[u8]) -> Result<Vec<u8>, WireError> {
 fn read_len(raw: &mut &[u8], eof_message: &'static str) -> Result<usize, WireError> {
     let len = read_varint(raw)?;
     if len > raw.len() as u64 {
-        return Err(WireError(eof_message.to_string()));
+        return Err(WireError::message(eof_message.to_string()));
     }
     Ok(len as usize)
 }
 
 fn read_string(raw: &mut &[u8]) -> Result<String, WireError> {
-    String::from_utf8(read_bytes(raw)?).map_err(|err| WireError(format!("invalid UTF-8: {err}")))
+    String::from_utf8(read_bytes(raw)?)
+        .map_err(|err| WireError::message(format!("invalid UTF-8: {err}")))
 }
 
 fn skip_value(wire: u8, raw: &mut &[u8]) -> Result<(), WireError> {
@@ -417,22 +455,71 @@ fn skip_value(wire: u8, raw: &mut &[u8]) -> Result<(), WireError> {
             skip(raw, len)?;
         }
         WIRE_32BIT => skip(raw, 4)?,
-        _ => return Err(WireError(format!("unsupported wire type {wire}"))),
+        _ => return Err(WireError::message(format!("unsupported wire type {wire}"))),
     }
     Ok(())
 }
 
 fn skip(raw: &mut &[u8], len: usize) -> Result<(), WireError> {
     if raw.len() < len {
-        return Err(WireError("unexpected EOF while skipping field".to_string()));
+        return Err(WireError::message(
+            "unexpected EOF while skipping field".to_string(),
+        ));
     }
     *raw = &raw[len..];
     Ok(())
 }
 
+#[derive(Debug, Clone)]
+struct ReflectionErrorResponse {
+    code: Option<status::Code>,
+    message: String,
+}
+
+impl ReflectionErrorResponse {
+    fn is_unimplemented(&self) -> bool {
+        self.code == Some(status::Code::UNIMPLEMENTED) || contains_unimplemented(&self.message)
+    }
+
+    fn display_message(&self) -> String {
+        if !self.message.is_empty() {
+            self.message.clone()
+        } else if let Some(code) = self.code {
+            format!("reflection request failed: {code}")
+        } else {
+            "reflection request failed".to_string()
+        }
+    }
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("{0}")]
-struct WireError(String);
+#[error("{message}")]
+struct WireError {
+    message: String,
+    reflection_error: Option<ReflectionErrorResponse>,
+}
+
+impl WireError {
+    fn message(message: String) -> Self {
+        Self {
+            message,
+            reflection_error: None,
+        }
+    }
+
+    fn reflection(error: ReflectionErrorResponse) -> Self {
+        Self {
+            message: error.display_message(),
+            reflection_error: Some(error),
+        }
+    }
+
+    fn is_unimplemented_reflection_error(&self) -> bool {
+        self.reflection_error
+            .as_ref()
+            .is_some_and(ReflectionErrorResponse::is_unimplemented)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -477,6 +564,28 @@ mod tests {
 
         let file_err = parse_reflection_file_descriptor_response(&response).unwrap_err();
         assert_eq!(file_err.to_string(), "symbol missing");
+    }
+
+    #[test]
+    fn recognizes_unimplemented_reflection_error_responses() {
+        let mut error = Vec::new();
+        append_key(&mut error, 1, WIRE_VARINT);
+        append_varint(&mut error, status::Code::UNIMPLEMENTED.0 as u64);
+        append_string(&mut error, 2, "reflection v1 disabled");
+        let mut response = Vec::new();
+        append_bytes(&mut response, 7, &error);
+
+        let err = parse_reflection_list_response(&response).unwrap_err();
+        assert!(err.is_unimplemented_reflection_error());
+        assert_eq!(err.to_string(), "reflection v1 disabled");
+
+        let mut error = Vec::new();
+        append_string(&mut error, 2, "server reflection API is unimplemented");
+        let mut response = Vec::new();
+        append_bytes(&mut response, 7, &error);
+
+        let err = parse_reflection_file_descriptor_response(&response).unwrap_err();
+        assert!(err.is_unimplemented_reflection_error());
     }
 
     #[test]

@@ -200,6 +200,13 @@ struct ReflectionGrpcServer {
     ca_cert_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReflectionBehavior {
+    Enabled,
+    Disabled,
+    V1ErrorResponseUnimplemented,
+}
+
 struct ReadCapture {
     buffer: Arc<Mutex<Vec<u8>>>,
     done: mpsc::Receiver<()>,
@@ -1412,6 +1419,20 @@ fn start_http3_server(
 }
 
 fn start_reflection_grpc_h2c_server(enable_reflection: bool) -> ReflectionGrpcServer {
+    start_reflection_grpc_h2c_server_with_behavior(if enable_reflection {
+        ReflectionBehavior::Enabled
+    } else {
+        ReflectionBehavior::Disabled
+    })
+}
+
+fn start_reflection_grpc_h2c_v1_error_response_server() -> ReflectionGrpcServer {
+    start_reflection_grpc_h2c_server_with_behavior(ReflectionBehavior::V1ErrorResponseUnimplemented)
+}
+
+fn start_reflection_grpc_h2c_server_with_behavior(
+    behavior: ReflectionBehavior,
+) -> ReflectionGrpcServer {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind h2c grpc server");
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -1429,7 +1450,7 @@ fn start_reflection_grpc_h2c_server(enable_reflection: bool) -> ReflectionGrpcSe
                 };
                 let descriptor = descriptor.clone();
                 tokio::spawn(async move {
-                    serve_reflection_h2_connection(stream, descriptor, enable_reflection).await;
+                    serve_reflection_h2_connection(stream, descriptor, behavior).await;
                 });
             }
         });
@@ -1451,6 +1472,11 @@ fn start_reflection_grpc_tls_server_with_versions(
     enable_reflection: bool,
     versions: &[&'static rustls::SupportedProtocolVersion],
 ) -> ReflectionGrpcServer {
+    let behavior = if enable_reflection {
+        ReflectionBehavior::Enabled
+    } else {
+        ReflectionBehavior::Disabled
+    };
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let certified =
         rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()])
@@ -1492,7 +1518,7 @@ fn start_reflection_grpc_tls_server_with_versions(
                     let Ok(tls) = acceptor.accept(stream).await else {
                         return;
                     };
-                    serve_reflection_h2_connection(tls, descriptor, enable_reflection).await;
+                    serve_reflection_h2_connection(tls, descriptor, behavior).await;
                 });
             }
         });
@@ -1510,8 +1536,11 @@ fn reflection_health_descriptor() -> Vec<u8> {
     set.file[0].encode_to_vec()
 }
 
-async fn serve_reflection_h2_connection<T>(stream: T, descriptor: Vec<u8>, enable_reflection: bool)
-where
+async fn serve_reflection_h2_connection<T>(
+    stream: T,
+    descriptor: Vec<u8>,
+    behavior: ReflectionBehavior,
+) where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let Ok(mut connection) = h2::server::handshake(stream).await else {
@@ -1523,7 +1552,7 @@ where
         };
         let descriptor = descriptor.clone();
         tokio::spawn(async move {
-            handle_reflection_h2_request(request, respond, descriptor, enable_reflection).await;
+            handle_reflection_h2_request(request, respond, descriptor, behavior).await;
         });
     }
 }
@@ -1801,7 +1830,7 @@ async fn handle_reflection_h2_request(
     request: http::Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<bytes::Bytes>,
     descriptor: Vec<u8>,
-    enable_reflection: bool,
+    behavior: ReflectionBehavior,
 ) {
     let path = request.uri().path().to_string();
     let mut body = request.into_body();
@@ -1819,7 +1848,7 @@ async fn handle_reflection_h2_request(
         ),
         "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
         | "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo" => {
-            if !enable_reflection {
+            if behavior == ReflectionBehavior::Disabled {
                 (
                     vec![
                         ("content-type", "application/grpc+proto"),
@@ -1827,6 +1856,16 @@ async fn handle_reflection_h2_request(
                         ("grpc-message", "reflection disabled"),
                     ],
                     None,
+                )
+            } else if behavior == ReflectionBehavior::V1ErrorResponseUnimplemented
+                && path == "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"
+            {
+                (
+                    vec![("content-type", "application/grpc+proto")],
+                    Some(grpc_frame(&reflection_error_response(
+                        12,
+                        "reflection v1 unavailable",
+                    ))),
                 )
             } else {
                 match reflection_response_for_request(&raw, &descriptor) {
@@ -1896,6 +1935,12 @@ fn reflection_response_for_request(raw_frame: &[u8], descriptor: &[u8]) -> Resul
         }
     }
     Err("symbol not found".to_string())
+}
+
+fn reflection_error_response(code: u64, message: &str) -> Vec<u8> {
+    let mut error = proto_field_varint(1, code);
+    error.extend(proto_field_string(2, message));
+    proto_field_bytes(7, &error)
 }
 
 fn parse_dns_question(raw: &[u8]) -> Option<(String, u16, usize)> {
@@ -7839,6 +7884,19 @@ fn grpc_reflection_h2c_go_cases() {
     let res = run_fetch(&["--grpc-list", &server.url]);
     assert_exit(&res, 0);
     assert!(res.stdout.contains("grpc.health.v1.Health"));
+
+    let fallback = start_reflection_grpc_h2c_v1_error_response_server();
+    let res = run_fetch(&["--grpc-list", &fallback.url]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains("grpc.health.v1.Health"));
+
+    let res = run_fetch(&[
+        "--grpc-describe",
+        "grpc.health.v1.Health/Check",
+        &fallback.url,
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains("method grpc.health.v1.Health/Check"));
 
     let res = run_fetch(&[
         "--grpc-describe",
