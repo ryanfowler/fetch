@@ -1,7 +1,7 @@
 use clap::{ColorChoice, CommandFactory, Parser};
 use serde::Serialize;
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
+use std::io::Read;
 
 use crate::cli::{Cli, from_curl};
 use crate::core;
@@ -207,7 +207,7 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     if let Some(shell) = cli.complete.as_deref() {
         let output =
             crate::cli::completion::output(shell, &cli.extra_args).map_err(FetchError::Message)?;
-        print!("{output}");
+        core::write_stdout(output)?;
         return Ok(0);
     }
 
@@ -220,7 +220,7 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
             return Ok(0);
         }
         if cli.version {
-            println!("fetch {}", core::version());
+            core::write_stdout(format!("fetch {}\n", core::version()))?;
             return Ok(0);
         }
         if cli.buildinfo {
@@ -389,7 +389,7 @@ fn check_file_exists(path: &str) -> Result<(), FetchError> {
 fn print_help(cli: &Cli) -> Result<(), FetchError> {
     let mut command = Cli::command().color(clap_color_choice(cli.color.as_deref()));
     command.print_help()?;
-    println!();
+    core::write_stdout(b"\n")?;
     Ok(())
 }
 
@@ -859,7 +859,7 @@ fn parse_aws_sigv4(value: &str) -> Result<String, FetchError> {
 fn print_build_info(cli: &Cli) -> Result<(), FetchError> {
     let stdout_is_terminal = core::stdio().stdout_is_terminal();
     let output = build_info_output(cli, stdout_is_terminal)?;
-    std::io::stdout().write_all(&output)?;
+    core::write_stdout(output)?;
     Ok(())
 }
 

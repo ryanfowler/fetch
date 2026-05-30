@@ -103,19 +103,26 @@ pub fn execute_local_discovery(cli: &crate::cli::Cli) -> Result<i32, FetchError>
     };
 
     if cli.grpc_list {
-        for service in schema.services() {
-            println!("{service}");
-        }
+        crate::core::write_stdout(service_list_output(schema.services()))?;
         return Ok(0);
     }
 
     if let Some(symbol) = cli.grpc_describe.as_deref() {
         let symbol = normalize_symbol_name(symbol);
-        print!("{}", describe_symbol(&schema, symbol)?);
+        crate::core::write_stdout(describe_symbol(&schema, symbol)?)?;
         return Ok(0);
     }
 
     Err("gRPC discovery requires --grpc-list or --grpc-describe".into())
+}
+
+fn service_list_output(services: Vec<String>) -> String {
+    let mut output = String::new();
+    for service in services {
+        output.push_str(&service);
+        output.push('\n');
+    }
+    output
 }
 
 pub fn load_local_schema(cli: &crate::cli::Cli) -> Result<Option<Schema>, FetchError> {

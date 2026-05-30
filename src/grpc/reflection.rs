@@ -56,9 +56,9 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
         .client;
 
     if cli.grpc_list {
-        for service in list_services(cli, &url, &client).await? {
-            println!("{service}");
-        }
+        core::write_stdout(service_list_output(
+            list_services(cli, &url, &client).await?,
+        ))?;
         return Ok(0);
     }
 
@@ -67,8 +67,17 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
     };
     let symbol = normalize_reflection_symbol(symbol);
     let schema = schema_for_symbol(cli, &url, &client, &symbol).await?;
-    print!("{}", crate::proto::describe_symbol(&schema, &symbol)?);
+    core::write_stdout(crate::proto::describe_symbol(&schema, &symbol)?)?;
     Ok(0)
+}
+
+fn service_list_output(services: Vec<String>) -> String {
+    let mut output = String::new();
+    for service in services {
+        output.push_str(&service);
+        output.push('\n');
+    }
+    output
 }
 
 pub async fn schema_for_call(cli: &Cli, url: &Url, client: &Client) -> Result<Schema, FetchError> {
