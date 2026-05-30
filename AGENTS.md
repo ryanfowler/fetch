@@ -24,7 +24,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --all-features
 
 # Run the Rust integration suite against the Rust binary
-cargo test --all-features --test integration -- --test-threads=1
+cargo test --all-features --test cli --test formatting --test grpc --test http --test network --test terminal --test update --test websocket -- --test-threads=1
 
 # Run a focused Rust test
 cargo test --all-features image::tests
@@ -42,7 +42,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 prettier -w .
 
 # Run a focused Rust integration test
-cargo test --all-features --test integration request_construction_and_data_sources
+cargo test --all-features --test http request_construction_and_data_sources
 ```
 
 ## Architecture
@@ -151,7 +151,9 @@ Rust request uploads use a replayable body descriptor instead of a universal `Ve
 ## Testing
 
 - Rust unit tests live alongside modules in `src/`.
-- Rust integration tests live in `tests/integration.rs` and run the compiled Rust binary via Cargo.
+- Rust integration tests live in focused files under `tests/`, with shared
+  harness code in `tests/support/mod.rs`, and run the compiled Rust binary via
+  Cargo.
 - CI runs Rust checks once on Ubuntu and runs the Rust integration harness once on each supported GitHub Actions runner: Ubuntu, macOS, and Windows.
 
 ## Docs

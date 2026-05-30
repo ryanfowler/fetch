@@ -64,4 +64,4 @@ jobs:
         run: choco install protoc -y
 
       - name: Rust integration tests against Rust binary
-        run: cargo test --locked --all-features --test integration -- --test-threads=1
+        run: cargo test --locked --all-features --test cli --test formatting --test grpc --test http --test network --test terminal --test update --test websocket -- --test-threads=1
