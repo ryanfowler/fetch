@@ -419,8 +419,10 @@ async fn dial_socks5_proxy(
         .map(|password| percent_encoding::percent_decode_str(password).decode_utf8())
         .transpose()
         .map_err(|err| FetchError::Message(format!("invalid proxy password: {err}")))?;
+    let has_credentials = !username.is_empty() || password.is_some();
+    let password = password.unwrap_or(std::borrow::Cow::Borrowed(""));
 
-    if let Some(password) = password.as_deref() {
+    if has_credentials {
         if username.len() > u8::MAX as usize || password.len() > u8::MAX as usize {
             return Err(FetchError::Message(
                 "SOCKS5 proxy credentials are too long".to_string(),
@@ -453,9 +455,11 @@ async fn dial_socks5_proxy(
     match method[1] {
         0x00 => {}
         0x02 => {
-            let password = password.as_deref().ok_or_else(|| {
-                FetchError::Runtime("SOCKS5 proxy requires authentication".to_string())
-            })?;
+            if !has_credentials {
+                return Err(FetchError::Runtime(
+                    "SOCKS5 proxy requires authentication".to_string(),
+                ));
+            }
             let mut auth = Vec::with_capacity(3 + username.len() + password.len());
             auth.push(0x01);
             auth.push(username.len() as u8);
@@ -1108,6 +1112,61 @@ mod tests {
         assert_eq!(
             proxy_basic_auth(&proxy_url).unwrap(),
             Some("Basic dXNlcjo=".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn socks5_proxy_username_only_auth_sends_empty_password() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_url =
+            Url::parse(&format!("socks5://user@{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut greeting = [0_u8; 2];
+            conn.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [0x05, 0x02]);
+
+            let mut methods = vec![0_u8; greeting[1] as usize];
+            conn.read_exact(&mut methods).await.unwrap();
+            assert_eq!(methods, vec![0x00, 0x02]);
+            conn.write_all(&[0x05, 0x02]).await.unwrap();
+
+            let mut auth = vec![0_u8; 2];
+            conn.read_exact(&mut auth).await.unwrap();
+            let username_len = auth[1] as usize;
+            auth.resize(2 + username_len + 1, 0);
+            conn.read_exact(&mut auth[2..]).await.unwrap();
+            let password_len = *auth.last().unwrap() as usize;
+            let password_start = auth.len();
+            auth.resize(password_start + password_len, 0);
+            if password_len > 0 {
+                conn.read_exact(&mut auth[password_start..]).await.unwrap();
+            }
+            conn.write_all(&[0x01, 0x00]).await.unwrap();
+
+            let mut request = [0_u8; 10];
+            conn.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, [0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0, 80]);
+            conn.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            auth
+        });
+
+        let target = Url::parse("ws://127.0.0.1/socket").unwrap();
+        let stream = dial_socks5_proxy(
+            &proxy_url,
+            &target,
+            None,
+            TimeoutBudget::new(Some(Duration::from_secs(5))),
+        )
+        .await
+        .unwrap();
+        drop(stream);
+
+        assert_eq!(
+            server.await.unwrap(),
+            vec![0x01, 0x04, b'u', b's', b'e', b'r', 0x00]
         );
     }
 
