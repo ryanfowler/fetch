@@ -6,14 +6,12 @@ use bytes::Bytes;
 use http::header::{ACCEPT, USER_AGENT};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use serde::Deserialize;
-use tokio::sync::Mutex;
 use url::Url;
 
 use crate::core;
 use crate::duration::TimeoutBudget;
-use crate::http::transport::hyper_client::{
-    BufferedResponse, SharedHttpClient, connect_shared_http,
-};
+use crate::error::FetchError;
+use crate::http::transport::{Client, Response};
 
 const DNS_TYPE_A: u16 = 1;
 const DNS_TYPE_AAAA: u16 = 28;
@@ -46,13 +44,7 @@ pub(crate) struct DohRecord {
 
 pub(crate) struct DohClient {
     timeout: Option<Duration>,
-    tls_config: rustls::ClientConfig,
-    connection: Mutex<Option<DohConnection>>,
-}
-
-struct DohConnection {
-    origin: String,
-    client: SharedHttpClient,
+    client: Client,
 }
 
 pub async fn lookup_doh(
@@ -98,12 +90,13 @@ pub async fn lookup_doh_type(
 }
 
 pub(crate) fn client(timeout: Option<Duration>) -> Result<DohClient, DnsError> {
-    Ok(DohClient {
-        timeout,
-        tls_config: crate::tls::rustls_platform_client_config()
-            .map_err(|err| DnsError(err.to_string()))?,
-        connection: Mutex::new(None),
-    })
+    let tls_config =
+        crate::tls::rustls_platform_client_config().map_err(|err| DnsError(err.to_string()))?;
+    let client = Client::builder()
+        .tls_config(tls_config)
+        .build()
+        .map_err(|err| DnsError(err.to_string()))?;
+    Ok(DohClient { timeout, client })
 }
 
 async fn lookup_doh_type_with_client(
@@ -172,168 +165,62 @@ pub(crate) async fn lookup_doh_records_with_client(
 impl DohClient {
     async fn get(&self, url: Url, headers: HeaderMap) -> Result<DohResponseBody, DnsError> {
         let budget = TimeoutBudget::new(self.timeout);
-        let response = budget
-            .run(async move { self.get_inner(url, headers, budget).await })
-            .await
-            .map_err(|err| DnsError(err.to_string()))?;
-        Ok(DohResponseBody(response))
-    }
-
-    async fn get_inner(
-        &self,
-        url: Url,
-        headers: HeaderMap,
-        budget: TimeoutBudget,
-    ) -> Result<BufferedResponse, crate::error::FetchError> {
-        let client = self
-            .shared_client(&url, budget)
-            .await
-            .map_err(|err| crate::error::FetchError::Runtime(err.to_string()))?;
-        if let SharedHttpClient::Http1(client) = &client {
-            match client
-                .try_send_buffered_with_limit(
-                    Method::GET,
-                    url.clone(),
-                    headers.clone(),
-                    Bytes::new(),
+        budget
+            .run(async {
+                let response = Box::pin(
+                    self.client
+                        .request(Method::GET, url)
+                        .headers(headers)
+                        .send(),
+                )
+                .await?;
+                buffer_response_with_limit(
+                    response,
                     DOH_RESPONSE_MAX_BYTES,
                     DOH_RESPONSE_LIMIT_ERROR,
                 )
                 .await
-            {
-                Ok(Some(response)) => return Ok(response),
-                Ok(None) => {
-                    return self
-                        .send_with_new_connection(url, headers, budget)
-                        .await
-                        .map_err(|err| crate::error::FetchError::Runtime(err.to_string()));
-                }
-                Err(err) => {
-                    self.clear_connection(&url).await;
-                    if matches!(err, crate::error::FetchError::Runtime(_)) {
-                        return self
-                            .send_with_new_connection(url, headers, budget)
-                            .await
-                            .map_err(|err| crate::error::FetchError::Runtime(err.to_string()));
-                    }
-                    return Err(err);
-                }
-            }
-        }
-        match client
-            .send_buffered_with_limit(
-                Method::GET,
-                url.clone(),
-                headers.clone(),
-                Bytes::new(),
-                DOH_RESPONSE_MAX_BYTES,
-                DOH_RESPONSE_LIMIT_ERROR,
-            )
-            .await
-        {
-            Ok(response) => Ok(response),
-            Err(err) => {
-                self.clear_connection(&url).await;
-                if matches!(err, crate::error::FetchError::Runtime(_)) {
-                    let client = self
-                        .shared_client(&url, budget)
-                        .await
-                        .map_err(|err| crate::error::FetchError::Runtime(err.to_string()))?;
-                    return client
-                        .send_buffered_with_limit(
-                            Method::GET,
-                            url,
-                            headers,
-                            Bytes::new(),
-                            DOH_RESPONSE_MAX_BYTES,
-                            DOH_RESPONSE_LIMIT_ERROR,
-                        )
-                        .await;
-                }
-                Err(err)
-            }
-        }
-    }
-
-    async fn send_with_new_connection(
-        &self,
-        url: Url,
-        headers: HeaderMap,
-        budget: TimeoutBudget,
-    ) -> Result<BufferedResponse, DnsError> {
-        let client = Box::pin(connect_shared_http(
-            &url,
-            None,
-            budget,
-            Some(self.tls_config.clone()),
-        ))
-        .await
-        .map_err(|err| DnsError(err.to_string()))?;
-        client
-            .send_buffered_with_limit(
-                Method::GET,
-                url,
-                headers,
-                Bytes::new(),
-                DOH_RESPONSE_MAX_BYTES,
-                DOH_RESPONSE_LIMIT_ERROR,
-            )
+            })
             .await
             .map_err(|err| DnsError(err.to_string()))
     }
-
-    async fn shared_client(
-        &self,
-        url: &Url,
-        budget: TimeoutBudget,
-    ) -> Result<SharedHttpClient, DnsError> {
-        let origin = doh_origin(url)?;
-        let mut connection = self.connection.lock().await;
-        if let Some(existing) = connection.as_ref()
-            && existing.origin == origin
-        {
-            return Ok(existing.client.clone());
-        }
-
-        let client = Box::pin(connect_shared_http(
-            url,
-            None,
-            budget,
-            Some(self.tls_config.clone()),
-        ))
-        .await
-        .map_err(|err| DnsError(err.to_string()))?;
-        *connection = Some(DohConnection {
-            origin,
-            client: client.clone(),
-        });
-        Ok(client)
-    }
-
-    async fn clear_connection(&self, url: &Url) {
-        let Ok(origin) = doh_origin(url) else {
-            return;
-        };
-        let mut connection = self.connection.lock().await;
-        if connection
-            .as_ref()
-            .is_some_and(|existing| existing.origin == origin)
-        {
-            *connection = None;
-        }
-    }
 }
 
-struct DohResponseBody(BufferedResponse);
+struct DohResponseBody {
+    status: StatusCode,
+    body: Bytes,
+}
 
 impl DohResponseBody {
     fn status(&self) -> StatusCode {
-        self.0.status
+        self.status
     }
 
     fn body(&self) -> &[u8] {
-        &self.0.body
+        &self.body
     }
+}
+
+async fn buffer_response_with_limit(
+    mut response: Response,
+    max_body_bytes: usize,
+    limit_error: &'static str,
+) -> Result<DohResponseBody, FetchError> {
+    let status = response.status();
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let Some(new_len) = body.len().checked_add(chunk.len()) else {
+            return Err(FetchError::Message(limit_error.to_string()));
+        };
+        if new_len > max_body_bytes {
+            return Err(FetchError::Message(limit_error.to_string()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(DohResponseBody {
+        status,
+        body: Bytes::from(body),
+    })
 }
 
 fn ip_records(records: Vec<DohRecord>, answer_type: u16) -> Result<Vec<DnsRecord>, DnsError> {
@@ -365,16 +252,6 @@ fn doh_query_url(server_url: &Url, host: &str, dns_type: &str) -> Url {
     pairs.push(("type".to_string(), dns_type.to_string()));
     url.query_pairs_mut().clear().extend_pairs(pairs);
     url
-}
-
-fn doh_origin(url: &Url) -> Result<String, DnsError> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| DnsError("DoH URL host is required".to_string()))?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| DnsError("DoH URL port is required".to_string()))?;
-    Ok(format!("{}://{}:{port}", url.scheme(), host))
 }
 
 fn rcode_name(code: i32) -> &'static str {
