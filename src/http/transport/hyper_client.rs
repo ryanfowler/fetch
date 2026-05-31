@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http::header::{CONTENT_LENGTH, HOST, HeaderMap, HeaderValue};
 use http::{Method, Request, StatusCode, Uri, Version};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -51,6 +51,43 @@ impl SharedHttpClient {
             Self::Http2(client) => client.send_buffered(method, url, headers, body).await,
         }
     }
+
+    pub(crate) async fn send_buffered_with_limit(
+        &self,
+        method: Method,
+        url: Url,
+        headers: HeaderMap,
+        body: Bytes,
+        max_body_bytes: usize,
+        limit_error: &'static str,
+    ) -> Result<BufferedResponse, FetchError> {
+        match self {
+            Self::Http1(client) => {
+                client
+                    .send_buffered_with_limit(
+                        method,
+                        url,
+                        headers,
+                        body,
+                        max_body_bytes,
+                        limit_error,
+                    )
+                    .await
+            }
+            Self::Http2(client) => {
+                client
+                    .send_buffered_with_limit(
+                        method,
+                        url,
+                        headers,
+                        body,
+                        max_body_bytes,
+                        limit_error,
+                    )
+                    .await
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -67,7 +104,28 @@ impl SharedHttp1Client {
         body: Bytes,
     ) -> Result<BufferedResponse, FetchError> {
         let mut sender = self.sender.lock().await;
-        send_buffered_http1_with_sender(&mut sender, method, url, headers, body).await
+        send_buffered_http1_with_sender(&mut sender, method, url, headers, body, None).await
+    }
+
+    pub(crate) async fn send_buffered_with_limit(
+        &self,
+        method: Method,
+        url: Url,
+        headers: HeaderMap,
+        body: Bytes,
+        max_body_bytes: usize,
+        limit_error: &'static str,
+    ) -> Result<BufferedResponse, FetchError> {
+        let mut sender = self.sender.lock().await;
+        send_buffered_http1_with_sender(
+            &mut sender,
+            method,
+            url,
+            headers,
+            body,
+            Some((max_body_bytes, limit_error)),
+        )
+        .await
     }
 
     pub(crate) async fn try_send_buffered(
@@ -80,9 +138,33 @@ impl SharedHttp1Client {
         let Ok(mut sender) = self.sender.try_lock() else {
             return Ok(None);
         };
-        send_buffered_http1_with_sender(&mut sender, method, url, headers, body)
+        send_buffered_http1_with_sender(&mut sender, method, url, headers, body, None)
             .await
             .map(Some)
+    }
+
+    pub(crate) async fn try_send_buffered_with_limit(
+        &self,
+        method: Method,
+        url: Url,
+        headers: HeaderMap,
+        body: Bytes,
+        max_body_bytes: usize,
+        limit_error: &'static str,
+    ) -> Result<Option<BufferedResponse>, FetchError> {
+        let Ok(mut sender) = self.sender.try_lock() else {
+            return Ok(None);
+        };
+        send_buffered_http1_with_sender(
+            &mut sender,
+            method,
+            url,
+            headers,
+            body,
+            Some((max_body_bytes, limit_error)),
+        )
+        .await
+        .map(Some)
     }
 }
 
@@ -92,6 +174,7 @@ async fn send_buffered_http1_with_sender(
     url: Url,
     mut headers: HeaderMap,
     body: Bytes,
+    body_limit: Option<(usize, &'static str)>,
 ) -> Result<BufferedResponse, FetchError> {
     ensure_http1_url(&url)?;
     apply_host_header(&url, &mut headers)?;
@@ -111,7 +194,9 @@ async fn send_buffered_http1_with_sender(
         .send_request(request)
         .await
         .map_err(|err| FetchError::Runtime(format!("http1 request: {err}")))?;
-    streaming_response(response).into_buffered().await
+    streaming_response(response)
+        .into_buffered_with_limit(body_limit)
+        .await
 }
 
 #[derive(Clone)]
@@ -148,6 +233,40 @@ impl SharedHttp2Client {
             .await
             .map_err(|err| FetchError::Runtime(format!("http2 request: {err}")))?;
         streaming_response(response).into_buffered().await
+    }
+
+    pub(crate) async fn send_buffered_with_limit(
+        &self,
+        method: Method,
+        url: Url,
+        mut headers: HeaderMap,
+        body: Bytes,
+        max_body_bytes: usize,
+        limit_error: &'static str,
+    ) -> Result<BufferedResponse, FetchError> {
+        ensure_http1_url(&url)?;
+        apply_host_header(&url, &mut headers)?;
+        if !body.is_empty() && !headers.contains_key(CONTENT_LENGTH) {
+            headers.insert(
+                CONTENT_LENGTH,
+                HeaderValue::from_str(&body.len().to_string())
+                    .expect("content length is a valid header value"),
+            );
+        }
+        let request =
+            build_request_with_uri(method, absolute_uri(&url)?, Version::HTTP_2, headers, body)?;
+        let mut sender = self.sender.clone();
+        sender
+            .ready()
+            .await
+            .map_err(|err| FetchError::Runtime(format!("http2 ready: {err}")))?;
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(|err| FetchError::Runtime(format!("http2 request: {err}")))?;
+        streaming_response(response)
+            .into_buffered_with_limit(Some((max_body_bytes, limit_error)))
+            .await
     }
 }
 
@@ -475,12 +594,32 @@ fn streaming_response(response: http::Response<Incoming>) -> StreamingResponse {
 
 impl StreamingResponse {
     pub(crate) async fn into_buffered(self) -> Result<BufferedResponse, FetchError> {
-        let body = self
-            .body
-            .collect()
-            .await
-            .map_err(|err| FetchError::Runtime(format!("response body error: {err}")))?
-            .to_bytes();
+        self.into_buffered_with_limit(None).await
+    }
+
+    async fn into_buffered_with_limit(
+        self,
+        body_limit: Option<(usize, &'static str)>,
+    ) -> Result<BufferedResponse, FetchError> {
+        let body = if let Some((max_body_bytes, limit_error)) = body_limit {
+            Limited::new(self.body, max_body_bytes)
+                .collect()
+                .await
+                .map_err(|err| {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        FetchError::Message(limit_error.to_string())
+                    } else {
+                        FetchError::Runtime(format!("response body error: {err}"))
+                    }
+                })?
+                .to_bytes()
+        } else {
+            self.body
+                .collect()
+                .await
+                .map_err(|err| FetchError::Runtime(format!("response body error: {err}")))?
+                .to_bytes()
+        };
         Ok(BufferedResponse {
             status: self.status,
             version: self.version,

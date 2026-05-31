@@ -17,6 +17,8 @@ use crate::http::transport::hyper_client::{
 
 const DNS_TYPE_A: u16 = 1;
 const DNS_TYPE_AAAA: u16 = 28;
+const DOH_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
+const DOH_RESPONSE_LIMIT_ERROR: &str = "DoH response exceeded maximum allowed size of 1 MiB";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsError(String);
@@ -189,7 +191,14 @@ impl DohClient {
             .map_err(|err| crate::error::FetchError::Runtime(err.to_string()))?;
         if let SharedHttpClient::Http1(client) = &client {
             match client
-                .try_send_buffered(Method::GET, url.clone(), headers.clone(), Bytes::new())
+                .try_send_buffered_with_limit(
+                    Method::GET,
+                    url.clone(),
+                    headers.clone(),
+                    Bytes::new(),
+                    DOH_RESPONSE_MAX_BYTES,
+                    DOH_RESPONSE_LIMIT_ERROR,
+                )
                 .await
             {
                 Ok(Some(response)) => return Ok(response),
@@ -212,7 +221,14 @@ impl DohClient {
             }
         }
         match client
-            .send_buffered(Method::GET, url.clone(), headers.clone(), Bytes::new())
+            .send_buffered_with_limit(
+                Method::GET,
+                url.clone(),
+                headers.clone(),
+                Bytes::new(),
+                DOH_RESPONSE_MAX_BYTES,
+                DOH_RESPONSE_LIMIT_ERROR,
+            )
             .await
         {
             Ok(response) => Ok(response),
@@ -224,7 +240,14 @@ impl DohClient {
                         .await
                         .map_err(|err| crate::error::FetchError::Runtime(err.to_string()))?;
                     return client
-                        .send_buffered(Method::GET, url, headers, Bytes::new())
+                        .send_buffered_with_limit(
+                            Method::GET,
+                            url,
+                            headers,
+                            Bytes::new(),
+                            DOH_RESPONSE_MAX_BYTES,
+                            DOH_RESPONSE_LIMIT_ERROR,
+                        )
                         .await;
                 }
                 Err(err)
@@ -247,7 +270,14 @@ impl DohClient {
         .await
         .map_err(|err| DnsError(err.to_string()))?;
         client
-            .send_buffered(Method::GET, url, headers, Bytes::new())
+            .send_buffered_with_limit(
+                Method::GET,
+                url,
+                headers,
+                Bytes::new(),
+                DOH_RESPONSE_MAX_BYTES,
+                DOH_RESPONSE_LIMIT_ERROR,
+            )
             .await
             .map_err(|err| DnsError(err.to_string()))
     }
@@ -400,6 +430,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn start_test_server<F>(handler: F) -> (Url, tokio::task::JoinHandle<()>)
     where
@@ -410,7 +441,7 @@ mod tests {
         let handler = Arc::new(handler);
         let task = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
+                let Ok((mut stream, _)) = listener.accept().await else {
                     break;
                 };
                 let handler = handler.clone();
@@ -438,8 +469,7 @@ mod tests {
                         "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
                         body.len()
                     );
-                    let _ = stream.writable().await;
-                    let _ = stream.try_write(raw.as_bytes());
+                    let _ = stream.write_all(raw.as_bytes()).await;
                 });
             }
         });
@@ -454,7 +484,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
+                let Ok((mut stream, _)) = listener.accept().await else {
                     break;
                 };
                 tokio::spawn(async move {
@@ -498,8 +528,7 @@ mod tests {
                         "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
                         body.len()
                     );
-                    let _ = stream.writable().await;
-                    let _ = stream.try_write(raw.as_bytes());
+                    let _ = stream.write_all(raw.as_bytes()).await;
                 });
             }
         });
@@ -631,6 +660,40 @@ mod tests {
         assert_eq!(records[0].ip.to_string(), "127.0.0.1");
         assert_eq!(records[0].ttl, Some(123));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_doh_rejects_oversized_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0_u8; 1024];
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                raw.extend_from_slice(&buf[..n]);
+                if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n")
+                .await;
+            let oversized = vec![b' '; DOH_RESPONSE_MAX_BYTES + 1];
+            let _ = stream.write_all(&oversized).await;
+        });
+        let url = Url::parse(&format!("http://{addr}/dns-query")).unwrap();
+
+        let err = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), DOH_RESPONSE_LIMIT_ERROR);
+        task.await.unwrap();
     }
 
     #[test]
