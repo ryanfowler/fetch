@@ -206,7 +206,7 @@ fn is_timeout_error(err: &FetchError) -> bool {
         FetchError::Message(message) | FetchError::Runtime(message) => {
             message.contains("timed out")
         }
-        FetchError::Reqwest(err) => err.is_timeout(),
+        FetchError::Transport(err) => err.is_timeout(),
         _ => false,
     }
 }

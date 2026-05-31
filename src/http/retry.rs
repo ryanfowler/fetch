@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const MAX_PROTOCOL_NACK_RETRIES: usize = 2;
+
 pub(super) fn redirect_requires_client_refresh(
     cli: &Cli,
     http_version: Option<HttpVersion>,
@@ -9,7 +11,14 @@ pub(super) fn redirect_requires_client_refresh(
     if url_client_endpoint(current) == url_client_endpoint(next) {
         return false;
     }
-    if cli.proxy.is_some() || cli.unix.is_some() {
+    if cli.unix.is_some() {
+        return false;
+    }
+    if cli
+        .proxy
+        .as_deref()
+        .is_some_and(|proxy| !client::proxy_uses_local_target_dns(proxy))
+    {
         return false;
     }
     cli.dns_server.is_some()
@@ -54,11 +63,40 @@ pub(super) fn parse_retry_after(headers: &HeaderMap) -> Duration {
         .unwrap_or(Duration::ZERO)
 }
 
-pub(super) fn is_retryable_error(err: &reqwest::Error) -> bool {
+pub(super) fn is_retryable_error(err: &transport::Error) -> bool {
     if is_certificate_validation_error(err) {
         return false;
     }
     err.is_timeout() || err.is_connect()
+}
+
+pub(super) fn is_protocol_nack_error(err: &transport::Error) -> bool {
+    let mut source = err.source();
+    while let Some(err) = source {
+        if err
+            .downcast_ref::<h2::Error>()
+            .is_some_and(is_h2_protocol_nack)
+        {
+            return true;
+        }
+        if err
+            .downcast_ref::<h3::error::ConnectionError>()
+            .is_some_and(is_h3_protocol_nack)
+        {
+            return true;
+        }
+        source = err.source();
+    }
+    false
+}
+
+fn is_h2_protocol_nack(err: &h2::Error) -> bool {
+    (err.is_go_away() && err.is_remote() && err.reason() == Some(h2::Reason::NO_ERROR))
+        || (err.is_reset() && err.is_remote() && err.reason() == Some(h2::Reason::REFUSED_STREAM))
+}
+
+fn is_h3_protocol_nack(err: &h3::error::ConnectionError) -> bool {
+    err.to_string() == "timeout"
 }
 
 #[derive(Debug)]
@@ -226,7 +264,7 @@ pub(super) fn print_redirect_status(cli: &Cli, response: &Response) {
     flush_stderr(printer);
 }
 
-pub(super) fn redirect_error_message(err: &reqwest::Error) -> Option<String> {
+pub(super) fn redirect_error_message(err: &transport::Error) -> Option<String> {
     if !err.is_redirect() {
         return None;
     }
@@ -242,7 +280,7 @@ pub(super) fn redirect_error_message(err: &reqwest::Error) -> Option<String> {
     None
 }
 
-pub(super) fn timeout_error_message(cli: &Cli, err: &reqwest::Error) -> Option<String> {
+pub(super) fn timeout_error_message(cli: &Cli, err: &transport::Error) -> Option<String> {
     if !err.is_timeout() {
         return None;
     }
@@ -251,11 +289,11 @@ pub(super) fn timeout_error_message(cli: &Cli, err: &reqwest::Error) -> Option<S
     Some(request_timeout_message(duration))
 }
 
-pub(super) fn reqwest_request_error_message(err: &reqwest::Error) -> String {
+pub(super) fn transport_request_error_message(err: &transport::Error) -> String {
     let mut message = err.to_string();
     let mut source = err.source();
     while let Some(err) = source {
-        let source_message = go_style_reqwest_source_message(&err.to_string());
+        let source_message = go_style_transport_source_message(&err.to_string());
         if !source_message.is_empty() && !message.contains(&source_message) {
             message.push_str(": ");
             message.push_str(&source_message);
@@ -265,11 +303,11 @@ pub(super) fn reqwest_request_error_message(err: &reqwest::Error) -> String {
     message
 }
 
-pub(super) fn reqwest_response_body_error_message(err: &reqwest::Error) -> String {
+pub(super) fn transport_response_body_error_message(err: &transport::Error) -> String {
     let mut details = Vec::new();
     let mut source = err.source();
     while let Some(err) = source {
-        let source_message = go_style_reqwest_source_message(&err.to_string());
+        let source_message = go_style_transport_source_message(&err.to_string());
         if !source_message.is_empty()
             && source_message != "request or response body error"
             && !details.contains(&source_message)
@@ -279,9 +317,9 @@ pub(super) fn reqwest_response_body_error_message(err: &reqwest::Error) -> Strin
         source = err.source();
     }
 
-    let reqwest_message = err.to_string();
-    if details.is_empty() && reqwest_message != "request or response body error" {
-        details.push(reqwest_message);
+    let transport_message = err.to_string();
+    if details.is_empty() && transport_message != "request or response body error" {
+        details.push(transport_message);
     }
 
     if details.is_empty() {
@@ -291,7 +329,7 @@ pub(super) fn reqwest_response_body_error_message(err: &reqwest::Error) -> Strin
     }
 }
 
-pub(super) fn go_style_reqwest_source_message(message: &str) -> String {
+pub(super) fn go_style_transport_source_message(message: &str) -> String {
     let lower = message.to_ascii_lowercase();
     if !lower.contains("tls")
         && (lower.contains("protocolversion")
@@ -304,7 +342,7 @@ pub(super) fn go_style_reqwest_source_message(message: &str) -> String {
     }
 }
 
-pub(super) fn is_certificate_validation_error(err: &reqwest::Error) -> bool {
+pub(super) fn is_certificate_validation_error(err: &transport::Error) -> bool {
     if is_certificate_validation_message(&err.to_string()) {
         return true;
     }
@@ -562,17 +600,17 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_tls_source_messages_keep_go_style_tls_hint() {
+    fn transport_tls_source_messages_keep_go_style_tls_hint() {
         assert_eq!(
-            go_style_reqwest_source_message("received fatal alert: ProtocolVersion"),
+            go_style_transport_source_message("received fatal alert: ProtocolVersion"),
             "tls: received fatal alert: ProtocolVersion"
         );
         assert_eq!(
-            go_style_reqwest_source_message("invalid peer certificate: UnknownIssuer"),
+            go_style_transport_source_message("invalid peer certificate: UnknownIssuer"),
             "tls: invalid peer certificate: UnknownIssuer"
         );
         assert_eq!(
-            go_style_reqwest_source_message("tls: handshake failure"),
+            go_style_transport_source_message("tls: handshake failure"),
             "tls: handshake failure"
         );
     }

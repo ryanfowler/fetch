@@ -195,6 +195,15 @@ fn basic_bearer_and_aws_auth_headers() {
             assert_eq!(String::from_utf8_lossy(&decoded), " user : pass ");
             return TestResponse::ok("");
         }
+        if req.path == "/url-basic" {
+            let auth = req.header("authorization");
+            let raw = auth.strip_prefix("Basic ").unwrap_or_default();
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(raw)
+                .unwrap_or_default();
+            assert_eq!(String::from_utf8_lossy(&decoded), "url user:open sesame");
+            return TestResponse::ok("");
+        }
         if req.path == "/bearer" {
             assert_eq!(req.header("authorization"), "Bearer token");
             return TestResponse::ok("");
@@ -220,6 +229,13 @@ fn basic_bearer_and_aws_auth_headers() {
         "--basic",
         " user : pass ",
     ]);
+    assert_exit(&res, 0);
+
+    let url_with_auth = format!(
+        "http://url%20user:open%20sesame@{}/url-basic",
+        server.url.trim_start_matches("http://")
+    );
+    let res = run_fetch(&[&url_with_auth]);
     assert_exit(&res, 0);
 
     let res = run_fetch(&[&format!("{}/bearer", server.url), "--bearer", "token"]);
@@ -687,15 +703,18 @@ fn retry_transport_error_delay_obeys_request_timeout_budget() {
     let url = format!("http://{addr}");
 
     let start = Instant::now();
-    let res = run_fetch(&[
-        &url,
-        "--retry",
-        "1",
-        "--retry-delay",
-        "3",
-        "--timeout",
-        "0.25",
-    ]);
+    let res = run_fetch_once(
+        FetchOpts::default(),
+        &[
+            &url,
+            "--retry",
+            "1",
+            "--retry-delay",
+            "3",
+            "--timeout",
+            "0.25",
+        ],
+    );
     let elapsed = start.elapsed();
 
     assert_exit(&res, 1);

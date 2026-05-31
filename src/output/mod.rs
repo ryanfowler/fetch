@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use reqwest::header::{CONTENT_DISPOSITION, HeaderMap};
+use http::header::{CONTENT_DISPOSITION, HeaderMap};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use url::Url;

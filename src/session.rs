@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use cookie::{Cookie as RawCookie, SameSite};
 use cookie_store::{CookieDomain, CookieExpiration};
-use reqwest::header::HeaderValue;
+use http::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -164,10 +164,12 @@ impl PersistentCookieStore {
         cookies.sort_by(|a, b| (&a.domain, &a.path, &a.name).cmp(&(&b.domain, &b.path, &b.name)));
         cookies
     }
-}
 
-impl reqwest::cookie::CookieStore for PersistentCookieStore {
-    fn set_cookies(&self, cookie_headers: &mut dyn Iterator<Item = &HeaderValue>, url: &Url) {
+    pub(crate) fn set_cookies(
+        &self,
+        cookie_headers: &mut dyn Iterator<Item = &HeaderValue>,
+        url: &Url,
+    ) {
         let cookies = cookie_headers.filter_map(|value| {
             let raw = std::str::from_utf8(value.as_bytes()).ok()?;
             let mut cookie = RawCookie::parse(raw).ok()?.into_owned();
@@ -182,7 +184,7 @@ impl reqwest::cookie::CookieStore for PersistentCookieStore {
             .store_response_cookies(cookies, url);
     }
 
-    fn cookies(&self, url: &Url) -> Option<HeaderValue> {
+    pub(crate) fn cookies(&self, url: &Url) -> Option<HeaderValue> {
         let value = self
             .store
             .read()
@@ -465,7 +467,6 @@ fn is_false(value: &bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::cookie::CookieStore;
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());

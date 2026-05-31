@@ -26,7 +26,7 @@ pub enum FetchError {
         message: Box<FetchError>,
     },
     #[error(transparent)]
-    Reqwest(#[from] reqwest::Error),
+    Transport(#[from] crate::http::transport::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

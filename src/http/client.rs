@@ -1,21 +1,17 @@
 use std::env;
-use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use ipnet::IpNet;
-use reqwest::{Client, redirect};
-use tower::{Layer, Service};
 use url::Url;
 
+use super::transport::{Client, ClientBuilder, NoProxy, Proxy, redirect};
 use crate::cli::{Cli, HttpVersion};
 use crate::dns::custom;
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
-use crate::timing::DnsTiming;
+use crate::timing::{DnsTiming, TransportTiming};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ClientMode {
@@ -65,7 +61,7 @@ pub(crate) async fn build_client_for_url(
         context.request_start,
     )?
     .timeout();
-    let dns_resolution = resolve_dns_for_client(cli, url, http_version, dns_timeout).await?;
+    let dns_resolution = resolve_dns_for_client(cli, url, dns_timeout).await?;
     let mut builder = Client::builder()
         .use_rustls_tls()
         .no_brotli()
@@ -78,13 +74,12 @@ pub(crate) async fn build_client_for_url(
     if let Some(connect_timing) = context.connect_timing
         && (cli.timing || (cli.verbose >= 3 && !cli.silent))
     {
-        builder = builder.connector_layer(ConnectionTimingLayer::new(connect_timing.clone()));
+        builder = builder.connection_timing(connect_timing.clone());
     }
-    builder = configure_tls(builder, cli)?;
+    if should_configure_tls(cli, url) {
+        builder = configure_tls(builder, cli)?;
+    }
     builder = configure_proxy(builder, cli.proxy.as_deref(), http_version, url)?;
-    if cli.insecure {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
     if let Some(timeout) =
         TimeoutBudget::started_at(context.request_timeout, context.request_start).remaining()?
     {
@@ -104,9 +99,9 @@ pub(crate) async fn build_client_for_url(
 }
 
 pub(crate) fn configure_unix_socket(
-    builder: reqwest::ClientBuilder,
+    builder: ClientBuilder,
     path: Option<&str>,
-) -> Result<reqwest::ClientBuilder, FetchError> {
+) -> Result<ClientBuilder, FetchError> {
     let Some(path) = path else {
         return Ok(builder);
     };
@@ -126,28 +121,31 @@ pub(crate) fn configure_unix_socket(
 async fn resolve_dns_for_client(
     cli: &Cli,
     url: &Url,
-    http_version: Option<HttpVersion>,
     timeout: Option<Duration>,
 ) -> Result<Option<DnsResolution>, FetchError> {
-    let resolve = resolve_dns_for_client_inner(cli, url, http_version, timeout);
+    let resolve = resolve_dns_for_client_inner(cli, url, timeout);
     TimeoutBudget::new(timeout).run(resolve).await
 }
 
 async fn resolve_dns_for_client_inner(
     cli: &Cli,
     url: &Url,
-    http_version: Option<HttpVersion>,
     timeout: Option<Duration>,
 ) -> Result<Option<DnsResolution>, FetchError> {
     let Some(host) = url.host_str() else {
         return Ok(None);
     };
-    if host.parse::<IpAddr>().is_ok() || cli.proxy.is_some() || cli.unix.is_some() {
+    if host.parse::<IpAddr>().is_ok()
+        || cli.unix.is_some()
+        || cli
+            .proxy
+            .as_deref()
+            .is_some_and(|proxy| !proxy_uses_local_target_dns(proxy))
+    {
         return Ok(None);
     }
 
-    let debug_dns = (cli.timing || (cli.verbose >= 3 && !cli.silent))
-        && !matches!(http_version, Some(HttpVersion::Http3));
+    let debug_dns = cli.timing || (cli.verbose >= 3 && !cli.silent);
 
     if let Some(dns_server) = cli.dns_server.as_deref() {
         let start = Instant::now();
@@ -191,10 +189,10 @@ async fn resolve_dns_for_client_inner(
 }
 
 fn configure_dns_resolution(
-    builder: reqwest::ClientBuilder,
+    builder: ClientBuilder,
     host: Option<&str>,
     resolution: Option<&DnsResolution>,
-) -> reqwest::ClientBuilder {
+) -> ClientBuilder {
     match (host, resolution) {
         (Some(host), Some(resolution)) if !resolution.socket_addrs.is_empty() => {
             builder.resolve_to_addrs(host, &resolution.socket_addrs)
@@ -204,11 +202,11 @@ fn configure_dns_resolution(
 }
 
 fn configure_http3_local_address(
-    builder: reqwest::ClientBuilder,
+    builder: ClientBuilder,
     version: Option<HttpVersion>,
     url: &Url,
     resolution: Option<&DnsResolution>,
-) -> reqwest::ClientBuilder {
+) -> ClientBuilder {
     if !matches!(version, Some(HttpVersion::Http3)) {
         return builder;
     }
@@ -234,54 +232,50 @@ pub(crate) fn http3_local_address(url: &Url, resolution: Option<&DnsResolution>)
 }
 
 pub(crate) fn configure_tls(
-    mut builder: reqwest::ClientBuilder,
+    mut builder: ClientBuilder,
     cli: &Cli,
-) -> Result<reqwest::ClientBuilder, FetchError> {
+) -> Result<ClientBuilder, FetchError> {
     let min_tls = cli.min_tls.as_deref().or(cli.tls.as_deref());
-    crate::tls::ensure_rustls_supported_range(
-        min_tls.map(|value| {
-            if cli.min_tls.is_some() {
-                ("min-tls", value)
-            } else {
-                ("tls", value)
-            }
-        }),
+    let min_tls_option = min_tls.map(|value| {
+        if cli.min_tls.is_some() {
+            ("min-tls", value)
+        } else {
+            ("tls", value)
+        }
+    });
+    crate::tls::ensure_rustls_supported_range(min_tls_option, cli.max_tls.as_deref())?;
+    builder = builder.tls_config(crate::tls::rustls_platform_client_config_with_options(
+        &cli.ca_cert,
+        cli.cert.as_deref(),
+        cli.key.as_deref(),
+        cli.insecure,
+        min_tls_option,
         cli.max_tls.as_deref(),
-    )?;
-    let min_version = match min_tls {
-        Some(value) => crate::tls::reqwest_tls_version(
-            if cli.min_tls.is_some() {
-                "min-tls"
-            } else {
-                "tls"
-            },
-            value,
-        )?,
-        None => crate::tls::default_min_tls_version(),
-    };
-    builder = builder.min_tls_version(min_version);
-    if let Some(value) = cli.max_tls.as_deref() {
-        builder = builder.max_tls_version(crate::tls::reqwest_tls_version("max-tls", value)?);
-    }
-    for cert in crate::tls::ca_certificates(&cli.ca_cert)? {
-        builder = builder.add_root_certificate(cert);
-    }
-    if let Some(identity) = crate::tls::client_identity(cli.cert.as_deref(), cli.key.as_deref())? {
-        builder = builder.identity(identity);
-    }
+    )?);
     Ok(builder)
 }
 
+fn should_configure_tls(cli: &Cli, url: &Url) -> bool {
+    url.scheme() == "https"
+        || cli.insecure
+        || !cli.ca_cert.is_empty()
+        || cli.cert.is_some()
+        || cli.key.is_some()
+        || cli.min_tls.is_some()
+        || cli.max_tls.is_some()
+        || cli.tls.is_some()
+}
+
 fn configure_proxy(
-    builder: reqwest::ClientBuilder,
+    builder: ClientBuilder,
     proxy: Option<&str>,
     version: Option<HttpVersion>,
     url: &Url,
-) -> Result<reqwest::ClientBuilder, FetchError> {
+) -> Result<ClientBuilder, FetchError> {
     validate_proxy_for_http_version(proxy, version)?;
 
     if let Some(proxy) = proxy {
-        let proxy_config = reqwest::Proxy::all(proxy)
+        let proxy_config = Proxy::all(proxy)
             .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?;
         return Ok(builder.proxy(proxy_config));
     }
@@ -296,33 +290,37 @@ fn configure_proxy(
     configure_environment_proxies(builder)
 }
 
-fn configure_environment_proxies(
-    mut builder: reqwest::ClientBuilder,
-) -> Result<reqwest::ClientBuilder, FetchError> {
-    let no_proxy = reqwest::NoProxy::from_env();
+fn configure_environment_proxies(mut builder: ClientBuilder) -> Result<ClientBuilder, FetchError> {
+    let no_proxy = NoProxy::from_env();
 
     if let Some(proxy) = env_proxy_value(&["HTTP_PROXY", "http_proxy"]) {
-        let proxy_config = reqwest::Proxy::http(&proxy)
+        let proxy_config = Proxy::http(&proxy)
             .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?
             .no_proxy(no_proxy.clone());
         builder = builder.proxy(proxy_config);
     }
 
     if let Some(proxy) = env_proxy_value(&["HTTPS_PROXY", "https_proxy"]) {
-        let proxy_config = reqwest::Proxy::https(&proxy)
+        let proxy_config = Proxy::https(&proxy)
             .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?
             .no_proxy(no_proxy.clone());
         builder = builder.proxy(proxy_config);
     }
 
     if let Some(proxy) = env_proxy_value(&["ALL_PROXY", "all_proxy"]) {
-        let proxy_config = reqwest::Proxy::all(&proxy)
+        let proxy_config = Proxy::all(&proxy)
             .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?
             .no_proxy(no_proxy);
         builder = builder.proxy(proxy_config);
     }
 
+    builder = builder.proxy(Proxy::system());
+
     Ok(builder)
+}
+
+pub(crate) fn proxy_uses_local_target_dns(proxy: &str) -> bool {
+    crate::net::parse_proxy_url(proxy).is_ok_and(|url| url.scheme() == "socks5")
 }
 
 fn env_proxy_value(keys: &[&str]) -> Option<String> {
@@ -351,10 +349,13 @@ fn environment_proxy_for_url(url: &Url) -> Option<String> {
 
     match url.scheme() {
         "http" => env_proxy_value(&["HTTP_PROXY", "http_proxy"])
-            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"])),
+            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"]))
+            .or_else(|| Proxy::system().matches_url(url).then(String::new)),
         "https" => env_proxy_value(&["HTTPS_PROXY", "https_proxy"])
-            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"])),
-        _ => env_proxy_value(&["ALL_PROXY", "all_proxy"]),
+            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"]))
+            .or_else(|| Proxy::system().matches_url(url).then(String::new)),
+        _ => env_proxy_value(&["ALL_PROXY", "all_proxy"])
+            .or_else(|| Proxy::system().matches_url(url).then(String::new)),
     }
 }
 
@@ -396,10 +397,7 @@ pub(crate) fn no_proxy_matches_url(url: &Url, no_proxy: Option<&str>) -> bool {
     })
 }
 
-fn configure_http_version(
-    builder: reqwest::ClientBuilder,
-    mode: ClientMode,
-) -> reqwest::ClientBuilder {
+fn configure_http_version(builder: ClientBuilder, mode: ClientMode) -> ClientBuilder {
     match mode {
         ClientMode::Request(Some(HttpVersion::Http1)) => builder.http1_only(),
         ClientMode::Request(Some(HttpVersion::Http2)) | ClientMode::GrpcReflection => {
@@ -426,83 +424,24 @@ fn proxy_http_version_error() -> FetchError {
 
 #[derive(Clone, Default)]
 pub(crate) struct ConnectionTiming {
-    duration: Arc<Mutex<Option<Duration>>>,
+    timing: Arc<Mutex<Option<TransportTiming>>>,
 }
 
 impl ConnectionTiming {
     pub(crate) fn clear(&self) {
-        if let Ok(mut duration) = self.duration.lock() {
-            *duration = None;
+        if let Ok(mut timing) = self.timing.lock() {
+            *timing = None;
         }
     }
 
-    fn set(&self, value: Duration) {
-        if let Ok(mut duration) = self.duration.lock() {
-            *duration = Some(value);
+    pub(crate) fn set(&self, value: TransportTiming) {
+        if let Ok(mut timing) = self.timing.lock() {
+            *timing = Some(value);
         }
     }
 
-    pub(crate) fn duration(&self) -> Option<Duration> {
-        self.duration.lock().ok().and_then(|duration| *duration)
-    }
-}
-
-#[derive(Clone)]
-struct ConnectionTimingLayer {
-    timing: ConnectionTiming,
-}
-
-impl ConnectionTimingLayer {
-    fn new(timing: ConnectionTiming) -> Self {
-        Self { timing }
-    }
-}
-
-impl<S> Layer<S> for ConnectionTimingLayer {
-    type Service = ConnectionTimingService<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        ConnectionTimingService {
-            inner,
-            timing: self.timing.clone(),
-        }
-    }
-}
-
-#[derive(Clone)]
-struct ConnectionTimingService<S> {
-    inner: S,
-    timing: ConnectionTiming,
-}
-
-impl<S, Request> Service<Request> for ConnectionTimingService<S>
-where
-    S: Service<Request> + Clone + Send + Sync + 'static,
-    S::Future: Send + 'static,
-    S::Response: Send + 'static,
-    S::Error: Send + 'static,
-    Request: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, request: Request) -> Self::Future {
-        let mut inner = self.inner.clone();
-        let timing = self.timing.clone();
-        Box::pin(async move {
-            let start = Instant::now();
-            let result = inner.call(request).await;
-            if result.is_ok() {
-                timing.set(start.elapsed());
-            }
-            result
-        })
+    pub(crate) fn timing(&self) -> Option<TransportTiming> {
+        self.timing.lock().ok().and_then(|timing| *timing)
     }
 }
 
@@ -590,10 +529,10 @@ mod tests {
     }
 
     #[test]
-    fn socks_proxy_urls_are_accepted_by_reqwest_feature() {
-        reqwest::Proxy::all("socks5://127.0.0.1:1080").unwrap();
-        reqwest::Proxy::http("socks5://127.0.0.1:1080").unwrap();
-        reqwest::Proxy::all("socks5h://localhost:1080").unwrap();
+    fn socks_proxy_urls_are_accepted_by_transport_adapter() {
+        Proxy::all("socks5://127.0.0.1:1080").unwrap();
+        Proxy::http("socks5://127.0.0.1:1080").unwrap();
+        Proxy::all("socks5h://localhost:1080").unwrap();
     }
     #[test]
     fn regular_http_rejects_legacy_tls_versions_on_rustls_path() {
@@ -620,7 +559,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unix_socket_configures_reqwest_builder_on_unix() {
+    fn unix_socket_configures_transport_builder_on_unix() {
         assert!(configure_unix_socket(Client::builder(), Some("/tmp/fetch.sock")).is_ok());
     }
 }

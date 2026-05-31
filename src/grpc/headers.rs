@@ -1,4 +1,4 @@
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use http::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 
 use crate::grpc::encoding;
 

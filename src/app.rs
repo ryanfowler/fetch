@@ -1453,7 +1453,7 @@ mod tests {
     fn build_info_json_includes_dependencies_when_verbose() {
         let value: Value = serde_json::from_slice(&build_info_json(true)).unwrap();
 
-        assert!(value["deps"]["reqwest"].as_str().is_some());
+        assert!(value["deps"]["hyper"].as_str().is_some());
     }
 
     #[test]

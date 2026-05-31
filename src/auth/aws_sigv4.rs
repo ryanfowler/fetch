@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use hmac::{Hmac, KeyInit, Mac};
-use reqwest::header::{AUTHORIZATION, HOST, HeaderMap, HeaderName, HeaderValue};
+use http::header::{AUTHORIZATION, HOST, HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -178,7 +178,7 @@ fn signed_headers(url: &Url, headers: &HeaderMap) -> Result<Vec<(String, String)
         .and_then(|value| value.to_str().ok())
         .filter(|host| !host.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| url_host(url));
+        .unwrap_or_else(|| crate::net::http_host_header_value(url).unwrap_or_default());
     if !host.is_empty() {
         out.entry("host".to_string()).or_default().push(host);
     }
@@ -201,16 +201,6 @@ fn signed_headers(url: &Url, headers: &HeaderMap) -> Result<Vec<(String, String)
         .into_iter()
         .map(|(key, values)| (key, canonical_header_value(&values)))
         .collect())
-}
-
-fn url_host(url: &Url) -> String {
-    let Some(host) = url.host_str() else {
-        return String::new();
-    };
-    match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    }
 }
 
 fn canonical_header_value(values: &[String]) -> String {
@@ -446,7 +436,7 @@ fn hex_encode_upper(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::header::{DATE, RANGE};
+    use http::header::{DATE, RANGE};
 
     fn fixed_now() -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(1_369_353_600).unwrap()

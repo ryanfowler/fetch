@@ -128,7 +128,7 @@ pub(super) fn content_encoding_decoders(
 
 pub(super) fn content_encodings(headers: &HeaderMap) -> Vec<String> {
     headers
-        .get_all(reqwest::header::CONTENT_ENCODING)
+        .get_all(http::header::CONTENT_ENCODING)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
@@ -194,11 +194,11 @@ mod tests {
     fn content_encodings_splits_multiple_header_values() {
         let mut headers = HeaderMap::new();
         headers.append(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("gzip"),
         );
         headers.append(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("zstd, aws-chunked"),
         );
 
@@ -278,7 +278,7 @@ mod tests {
         let body = zstd_encode(&gzip_encode(data));
         let mut headers = HeaderMap::new();
         headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("gzip, zstd"),
         );
 
@@ -293,7 +293,7 @@ mod tests {
         let body = brotli_encode(data);
         let mut headers = HeaderMap::new();
         headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("br"),
         );
 
@@ -308,7 +308,7 @@ mod tests {
         let body = gzip_encode(data);
         let mut headers = HeaderMap::new();
         headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("aws-chunked, gzip"),
         );
 
@@ -323,7 +323,7 @@ mod tests {
         let body = gzip_encode(data);
         let mut headers = HeaderMap::new();
         headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("gzip"),
         );
 
@@ -342,7 +342,7 @@ mod tests {
         let body = b"not decoded";
         let mut headers = HeaderMap::new();
         headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("deflate, gzip"),
         );
 
@@ -357,7 +357,7 @@ mod tests {
         let body = gzip_encode(data);
         let mut headers = HeaderMap::new();
         headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("gzip"),
         );
 
@@ -370,7 +370,7 @@ mod tests {
     fn output_progress_omits_total_for_decoded_content_encoding() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("gzip"),
         );
 
@@ -390,7 +390,7 @@ mod tests {
 
         let mut compressed_headers = HeaderMap::new();
         compressed_headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("gzip"),
         );
         assert_eq!(
@@ -400,7 +400,7 @@ mod tests {
 
         let mut unsupported_headers = HeaderMap::new();
         unsupported_headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("deflate"),
         );
         assert_eq!(
@@ -417,7 +417,7 @@ mod tests {
     fn gzip_decoder_errors_are_prefixed() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("gzip"),
         );
 
@@ -430,7 +430,7 @@ mod tests {
     fn brotli_decoder_errors_are_prefixed() {
         let mut headers = HeaderMap::new();
         headers.insert(
-            reqwest::header::CONTENT_ENCODING,
+            http::header::CONTENT_ENCODING,
             HeaderValue::from_static("br"),
         );
 
