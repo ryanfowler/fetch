@@ -240,6 +240,9 @@ ca-cert = ca-cert.pem
 
 Use a custom DNS server for hostname resolution.
 
+DoH URLs use RFC 8484 wire-format requests, with Google-style JSON DoH retained
+as a compatibility fallback.
+
 ```ini
 # Use Google DNS
 dns-server = 8.8.8.8

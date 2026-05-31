@@ -354,7 +354,8 @@ fetch --retry 3 --retry-delay 0.5 example.com
 
 Use custom DNS server. Supports UDP DNS and DNS-over-HTTPS for requests and
 DNS/TLS inspection. UDP DNS queries advertise EDNS(0) and retry truncated
-responses over TCP.
+responses over TCP. DoH URLs are queried with RFC 8484 wire-format requests,
+with Google-style JSON DoH retained as a compatibility fallback.
 
 ```sh
 fetch --dns-server 8.8.8.8 example.com
