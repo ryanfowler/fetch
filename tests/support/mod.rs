@@ -56,6 +56,7 @@ pub(crate) struct TestRequest {
     pub(crate) method: String,
     pub(crate) path: String,
     pub(crate) headers: HashMap<String, String>,
+    pub(crate) header_lines: Vec<(String, String)>,
     pub(crate) body: Vec<u8>,
 }
 
@@ -65,6 +66,14 @@ impl TestRequest {
             .get(&name.to_ascii_lowercase())
             .cloned()
             .unwrap_or_default()
+    }
+
+    pub(crate) fn header_values(&self, name: &str) -> Vec<String> {
+        self.header_lines
+            .iter()
+            .filter(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
+            .collect()
     }
 
     pub(crate) fn body_string(&self) -> String {
@@ -460,6 +469,7 @@ pub(crate) fn read_request(reader: &mut impl BufRead) -> Option<TestRequest> {
     let _version = parts.next()?.to_string();
 
     let mut headers = HashMap::new();
+    let mut header_lines = Vec::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).ok()? == 0 {
@@ -470,7 +480,10 @@ pub(crate) fn read_request(reader: &mut impl BufRead) -> Option<TestRequest> {
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
-            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            let name = name.trim().to_ascii_lowercase();
+            let value = value.trim().to_string();
+            header_lines.push((name.clone(), value.clone()));
+            headers.insert(name, value);
         }
     }
 
@@ -509,6 +522,7 @@ pub(crate) fn read_request(reader: &mut impl BufRead) -> Option<TestRequest> {
         method,
         path,
         headers,
+        header_lines,
         body,
     })
 }
@@ -1308,11 +1322,18 @@ async fn handle_test_h2_request(
         body_bytes.extend_from_slice(&chunk);
     }
     let mut headers = HashMap::new();
+    let mut header_lines = Vec::new();
+    let mut current_name = None;
     for (name, value) in parts.headers {
-        if let Some(name) = name
+        if let Some(name) = name {
+            current_name = Some(name.as_str().to_ascii_lowercase());
+        }
+        if let Some(name) = &current_name
             && let Ok(value) = value.to_str()
         {
-            headers.insert(name.as_str().to_ascii_lowercase(), value.to_string());
+            let value = value.to_string();
+            header_lines.push((name.clone(), value.clone()));
+            headers.insert(name.clone(), value);
         }
     }
     let resp = handler(TestRequest {
@@ -1324,6 +1345,7 @@ async fn handle_test_h2_request(
             .unwrap_or("/")
             .to_string(),
         headers,
+        header_lines,
         body: body_bytes,
     });
     if let Some(reason) = resp.h2_reset {
