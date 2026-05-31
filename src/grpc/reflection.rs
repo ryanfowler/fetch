@@ -1,7 +1,7 @@
 use std::time::Instant;
 
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
-use reqwest::{Client, StatusCode};
+use http::StatusCode;
+use http::header::{HeaderMap, HeaderValue, USER_AGENT};
 use url::Url;
 
 use crate::cli::Cli;
@@ -13,6 +13,7 @@ use crate::grpc::encoding::MessageEncoding;
 use crate::grpc::framing;
 use crate::grpc::headers as grpc_headers;
 use crate::grpc::status;
+use crate::http::transport::Client;
 use crate::proto::Schema;
 
 const REFLECTION_V1_PATH: &str = "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo";
@@ -195,8 +196,10 @@ async fn invoke(
 
     let headers = response.headers().clone();
     let message_encoding = MessageEncoding::from_headers(&headers);
-    let response: http::Response<reqwest::Body> = response.into();
-    let body = body::read_framed_body(response.into_body(), &message_encoding).await?;
+    let (response_body, body_deadline) = response.into_body_with_deadline();
+    let body =
+        body::read_framed_body_with_deadline(response_body, &message_encoding, body_deadline)
+            .await?;
     if let Some(grpc_status) = status::from_headers_or_trailers(&headers, &body.trailers)
         && !grpc_status.ok()
     {

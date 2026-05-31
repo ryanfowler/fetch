@@ -132,6 +132,19 @@ fn http3_go_harness_cases() {
         if req.path == "/h3" {
             return H3Response::status(201, "h3 ok").header("Content-Type", "text/plain");
         }
+        if req.path == "/h3-zstd" {
+            let body = zstd::stream::encode_all("h3 zstd ok".as_bytes(), 0).unwrap();
+            return H3Response::ok(body)
+                .header("Content-Type", "text/plain")
+                .header("Content-Encoding", "zstd")
+                .delay_body(Duration::from_millis(100));
+        }
+        if req.path == "/h3-grpc-trailer-error" {
+            return H3Response::ok("")
+                .header("Content-Type", "application/grpc+proto")
+                .trailer("grpc-status", "7")
+                .trailer("grpc-message", "permission denied");
+        }
         H3Response::status(404, "not found")
     });
     let res = run_fetch(&[
@@ -158,6 +171,36 @@ fn http3_go_harness_cases() {
     assert_eq!(req.query, "existing=1&cli=1");
     assert_eq!(req.header("x-h3"), "yes");
     assert_eq!(req.body_string(), "payload");
+
+    let h3_timing_url = h3.url.replace("127.0.0.1", "localhost");
+    let res = run_fetch(&[
+        &format!("{}/h3-zstd", h3_timing_url),
+        "--http",
+        "3",
+        "--ca-cert",
+        h3.ca_cert_path.to_str().unwrap(),
+        "--timing",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "h3 zstd ok");
+    assert!(res.stderr.contains("HTTP/3.0 200 OK"));
+    assert!(res.stderr.contains("DNS"));
+    assert!(res.stderr.contains("QUIC"));
+
+    let res = run_fetch(&[
+        &format!("{}/h3-grpc-trailer-error", h3.url),
+        "--http",
+        "3",
+        "--grpc",
+        "--format",
+        "off",
+        "--ca-cert",
+        h3.ca_cert_path.to_str().unwrap(),
+    ]);
+    assert_exit(&res, 1);
+    assert!(res.stdout.is_empty(), "stdout:\n{}", res.stdout);
+    assert!(res.stderr.contains("PERMISSION_DENIED"), "{}", res.stderr);
+    assert!(res.stderr.contains("permission denied"), "{}", res.stderr);
 
     let res = run_fetch(&["http://example.com", "--http", "3"]);
     assert_exit(&res, 1);
@@ -247,6 +290,7 @@ fn http3_go_harness_cases() {
     assert_eq!(requests[1].path, "/final");
     assert_eq!(requests[0].body_string(), "redirect-body");
     assert_eq!(requests[1].body_string(), "redirect-body");
+    assert_eq!(redirect.connections(), 1);
 
     let retry_count = Arc::new(AtomicUsize::new(0));
     let retry_count_for_handler = Arc::clone(&retry_count);
@@ -278,6 +322,7 @@ fn http3_go_harness_cases() {
     let requests = wait_for_h3_requests(&retry, 2);
     assert_eq!(requests[0].body_string(), "retry-body");
     assert_eq!(requests[1].body_string(), "retry-body");
+    assert_eq!(retry.connections(), 1);
 
     let session = start_http3_server(|req| {
         if req.path == "/login" {
@@ -480,7 +525,8 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "udp dns ok");
     assert!(res.stderr.contains("DNS"));
-    assert!(res.stderr.contains("Connect"));
+    assert!(res.stderr.contains("TCP"));
+    assert!(!res.stderr.contains("Connect"));
     assert!(res.stderr.contains("TTFB"));
 
     let redirect_location = Arc::new(Mutex::new(String::new()));
@@ -573,11 +619,26 @@ fn socks_proxy_unix_socket_timing_and_grpc_binary_cases() {
     assert_eq!(res.stdout, "socks /from-curl-socks");
     assert_socks_seen(&seen, &target_addr);
 
+    let dns_port = Url::parse(&server.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server("fetch-socks-dns.test.", Ipv4Addr::new(127, 0, 0, 1));
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--proxy",
+        &proxy_url,
+        "--format",
+        "off",
+        &format!("http://fetch-socks-dns.test:{dns_port}/via-socks"),
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "socks /via-socks");
+    assert_socks_seen(&seen, &target_addr);
+
     let res = run_fetch(&[&format!("{}/timing", server.url), "--timing"]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "timed");
     assert!(res.stderr.contains("Total") || res.stderr.contains("Timing"));
-    assert!(res.stderr.contains("Connect"));
+    assert!(res.stderr.contains("TCP"));
     assert!(res.stderr.contains("█"));
     assert!(res.stderr.contains("─"));
     assert!(!res.stderr.contains("* Connect:"));
@@ -589,7 +650,8 @@ fn socks_proxy_unix_socket_timing_and_grpc_binary_cases() {
     assert!(res.stderr.contains("█"));
     let res = run_fetch(&[&format!("{}/timing", server.url), "-T", "-vvv"]);
     assert_exit(&res, 0);
-    assert!(res.stderr.contains("* Connect:"));
+    assert!(res.stderr.contains("* TCP:"));
+    assert!(!res.stderr.contains("* Connect:"));
     assert!(res.stderr.contains("* TTFB:"));
     assert!(res.stderr.contains("Total") || res.stderr.contains("Timing"));
 
@@ -736,6 +798,53 @@ fn tls_certificate_validation_inspection_and_bounds_cases() {
     let res = run_fetch(&["--ca-cert", tls.ca_cert_path.to_str().unwrap(), &tls.url]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "tls-ok");
+
+    let res = run_fetch(&[
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        "--timing",
+        &tls.url,
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "tls-ok");
+    assert!(res.stderr.contains("TCP"));
+    assert!(res.stderr.contains("TLS"));
+    assert!(!res.stderr.contains("Connect"));
+
+    let h2 = start_h2_tls_server(|req| {
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "/auto-h2?x=1");
+        TestResponse::ok("h2-ok")
+    });
+    let h2_url = format!("{}/auto-h2?x=1", h2.url);
+    let res = run_fetch(&[
+        "-v",
+        "--ca-cert",
+        h2.ca_cert_path.to_str().unwrap(),
+        &h2_url,
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "h2-ok");
+    assert!(res.stderr.contains("HTTP/2.0 200"));
+
+    let refused_count = Arc::new(AtomicUsize::new(0));
+    let refused_count_for_handler = Arc::clone(&refused_count);
+    let refused = start_h2_tls_server(move |_req| {
+        if refused_count_for_handler.fetch_add(1, Ordering::SeqCst) == 0 {
+            return TestResponse::h2_reset(h2::Reason::REFUSED_STREAM);
+        }
+        TestResponse::ok("h2-retried")
+    });
+    let res = run_fetch(&[
+        "--ca-cert",
+        refused.ca_cert_path.to_str().unwrap(),
+        "--format",
+        "off",
+        &refused.url,
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "h2-retried");
+    assert_eq!(refused_count.load(Ordering::SeqCst), 2);
 
     let res = run_fetch(&[
         "--ca-cert",

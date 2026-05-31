@@ -1,8 +1,6 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
-use reqwest::tls::Version;
-use reqwest::{Certificate, Identity};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme, SupportedProtocolVersion};
@@ -10,6 +8,40 @@ use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme, SupportedPro
 use crate::error::FetchError;
 
 pub mod inspect;
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Version {
+    TLS_1_2,
+    TLS_1_3,
+}
+
+#[derive(Debug)]
+pub struct Certificate;
+
+impl Certificate {
+    fn from_pem_bundle(data: &[u8]) -> Result<Vec<Self>, String> {
+        pem_certificates(data).map(|certs| certs.into_iter().map(|_| Self).collect())
+    }
+}
+
+#[derive(Debug)]
+pub struct Identity;
+
+impl Identity {
+    fn from_pem(data: &[u8]) -> Result<Self, FetchError> {
+        let certs = pem_certificates(data).map_err(FetchError::Message)?;
+        if certs.is_empty() {
+            return Err(FetchError::Message("no PEM data found".to_string()));
+        }
+        if first_private_key(data)?.is_none() {
+            return Err(FetchError::Message(
+                "private key or certificate not found".to_string(),
+            ));
+        }
+        Ok(Self)
+    }
+}
 
 pub fn install_default_crypto_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -19,7 +51,7 @@ pub fn default_min_tls_version() -> Version {
     Version::TLS_1_2
 }
 
-pub fn reqwest_tls_version(option: &str, value: &str) -> Result<Version, FetchError> {
+pub fn transport_tls_version(option: &str, value: &str) -> Result<Version, FetchError> {
     match value {
         "1.2" => Ok(Version::TLS_1_2),
         "1.3" => Ok(Version::TLS_1_3),
@@ -97,6 +129,53 @@ pub fn rustls_client_config(
             .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
     } else {
         builder.with_root_certificates(rustls_root_store(ca_cert_paths)?)
+    };
+
+    if let Some((certs, key)) = rustls_client_auth(cert_path, key_path)? {
+        builder
+            .with_client_auth_cert(certs, key)
+            .map_err(|err| FetchError::Message(err.to_string()))
+    } else {
+        Ok(builder.with_no_client_auth())
+    }
+}
+
+pub fn rustls_platform_client_config() -> Result<rustls::ClientConfig, FetchError> {
+    rustls_platform_client_config_with_options(&[], None, None, false, None, None)
+}
+
+pub fn rustls_platform_client_config_with_options(
+    ca_cert_paths: &[String],
+    cert_path: Option<&str>,
+    key_path: Option<&str>,
+    insecure: bool,
+    min_tls: Option<(&str, &str)>,
+    max_tls: Option<&str>,
+) -> Result<rustls::ClientConfig, FetchError> {
+    install_default_crypto_provider();
+
+    let versions = rustls_protocol_versions(min_tls, max_tls)?;
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&versions)
+        .map_err(|_| FetchError::Message("invalid TLS versions".to_string()))?;
+    let builder = if insecure {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+    } else {
+        let extra_roots = custom_ca_certificates(ca_cert_paths)?;
+        let verifier = if extra_roots.is_empty() {
+            rustls_platform_verifier::Verifier::new(provider)
+        } else {
+            rustls_platform_verifier::Verifier::new_with_extra_roots(extra_roots, provider)
+        }
+        .map_err(|err| FetchError::Message(err.to_string()))?;
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
     };
 
     if let Some((certs, key)) = rustls_client_auth(cert_path, key_path)? {
@@ -230,6 +309,18 @@ fn rustls_root_store(ca_cert_paths: &[String]) -> Result<RootCertStore, FetchErr
     let native_certs = rustls_native_certs::load_native_certs().certs;
     let _ = roots.add_parsable_certificates(native_certs);
 
+    for cert in custom_ca_certificates(ca_cert_paths)? {
+        roots
+            .add(cert)
+            .map_err(|err| FetchError::Message(format!("invalid CA certificate: {err}")))?;
+    }
+    Ok(roots)
+}
+
+fn custom_ca_certificates(
+    ca_cert_paths: &[String],
+) -> Result<Vec<CertificateDer<'static>>, FetchError> {
+    let mut certificates = Vec::new();
     for path in ca_cert_paths {
         let data = read_pem_file(path)?;
         let certs = pem_certificates(&data).map_err(|err| {
@@ -239,12 +330,10 @@ fn rustls_root_store(ca_cert_paths: &[String]) -> Result<RootCertStore, FetchErr
             return Err(format!("invalid CA certificate '{path}': no certificates found").into());
         }
         for cert in certs {
-            roots.add(CertificateDer::from(cert)).map_err(|err| {
-                FetchError::Message(format!("invalid CA certificate '{path}': {err}"))
-            })?;
+            certificates.push(CertificateDer::from(cert));
         }
     }
-    Ok(roots)
+    Ok(certificates)
 }
 
 fn rustls_client_auth(
@@ -513,22 +602,22 @@ mod tests {
     fn tls_version_bounds_match_go_defaults_and_supported_values() {
         assert_eq!(default_min_tls_version(), Version::TLS_1_2);
         assert_eq!(
-            reqwest_tls_version("min-tls", "1.2").unwrap(),
+            transport_tls_version("min-tls", "1.2").unwrap(),
             Version::TLS_1_2
         );
         assert_eq!(
-            reqwest_tls_version("max-tls", "1.3").unwrap(),
+            transport_tls_version("max-tls", "1.3").unwrap(),
             Version::TLS_1_3
         );
 
-        let err = reqwest_tls_version("min-tls", "1.4").unwrap_err();
+        let err = transport_tls_version("min-tls", "1.4").unwrap_err();
         assert!(err.to_string().contains("invalid value '1.4'"));
         assert!(err.to_string().contains("must be one of"));
     }
 
     #[test]
     fn tls_version_bounds_reject_legacy_tls_versions() {
-        let err = reqwest_tls_version("tls", "1.0").unwrap_err();
+        let err = transport_tls_version("tls", "1.0").unwrap_err();
         assert_eq!(
             err.to_string(),
             "invalid value '1.0' for option '--tls': must be one of [1.2, 1.3]"

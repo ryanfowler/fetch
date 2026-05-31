@@ -394,7 +394,7 @@ fn records_from_ip_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<Record>
 }
 
 async fn lookup_doh_records(
-    client: &reqwest::Client,
+    client: &crate::dns::doh::DohClient,
     server_url: &Url,
     host: &str,
     query_type: QueryType,

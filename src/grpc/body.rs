@@ -1,9 +1,9 @@
-use http_body_util::BodyExt;
-use reqwest::header::HeaderMap;
+use http::header::HeaderMap;
 
 use crate::error::FetchError;
 use crate::grpc::encoding::{self, MessageEncoding};
 use crate::grpc::framing;
+use crate::http::transport::{Body, read_body_frame};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FramedBody {
@@ -12,15 +12,22 @@ pub struct FramedBody {
 }
 
 pub async fn read_framed_body(
-    mut body: reqwest::Body,
+    body: Body,
     message_encoding: &MessageEncoding,
+) -> Result<FramedBody, FetchError> {
+    read_framed_body_with_deadline(body, message_encoding, None).await
+}
+
+pub(crate) async fn read_framed_body_with_deadline(
+    mut body: Body,
+    message_encoding: &MessageEncoding,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<FramedBody, FetchError> {
     let mut decoder = framing::FrameDecoder::new();
     let mut messages = Vec::new();
     let mut trailers = HeaderMap::new();
 
-    while let Some(frame) = body.frame().await {
-        let frame = frame?;
+    while let Some(frame) = read_body_frame(&mut body, deadline).await? {
         match frame.into_data() {
             Ok(data) => {
                 for frame in decoder
@@ -52,10 +59,9 @@ mod tests {
 
     #[tokio::test]
     async fn reader_rejects_oversized_message_from_header() {
-        let body =
-            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
-                bytes::Bytes::from_static(&[0x00, 0x04, 0x00, 0x00, 0x01]),
-            )]));
+        let body = Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+            bytes::Bytes::from_static(&[0x00, 0x04, 0x00, 0x00, 0x01]),
+        )]));
 
         let err = read_framed_body(body, &MessageEncoding::Identity)
             .await
@@ -69,10 +75,9 @@ mod tests {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut encoder, b"\x3a\x01*").unwrap();
         let compressed = encoder.finish().unwrap();
-        let body =
-            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
-                bytes::Bytes::from(framing::frame(&compressed, true).unwrap()),
-            )]));
+        let body = Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+            bytes::Bytes::from(framing::frame(&compressed, true).unwrap()),
+        )]));
 
         let body = read_framed_body(body, &MessageEncoding::Gzip)
             .await
@@ -83,15 +88,28 @@ mod tests {
 
     #[tokio::test]
     async fn reader_names_unsupported_compression() {
-        let body =
-            reqwest::Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
-                bytes::Bytes::from(framing::frame(b"payload", true).unwrap()),
-            )]));
+        let body = Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+            bytes::Bytes::from(framing::frame(b"payload", true).unwrap()),
+        )]));
 
         let err = read_framed_body(body, &MessageEncoding::Unsupported("br".to_string()))
             .await
             .unwrap_err();
 
         assert_eq!(err.to_string(), "unsupported gRPC compression encoding: br");
+    }
+
+    #[tokio::test]
+    async fn reader_applies_body_deadline() {
+        let body = Body::wrap_stream(futures_util::stream::pending::<
+            Result<bytes::Bytes, std::io::Error>,
+        >());
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(10);
+
+        let err = read_framed_body_with_deadline(body, &MessageEncoding::Identity, Some(deadline))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "operation timed out");
     }
 }

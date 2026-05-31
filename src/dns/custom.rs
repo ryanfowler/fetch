@@ -69,7 +69,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn socket_addrs_use_zero_port_for_reqwest_override() {
+    fn socket_addrs_use_zero_port_for_transport_override() {
         let addrs = socket_addrs_for_override(&["127.0.0.1".parse().unwrap()]);
 
         assert_eq!(addrs, [SocketAddr::new("127.0.0.1".parse().unwrap(), 0)]);

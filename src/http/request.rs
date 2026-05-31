@@ -1,4 +1,6 @@
 use super::*;
+use futures_util::TryStreamExt;
+use std::io::Cursor;
 
 pub(crate) type RequestBody = Option<RequestBodyPayload>;
 pub(crate) type MaterializedRequestBody = Option<(Vec<u8>, Option<String>)>;
@@ -98,12 +100,12 @@ pub(super) fn build_request(
         );
     }
     let mut req = client.request(method, url).headers(headers);
-    if let Some(version) = reqwest_request_version_for_cli(cli)? {
+    if let Some(version) = transport_request_version_for_cli(cli)? {
         req = req.version(version);
     }
 
     if let Some(body) = body {
-        req = req.body(request_body_to_reqwest_body(body)?);
+        req = req.body(request_body_to_transport_body(body)?);
     }
 
     match authorization {
@@ -148,29 +150,29 @@ pub(crate) fn apply_builder_authorization_headers(
     if let Some(auth) = authorization {
         let value = HeaderValue::from_str(auth)
             .map_err(|err| FetchError::Message(format!("invalid authorization header: {err}")))?;
-        headers.insert(reqwest::header::AUTHORIZATION, value);
+        headers.insert(http::header::AUTHORIZATION, value);
     } else if let Some(auth) = basic_header(cli.basic.as_deref())? {
         let value = HeaderValue::from_str(&auth)
             .map_err(|err| FetchError::Message(format!("invalid authorization header: {err}")))?;
-        headers.insert(reqwest::header::AUTHORIZATION, value);
+        headers.insert(http::header::AUTHORIZATION, value);
     }
     if let Some(token) = cli.bearer.as_deref() {
         let value = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|err| FetchError::Message(format!("invalid bearer token: {err}")))?;
-        headers.insert(reqwest::header::AUTHORIZATION, value);
+        headers.insert(http::header::AUTHORIZATION, value);
     }
     Ok(())
 }
 
-pub(super) fn reqwest_request_version_for_cli(
+pub(super) fn transport_request_version_for_cli(
     cli: &Cli,
-) -> Result<Option<reqwest::Version>, FetchError> {
+) -> Result<Option<http::Version>, FetchError> {
     let version =
         crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?;
     Ok(match effective_http_version(cli, version) {
-        Some(HttpVersion::Http1) => Some(reqwest::Version::HTTP_11),
-        Some(HttpVersion::Http2) => Some(reqwest::Version::HTTP_2),
-        Some(HttpVersion::Http3) => Some(reqwest::Version::HTTP_3),
+        Some(HttpVersion::Http1) => Some(http::Version::HTTP_11),
+        Some(HttpVersion::Http2) => Some(http::Version::HTTP_2),
+        Some(HttpVersion::Http3) => Some(http::Version::HTTP_3),
         None => None,
     })
 }
@@ -299,7 +301,7 @@ pub(super) fn digest_retry_before_drain(response: &Response) -> bool {
 pub(super) fn response_connection_close(response: &Response) -> bool {
     response
         .headers()
-        .get_all(reqwest::header::CONNECTION)
+        .get_all(http::header::CONNECTION)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
@@ -502,7 +504,7 @@ pub(super) fn inferred_request_body_content_len(
     request_body_content_len(body)
 }
 
-pub(crate) fn request_body_to_reqwest_body(body: RequestBodyPayload) -> Result<Body, FetchError> {
+pub(crate) fn request_body_to_transport_body(body: RequestBodyPayload) -> Result<Body, FetchError> {
     match body.source {
         RequestBodySource::Bytes(bytes) => Ok(Body::from(bytes)),
         RequestBodySource::File { path, .. } => {

@@ -295,7 +295,7 @@ pub(super) fn stdout_stream_target(
 
 pub(super) fn response_header_content_type(headers: &HeaderMap) -> ContentType {
     let content_type = headers
-        .get(reqwest::header::CONTENT_TYPE)
+        .get(http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
     content_type::get_content_type(content_type).0
 }
@@ -849,26 +849,30 @@ impl AsyncRead for AsyncClipboardTeeReader<'_> {
 }
 
 pub(super) fn async_response_reader(response: Response) -> (AsyncReadBox, ResponseTrailers) {
-    let response: http::Response<reqwest::Body> = response.into();
-    let body = response.into_body();
+    let (body, deadline) = response.into_body_with_deadline();
     let trailers = Arc::new(Mutex::new(HeaderMap::new()));
     let stream_trailers = trailers.clone();
-    let stream = stream::try_unfold(body, move |mut body| {
+    let stream = stream::try_unfold((body, deadline), move |(mut body, deadline)| {
         let stream_trailers = stream_trailers.clone();
         async move {
             loop {
-                let Some(frame) = body.frame().await else {
-                    return Ok::<Option<(Bytes, reqwest::Body)>, std::io::Error>(None);
+                let Some(frame) = transport::read_body_frame(&mut body, deadline)
+                    .await
+                    .map_err(|err| {
+                        std::io::Error::other(transport_response_body_error_message(&err))
+                    })?
+                else {
+                    return Ok::<
+                        Option<(Bytes, (Body, Option<tokio::time::Instant>))>,
+                        std::io::Error,
+                    >(None);
                 };
-                let frame = frame.map_err(|err| {
-                    std::io::Error::other(reqwest_response_body_error_message(&err))
-                })?;
                 match frame.into_data() {
                     Ok(data) => {
                         if data.is_empty() {
                             continue;
                         }
-                        return Ok(Some((data, body)));
+                        return Ok(Some((data, (body, deadline))));
                     }
                     Err(frame) => {
                         if let Ok(trailers) = frame.into_trailers()
@@ -1172,7 +1176,7 @@ pub(super) fn format_stdout_bytes_with_terminal(
     terminal_cols: usize,
 ) -> Result<StdoutBody, FetchError> {
     let content_type = headers
-        .get(reqwest::header::CONTENT_TYPE)
+        .get(http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok());
     let (mut content_type, charset) = content_type::get_content_type(content_type);
     if content_type == ContentType::Unknown {

@@ -175,7 +175,7 @@ silent = false
 **Type**: Boolean
 **Default**: `false`
 
-Display a timing waterfall chart after the response, showing DNS, Connect, TTFB, and body download phases.
+Display a timing waterfall chart after the response, showing DNS, TCP, TLS, TTFB, and body download phases.
 
 ```ini
 # Enable timing waterfall

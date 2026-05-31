@@ -511,7 +511,7 @@ fetch -vvv example.com
 
 ### `-T, --timing`
 
-Display a timing waterfall chart after the response. Shows DNS, Connect, TTFB, and body download phases as a proportional bar chart. Connect is the full connector phase and may include TCP plus TLS. Works independently of verbosity. Phases that don't apply (e.g., connection phases for reused connections) are omitted.
+Display a timing waterfall chart after the response. Shows DNS, TCP, TLS, TTFB, and body download phases as a proportional bar chart. HTTP/3 reports connection setup as QUIC. Works independently of verbosity. Phases that don't apply (e.g., TLS for plaintext HTTP or connection phases for reused connections) are omitted.
 
 ```sh
 fetch --timing https://example.com

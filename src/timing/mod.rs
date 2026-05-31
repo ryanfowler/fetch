@@ -8,7 +8,7 @@ pub struct AttemptTiming {
     start: Option<Instant>,
     response_headers: Option<Duration>,
     dns: Option<Duration>,
-    connect: Option<Duration>,
+    transport: TransportTiming,
 }
 
 impl AttemptTiming {
@@ -17,7 +17,7 @@ impl AttemptTiming {
             start: Some(Instant::now()),
             response_headers: None,
             dns: None,
-            connect: None,
+            transport: TransportTiming::default(),
         }
     }
 
@@ -35,18 +35,34 @@ impl AttemptTiming {
         self.dns = duration;
     }
 
-    pub fn set_connect(&mut self, duration: Option<Duration>) {
-        self.connect = duration;
+    pub fn set_transport(&mut self, timing: Option<TransportTiming>) {
+        self.transport = timing.unwrap_or_default();
     }
 
     pub fn response_timing(self) -> Option<ResponseTiming> {
         let response_headers = self.response_headers?;
+        let transport = self.transport.total();
         Some(ResponseTiming {
             dns: self.dns,
-            connect: self.connect,
-            ttfb: response_headers.saturating_sub(self.connect.unwrap_or_default()),
+            tcp: self.transport.tcp,
+            tls: self.transport.tls,
+            quic: self.transport.quic,
+            ttfb: response_headers.saturating_sub(transport),
             body: None,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TransportTiming {
+    pub tcp: Option<Duration>,
+    pub tls: Option<Duration>,
+    pub quic: Option<Duration>,
+}
+
+impl TransportTiming {
+    fn total(self) -> Duration {
+        self.tcp.unwrap_or_default() + self.tls.unwrap_or_default() + self.quic.unwrap_or_default()
     }
 }
 
@@ -60,7 +76,9 @@ struct Phase {
 #[derive(Clone, Copy, Debug)]
 pub struct ResponseTiming {
     pub dns: Option<Duration>,
-    pub connect: Option<Duration>,
+    pub tcp: Option<Duration>,
+    pub tls: Option<Duration>,
+    pub quic: Option<Duration>,
     pub ttfb: Duration,
     pub body: Option<Duration>,
 }
@@ -186,25 +204,21 @@ pub fn render_dns_debug_to(dns: &DnsTiming, out: &mut Printer) {
 }
 
 pub fn print_debug_lines(timing: &AttemptTiming, target: &str, color: Option<&str>) {
-    let connect_elapsed = timing
-        .connect
-        .or(timing.response_headers)
-        .unwrap_or_default();
+    let transport_elapsed = timing.transport.total();
     let ttfb_elapsed = timing
         .response_headers
-        .map(|elapsed| elapsed.saturating_sub(timing.connect.unwrap_or_default()))
+        .map(|elapsed| elapsed.saturating_sub(transport_elapsed))
         .unwrap_or_default();
     let mut out = core::stdio().stderr_printer(color);
-    out.write_info_prefix();
-    out.write_styled("Connect", &[Sequence::Bold, Sequence::Yellow]);
-    out.push_str(": ");
-    out.push_str(target);
-    out.push_str(" ");
-    out.write_styled(
-        &format!("({})", format_timing_duration(connect_elapsed)),
-        &[Sequence::Dim],
-    );
-    out.push('\n');
+    if let Some(tcp) = timing.transport.tcp {
+        write_transport_debug_line(&mut out, "TCP", target, tcp);
+    }
+    if let Some(tls) = timing.transport.tls {
+        write_transport_debug_line(&mut out, "TLS", target, tls);
+    }
+    if let Some(quic) = timing.transport.quic {
+        write_transport_debug_line(&mut out, "QUIC", target, quic);
+    }
     out.write_info_prefix();
     out.write_styled("TTFB", &[Sequence::Bold, Sequence::Yellow]);
     out.push_str(": ");
@@ -216,6 +230,19 @@ pub fn print_debug_lines(timing: &AttemptTiming, target: &str, color: Option<&st
     let _ = out.flush_to(&mut stderr);
 }
 
+fn write_transport_debug_line(out: &mut Printer, label: &str, target: &str, duration: Duration) {
+    out.write_info_prefix();
+    out.write_styled(label, &[Sequence::Bold, Sequence::Yellow]);
+    out.push_str(": ");
+    out.push_str(target);
+    out.push_str(" ");
+    out.write_styled(
+        &format!("({})", format_timing_duration(duration)),
+        &[Sequence::Dim],
+    );
+    out.push('\n');
+}
+
 fn build_phases(timing: ResponseTiming) -> Vec<Phase> {
     let mut phases = Vec::new();
     if let Some(dns) = timing.dns {
@@ -225,11 +252,25 @@ fn build_phases(timing: ResponseTiming) -> Vec<Phase> {
             duration: dns,
         });
     }
-    if let Some(connect) = timing.connect {
+    if let Some(tcp) = timing.tcp {
         phases.push(Phase {
-            label: "Connect",
+            label: "TCP",
             color: Sequence::Green,
-            duration: connect,
+            duration: tcp,
+        });
+    }
+    if let Some(tls) = timing.tls {
+        phases.push(Phase {
+            label: "TLS",
+            color: Sequence::Yellow,
+            duration: tls,
+        });
+    }
+    if let Some(quic) = timing.quic {
+        phases.push(Phase {
+            label: "QUIC",
+            color: Sequence::Green,
+            duration: quic,
         });
     }
     phases.push(Phase {
@@ -282,7 +323,9 @@ mod tests {
         let out = render_waterfall(
             ResponseTiming {
                 dns: None,
-                connect: None,
+                tcp: None,
+                tls: None,
+                quic: None,
                 ttfb: Duration::from_millis(7),
                 body: Some(Duration::from_millis(3)),
             },
@@ -301,7 +344,9 @@ mod tests {
         let out = render_waterfall(
             ResponseTiming {
                 dns: None,
-                connect: None,
+                tcp: None,
+                tls: None,
+                quic: None,
                 ttfb: Duration::ZERO,
                 body: None,
             },
@@ -318,7 +363,9 @@ mod tests {
         let out = render_waterfall(
             ResponseTiming {
                 dns: None,
-                connect: None,
+                tcp: None,
+                tls: None,
+                quic: None,
                 ttfb: Duration::ZERO,
                 body: None,
             },
@@ -353,7 +400,9 @@ mod tests {
         let out = render_waterfall(
             ResponseTiming {
                 dns: Some(Duration::from_millis(2)),
-                connect: Some(Duration::from_millis(5)),
+                tcp: Some(Duration::from_millis(5)),
+                tls: Some(Duration::from_millis(4)),
+                quic: None,
                 ttfb: Duration::from_millis(7),
                 body: Some(Duration::from_millis(3)),
             },
@@ -361,7 +410,8 @@ mod tests {
         );
 
         assert!(out.contains("\x1b[1m\x1b[36mDNS  "));
-        assert!(out.contains("\x1b[1m\x1b[32mConnect"));
+        assert!(out.contains("\x1b[1m\x1b[32mTCP "));
+        assert!(out.contains("\x1b[1m\x1b[33mTLS "));
         assert!(out.contains("\x1b[1m\x1b[35mTTFB "));
         assert!(out.contains("\x1b[34m█\x1b[0m"));
         assert!(out.contains("\x1b[2mTotal"));
@@ -372,7 +422,9 @@ mod tests {
         let out = render_waterfall(
             ResponseTiming {
                 dns: Some(Duration::from_millis(2)),
-                connect: Some(Duration::from_millis(5)),
+                tcp: Some(Duration::from_millis(5)),
+                tls: None,
+                quic: None,
                 ttfb: Duration::from_millis(7),
                 body: None,
             },
@@ -384,21 +436,45 @@ mod tests {
                 .char_indices()
                 .find_map(|(index, ch)| (ch == '█' || ch == '░').then_some(index))
                 .expect("waterfall line has a bar");
-            assert_eq!(bar_start, 11, "{line}");
+            assert_eq!(bar_start, 9, "{line}");
         }
     }
 
     #[test]
-    fn response_timing_subtracts_connect_from_ttfb() {
+    fn render_waterfall_shows_quic_phase() {
+        let out = render_waterfall(
+            ResponseTiming {
+                dns: Some(Duration::from_millis(2)),
+                tcp: None,
+                tls: None,
+                quic: Some(Duration::from_millis(5)),
+                ttfb: Duration::from_millis(7),
+                body: None,
+            },
+            false,
+        );
+
+        assert!(out.contains("QUIC"));
+        assert!(!out.contains("Connect"));
+    }
+
+    #[test]
+    fn response_timing_subtracts_transport_phases_from_ttfb() {
         let mut timing = AttemptTiming::start();
         timing.response_headers = Some(Duration::from_millis(25));
         timing.set_dns(Some(Duration::from_millis(3)));
-        timing.set_connect(Some(Duration::from_millis(10)));
+        timing.set_transport(Some(TransportTiming {
+            tcp: Some(Duration::from_millis(4)),
+            tls: Some(Duration::from_millis(6)),
+            quic: None,
+        }));
 
         let response = timing.response_timing().unwrap();
 
         assert_eq!(response.dns, Some(Duration::from_millis(3)));
-        assert_eq!(response.connect, Some(Duration::from_millis(10)));
+        assert_eq!(response.tcp, Some(Duration::from_millis(4)));
+        assert_eq!(response.tls, Some(Duration::from_millis(6)));
+        assert_eq!(response.quic, None);
         assert_eq!(response.ttfb, Duration::from_millis(15));
     }
 }

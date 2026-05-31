@@ -530,13 +530,13 @@ Sessions are stored as JSON in the user's cache directory:
 
 ### Timing Waterfall
 
-`--timing` (or `-T`) displays a timing waterfall chart after the response, showing how time was spent across DNS resolution, connection establishment, time to first byte, and body download:
+`--timing` (or `-T`) displays a timing waterfall chart after the response, showing how time was spent across DNS resolution, TCP connection setup, TLS handshake, time to first byte, and body download:
 
 ```sh
 fetch --timing https://example.com
 ```
 
-The chart adapts to the request: Connect represents the full connector phase and may include TCP plus TLS. DNS and Connect are omitted when the connection is reused. Combine with `-vvv` for both inline debug text and the waterfall summary.
+The chart adapts to the request: TLS is omitted for plaintext HTTP, HTTP/3 reports connection setup as QUIC, and connection phases are omitted when an existing pooled connection is reused. Combine with `-vvv` for both inline debug text and the waterfall summary.
 
 Can also be configured in the [configuration file](configuration.md):
 

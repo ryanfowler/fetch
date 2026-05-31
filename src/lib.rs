@@ -11,6 +11,7 @@ pub mod format;
 pub mod grpc;
 pub mod http;
 pub mod image;
+pub(crate) mod net;
 pub mod output;
 pub mod proto;
 pub mod session;

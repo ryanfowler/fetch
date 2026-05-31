@@ -114,15 +114,10 @@ pub(super) fn print_request_metadata(
         lines.push(("content-length".to_string(), len.to_string()));
     }
     let host = headers
-        .get(reqwest::header::HOST)
+        .get(http::header::HOST)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
-        .or_else(|| {
-            url.host_str().map(|host| match url.port() {
-                Some(port) => format!("{host}:{port}"),
-                None => host.to_string(),
-            })
-        });
+        .or_else(|| crate::net::http_host_header_value(url).ok());
     if let Some(host) = host {
         lines.push(("host".to_string(), host));
     }
@@ -361,13 +356,13 @@ pub(crate) fn apply_headers(headers: &mut HeaderMap, values: &[String]) -> Resul
     Ok(())
 }
 
-pub(super) fn version_label(version: reqwest::Version) -> &'static str {
+pub(super) fn version_label(version: http::Version) -> &'static str {
     match version {
-        reqwest::Version::HTTP_09 => "HTTP/0.9",
-        reqwest::Version::HTTP_10 => "HTTP/1.0",
-        reqwest::Version::HTTP_11 => "HTTP/1.1",
-        reqwest::Version::HTTP_2 => "HTTP/2.0",
-        reqwest::Version::HTTP_3 => "HTTP/3.0",
+        http::Version::HTTP_09 => "HTTP/0.9",
+        http::Version::HTTP_10 => "HTTP/1.0",
+        http::Version::HTTP_11 => "HTTP/1.1",
+        http::Version::HTTP_2 => "HTTP/2.0",
+        http::Version::HTTP_3 => "HTTP/3.0",
         _ => "HTTP/?",
     }
 }

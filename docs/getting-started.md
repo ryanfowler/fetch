@@ -197,7 +197,8 @@ fetch -vvv httpbin.org/json
 * DNS: httpbin.org (2.7ms)
 *   3.210.41.225
 *   3.223.36.72
-* Connect: 3.210.41.225:443 (81.9ms)
+* TCP: 3.210.41.225:443 (81.9ms)
+* TLS: 3.210.41.225:443 (94.7ms)
 * TLS 1.2: TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 (176.6ms)
 *   ALPN: h2
 *   Resumed: no

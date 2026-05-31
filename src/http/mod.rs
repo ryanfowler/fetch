@@ -1,6 +1,6 @@
 use std::error::Error as StdError;
 use std::fmt;
-use std::io::{Cursor, ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
@@ -16,14 +16,13 @@ use base64::Engine;
 use bytes::Bytes;
 #[cfg(test)]
 use flate2::read::GzDecoder;
-use futures_util::{TryStreamExt, stream};
-use http_body_util::BodyExt;
-use reqwest::header::{
+use futures_util::stream;
+use http::header::{
     ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap,
     HeaderName, HeaderValue, LOCATION, PROXY_AUTHORIZATION, RANGE, RETRY_AFTER, TRANSFER_ENCODING,
     USER_AGENT, WWW_AUTHENTICATE,
 };
-use reqwest::{Body, Client, Method, RequestBuilder, Response, StatusCode};
+use http::{Method, StatusCode};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_util::io::{ReaderStream, StreamReader};
@@ -67,6 +66,7 @@ pub mod multipart;
 mod request;
 mod response;
 mod retry;
+pub(crate) mod transport;
 
 pub(crate) use metadata::{
     apply_headers, apply_query, load_session, normalize_url, request_target,
@@ -82,6 +82,7 @@ use metadata::*;
 use request::*;
 use response::*;
 use retry::*;
+use transport::{Body, Client, RequestBuilder, Response};
 
 type AsyncReadBox = Pin<Box<dyn AsyncRead + Send>>;
 
@@ -125,7 +126,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         session: session.as_ref(),
         connect_timing: Some(&connect_timing),
     };
-    let mut initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
+    let initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
     if cli.grpc && grpc_method.is_none() {
         let request_requires_schema = grpc_request_requires_schema(cli);
         match crate::grpc::reflection::schema_for_call(cli, &url, &initial_client.client).await {
@@ -202,6 +203,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         let mut request_client = initial_client.clone();
         let mut redirect_statuses = Vec::new();
         let mut redirect_count = 0_usize;
+        let mut protocol_nack_retries = 0_usize;
         let mut strip_entity_headers = false;
         let mut timing = AttemptTiming::start();
         let attempt_result = loop {
@@ -269,7 +271,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 Ok(response) => {
                     if let Some(redirect) = redirect_target(cli, &response, redirect_count)? {
                         timing.mark_response_headers();
-                        timing.set_connect(connect_timing.duration());
+                        timing.set_transport(connect_timing.timing());
                         print_redirect_status(cli, &response);
                         redirect_statuses.push(response.status());
                         let redirected =
@@ -295,13 +297,22 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     }
                     break Ok(response);
                 }
-                Err(err) => break Err(err),
+                Err(err) => {
+                    if protocol_nack_retries < MAX_PROTOCOL_NACK_RETRIES
+                        && is_protocol_nack_error(&err)
+                    {
+                        ensure_request_body_replayable(&request_body, "protocol retry")?;
+                        protocol_nack_retries += 1;
+                        continue;
+                    }
+                    break Err(err);
+                }
             }
         };
         match attempt_result {
             Ok(response) => {
                 timing.mark_response_headers();
-                timing.set_connect(connect_timing.duration());
+                timing.set_transport(connect_timing.timing());
                 if cli.verbose >= 3 && !cli.silent {
                     let connect_target = connect_debug_target(
                         &response,
@@ -363,7 +374,6 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         request_timeout,
                         request_start,
                     )?;
-                    initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
                     attempt += 1;
                     continue;
                 }
@@ -396,14 +406,13 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         request_timeout,
                         request_start,
                     )?;
-                    initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
                     attempt += 1;
                     continue;
                 }
                 if let Some(message) = timeout_error_message(cli, &err) {
                     break Err(FetchError::Runtime(message));
                 }
-                let message = reqwest_request_error_message(&err);
+                let message = transport_request_error_message(&err);
                 if is_certificate_validation_error(&err) {
                     break Err(FetchError::CertificateValidation(message));
                 }

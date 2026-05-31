@@ -77,6 +77,7 @@ pub(crate) struct TestResponse {
     pub(crate) reason: &'static str,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Vec<u8>,
+    pub(crate) h2_reset: Option<h2::Reason>,
 }
 
 impl TestResponse {
@@ -86,6 +87,7 @@ impl TestResponse {
             reason: "OK",
             headers: Vec::new(),
             body: body.into(),
+            h2_reset: None,
         }
     }
 
@@ -95,6 +97,17 @@ impl TestResponse {
             reason,
             headers: Vec::new(),
             body: body.into(),
+            h2_reset: None,
+        }
+    }
+
+    pub(crate) fn h2_reset(reason: h2::Reason) -> Self {
+        Self {
+            status: 200,
+            reason: "OK",
+            headers: Vec::new(),
+            body: Vec::new(),
+            h2_reset: Some(reason),
         }
     }
 
@@ -123,6 +136,8 @@ impl H3Response {
             status: 200,
             headers: Vec::new(),
             body: body.into(),
+            body_delay: None,
+            trailers: Vec::new(),
         }
     }
 
@@ -131,6 +146,8 @@ impl H3Response {
             status,
             headers: Vec::new(),
             body: body.into(),
+            body_delay: None,
+            trailers: Vec::new(),
         }
     }
 
@@ -138,11 +155,25 @@ impl H3Response {
         self.headers.push((name.to_string(), value.to_string()));
         self
     }
+
+    pub(crate) fn delay_body(mut self, delay: Duration) -> Self {
+        self.body_delay = Some(delay);
+        self
+    }
+
+    pub(crate) fn trailer(mut self, name: &str, value: &str) -> Self {
+        self.trailers.push((name.to_string(), value.to_string()));
+        self
+    }
 }
 
 impl H3TestServer {
     pub(crate) fn requests(&self) -> Vec<H3Request> {
         self.requests.lock().unwrap().clone()
+    }
+
+    pub(crate) fn connections(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
     }
 }
 
@@ -189,12 +220,15 @@ pub(crate) struct H3Response {
     pub(crate) status: u16,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: Vec<u8>,
+    pub(crate) body_delay: Option<Duration>,
+    pub(crate) trailers: Vec<(String, String)>,
 }
 
 pub(crate) struct H3TestServer {
     pub(crate) url: String,
     pub(crate) ca_cert_path: PathBuf,
     pub(crate) requests: Arc<Mutex<Vec<H3Request>>>,
+    pub(crate) connections: Arc<AtomicUsize>,
 }
 
 pub(crate) struct ReflectionGrpcServer {
@@ -1175,6 +1209,154 @@ pub(crate) fn start_tls_server(
     }
 }
 
+pub(crate) fn start_h2_tls_server(
+    handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static,
+) -> TlsTestServer {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()])
+            .unwrap();
+    let dir = TempDir::new().unwrap().keep();
+    let ca_cert_path = dir.join("ca.pem");
+    fs::write(&ca_cert_path, certified.cert.pem()).unwrap();
+    let cert_der = certified.cert.der().clone();
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
+    );
+    let mut config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .unwrap();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind h2 tls server");
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("https://localhost:{port}");
+    let handler: Arc<dyn Fn(TestRequest) -> TestResponse + Send + Sync> = Arc::new(handler);
+    let (tx, rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        loop {
+            if rx.try_recv().is_ok() {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(true);
+                    let acceptor = acceptor.clone();
+                    let handler = Arc::clone(&handler);
+                    runtime.block_on(async move {
+                        let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
+                            return;
+                        };
+                        let Ok(tls) = acceptor.accept(stream).await else {
+                            return;
+                        };
+                        serve_test_h2_connection(tls, handler).await;
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    TlsTestServer {
+        url,
+        ca_cert_path,
+        shutdown: Some(tx),
+        join: Some(join),
+    }
+}
+
+async fn serve_test_h2_connection<T>(
+    stream: T,
+    handler: Arc<dyn Fn(TestRequest) -> TestResponse + Send + Sync>,
+) where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let Ok(mut connection) = h2::server::handshake(stream).await else {
+        return;
+    };
+    while let Some(result) = connection.accept().await {
+        let Ok((request, respond)) = result else {
+            break;
+        };
+        let handler = Arc::clone(&handler);
+        tokio::spawn(async move {
+            handle_test_h2_request(request, respond, handler).await;
+        });
+    }
+}
+
+async fn handle_test_h2_request(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<bytes::Bytes>,
+    handler: Arc<dyn Fn(TestRequest) -> TestResponse + Send + Sync>,
+) {
+    let (parts, mut body) = request.into_parts();
+    let mut body_bytes = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let Ok(chunk) = chunk else {
+            return;
+        };
+        body_bytes.extend_from_slice(&chunk);
+    }
+    let mut headers = HashMap::new();
+    for (name, value) in parts.headers {
+        if let Some(name) = name
+            && let Ok(value) = value.to_str()
+        {
+            headers.insert(name.as_str().to_ascii_lowercase(), value.to_string());
+        }
+    }
+    let resp = handler(TestRequest {
+        method: parts.method.to_string(),
+        path: parts
+            .uri
+            .path_and_query()
+            .map(|path| path.as_str())
+            .unwrap_or("/")
+            .to_string(),
+        headers,
+        body: body_bytes,
+    });
+    if let Some(reason) = resp.h2_reset {
+        respond.send_reset(reason);
+        return;
+    }
+    let mut response_headers = resp.headers;
+    if !response_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
+        response_headers.push(("content-length".to_string(), resp.body.len().to_string()));
+    }
+    let mut builder = http::Response::builder().status(resp.status);
+    for (name, value) in response_headers {
+        if name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("transfer-encoding")
+        {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+    let Ok(response) = builder.body(()) else {
+        return;
+    };
+    let body_is_empty = resp.body.is_empty();
+    let Ok(mut send) = respond.send_response(response, body_is_empty) else {
+        return;
+    };
+    if !body_is_empty {
+        let _ = send.send_data(bytes::Bytes::from(resp.body), true);
+    }
+}
+
 pub(crate) fn start_mtls_server() -> MtlsTestServer {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let dir = TempDir::new().unwrap().keep();
@@ -1317,7 +1499,9 @@ pub(crate) fn start_http3_server(
     ));
     let handler = Arc::new(handler);
     let requests = Arc::new(Mutex::new(Vec::new()));
+    let connections = Arc::new(AtomicUsize::new(0));
     let requests_for_thread = Arc::clone(&requests);
+    let connections_for_thread = Arc::clone(&connections);
     let (addr_tx, addr_rx) = mpsc::channel();
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1334,10 +1518,12 @@ pub(crate) fn start_http3_server(
             while let Some(incoming) = endpoint.accept().await {
                 let handler = Arc::clone(&handler);
                 let requests = Arc::clone(&requests_for_thread);
+                let connections = Arc::clone(&connections_for_thread);
                 tokio::spawn(async move {
                     let Ok(connection) = incoming.await else {
                         return;
                     };
+                    connections.fetch_add(1, Ordering::SeqCst);
                     let conn = h3_quinn::Connection::new(connection);
                     let Ok(mut h3_conn) = h3::server::builder().build(conn).await else {
                         return;
@@ -1397,6 +1583,9 @@ pub(crate) fn start_http3_server(
                             if stream.send_response(resp).await.is_err() {
                                 return;
                             }
+                            if let Some(delay) = response.body_delay {
+                                tokio::time::sleep(delay).await;
+                            }
                             if !response.body.is_empty()
                                 && stream
                                     .send_data(bytes::Bytes::from(response.body))
@@ -1404,6 +1593,22 @@ pub(crate) fn start_http3_server(
                                     .is_err()
                             {
                                 return;
+                            }
+                            if !response.trailers.is_empty() {
+                                let mut trailers = http::HeaderMap::new();
+                                for (name, value) in response.trailers {
+                                    let Ok(name) = http::HeaderName::from_bytes(name.as_bytes())
+                                    else {
+                                        return;
+                                    };
+                                    let Ok(value) = http::HeaderValue::from_str(&value) else {
+                                        return;
+                                    };
+                                    trailers.insert(name, value);
+                                }
+                                if stream.send_trailers(trailers).await.is_err() {
+                                    return;
+                                }
                             }
                             let _ = stream.finish().await;
                         });
@@ -1419,6 +1624,7 @@ pub(crate) fn start_http3_server(
         url,
         ca_cert_path,
         requests,
+        connections,
     }
 }
 

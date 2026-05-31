@@ -167,7 +167,8 @@ fn verbosity_and_color_output() {
 
     let res = run_fetch(&[&server.url, "-vvv"]);
     assert_exit(&res, 0);
-    assert!(res.stderr.contains("* Connect:"));
+    assert!(res.stderr.contains("* TCP:"));
+    assert!(!res.stderr.contains("* Connect:"));
     assert!(res.stderr.contains("* TTFB:"));
 }
 

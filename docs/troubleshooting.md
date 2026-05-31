@@ -55,7 +55,7 @@ fetch -vvv example.com
 Shows:
 
 - `> ` prefixed request lines
-- `* ` prefixed connection info (DNS, Connect, TTFB)
+- `* ` prefixed connection info (DNS, TCP, TLS, TTFB)
 - `< ` prefixed response lines
 
 ## Dry Run Mode

@@ -1,19 +1,23 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
-use futures_util::StreamExt;
-use reqwest::header::{ACCEPT, USER_AGENT};
+use http::header::{ACCEPT, CONTENT_LENGTH, LOCATION, USER_AGENT};
+use http::{HeaderMap, HeaderValue, Method, StatusCode};
+use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tokio::sync::Mutex;
 
 use crate::cli::Cli;
 use crate::core;
+use crate::duration::{TimeoutBudget, duration_from_seconds};
 use crate::error::{FetchError, write_warning_with_separator_with_color};
+use crate::http::{client, transport};
 use crate::output::progress::{self, BarCounter, ProgressPrinter, SpinnerCounter};
 
 #[cfg(any(windows, test))]
@@ -46,16 +50,22 @@ struct ReleaseArtifact<'a> {
     checksum_url: &'a str,
 }
 
+struct UpdateClient<'a> {
+    cli: Option<&'a Cli>,
+    timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+    client: Mutex<Option<UpdateCachedClient>>,
+}
+
+#[derive(Clone)]
+struct UpdateCachedClient {
+    origin: String,
+    client: client::UrlClient,
+}
+
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
-    let timeout = cli
-        .timeout
-        .map(|seconds| crate::duration::duration_from_seconds("timeout", seconds))
-        .transpose()?;
-    let mut builder = reqwest::Client::builder().use_rustls_tls();
-    if let Some(timeout) = timeout {
-        builder = builder.timeout(timeout);
-    }
-    let client = builder.build()?;
+    crate::tls::install_default_crypto_provider();
+    let client = UpdateClient::new(cli)?;
 
     let cache_dir = cache_dir()?;
     let _lock = acquire_update_lock(&cache_dir, true, cli.silent, cli.color.as_deref())?
@@ -110,7 +120,7 @@ pub fn maybe_run_self_delete_helper() -> Option<i32> {
 }
 
 async fn update_inner(
-    client: &reqwest::Client,
+    client: &UpdateClient<'_>,
     silent: bool,
     dry_run: bool,
 ) -> Result<(), FetchError> {
@@ -173,12 +183,12 @@ async fn update_inner(
     Ok(())
 }
 
-async fn latest_release(client: &reqwest::Client) -> Result<Release, FetchError> {
+async fn latest_release(client: &UpdateClient<'_>) -> Result<Release, FetchError> {
     let url = format!(
         "{}/repos/ryanfowler/fetch/releases/latest",
         update_url().trim_end_matches('/')
     );
-    let response = update_get(client, url).send().await?;
+    let response = update_get(client, &url).await?;
     if !response.status().is_success() {
         return Err(format!(
             "unable to fetch the latest release: received status: {}",
@@ -186,9 +196,7 @@ async fn latest_release(client: &reqwest::Client) -> Result<Release, FetchError>
         )
         .into());
     }
-    let release: Release = response
-        .json()
-        .await
+    let release: Release = serde_json::from_slice(response.body())
         .map_err(|err| FetchError::Message(format!("unable to fetch the latest release: {err}")))?;
     if release.tag_name.is_empty() {
         return Err("unable to fetch the latest release: no tag found".into());
@@ -197,7 +205,7 @@ async fn latest_release(client: &reqwest::Client) -> Result<Release, FetchError>
 }
 
 async fn download_artifact(
-    client: &reqwest::Client,
+    client: &UpdateClient<'_>,
     artifact_url: &str,
     silent: bool,
 ) -> Result<Vec<u8>, FetchError> {
@@ -205,12 +213,12 @@ async fn download_artifact(
 }
 
 async fn download_artifact_with_limit(
-    client: &reqwest::Client,
+    client: &UpdateClient<'_>,
     artifact_url: &str,
     silent: bool,
     max_artifact_bytes: u64,
 ) -> Result<Vec<u8>, FetchError> {
-    let response = update_get(client, artifact_url).send().await?;
+    let response = update_get_stream(client, artifact_url).await?;
     if !response.status().is_success() {
         return Err(format!(
             "fetching artifact: downloading artifact: received status: {}",
@@ -235,33 +243,25 @@ async fn download_artifact_with_limit(
         .unwrap_or(0)
         .min(max_artifact_bytes) as usize;
     let mut artifact = Vec::with_capacity(capacity);
-
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(err) => {
-                progress.finish();
-                return Err(err.into());
-            }
-        };
-        if artifact.len().saturating_add(chunk.len()) > max_artifact_bytes as usize {
-            progress.finish();
-            return Err("update artifact exceeded maximum allowed size".into());
-        }
-        progress.add(chunk.len());
-        artifact.extend_from_slice(&chunk);
-    }
+    let response = response
+        .into_buffered_with_limit(
+            Some(max_artifact_bytes),
+            Some(&mut progress),
+            "update artifact exceeded maximum allowed size",
+        )
+        .await;
     progress.finish();
+    let response = response?;
+    artifact.extend_from_slice(response.body());
 
     Ok(artifact)
 }
 
 async fn download_checksum(
-    client: &reqwest::Client,
+    client: &UpdateClient<'_>,
     checksum_url: &str,
 ) -> Result<String, FetchError> {
-    let response = update_get(client, checksum_url).send().await?;
+    let response = update_get_stream(client, checksum_url).await?;
     if !response.status().is_success() {
         return Err(format!(
             "fetching artifact checksum: received status: {}",
@@ -276,17 +276,19 @@ async fn download_checksum(
         return Err(format!("update artifact checksum is too large: {len} bytes").into());
     }
 
-    let mut checksum = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if checksum.len().saturating_add(chunk.len()) > MAX_UPDATE_CHECKSUM_BYTES as usize {
-            return Err("update artifact checksum exceeded maximum allowed size".into());
-        }
-        checksum.extend_from_slice(&chunk);
+    let response = response
+        .into_buffered_with_limit(
+            Some(MAX_UPDATE_CHECKSUM_BYTES),
+            None,
+            "update artifact checksum exceeded maximum allowed size",
+        )
+        .await?;
+
+    if response.body().len() > MAX_UPDATE_CHECKSUM_BYTES as usize {
+        return Err("update artifact checksum exceeded maximum allowed size".into());
     }
 
-    let checksum = String::from_utf8(checksum).map_err(|_| {
+    let checksum = String::from_utf8(response.body().to_vec()).map_err(|_| {
         FetchError::Message("update artifact checksum is not valid UTF-8".to_string())
     })?;
     parse_sha256_checksum(&checksum)
@@ -329,11 +331,267 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-fn update_get(client: &reqwest::Client, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
-    client
-        .get(url)
-        .header(USER_AGENT, core::user_agent())
-        .header(ACCEPT, core::DEFAULT_ACCEPT_HEADER)
+async fn update_get(client: &UpdateClient<'_>, url: &str) -> Result<UpdateResponse, FetchError> {
+    client.get(url).await
+}
+
+async fn update_get_stream(
+    client: &UpdateClient<'_>,
+    url: &str,
+) -> Result<UpdateStreamingResponse, FetchError> {
+    client.get_stream(url).await
+}
+
+impl<'a> UpdateClient<'a> {
+    fn new(cli: &'a Cli) -> Result<Self, FetchError> {
+        let timeout = cli
+            .timeout
+            .map(|seconds| duration_from_seconds("timeout", seconds))
+            .transpose()?;
+        let connect_timeout = cli
+            .connect_timeout
+            .map(|seconds| duration_from_seconds("connect-timeout", seconds))
+            .transpose()?;
+        Ok(Self {
+            cli: Some(cli),
+            timeout,
+            connect_timeout,
+            client: Mutex::new(None),
+        })
+    }
+
+    #[cfg(test)]
+    fn test(timeout: Option<Duration>) -> Self {
+        Self {
+            cli: None,
+            timeout,
+            connect_timeout: None,
+            client: Mutex::new(None),
+        }
+    }
+
+    async fn get(&self, raw_url: &str) -> Result<UpdateResponse, FetchError> {
+        self.get_stream(raw_url).await?.into_buffered().await
+    }
+
+    async fn get_stream(&self, raw_url: &str) -> Result<UpdateStreamingResponse, FetchError> {
+        let mut url = url::Url::parse(raw_url)?;
+        let request_start = Instant::now();
+        let budget = TimeoutBudget::started_at(self.timeout, request_start);
+        let mut redirects = 0usize;
+        loop {
+            let client = budget
+                .run(Box::pin(async { self.client_for_url(&url).await }))
+                .await?;
+            let headers = update_headers();
+            let mut request = client
+                .client
+                .request(Method::GET, url.clone())
+                .headers(headers);
+            if let Some(timeout) = budget.remaining()? {
+                request = request.timeout(timeout);
+            }
+            let response = budget
+                .run(Box::pin(async move {
+                    request.send().await.map_err(FetchError::from)
+                }))
+                .await?;
+            if !is_update_redirect(response.status()) {
+                return Ok(UpdateStreamingResponse { response, budget });
+            }
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| {
+                    FetchError::Runtime("redirect response missing Location".to_string())
+                })?;
+            if redirects >= 10 {
+                return Err(FetchError::Runtime(
+                    "exceeded maximum number of redirects: 10".to_string(),
+                ));
+            }
+            url = url
+                .join(location)
+                .map_err(|err| FetchError::Runtime(format!("invalid redirect location: {err}")))?;
+            redirects += 1;
+        }
+    }
+
+    async fn client_for_url(&self, url: &url::Url) -> Result<client::UrlClient, FetchError> {
+        let origin = update_client_origin(url)?;
+        {
+            let cache = self.client.lock().await;
+            if let Some(cached) = cache.as_ref().filter(|cached| cached.origin == origin) {
+                return Ok(cached.client.clone());
+            }
+        }
+
+        let client = self.build_client_for_url(url).await?;
+        let mut cache = self.client.lock().await;
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.origin == origin) {
+            return Ok(cached.client.clone());
+        }
+        *cache = Some(UpdateCachedClient {
+            origin,
+            client: client.clone(),
+        });
+        Ok(client)
+    }
+
+    async fn build_client_for_url(&self, url: &url::Url) -> Result<client::UrlClient, FetchError> {
+        let Some(cli) = self.cli else {
+            let mut builder = transport::Client::builder()
+                .use_rustls_tls()
+                .no_brotli()
+                .no_gzip()
+                .no_zstd();
+            if let Some(timeout) = self.connect_timeout {
+                builder = builder.connect_timeout(timeout);
+            }
+            return Ok(client::UrlClient {
+                client: builder.build()?,
+                dns_resolution: None,
+            });
+        };
+
+        let context = client::ClientBuildContext {
+            mode: client::ClientMode::Request(None),
+            request_timeout: None,
+            connect_timeout: self.connect_timeout,
+            request_start: Instant::now(),
+            session: None,
+            connect_timing: None,
+        };
+        client::build_client_for_url(cli, url, &context).await
+    }
+}
+
+fn update_client_origin(url: &url::Url) -> Result<String, FetchError> {
+    let authority = crate::net::url_authority(url)?;
+    Ok(format!("{}://{authority}", url.scheme()))
+}
+
+fn update_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_str(&core::user_agent()).expect("valid user agent"),
+    );
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static(core::DEFAULT_ACCEPT_HEADER),
+    );
+    headers
+}
+
+fn is_update_redirect(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    )
+}
+
+#[derive(Debug)]
+struct UpdateResponse {
+    status: StatusCode,
+    body: bytes::Bytes,
+}
+
+impl UpdateResponse {
+    fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+struct UpdateStreamingResponse {
+    response: transport::Response,
+    budget: TimeoutBudget,
+}
+
+impl UpdateStreamingResponse {
+    fn status(&self) -> StatusCode {
+        self.response.status()
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        self.response.headers()
+    }
+
+    fn content_length(&self) -> Option<u64> {
+        content_length(self.headers())
+    }
+
+    async fn into_buffered(self) -> Result<UpdateResponse, FetchError> {
+        self.into_buffered_with_limit(None, None, "response body exceeded maximum allowed size")
+            .await
+    }
+
+    async fn into_buffered_with_limit(
+        self,
+        max_body_bytes: Option<u64>,
+        mut progress: Option<&mut UpdateDownloadProgress>,
+        limit_error: &'static str,
+    ) -> Result<UpdateResponse, FetchError> {
+        let budget = self.budget;
+        let status = self.response.status();
+        let headers = self.response.headers().clone();
+        let (mut body, _) = self.response.into_body_with_deadline();
+        let capacity = content_length(&headers)
+            .map(|len| max_body_bytes.map_or(len, |max| len.min(max)))
+            .and_then(|len| usize::try_from(len).ok())
+            .unwrap_or(0);
+        let mut bytes = Vec::with_capacity(capacity);
+        while let Some(frame) = budget
+            .run(Box::pin(async {
+                match body.frame().await {
+                    Some(Ok(frame)) => Ok(Some(frame)),
+                    Some(Err(err)) => {
+                        Err(FetchError::Runtime(format!("response body error: {err}")))
+                    }
+                    None => Ok(None),
+                }
+            }))
+            .await?
+        {
+            let Ok(data) = frame.into_data() else {
+                continue;
+            };
+            if data.is_empty() {
+                continue;
+            }
+            if let Some(max) = max_body_bytes {
+                let current = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                let chunk = u64::try_from(data.len()).unwrap_or(u64::MAX);
+                if current.saturating_add(chunk) > max {
+                    return Err(limit_error.into());
+                }
+            }
+            if let Some(progress) = progress.as_deref_mut() {
+                progress.add(data.len());
+            }
+            bytes.extend_from_slice(&data);
+        }
+        Ok(UpdateResponse {
+            status,
+            body: bytes::Bytes::from(bytes),
+        })
+    }
+}
+
+fn content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
 }
 
 enum UpdateDownloadProgress {
@@ -1184,35 +1442,96 @@ mod tests {
         (url, join)
     }
 
+    fn read_request_line_and_headers(stream: &mut std::net::TcpStream) -> String {
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                break;
+            }
+        }
+        request_line
+    }
+
+    fn start_update_proxy(body: &'static str) -> (String, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let join = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request_line = read_request_line_and_headers(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+            request_line
+        });
+        (url, join)
+    }
+
+    fn start_slow_redirect_response(
+        first_delay: Duration,
+        final_delay: Duration,
+    ) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let join = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_request_line_and_headers(&mut stream);
+                std::thread::sleep(first_delay);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+            }
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_request_line_and_headers(&mut stream);
+                std::thread::sleep(final_delay);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                );
+            }
+        });
+        (url, join)
+    }
+
     #[test]
     fn update_requests_use_go_client_headers() {
-        let client = reqwest::Client::builder().use_rustls_tls().build().unwrap();
-
-        let request = update_get(
-            &client,
-            "https://api.github.com/repos/ryanfowler/fetch/releases/latest",
-        )
-        .build()
-        .unwrap();
+        let headers = update_headers();
 
         assert_eq!(
-            request
-                .headers()
-                .get(USER_AGENT)
-                .and_then(|v| v.to_str().ok()),
+            headers.get(USER_AGENT).and_then(|v| v.to_str().ok()),
             Some(core::user_agent().as_str())
         );
         assert_eq!(
-            request.headers().get(ACCEPT).and_then(|v| v.to_str().ok()),
+            headers.get(ACCEPT).and_then(|v| v.to_str().ok()),
             Some(core::DEFAULT_ACCEPT_HEADER)
         );
+    }
+
+    #[test]
+    fn update_client_origin_keys_default_ports_and_ipv6_hosts() {
+        let url = url::Url::parse("https://example.com/releases/latest").unwrap();
+        assert_eq!(
+            update_client_origin(&url).unwrap(),
+            "https://example.com:443"
+        );
+
+        let url = url::Url::parse("http://[::1]/artifact").unwrap();
+        assert_eq!(update_client_origin(&url).unwrap(), "http://[::1]:80");
     }
 
     #[tokio::test]
     async fn download_artifact_rejects_content_length_above_limit() {
         let (url, join) =
             start_artifact_response(vec![("Content-Length", "11".to_string())], Vec::new());
-        let client = reqwest::Client::builder().use_rustls_tls().build().unwrap();
+        let client = UpdateClient::test(None);
 
         let err = download_artifact_with_limit(&client, &url, true, 10)
             .await
@@ -1231,7 +1550,7 @@ mod tests {
             Vec::new(),
             vec![b"12345".to_vec(), b"67890".to_vec(), b"!".to_vec()],
         );
-        let client = reqwest::Client::builder().use_rustls_tls().build().unwrap();
+        let client = UpdateClient::test(None);
 
         let err = download_artifact_with_limit(&client, &url, true, 10)
             .await
@@ -1241,6 +1560,42 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("update artifact exceeded maximum allowed size")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_client_uses_shared_proxy_config() {
+        let (proxy_url, join) = start_update_proxy("proxied update");
+        let cli =
+            <Cli as clap::Parser>::try_parse_from(["fetch", "--update", "--proxy", &proxy_url])
+                .unwrap();
+        let client = UpdateClient::new(&cli).unwrap();
+
+        let response = update_get(&client, "http://updates.example/artifact")
+            .await
+            .unwrap();
+        let request_line = join.join().unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"proxied update");
+        assert!(
+            request_line.starts_with("GET http://updates.example/artifact HTTP/1.1"),
+            "{request_line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_redirects_share_one_request_timeout_budget() {
+        let (url, join) =
+            start_slow_redirect_response(Duration::from_millis(150), Duration::from_millis(150));
+        let client = UpdateClient::test(Some(Duration::from_millis(220)));
+
+        let err = update_get(&client, &url).await.unwrap_err();
+        let _ = join.join();
+
+        assert!(
+            err.to_string().contains("request timed out after 220ms"),
+            "{err}"
         );
     }
 

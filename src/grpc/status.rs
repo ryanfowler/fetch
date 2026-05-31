@@ -1,7 +1,7 @@
 use std::fmt;
 
+use http::header::HeaderMap;
 use percent_encoding::percent_decode_str;
-use reqwest::header::HeaderMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Code(pub i32);
@@ -111,7 +111,7 @@ pub fn from_headers_or_trailers(headers: &HeaderMap, trailers: &HeaderMap) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::header::HeaderValue;
+    use http::header::HeaderValue;
 
     #[test]
     fn test_code_string() {

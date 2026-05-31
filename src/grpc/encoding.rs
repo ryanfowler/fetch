@@ -2,7 +2,7 @@ use std::fmt;
 use std::io::Read;
 
 use flate2::read::GzDecoder;
-use reqwest::header::HeaderMap;
+use http::header::HeaderMap;
 
 use crate::grpc::framing;
 
@@ -93,7 +93,7 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use reqwest::header::HeaderValue;
+    use http::header::HeaderValue;
     use std::io::Write;
 
     #[test]

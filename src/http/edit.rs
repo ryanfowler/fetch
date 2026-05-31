@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use reqwest::header::{CONTENT_TYPE, HeaderMap};
+use http::header::{CONTENT_TYPE, HeaderMap};
 
 use crate::error::FetchError;
 use crate::format::content_type;
@@ -313,7 +313,7 @@ mod tests {
     use crate::http::RequestBodyPayload;
 
     use super::*;
-    use reqwest::header::HeaderValue;
+    use http::header::HeaderValue;
 
     #[test]
     fn test_split_args() {
