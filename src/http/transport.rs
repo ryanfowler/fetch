@@ -41,8 +41,6 @@ use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
 use crate::timing::TransportTiming;
 
-pub(crate) mod hyper_client;
-
 const HTTP3_HAPPY_EYEBALLS_FALLBACK_DELAY: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,7 +412,7 @@ impl Client {
             .pooled
             .request(request)
             .await
-            .map_err(map_hyper_client_error)?;
+            .map_err(map_pooled_client_error)?;
         Ok(Response::from_hyper(url, response, body_deadline))
     }
 
@@ -943,7 +941,7 @@ fn http3_origin(url: &Url) -> Result<String, Error> {
     Ok(format!("{}://{}:{}", url.scheme(), host, port))
 }
 
-fn map_hyper_client_error(err: hyper_util::client::legacy::Error) -> Error {
+fn map_pooled_client_error(err: hyper_util::client::legacy::Error) -> Error {
     let kind = if err.is_connect() {
         ErrorKind::Connect
     } else {
