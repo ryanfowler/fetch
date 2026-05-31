@@ -200,6 +200,53 @@ pub fn write_stdout(bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
     stdout.write_all(bytes.as_ref())
 }
 
+pub fn bytes_appear_printable(bytes: &[u8]) -> bool {
+    let mut preview = bytes;
+    if bytes.len() > 1024 {
+        preview = &bytes[..1024];
+    }
+    if preview.contains(&0) {
+        return false;
+    }
+
+    let mut safe = 0usize;
+    let mut total = 0usize;
+    let mut remaining = preview;
+    while !remaining.is_empty() {
+        match std::str::from_utf8(remaining) {
+            Ok(valid) => {
+                for ch in valid.chars() {
+                    total += 1;
+                    if ch.is_whitespace() || !ch.is_control() || ch == '\x1b' {
+                        safe += 1;
+                    }
+                }
+                break;
+            }
+            Err(err) => {
+                let valid_up_to = err.valid_up_to();
+                if valid_up_to > 0 {
+                    let valid = std::str::from_utf8(&remaining[..valid_up_to])
+                        .expect("valid prefix reported by utf8 error");
+                    for ch in valid.chars() {
+                        total += 1;
+                        if ch.is_whitespace() || !ch.is_control() || ch == '\x1b' {
+                            safe += 1;
+                        }
+                    }
+                }
+                if err.error_len().is_none() {
+                    break;
+                }
+                total += 1;
+                remaining = &remaining[valid_up_to + err.error_len().unwrap()..];
+            }
+        }
+    }
+
+    total == 0 || (safe as f64 / total as f64) >= 0.9
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sequence {
     Reset,

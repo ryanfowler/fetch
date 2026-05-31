@@ -2878,6 +2878,11 @@ pub(crate) fn read_ws_text(reader: &mut impl Read) -> String {
 }
 
 pub(crate) fn read_ws_text_frame(reader: &mut impl Read) -> Option<String> {
+    let (_opcode, payload) = read_ws_frame(reader)?;
+    Some(String::from_utf8_lossy(&payload).into_owned())
+}
+
+pub(crate) fn read_ws_frame(reader: &mut impl Read) -> Option<(u8, Vec<u8>)> {
     let mut header = [0_u8; 2];
     if reader.read_exact(&mut header).is_err() {
         return None;
@@ -2908,7 +2913,7 @@ pub(crate) fn read_ws_text_frame(reader: &mut impl Read) -> Option<String> {
     if opcode == 0x8 {
         return None;
     }
-    Some(String::from_utf8_lossy(&payload).into_owned())
+    Some((opcode, payload))
 }
 
 pub(crate) fn write_ws_close_and_drain<T: Read + Write>(stream: &mut T, reason: &[u8]) {

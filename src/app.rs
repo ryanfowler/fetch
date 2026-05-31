@@ -276,6 +276,9 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     if !is_websocket && cli.ws_interactive.is_some() {
         return Err("'--ws-interactive' requires a ws:// or wss:// URL".into());
     }
+    if !is_websocket && cli.ws_message_mode.is_some() {
+        return Err("'--ws-message-mode' requires a ws:// or wss:// URL".into());
+    }
     if is_websocket {
         validate_websocket_exclusives(cli)?;
         return crate::websocket::execute(cli).await;
@@ -714,6 +717,15 @@ fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
             .unwrap_or(false)
     {
         return Err("'--ws-interactive' requires a ws:// or wss:// URL".into());
+    }
+    if cli.ws_message_mode.is_some()
+        && !cli
+            .url
+            .as_deref()
+            .map(crate::websocket::is_websocket_url)
+            .unwrap_or(false)
+    {
+        return Err("'--ws-message-mode' requires a ws:// or wss:// URL".into());
     }
     Ok(())
 }

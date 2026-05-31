@@ -22,6 +22,14 @@ fetch ws://echo.websocket.events -d "hello"
 fetch ws://echo.websocket.events -j '{"type": "subscribe", "channel": "updates"}'
 ```
 
+By default, outgoing messages are sent as text when the payload is valid UTF-8
+and as binary when it is not. Use `--ws-message-mode text|binary|auto` to force
+the frame type:
+
+```sh
+fetch ws://api.example.com/upload -d @payload.bin --ws-message-mode binary
+```
+
 ### Piped Input
 
 Pipe lines from stdin — each line is sent as a separate text message, including
@@ -35,6 +43,11 @@ printf "msg1\nmsg2\n" | fetch ws://echo.websocket.events
 `fetch` connects before reading piped input, streams each line as it arrives, and
 continues printing server messages after stdin reaches EOF until the server
 closes the connection.
+
+With `--ws-message-mode auto`, piped input is still line-delimited, but a line
+that is not valid UTF-8 is sent as a binary message. With `--ws-message-mode
+binary`, piped input is streamed as raw byte chunks and newline bytes are
+preserved.
 
 When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Use Ctrl+C or Ctrl+D to exit.
 
@@ -54,7 +67,7 @@ fetch ws://api.example.com/stream --ws-interactive off
 ## Output
 
 - **Text messages**: Written to stdout. JSON messages are automatically formatted when connected to a terminal.
-- **Binary messages**: A `[binary N bytes]` indicator is printed to stderr.
+- **Binary messages**: Written as raw bytes to stdout when stdout is redirected or piped. When stdout is a terminal, binary-looking payloads are guarded with a warning instead of being printed.
 - **Formatting**: Use `--format on` to force JSON formatting, or `--format off` to disable it.
 
 ```sh
@@ -119,5 +132,4 @@ fetch --connect-timeout 2 --timeout 10 wss://api.example.com/ws
 
 - WebSocket requires HTTP/1.1 for the upgrade handshake. Using `--http 2` or `--http 3` with WebSocket is not supported.
 - WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`, `--form`, `--multipart`, `--xml`, `--edit`, output-file/clipboard flags, or retry flags.
-- Binary message content is not displayed; only a size indicator is shown.
 - The pager is disabled for WebSocket output.

@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,18 +24,29 @@ use crate::auth::aws_sigv4;
 use crate::cli::Cli;
 use crate::core;
 use crate::duration::{TimeoutBudget, duration_from_seconds};
-use crate::error::{FetchError, write_warnings_with_separator_with_color};
+use crate::error::{
+    FetchError, write_warning_with_color, write_warnings_with_separator_with_color,
+};
 use crate::format::json;
 use crate::net::DialStream;
 
 pub mod interactive;
 
-const STDIN_LINE_CHANNEL_CAPACITY: usize = 16;
+const STDIN_MESSAGE_CHANNEL_CAPACITY: usize = 16;
+const STDIN_BINARY_CHUNK_SIZE: usize = 16 * 1024;
+const BINARY_MESSAGE_WARNING: &str = "the WebSocket message appears to be binary\n\nRedirect stdout to a file or pipe to output binary WebSocket messages";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MessageOutput {
     Continue,
     Closed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebSocketMessageMode {
+    Auto,
+    Text,
+    Binary,
 }
 
 pub fn is_websocket_url(raw: &str) -> bool {
@@ -103,7 +114,8 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     }
 
     let (mut sender, mut receiver) = stream.split();
-    let send_messages = send_noninteractive_messages(&mut sender, initial_message);
+    let send_messages =
+        send_noninteractive_messages(&mut sender, initial_message, message_mode(cli));
     let receive_messages = read_messages(cli, &mut receiver);
     tokio::pin!(send_messages);
     tokio::pin!(receive_messages);
@@ -239,6 +251,14 @@ fn should_use_interactive(cli: &Cli) -> Result<bool, FetchError> {
     interactive_for_mode(cli.ws_interactive.as_deref(), core::stdio().all_terminal())
 }
 
+fn message_mode(cli: &Cli) -> WebSocketMessageMode {
+    match cli.ws_message_mode.as_deref().unwrap_or("auto") {
+        "text" => WebSocketMessageMode::Text,
+        "binary" => WebSocketMessageMode::Binary,
+        _ => WebSocketMessageMode::Auto,
+    }
+}
+
 fn interactive_for_mode(mode: Option<&str>, all_terms: bool) -> Result<bool, FetchError> {
     match mode {
         Some("on") if !all_terms => {
@@ -260,24 +280,23 @@ fn websocket_initial_message(cli: &Cli) -> Result<Option<Vec<u8>>, FetchError> {
 async fn send_noninteractive_messages<S>(
     sink: &mut S,
     initial_message: Option<Vec<u8>>,
+    mode: WebSocketMessageMode,
 ) -> Result<(), FetchError>
 where
     S: Sink<Message, Error = WsError> + Unpin,
 {
     if let Some(message) = initial_message {
-        sink.send(Message::Text(
-            String::from_utf8_lossy(&message).into_owned().into(),
-        ))
-        .await
-        .map_err(websocket_error)?;
+        sink.send(outgoing_message(message, mode)?)
+            .await
+            .map_err(websocket_error)?;
     }
     if core::stdio().stdin_is_terminal() {
         return Ok(());
     }
 
-    let mut stdin_lines = spawn_stdin_line_reader();
-    while let Some(line) = stdin_lines.recv().await {
-        sink.send(Message::Text(line?.into()))
+    let mut stdin_messages = spawn_stdin_message_reader(mode);
+    while let Some(message) = stdin_messages.recv().await {
+        sink.send(outgoing_message(message?, mode)?)
             .await
             .map_err(websocket_error)?;
     }
@@ -285,36 +304,85 @@ where
     Ok(())
 }
 
-fn spawn_stdin_line_reader() -> mpsc::Receiver<Result<String, io::Error>> {
-    let (tx, rx) = mpsc::channel(STDIN_LINE_CHANNEL_CAPACITY);
+fn outgoing_message(bytes: Vec<u8>, mode: WebSocketMessageMode) -> Result<Message, FetchError> {
+    match mode {
+        WebSocketMessageMode::Auto => match String::from_utf8(bytes) {
+            Ok(text) => Ok(Message::Text(text.into())),
+            Err(err) => Ok(Message::Binary(err.into_bytes().into())),
+        },
+        WebSocketMessageMode::Text => String::from_utf8(bytes)
+            .map(|text| Message::Text(text.into()))
+            .map_err(|err| {
+                FetchError::Message(format!(
+                    "WebSocket text message is not valid UTF-8: {}",
+                    err.utf8_error()
+                ))
+            }),
+        WebSocketMessageMode::Binary => Ok(Message::Binary(bytes.into())),
+    }
+}
+
+fn spawn_stdin_message_reader(
+    mode: WebSocketMessageMode,
+) -> mpsc::Receiver<Result<Vec<u8>, io::Error>> {
+    let (tx, rx) = mpsc::channel(STDIN_MESSAGE_CHANNEL_CAPACITY);
     thread::spawn(move || {
         let stdin = io::stdin();
         let mut reader = io::BufReader::new(stdin.lock());
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    strip_line_ending(&mut line);
-                    if tx.blocking_send(Ok(line)).is_err() {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    let _ = tx.blocking_send(Err(err));
-                    break;
-                }
-            }
+        if mode == WebSocketMessageMode::Binary {
+            read_stdin_binary_chunks(&mut reader, tx);
+        } else {
+            read_stdin_lines_as_bytes(&mut reader, tx);
         }
     });
     rx
 }
 
-fn strip_line_ending(line: &mut String) {
-    if line.ends_with('\n') {
+fn read_stdin_lines_as_bytes(
+    reader: &mut impl BufRead,
+    tx: mpsc::Sender<Result<Vec<u8>, io::Error>>,
+) {
+    loop {
+        let mut line = Vec::new();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                strip_line_ending(&mut line);
+                if tx.blocking_send(Ok(line)).is_err() {
+                    break;
+                }
+            }
+            Err(err) => {
+                let _ = tx.blocking_send(Err(err));
+                break;
+            }
+        }
+    }
+}
+
+fn read_stdin_binary_chunks(reader: &mut impl Read, tx: mpsc::Sender<Result<Vec<u8>, io::Error>>) {
+    let mut buf = vec![0; STDIN_BINARY_CHUNK_SIZE];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if tx.blocking_send(Ok(buf[..n].to_vec())).is_err() {
+                    break;
+                }
+            }
+            Err(err) => {
+                let _ = tx.blocking_send(Err(err));
+                break;
+            }
+        }
+    }
+}
+
+fn strip_line_ending(line: &mut Vec<u8>) {
+    if line.ends_with(b"\n") {
         line.pop();
     }
-    if line.ends_with('\r') {
+    if line.ends_with(b"\r") {
         line.pop();
     }
 }
@@ -545,7 +613,11 @@ where
                     return Ok(());
                 }
             }
-            Message::Binary(bytes) => write_binary_indicator(cli, bytes.len()),
+            Message::Binary(bytes) => {
+                if write_binary_message(cli, &bytes, stdout_is_terminal)? == MessageOutput::Closed {
+                    return Ok(());
+                }
+            }
             Message::Close(_) => return Ok(()),
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
@@ -567,6 +639,25 @@ fn write_text_message(
         }
     }
     write_stdout_message(&mut stdout, bytes, true)
+}
+
+fn write_binary_message(
+    cli: &Cli,
+    bytes: &[u8],
+    stdout_is_terminal: bool,
+) -> Result<MessageOutput, FetchError> {
+    if should_warn_for_terminal_binary_message(bytes, stdout_is_terminal) {
+        write_binary_terminal_warning(cli);
+        return Ok(MessageOutput::Continue);
+    }
+
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    write_stdout_message(&mut stdout, bytes, false)
+}
+
+fn should_warn_for_terminal_binary_message(bytes: &[u8], stdout_is_terminal: bool) -> bool {
+    stdout_is_terminal && !core::bytes_appear_printable(bytes)
 }
 
 fn write_stdout_message(
@@ -600,11 +691,11 @@ fn use_color(cli: &Cli, stdout_is_terminal: bool) -> bool {
     core::color_enabled(cli.color.as_deref(), stdout_is_terminal)
 }
 
-fn write_binary_indicator(cli: &Cli, len: usize) {
+fn write_binary_terminal_warning(cli: &Cli) {
     if cli.silent {
         return;
     }
-    eprintln!("[binary {len} bytes]");
+    write_warning_with_color(BINARY_MESSAGE_WARNING, cli.color.as_deref());
 }
 
 fn websocket_error(err: WsError) -> FetchError {
@@ -788,6 +879,33 @@ mod tests {
 
         let off_cli = Cli::try_parse_from(["fetch", "--color", "off", "ws://example.com"]).unwrap();
         assert!(!use_color(&off_cli, true));
+    }
+
+    #[test]
+    fn websocket_message_mode_controls_outgoing_frame_type() {
+        let auto_text = outgoing_message(b"hello".to_vec(), WebSocketMessageMode::Auto).unwrap();
+        assert!(matches!(auto_text, Message::Text(_)));
+
+        let auto_binary =
+            outgoing_message(vec![0xff, 0, 0xfe], WebSocketMessageMode::Auto).unwrap();
+        assert!(matches!(auto_binary, Message::Binary(_)));
+
+        let forced_binary =
+            outgoing_message(b"hello".to_vec(), WebSocketMessageMode::Binary).unwrap();
+        assert!(matches!(forced_binary, Message::Binary(_)));
+
+        let err = outgoing_message(vec![0xff], WebSocketMessageMode::Text).unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn websocket_binary_terminal_guard_matches_printable_policy() {
+        assert!(should_warn_for_terminal_binary_message(b"abc\0def", true));
+        assert!(!should_warn_for_terminal_binary_message(b"abc\0def", false));
+        assert!(!should_warn_for_terminal_binary_message(
+            b"plain text",
+            true
+        ));
     }
 
     #[test]

@@ -509,6 +509,15 @@ pub struct Cli {
     pub ws_interactive: Option<String>,
 
     #[arg(
+        long = "ws-message-mode",
+        value_name = "MODE",
+        value_parser = ["auto", "text", "binary"],
+        hide_possible_values = true,
+        help = "WebSocket frame mode [auto, text, binary]"
+    )]
+    pub ws_message_mode: Option<String>,
+
+    #[arg(
         short = 'x',
         long,
         value_name = "[@]VALUE",
@@ -617,6 +626,11 @@ mod tests {
         );
         assert!(
             help.contains("--ws-interactive <MODE>       WebSocket prompt mode [auto, on, off]")
+        );
+        assert!(
+            help.contains(
+                "--ws-message-mode <MODE>      WebSocket frame mode [auto, text, binary]"
+            )
         );
 
         for line in help.lines() {

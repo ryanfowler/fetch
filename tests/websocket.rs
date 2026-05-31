@@ -2,6 +2,59 @@ mod support;
 
 use support::*;
 
+fn start_ws_frame_server(reply: Vec<u8>) -> (String, mpsc::Receiver<(u8, Vec<u8>)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket frame server");
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let (seen_tx, seen_rx) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let reply = reply.clone();
+                    let seen_tx = seen_tx.clone();
+                    thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut reader = BufReader::new(&mut stream);
+                        let Some(req) = read_request(&mut reader) else {
+                            return;
+                        };
+                        let key = req.header("sec-websocket-key");
+                        let mut sha = Sha1::new();
+                        sha.update(key.as_bytes());
+                        sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                        let accept =
+                            base64::engine::general_purpose::STANDARD.encode(sha.finalize());
+                        let response = format!(
+                            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                        );
+                        if reader
+                            .get_mut()
+                            .write_all(response.as_bytes())
+                            .and_then(|()| reader.get_mut().flush())
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if let Some(frame) = read_ws_frame(&mut reader) {
+                            let _ = seen_tx.send(frame);
+                        }
+                        let stream = reader.into_inner();
+                        let _ = stream.write_all(&ws_binary_frame(&reply));
+                        write_ws_close_and_drain(stream, b"done");
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (url, seen_rx)
+}
+
 #[test]
 fn websocket_noninteractive_go_cases() {
     let (ws_url, seen) = start_ws_echo_server(|_| Ok(()));
@@ -119,6 +172,91 @@ fn websocket_noninteractive_go_cases() {
     ]);
     assert_exit(&res, 0);
     assert!(res.stderr.contains("GET") || res.stderr.contains("method"));
+}
+
+#[test]
+fn websocket_auto_sends_invalid_utf8_body_as_binary_and_writes_binary_stdout() {
+    let reply = vec![0, 1, 2, 3];
+    let (ws_url, seen) = start_ws_frame_server(reply.clone());
+    let dir = TempDir::new().unwrap();
+    let body_path = dir.path().join("ws-body.bin");
+    let body = vec![0xff, 0, 0xfe];
+    fs::write(&body_path, &body).unwrap();
+    let body_arg = format!("@{}", body_path.display());
+
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([
+        &ws_url,
+        "-d",
+        &body_arg,
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.env("NO_COLOR", "");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let output = cmd.output().expect("run websocket binary body fetch");
+    assert!(
+        output.status.success(),
+        "fetch exited with {}; stdout: {:?}; stderr: {}",
+        output.status,
+        output.stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        (0x2, body)
+    );
+    assert_eq!(output.stdout, reply);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("[binary"));
+}
+
+#[test]
+fn websocket_binary_message_mode_streams_stdin_as_raw_bytes() {
+    let (ws_url, seen) = start_ws_frame_server(Vec::new());
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([
+        &ws_url,
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+        "--ws-message-mode",
+        "binary",
+    ]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.env("NO_COLOR", "");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let mut child = cmd.spawn().expect("spawn websocket binary stdin fetch");
+    let mut stdin = child.stdin.take().expect("child stdin");
+    stdin.write_all(b"a\nb\0").unwrap();
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .expect("wait websocket binary stdin fetch");
+    assert!(
+        output.status.success(),
+        "fetch exited with {}; stdout: {:?}; stderr: {}",
+        output.status,
+        output.stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        (0x2, b"a\nb\0".to_vec())
+    );
 }
 
 #[test]
@@ -311,8 +449,14 @@ fn websocket_receives_json_text_binary_and_query_handshake() {
 
     assert_exit(&res, 0);
     assert!(res.stdout.contains("\"hello\": \"websocket\""));
+    assert!(
+        res.stdout
+            .as_bytes()
+            .windows(4)
+            .any(|window| window == b"\0\x01\x02\x03")
+    );
     assert!(res.stdout.contains("plain text"));
-    assert!(res.stderr.contains("[binary 4 bytes]"));
+    assert!(!res.stderr.contains("[binary"));
 }
 
 #[test]
