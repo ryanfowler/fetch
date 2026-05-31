@@ -148,6 +148,24 @@ fn websocket_noninteractive_go_cases() {
     assert!(res.stderr.contains("WebSocket requires HTTP/1.1"));
     assert!(res.stderr.contains("HTTP/3.0 is not supported"));
 
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused websocket port");
+    let addr = listener
+        .local_addr()
+        .expect("unused websocket port local addr");
+    drop(listener);
+    let refused_url = format!("ws://{addr}");
+    let res = run_fetch_once(
+        FetchOpts::default(),
+        &[&refused_url, "--ws-interactive", "off"],
+    );
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.to_ascii_lowercase().contains("refused"),
+        "stderr:\n{}",
+        res.stderr
+    );
+    assert!(!res.stderr.contains("--help"), "stderr:\n{}", res.stderr);
+
     let res = run_fetch(&[&ws_url, "--method", "POST", "--timing", "--dry-run"]);
     assert_exit(&res, 0);
     assert!(res.stderr.contains("GET / HTTP/1.1"));
@@ -485,6 +503,29 @@ fn websocket_wss_trusts_custom_ca_go_case() {
         "secure websocket"
     );
     assert!(res.stdout.contains("echo: secure websocket"));
+}
+
+#[test]
+fn websocket_wss_bad_certificate_suggests_insecure_go_case() {
+    let (wss, _seen) = start_wss_echo_server(|_| Ok(()));
+    let res = run_fetch(&[
+        &wss.url,
+        "-d",
+        "secure websocket",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.to_ascii_lowercase().contains("certificate"),
+        "stderr:\n{}",
+        res.stderr
+    );
+    assert!(res.stderr.contains("--insecure"), "stderr:\n{}", res.stderr);
+    assert!(!res.stderr.contains("--help"), "stderr:\n{}", res.stderr);
 }
 
 #[test]
