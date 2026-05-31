@@ -546,6 +546,9 @@ fetch wss://echo.websocket.events -d "hello"
 
 Use `--ws-interactive auto|on|off` to control the terminal prompt.
 
+Use `--ws-message-mode auto|text|binary` to control whether outgoing messages
+are sent as text or binary WebSocket frames.
+
 See [WebSocket documentation](websocket.md) for details.
 
 ## gRPC Options
