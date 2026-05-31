@@ -54,6 +54,23 @@ fn request_construction_and_data_sources() {
 }
 
 #[test]
+fn duplicate_cli_headers_are_sent_as_separate_wire_lines() {
+    let server = TestServer::start(|_| TestResponse::ok("ok"));
+
+    let res = run_fetch(&[
+        &server.url,
+        "--header",
+        "X-Test: one",
+        "--header",
+        "X-Test: two",
+    ]);
+    assert_exit(&res, 0);
+
+    let req = wait_for_requests(&server, 1).remove(0);
+    assert_eq!(req.header_values("x-test"), ["one", "two"]);
+}
+
+#[test]
 fn config_merges_global_host_and_cli_options() {
     let attempts = Arc::new(AtomicUsize::new(0));
     let attempts_for_handler = Arc::clone(&attempts);

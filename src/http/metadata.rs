@@ -1,5 +1,7 @@
 use super::*;
 
+use std::collections::HashSet;
+
 pub(crate) fn load_session(cli: &Cli) -> Result<Option<crate::session::Session>, FetchError> {
     let Some(name) = cli.session.as_deref() else {
         return Ok(None);
@@ -331,6 +333,7 @@ pub(crate) fn apply_query(url: &mut Url, query: &[String]) {
 }
 
 pub(crate) fn apply_headers(headers: &mut HeaderMap, values: &[String]) -> Result<(), FetchError> {
+    let mut seen = HashSet::new();
     for raw in values {
         let Some((key, val)) = raw.split_once(':') else {
             return Err(FetchError::Message(format!(
@@ -351,7 +354,10 @@ pub(crate) fn apply_headers(headers: &mut HeaderMap, values: &[String]) -> Resul
         let value = HeaderValue::from_str(val.trim()).map_err(|err| {
             FetchError::Message(format!("invalid header value for '{key}': {err}"))
         })?;
-        headers.insert(name, value);
+        if seen.insert(name.clone()) {
+            headers.remove(&name);
+        }
+        headers.append(name, value);
     }
     Ok(())
 }
@@ -489,6 +495,42 @@ mod tests {
             err,
             "invalid value 'Bad Header: value' for option '--header': must be in the format NAME:VALUE with a valid non-empty header name"
         );
+    }
+
+    #[test]
+    fn apply_headers_appends_duplicates_after_clearing_defaults() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static(core::DEFAULT_ACCEPT_HEADER),
+        );
+        headers.insert(USER_AGENT, HeaderValue::from_static("fetch-test"));
+
+        apply_headers(
+            &mut headers,
+            &[
+                "Accept: application/xml".to_string(),
+                "X-Test: one".to_string(),
+                "Accept: application/yaml".to_string(),
+                "X-Test: two".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let accept_values = headers
+            .get_all(ACCEPT)
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(accept_values, ["application/xml", "application/yaml"]);
+
+        let test_values = headers
+            .get_all("x-test")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(test_values, ["one", "two"]);
+        assert_eq!(headers.get(USER_AGENT).unwrap(), "fetch-test");
     }
 
     #[test]
