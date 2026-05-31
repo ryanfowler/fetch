@@ -10,6 +10,8 @@ use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use crate::error::FetchError;
 use crate::format::json;
 
+use super::websocket_error;
+
 pub const PROMPT: &str = "❯ ";
 const MIN_ROWS: usize = 5;
 const READ_BUF_SIZE: usize = 256;
@@ -811,10 +813,6 @@ async fn detect_cursor_row_async<W: Write>(
 fn teardown<W: Write>(mode: &mut InteractiveMode, out: &mut W) -> io::Result<()> {
     mode.teardown_screen(out)?;
     out.flush()
-}
-
-fn websocket_error(err: WsError) -> FetchError {
-    FetchError::Message(err.to_string())
 }
 
 fn utf8_sequence_width(byte: u8) -> Option<usize> {

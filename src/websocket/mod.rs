@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::future::Future;
 use std::io::{self, BufRead, Read, Write};
 use std::sync::Arc;
@@ -87,11 +88,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let request_timeout = websocket_request_timeout(cli)?;
     let request_budget = TimeoutBudget::started_at(request_timeout, request_start);
     let connect_timeout = websocket_connect_timeout(cli, request_timeout, request_start)?;
-    let connect = async {
-        connect_websocket(cli, &url, request, connector, connect_timeout)
-            .await
-            .map_err(websocket_error)
-    };
+    let connect = async { connect_websocket(cli, &url, request, connector, connect_timeout).await };
     let (stream, response) = request_budget.run(connect).await?;
 
     print_response_metadata(cli, &response);
@@ -177,11 +174,11 @@ async fn connect_websocket(
         tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<DialStream>>,
         tokio_tungstenite::tungstenite::handshake::client::Response,
     ),
-    WsError,
+    FetchError,
 > {
     let stream = dial_websocket(cli, url, timeout)
         .await
-        .map_err(websocket_io_error)?;
+        .map_err(websocket_network_error)?;
     timeout_ws(
         timeout,
         client_async_tls_with_config(request, stream, None, connector),
@@ -224,17 +221,22 @@ fn websocket_connect_timeout(
 async fn timeout_ws<T>(
     timeout: TimeoutBudget,
     future: impl Future<Output = Result<T, WsError>>,
-) -> Result<T, WsError> {
-    let Some(remaining) = timeout.remaining().map_err(websocket_io_error)? else {
-        return future.await;
+) -> Result<T, FetchError> {
+    let Some(remaining) = timeout.remaining()? else {
+        return future.await.map_err(websocket_error);
     };
     tokio::time::timeout(remaining, future)
         .await
-        .map_err(|_| websocket_io_error(timeout.timeout_error()))?
+        .map_err(|_| timeout.timeout_error())?
+        .map_err(websocket_error)
 }
 
-fn websocket_io_error(err: FetchError) -> WsError {
-    WsError::Io(io::Error::other(err.to_string()))
+fn websocket_network_error(err: FetchError) -> FetchError {
+    match err {
+        FetchError::Io(err) => FetchError::Runtime(err.to_string()),
+        FetchError::Transport(err) => FetchError::Runtime(err.to_string()),
+        err => err,
+    }
 }
 
 fn write_warnings(cli: &Cli, warnings: &[String]) {
@@ -700,10 +702,32 @@ fn write_binary_terminal_warning(cli: &Cli) {
 
 fn websocket_error(err: WsError) -> FetchError {
     let message = err.to_string();
+    if websocket_certificate_validation_error(&err, &message) {
+        return FetchError::CertificateValidation(message);
+    }
     if let Some(start) = message.find("request timed out after ") {
         return FetchError::Runtime(message[start..].to_string());
     }
-    FetchError::Message(message)
+    match err {
+        WsError::Url(_) | WsError::HttpFormat(_) => FetchError::Message(message),
+        _ => FetchError::Runtime(message),
+    }
+}
+
+fn websocket_certificate_validation_error(err: &WsError, message: &str) -> bool {
+    if crate::http::is_certificate_validation_message(message) {
+        return true;
+    }
+
+    let mut source = err.source();
+    while let Some(err) = source {
+        if crate::http::is_certificate_validation_message(&err.to_string()) {
+            return true;
+        }
+        source = err.source();
+    }
+
+    false
 }
 
 #[cfg(test)]

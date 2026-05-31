@@ -75,7 +75,7 @@ pub(crate) use request::{
     RequestBody, RequestBodyPayload, apply_builder_authorization_headers, basic_header,
     request_body, request_body_into_bytes,
 };
-pub(crate) use retry::total_attempts_for_retry;
+pub(crate) use retry::{is_certificate_validation_message, total_attempts_for_retry};
 
 use encoding::*;
 use metadata::*;

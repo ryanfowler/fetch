@@ -358,7 +358,7 @@ pub(super) fn is_certificate_validation_error(err: &transport::Error) -> bool {
     false
 }
 
-pub(super) fn is_certificate_validation_message(message: &str) -> bool {
+pub(crate) fn is_certificate_validation_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("hostnameerror")
         || (lower.contains("certificate")
