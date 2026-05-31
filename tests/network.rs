@@ -420,6 +420,59 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     let port = host_port(&doh.url).split(':').nth(1).unwrap();
     let localhost_url = format!("http://localhost:{port}");
 
+    fn doh_wire_test_response(query: &[u8], answers: Vec<(u16, u32, Vec<u8>)>) -> Vec<u8> {
+        let (_, _, question_end) = parse_dns_question(query).expect("valid DNS query");
+        let mut response = Vec::new();
+        response.extend_from_slice(&query[0..2]);
+        response.extend_from_slice(&0x8180u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        response.extend_from_slice(&query[12..question_end]);
+        for (typ, ttl, data) in answers {
+            response.extend_from_slice(&[0xc0, 0x0c]);
+            response.extend_from_slice(&typ.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&ttl.to_be_bytes());
+            response.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            response.extend_from_slice(&data);
+        }
+        response
+    }
+
+    let wire_doh = TestServer::start(|req| {
+        if req.method != "POST"
+            || req.header("accept") != "application/dns-message"
+            || req.header("content-type") != "application/dns-message"
+        {
+            return TestResponse::status(415, "Unsupported Media Type", "")
+                .header("Connection", "close");
+        }
+        let Some((name, qtype, _)) = parse_dns_question(&req.body) else {
+            return TestResponse::status(400, "Bad Request", "").header("Connection", "close");
+        };
+        let answers = if name == "localhost." && qtype == 1 {
+            vec![(1, 30, vec![127, 0, 0, 1])]
+        } else {
+            Vec::new()
+        };
+        TestResponse::ok(doh_wire_test_response(&req.body, answers))
+            .header("Content-Type", "application/dns-message")
+            .header("Connection", "close")
+    });
+    let res = run_fetch(&[
+        &localhost_url,
+        "--dns-server",
+        &format!("{}/dns-query", wire_doh.url),
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stderr.contains("204 No Content"));
+    let wire_requests = wire_doh.requests.lock().unwrap();
+    assert_eq!(wire_requests.len(), 2);
+    assert!(wire_requests.iter().all(|req| req.method == "POST"));
+    assert!(wire_requests.iter().all(|req| req.path == "/dns-query"));
+
     let res = run_fetch(&[
         &localhost_url,
         "--dns-server",

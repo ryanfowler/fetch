@@ -173,6 +173,9 @@ Shows:
    fetch --dns-server https://1.1.1.1/dns-query example.com
    ```
 
+   DoH URLs use RFC 8484 wire-format requests, with Google-style JSON DoH
+   retained as a compatibility fallback.
+
 2. **Verify hostname**:
    ```sh
    nslookup example.com

@@ -27,7 +27,9 @@ UDP DNS queries advertise EDNS(0) and retry truncated responses over TCP.
 
 ### DNS-over-HTTPS (DoH)
 
-Use HTTPS URL for encrypted DNS queries:
+Use an HTTPS URL for encrypted DNS queries. `fetch` uses RFC 8484
+`application/dns-message` requests for generic DoH endpoints and falls back to
+Google-style JSON DoH responses for compatibility.
 
 ```sh
 # Cloudflare DoH
