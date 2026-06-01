@@ -1600,14 +1600,11 @@ async fn connect_http3(
     host: String,
     timeout: TimeoutBudget,
 ) -> Result<quinn::Connection, FetchError> {
-    let (ipv6, ipv4): (Vec<_>, Vec<_>) = addrs.into_iter().partition(SocketAddr::is_ipv6);
-    match (ipv6.is_empty(), ipv4.is_empty()) {
-        (true, true) => Err(FetchError::Runtime(
-            "lookup returned no addresses".to_string(),
-        )),
-        (true, false) => connect_http3_sequence(endpoint, ipv4, host, timeout).await,
-        (false, true) => connect_http3_sequence(endpoint, ipv6, host, timeout).await,
-        (false, false) => connect_http3_happy_eyeballs(endpoint, ipv6, ipv4, host, timeout).await,
+    let (preferred, fallback) = crate::net::split_addrs_by_first_family(addrs)?;
+    if fallback.is_empty() {
+        connect_http3_sequence(endpoint, preferred, host, timeout).await
+    } else {
+        connect_http3_happy_eyeballs(endpoint, preferred, fallback, host, timeout).await
     }
 }
 
