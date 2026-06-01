@@ -69,7 +69,7 @@ pub(crate) async fn build_client_for_url(
         .no_zstd();
     builder = configure_http_version(builder, context.mode);
     builder = configure_unix_socket(builder, cli.unix.as_deref())?;
-    builder = configure_http3_local_address(builder, http_version, url, dns_resolution.as_ref());
+    builder = configure_http3_local_address(builder, http_version, url);
     builder = configure_dns_resolution(builder, url.host_str(), dns_resolution.as_ref());
     if let Some(connect_timing) = context.connect_timing
         && (cli.timing || (cli.verbose >= 3 && !cli.silent))
@@ -153,12 +153,13 @@ async fn resolve_dns_for_client_inner(
 
     if let Some(dns_server) = cli.dns_server.as_deref() {
         let start = Instant::now();
-        let addrs = custom::sorted_unique_ips(custom::lookup_ips(dns_server, host, timeout).await?);
+        let addrs = custom::lookup_ips(dns_server, host, timeout).await?;
+        let timing_addrs = dns_timing_addrs(addrs.iter().copied());
         return Ok(Some(DnsResolution {
             socket_addrs: custom::socket_addrs_for_override(&addrs),
             timing: debug_dns.then(|| DnsTiming {
                 host: host.to_string(),
-                addrs,
+                addrs: timing_addrs,
                 duration: start.elapsed(),
             }),
         }));
@@ -176,12 +177,11 @@ async fn resolve_dns_for_client_inner(
         }
     });
     let start = Instant::now();
-    let mut socket_addrs = tokio::net::lookup_host((host, port))
+    let socket_addrs = tokio::net::lookup_host((host, port))
         .await
         .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
         .collect::<Vec<_>>();
-    custom::sort_socket_addrs(&mut socket_addrs);
-    let addrs = custom::sorted_unique_ips(socket_addrs.iter().map(|addr| addr.ip()).collect());
+    let addrs = dns_timing_addrs(socket_addrs.iter().map(|addr| addr.ip()));
     Ok(Some(DnsResolution {
         socket_addrs,
         timing: Some(DnsTiming {
@@ -190,6 +190,16 @@ async fn resolve_dns_for_client_inner(
             duration: start.elapsed(),
         }),
     }))
+}
+
+fn dns_timing_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<IpAddr> {
+    let mut unique = Vec::new();
+    for addr in addrs {
+        if !unique.contains(&addr) {
+            unique.push(addr);
+        }
+    }
+    unique
 }
 
 fn configure_dns_resolution(
@@ -209,24 +219,22 @@ fn configure_http3_local_address(
     builder: ClientBuilder,
     version: Option<HttpVersion>,
     url: &Url,
-    resolution: Option<&DnsResolution>,
 ) -> ClientBuilder {
     if !matches!(version, Some(HttpVersion::Http3)) {
         return builder;
     }
 
-    match http3_local_address(url, resolution) {
+    match http3_local_address(url) {
         Some(addr) => builder.local_address(addr),
         None => builder,
     }
 }
 
-pub(crate) fn http3_local_address(url: &Url, resolution: Option<&DnsResolution>) -> Option<IpAddr> {
+pub(crate) fn http3_local_address(url: &Url) -> Option<IpAddr> {
     let destination_ip = url
         .host_str()
         .map(|host| host.trim_start_matches('[').trim_end_matches(']'))
-        .and_then(|host| host.parse::<IpAddr>().ok())
-        .or_else(|| resolution?.socket_addrs.first().map(SocketAddr::ip));
+        .and_then(|host| host.parse::<IpAddr>().ok());
 
     match destination_ip {
         Some(IpAddr::V4(_)) => Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
@@ -455,18 +463,49 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn dns_timing_addrs_preserve_resolver_order_and_dedupe_display_addrs() {
+        let addrs = [
+            "::2".parse().unwrap(),
+            "127.0.0.2".parse().unwrap(),
+            "::1".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+            "::2".parse().unwrap(),
+        ];
+
+        let display_addrs = dns_timing_addrs(addrs);
+
+        assert_eq!(
+            display_addrs,
+            [
+                "::2".parse().unwrap(),
+                "127.0.0.2".parse().unwrap(),
+                "::1".parse().unwrap(),
+                "127.0.0.1".parse::<IpAddr>().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
     fn http3_local_address_matches_ip_literal_family() {
         let ipv4_url = Url::parse("https://127.0.0.1:3000/").unwrap();
         assert_eq!(
-            http3_local_address(&ipv4_url, None),
+            http3_local_address(&ipv4_url),
             Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         );
 
         let ipv6_url = Url::parse("https://[::1]:3000/").unwrap();
         assert_eq!(
-            http3_local_address(&ipv6_url, None),
+            http3_local_address(&ipv6_url),
             Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED))
         );
+    }
+
+    #[test]
+    fn http3_local_address_uses_dual_stack_bind_for_named_hosts() {
+        let url = Url::parse("https://localhost:3000/").unwrap();
+
+        assert_eq!(http3_local_address(&url), None);
     }
 
     #[test]

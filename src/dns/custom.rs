@@ -43,12 +43,6 @@ pub(crate) fn socket_addrs_with_port(
     addrs
 }
 
-pub(crate) fn sorted_unique_ips(mut addrs: Vec<IpAddr>) -> Vec<IpAddr> {
-    addrs.sort_by(compare_ip_addrs);
-    addrs.dedup();
-    addrs
-}
-
 pub(crate) fn sort_socket_addrs(addrs: &mut [SocketAddr]) {
     addrs.sort_by(|left, right| {
         compare_ip_addrs(&left.ip(), &right.ip()).then_with(|| left.port().cmp(&right.port()))

@@ -87,21 +87,27 @@ pub(crate) async fn connect_first(
     addrs: Vec<SocketAddr>,
     timeout: TimeoutBudget,
 ) -> Result<TcpStream, FetchError> {
-    let Some(first) = addrs.first() else {
-        return Err(FetchError::Runtime(
-            "lookup returned no addresses".to_string(),
-        ));
-    };
-    let first_is_ipv4 = first.is_ipv4();
-    let (preferred, fallback): (Vec<_>, Vec<_>) = addrs
-        .into_iter()
-        .partition(|addr| addr.is_ipv4() == first_is_ipv4);
+    let (preferred, fallback) = split_addrs_by_first_family(addrs)?;
 
     if fallback.is_empty() {
         return connect_sequence(preferred, timeout).await;
     }
 
     connect_happy_eyeballs(preferred, fallback, timeout).await
+}
+
+pub(crate) fn split_addrs_by_first_family(
+    addrs: Vec<SocketAddr>,
+) -> Result<(Vec<SocketAddr>, Vec<SocketAddr>), FetchError> {
+    let Some(first) = addrs.first() else {
+        return Err(FetchError::Runtime(
+            "lookup returned no addresses".to_string(),
+        ));
+    };
+    let first_is_ipv4 = first.is_ipv4();
+    Ok(addrs
+        .into_iter()
+        .partition(|addr| addr.is_ipv4() == first_is_ipv4))
 }
 
 async fn connect_happy_eyeballs(
@@ -758,5 +764,32 @@ mod tests {
         );
         assert_eq!(per_address_timeout(0, timeout), None);
         assert_eq!(per_address_timeout(3, TimeoutBudget::new(None)), None);
+    }
+
+    #[test]
+    fn split_addrs_by_first_family_preserves_resolver_family_preference() {
+        let addrs = vec![
+            SocketAddr::new("::1".parse().unwrap(), 443),
+            SocketAddr::new("127.0.0.1".parse().unwrap(), 443),
+            SocketAddr::new("::2".parse().unwrap(), 443),
+            SocketAddr::new("127.0.0.2".parse().unwrap(), 443),
+        ];
+
+        let (preferred, fallback) = split_addrs_by_first_family(addrs).unwrap();
+
+        assert_eq!(
+            preferred,
+            [
+                SocketAddr::new("::1".parse().unwrap(), 443),
+                SocketAddr::new("::2".parse().unwrap(), 443)
+            ]
+        );
+        assert_eq!(
+            fallback,
+            [
+                SocketAddr::new("127.0.0.1".parse().unwrap(), 443),
+                SocketAddr::new("127.0.0.2".parse().unwrap(), 443)
+            ]
+        );
     }
 }
