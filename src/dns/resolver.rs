@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::dns::util::{dns_query_id, udp_dns_timeout};
 use crate::dns::wire;
+use crate::duration::TimeoutBudget;
 
 const DNS_TYPE_A: u16 = wire::TYPE_A;
 const DNS_TYPE_AAAA: u16 = wire::TYPE_AAAA;
@@ -35,10 +36,10 @@ pub async fn lookup_udp(
         return Ok(vec![ip]);
     }
 
-    let timeout = udp_dns_timeout(timeout);
+    let budget = TimeoutBudget::new(timeout);
     let (a, aaaa) = tokio::join!(
-        lookup_udp_type(server_addr, host, DNS_TYPE_A, timeout),
-        lookup_udp_type(server_addr, host, DNS_TYPE_AAAA, timeout)
+        lookup_udp_type_with_budget(server_addr, host, DNS_TYPE_A, budget),
+        lookup_udp_type_with_budget(server_addr, host, DNS_TYPE_AAAA, budget)
     );
 
     let mut addrs = Vec::new();
@@ -63,14 +64,31 @@ pub async fn lookup_udp_type(
     dns_type: u16,
     timeout: Duration,
 ) -> Result<Vec<DnsRecord>, ResolverError> {
+    lookup_udp_type_with_budget(
+        server_addr,
+        host,
+        dns_type,
+        TimeoutBudget::new(Some(timeout)),
+    )
+    .await
+}
+
+async fn lookup_udp_type_with_budget(
+    server_addr: &str,
+    host: &str,
+    dns_type: u16,
+    budget: TimeoutBudget,
+) -> Result<Vec<DnsRecord>, ResolverError> {
     let id = dns_query_id();
     let raw = wire::build_query(id, host, dns_type).map_err(resolver_error)?;
+    let timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
     let response = crate::dns::transport::query_udp(server_addr, &raw, timeout)
         .await
         .map_err(resolver_error)?;
     match dns_records_from_response(&response, id) {
         Ok(records) => Ok(records),
         Err(err) if err.is_truncated() => {
+            let timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
             let response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
                 .await
                 .map_err(resolver_error)?;
@@ -143,7 +161,10 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream as StdTcpStream, UdpSocket as StdUdpSocket};
-    use std::sync::{Arc, Barrier, Mutex};
+    use std::sync::{
+        Arc, Barrier, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -208,6 +229,27 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].ip.to_string(), "203.0.113.10");
         assert_eq!(records[0].ttl, Some(55));
+        stop();
+    }
+
+    #[tokio::test]
+    async fn lookup_udp_type_timeout_budget_covers_truncated_tcp_fallback() {
+        let timeout = Duration::from_millis(250);
+        let (addr, tcp_accepts, stop) =
+            start_delayed_truncated_udp_slow_tcp_server(Duration::from_millis(150));
+
+        let start = Instant::now();
+        let err = lookup_udp_type(&addr, "example.com", DNS_TYPE_A, timeout)
+            .await
+            .unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert_eq!(err.to_string(), "DNS lookup timed out");
+        assert_eq!(tcp_accepts.load(Ordering::SeqCst), 1);
+        assert!(
+            elapsed < Duration::from_millis(350),
+            "lookup took {elapsed:?}, expected timeout to cover UDP and TCP fallback"
+        );
         stop();
     }
 
@@ -398,6 +440,77 @@ mod tests {
                 .unwrap()
                 .send_to(&[0], "127.0.0.1:9");
             handle.join().unwrap();
+        })
+    }
+
+    fn start_delayed_truncated_udp_slow_tcp_server(
+        udp_delay: Duration,
+    ) -> (String, Arc<AtomicUsize>, impl FnOnce()) {
+        let udp_socket = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+        udp_socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let addr = udp_socket.local_addr().unwrap();
+        let tcp_listener = TcpListener::bind(addr).unwrap();
+        tcp_listener.set_nonblocking(true).unwrap();
+        let done = Arc::new(Mutex::new(false));
+        let tcp_accepts = Arc::new(AtomicUsize::new(0));
+
+        let udp_done = done.clone();
+        let udp_handle = thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            loop {
+                if *udp_done.lock().unwrap() {
+                    return;
+                }
+                let Ok((n, peer)) = udp_socket.recv_from(&mut buf) else {
+                    continue;
+                };
+                if n < 12 {
+                    continue;
+                }
+                thread::sleep(udp_delay);
+                let response = truncated_response(&buf[..n]);
+                let _ = udp_socket.send_to(&response, peer);
+            }
+        });
+
+        let tcp_done = done.clone();
+        let tcp_accepts_for_thread = tcp_accepts.clone();
+        let tcp_handle = thread::spawn(move || {
+            loop {
+                if *tcp_done.lock().unwrap() {
+                    return;
+                }
+                match tcp_listener.accept() {
+                    Ok((mut stream, _)) => {
+                        tcp_accepts_for_thread.fetch_add(1, Ordering::SeqCst);
+                        if read_tcp_query(&mut stream).is_none() {
+                            continue;
+                        }
+                        loop {
+                            if *tcp_done.lock().unwrap() {
+                                return;
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
+
+        (addr.to_string(), tcp_accepts, move || {
+            *done.lock().unwrap() = true;
+            let _ = StdUdpSocket::bind("127.0.0.1:0")
+                .unwrap()
+                .send_to(&[0], addr);
+            let _ = StdTcpStream::connect(addr);
+            udp_handle.join().unwrap();
+            tcp_handle.join().unwrap();
         })
     }
 

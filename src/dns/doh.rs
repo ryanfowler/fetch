@@ -48,7 +48,7 @@ pub(crate) struct DohRecord {
 }
 
 pub(crate) struct DohClient {
-    timeout: Option<Duration>,
+    budget: TimeoutBudget,
     client: Client,
 }
 
@@ -95,13 +95,17 @@ pub async fn lookup_doh_type(
 }
 
 pub(crate) fn client(timeout: Option<Duration>) -> Result<DohClient, DnsError> {
+    client_with_budget(TimeoutBudget::new(timeout))
+}
+
+pub(crate) fn client_with_budget(budget: TimeoutBudget) -> Result<DohClient, DnsError> {
     let tls_config =
         crate::tls::rustls_platform_client_config().map_err(|err| DnsError(err.to_string()))?;
     let client = Client::builder()
         .tls_config(tls_config)
         .build()
         .map_err(|err| DnsError(err.to_string()))?;
-    Ok(DohClient { timeout, client })
+    Ok(DohClient { budget, client })
 }
 
 async fn lookup_doh_type_with_client(
@@ -246,8 +250,7 @@ impl DohClient {
         headers: HeaderMap,
         body: Option<Vec<u8>>,
     ) -> Result<DohResponseBody, DnsError> {
-        let budget = TimeoutBudget::new(self.timeout);
-        budget
+        self.budget
             .run(async {
                 let mut request = self.client.request(method, url).headers(headers);
                 if let Some(body) = body {
@@ -712,6 +715,37 @@ mod tests {
         )
     }
 
+    async fn start_delayed_415_fallback_server(
+        post_delay: Duration,
+    ) -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let Some(request) = read_wire_test_request(&mut stream).await else {
+                    continue;
+                };
+                if request.method.eq_ignore_ascii_case("POST") {
+                    tokio::time::sleep(post_delay).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 415 Unsupported Media Type\r\ncontent-length: 0\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n",
+                        )
+                        .await;
+                    continue;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        (
+            Url::parse(&format!("http://{addr}/dns-query")).unwrap(),
+            task,
+        )
+    }
+
     #[derive(Debug)]
     struct WireTestRequest {
         method: String,
@@ -1026,6 +1060,25 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(400),
             "lookup took {elapsed:?}, expected parallel A/AAAA queries near {delay:?}"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_doh_timeout_budget_covers_415_json_fallback() {
+        let timeout = Duration::from_millis(250);
+        let (url, task) = start_delayed_415_fallback_server(Duration::from_millis(150)).await;
+
+        let start = Instant::now();
+        let err = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A, Some(timeout))
+            .await
+            .unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert_eq!(err.to_string(), "request timed out after 250ms");
+        assert!(
+            elapsed < Duration::from_millis(350),
+            "lookup took {elapsed:?}, expected timeout to cover POST and JSON fallback"
         );
         task.abort();
     }
