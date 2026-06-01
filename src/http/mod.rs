@@ -387,9 +387,6 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 .await;
             }
             Err(err) => {
-                if let Some(message) = redirect_error_message(&err) {
-                    break Err(FetchError::Runtime(message));
-                }
                 if attempt < retry_count && is_retryable_error(&err) {
                     ensure_body_replayable(original_body_replayable, "retry")?;
                     let requested_delay = compute_delay(retry_delay, attempt, Duration::ZERO);
