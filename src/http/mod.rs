@@ -72,8 +72,8 @@ pub(crate) use metadata::{
     apply_headers, apply_query, load_session, normalize_url, request_target,
 };
 pub(crate) use request::{
-    RequestBody, RequestBodyPayload, apply_builder_authorization_headers, basic_header,
-    request_body, request_body_into_bytes,
+    RequestBody, RequestBodyPayload, apply_aws_sigv4, apply_builder_authorization_headers,
+    aws_config, basic_header, request_body, request_body_into_bytes,
 };
 pub(crate) use retry::{is_certificate_validation_message, total_attempts_for_retry};
 

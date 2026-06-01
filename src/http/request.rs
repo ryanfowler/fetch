@@ -347,7 +347,7 @@ pub(super) fn digest_credentials(
     Ok(Some((username.to_string(), password.to_string())))
 }
 
-pub(super) fn aws_config(value: Option<&str>) -> Result<Option<aws_sigv4::Config>, FetchError> {
+pub(crate) fn aws_config(value: Option<&str>) -> Result<Option<aws_sigv4::Config>, FetchError> {
     value
         .map(aws_sigv4::parse_config)
         .transpose()
@@ -358,7 +358,7 @@ pub(super) fn aws_unsigned_payload(cli: &Cli, config: &aws_sigv4::Config) -> boo
     config.service == "s3" && cli.data.as_deref() == Some("@-") && !cli.data_is_literal
 }
 
-pub(super) fn apply_aws_sigv4(
+pub(crate) fn apply_aws_sigv4(
     cli: &Cli,
     method: &str,
     url: &Url,

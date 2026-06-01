@@ -1,6 +1,18 @@
 mod support;
 
+use sha2::{Digest as Sha2Digest, Sha256};
 use support::*;
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter().copied() {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
 
 #[test]
 fn grpc_schema_descriptor_and_client_streaming_cases() {
@@ -590,4 +602,46 @@ fn grpc_reflection_h2c_go_cases() {
     ]);
     assert_exit(&res, 0);
     assert!(!res.stdout.is_empty());
+}
+
+#[test]
+fn grpc_reflection_requests_include_aws_sigv4_headers() {
+    let server = start_reflection_grpc_h2c_server(true);
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: vec![
+                ("AWS_ACCESS_KEY_ID".to_string(), "1234".to_string()),
+                ("AWS_SECRET_ACCESS_KEY".to_string(), "5678".to_string()),
+                ("AWS_SESSION_TOKEN".to_string(), "session-token".to_string()),
+            ],
+            ..Default::default()
+        },
+        &[
+            "--grpc-list",
+            "--aws-sigv4",
+            "us-east-1/execute-api",
+            &server.url,
+        ],
+    );
+    assert_exit(&res, 0);
+
+    let requests = server.requests();
+    let reflection = requests
+        .iter()
+        .find(|req| req.path == "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo")
+        .expect("captured reflection request");
+    let auth = reflection.header("authorization");
+    assert_eq!(reflection.method, "POST");
+    assert!(auth.starts_with("AWS4-HMAC-SHA256 "));
+    assert!(auth.contains("Credential=1234/"));
+    assert!(auth.contains("/us-east-1/execute-api/aws4_request"));
+    assert!(auth.contains("x-amz-content-sha256"));
+    assert!(auth.contains("x-amz-date"));
+    assert!(auth.contains("x-amz-security-token"));
+    assert!(!reflection.header("x-amz-date").is_empty());
+    assert_eq!(reflection.header("x-amz-security-token"), "session-token");
+    assert_eq!(
+        reflection.header("x-amz-content-sha256"),
+        sha256_hex(&reflection.body)
+    );
 }
