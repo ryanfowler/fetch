@@ -378,8 +378,13 @@ Route request through a proxy.
 
 ```sh
 fetch --proxy http://localhost:8080 example.com
+fetch --proxy https://secure-proxy.example.com:8443 example.com
 fetch --proxy socks5://localhost:1080 example.com
 ```
+
+HTTPS proxy TLS uses platform verification by default. Origin TLS flags such as
+`--ca-cert`, `--cert`, `--key`, and `--insecure` do not apply to the proxy
+handshake.
 
 ### `--unix PATH`
 

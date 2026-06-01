@@ -216,6 +216,16 @@ pub(crate) struct MtlsTestServer {
     pub(crate) join: Option<thread::JoinHandle<()>>,
 }
 
+pub(crate) struct HttpsProxyTestServer {
+    pub(crate) url: String,
+    pub(crate) ca_cert_path: PathBuf,
+    pub(crate) client_cert_path: PathBuf,
+    pub(crate) client_key_path: PathBuf,
+    pub(crate) requests: Arc<Mutex<Vec<TestRequest>>>,
+    pub(crate) shutdown: Option<mpsc::Sender<()>>,
+    pub(crate) join: Option<thread::JoinHandle<()>>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct H3Request {
     pub(crate) method: String,
@@ -289,6 +299,23 @@ impl Drop for TlsTestServer {
 }
 
 impl Drop for MtlsTestServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl HttpsProxyTestServer {
+    pub(crate) fn requests(&self) -> Vec<TestRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for HttpsProxyTestServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
@@ -2351,6 +2378,124 @@ pub(crate) fn start_http_connect_proxy(target_addr: String) -> (String, mpsc::Re
         }
     });
     (proxy_url, seen_rx)
+}
+
+pub(crate) fn start_https_proxy(require_client_auth: bool) -> HttpsProxyTestServer {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let dir = TempDir::new().unwrap().keep();
+
+    let ca_key =
+        rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
+            .unwrap();
+    let mut ca_params = rcgen::CertificateParams::default();
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "Proxy Test CA");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::DigitalSignature,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+
+    let server_key =
+        rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
+            .unwrap();
+    let mut server_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    server_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "proxy");
+    server_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+    let server_cert = server_params.signed_by(&server_key, &ca_issuer).unwrap();
+
+    let client_key =
+        rcgen::KeyPair::generate_rsa_for(&rcgen::PKCS_RSA_SHA256, rcgen::RsaKeySize::_2048)
+            .unwrap();
+    let mut client_params =
+        rcgen::CertificateParams::new(vec!["proxy-client".to_string()]).unwrap();
+    client_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "proxy-client");
+    client_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    let client_cert = client_params.signed_by(&client_key, &ca_issuer).unwrap();
+
+    let ca_cert_path = dir.join("proxy-ca.crt");
+    let client_cert_path = dir.join("proxy-client.crt");
+    let client_key_path = dir.join("proxy-client.key");
+    fs::write(&ca_cert_path, ca_cert.pem()).unwrap();
+    fs::write(&client_cert_path, client_cert.pem()).unwrap();
+    fs::write(&client_key_path, client_key.serialize_pem()).unwrap();
+
+    let server_key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(server_key.serialize_der()),
+    );
+    let builder = rustls::ServerConfig::builder();
+    let builder = if require_client_auth {
+        let mut client_roots = rustls::RootCertStore::empty();
+        client_roots.add(ca_cert.der().clone()).unwrap();
+        let client_verifier = rustls::server::WebPkiClientVerifier::builder(client_roots.into())
+            .build()
+            .unwrap();
+        builder.with_client_cert_verifier(client_verifier)
+    } else {
+        builder.with_no_client_auth()
+    };
+    let mut config = builder
+        .with_single_cert(vec![server_cert.der().clone()], server_key_der)
+        .unwrap();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let config = Arc::new(config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTPS proxy");
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("https://localhost:{port}");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let requests_for_thread = Arc::clone(&requests);
+    let (tx, rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        loop {
+            if rx.try_recv().is_ok() {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let config = Arc::clone(&config);
+                    let requests = Arc::clone(&requests_for_thread);
+                    thread::spawn(move || {
+                        let Ok(conn) = rustls::ServerConnection::new(config) else {
+                            return;
+                        };
+                        let mut tls = rustls::StreamOwned::new(conn, stream);
+                        let mut reader = BufReader::new(&mut tls);
+                        let Some(req) = read_request(&mut reader) else {
+                            return;
+                        };
+                        requests.lock().unwrap().push(req);
+                        let tls = reader.into_inner();
+                        write_response(tls, TestResponse::ok("proxied"));
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    HttpsProxyTestServer {
+        url,
+        ca_cert_path,
+        client_cert_path,
+        client_key_path,
+        requests,
+        shutdown: Some(tx),
+        join: Some(join),
+    }
 }
 
 pub(crate) fn start_stalling_proxy(scheme: &str) -> String {
