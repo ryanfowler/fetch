@@ -28,7 +28,8 @@ fn main() {
         "FETCH_VCS_TIME",
         command_output("git", &["log", "-1", "--format=%cI"]),
     );
-    if let Some(status) = command_output("git", &["status", "--porcelain"]) {
+    if let Some(status) = command_output("git", &["status", "--porcelain", "--untracked-files=no"])
+    {
         println!(
             "cargo:rustc-env=FETCH_VCS_MODIFIED={}",
             if status.is_empty() { "false" } else { "true" }

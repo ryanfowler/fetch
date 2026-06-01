@@ -1,4 +1,5 @@
 /.claude
+/.zig-cache
 /bin
 /scratch
 /target
