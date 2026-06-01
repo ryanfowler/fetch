@@ -337,10 +337,10 @@ pub(crate) async fn dial_http_proxy_tunnel(
     proxy_url: &Url,
     target: &Url,
     timeout: TimeoutBudget,
-    tls_config: Option<rustls::ClientConfig>,
+    proxy_tls_config: Option<rustls::ClientConfig>,
     proxy_authorization: Option<String>,
 ) -> Result<DialStream, FetchError> {
-    let mut stream = match tls_config {
+    let mut stream = match proxy_tls_config {
         Some(config) => {
             dial_http_proxy_stream_with_tls(raw_proxy, proxy_url, timeout, Some(config)).await?
         }
@@ -411,7 +411,7 @@ pub(crate) async fn dial_http_proxy_stream_with_tls(
     raw_proxy: &str,
     proxy_url: &Url,
     timeout: TimeoutBudget,
-    tls_config: Option<rustls::ClientConfig>,
+    proxy_tls_config: Option<rustls::ClientConfig>,
 ) -> Result<DialStream, FetchError> {
     let stream = connect_proxy_tcp(proxy_url, timeout).await?;
     if proxy_url.scheme() == "https" {
@@ -422,7 +422,7 @@ pub(crate) async fn dial_http_proxy_stream_with_tls(
             rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| {
                 FetchError::Message(format!("invalid proxy '{raw_proxy}': invalid host"))
             })?;
-        let mut config = match tls_config {
+        let mut config = match proxy_tls_config {
             Some(config) => config,
             None => crate::tls::rustls_platform_client_config()?,
         };

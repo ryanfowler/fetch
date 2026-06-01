@@ -793,14 +793,10 @@ async fn dial_stream_for_config(
         Some(proxy) if proxy.is_http_proxy() && url.scheme() == "http" => {
             let proxy_url = crate::net::parse_proxy_url(&proxy.url)
                 .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
-            let stream = crate::net::dial_http_proxy_stream_with_tls(
-                &proxy.url,
-                &proxy_url,
-                timeout,
-                config.tls_config.clone(),
-            )
-            .await
-            .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
+            let stream =
+                crate::net::dial_http_proxy_stream_with_tls(&proxy.url, &proxy_url, timeout, None)
+                    .await
+                    .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
             Ok((stream, true, true, None))
         }
         Some(proxy) if proxy.is_http_proxy() => {
@@ -814,7 +810,7 @@ async fn dial_stream_for_config(
                 &proxy_url,
                 url,
                 timeout,
-                config.tls_config.clone(),
+                None,
                 proxy_authorization,
             )
             .await

@@ -82,6 +82,10 @@ fetch --proxy http://proxy.example.com:8080 example.com
 fetch --proxy https://secure-proxy.example.com:8443 example.com
 ```
 
+HTTPS proxy TLS is configured separately from origin TLS. The proxy handshake
+uses platform verification, and origin `--ca-cert`, `--cert`/`--key`, and
+`--insecure` settings do not apply to the proxy.
+
 ### SOCKS5 Proxy
 
 ```sh

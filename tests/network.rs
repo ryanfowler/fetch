@@ -127,6 +127,59 @@ fn proxy_config_environment_and_curl_http1_cases() {
 }
 
 #[test]
+fn https_proxy_tls_ignores_origin_tls_settings() {
+    let proxy = start_https_proxy(false);
+    let ca = proxy.ca_cert_path.to_str().unwrap();
+    let target = "http://origin.example/proxied";
+
+    let res = run_fetch(&[
+        "--format",
+        "off",
+        "--proxy",
+        &proxy.url,
+        "--ca-cert",
+        ca,
+        target,
+    ]);
+    assert_exit(&res, 1);
+    assert!(proxy.requests().is_empty());
+
+    let res = run_fetch(&[
+        "--format",
+        "off",
+        "--proxy",
+        &proxy.url,
+        "--insecure",
+        target,
+    ]);
+    assert_exit(&res, 1);
+    assert!(proxy.requests().is_empty());
+}
+
+#[test]
+fn https_proxy_mtls_does_not_receive_origin_client_certificate() {
+    let proxy = start_https_proxy(true);
+    let cert = proxy.client_cert_path.to_str().unwrap();
+    let key = proxy.client_key_path.to_str().unwrap();
+    let target = "http://origin.example/mtls-proxy";
+
+    let res = run_fetch(&[
+        "--format",
+        "off",
+        "--proxy",
+        &proxy.url,
+        "--insecure",
+        "--cert",
+        cert,
+        "--key",
+        key,
+        target,
+    ]);
+    assert_exit(&res, 1);
+    assert!(proxy.requests().is_empty());
+}
+
+#[test]
 fn http3_go_harness_cases() {
     let h3 = start_http3_server(|req| {
         if req.path == "/h3" {
