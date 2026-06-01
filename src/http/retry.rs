@@ -264,22 +264,6 @@ pub(super) fn print_redirect_status(cli: &Cli, response: &Response) {
     flush_stderr(printer);
 }
 
-pub(super) fn redirect_error_message(err: &transport::Error) -> Option<String> {
-    if !err.is_redirect() {
-        return None;
-    }
-
-    let mut source = err.source();
-    while let Some(err) = source {
-        let message = err.to_string();
-        if message.contains("exceeded maximum number of redirects") {
-            return Some(message);
-        }
-        source = err.source();
-    }
-    None
-}
-
 pub(super) fn timeout_error_message(cli: &Cli, err: &transport::Error) -> Option<String> {
     if !err.is_timeout() {
         return None;

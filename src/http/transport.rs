@@ -117,10 +117,6 @@ impl Error {
     pub(crate) fn is_connect(&self) -> bool {
         self.kind == ErrorKind::Connect
     }
-
-    pub(crate) fn is_redirect(&self) -> bool {
-        false
-    }
 }
 
 impl fmt::Display for Error {
