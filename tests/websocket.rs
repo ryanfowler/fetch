@@ -731,6 +731,56 @@ fn websocket_dry_run_prints_effective_handshake_headers() {
     assert!(res.stderr.contains("> user-agent: fetch/"));
 }
 
+#[test]
+fn websocket_dry_run_does_not_read_stdin_body() {
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args(["ws://example.com/socket", "--dry-run", "-d", "@-"]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.env("NO_COLOR", "");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let mut child = cmd.spawn().expect("spawn websocket dry-run fetch");
+    let stdin = child.stdin.take().expect("child stdin");
+    let start = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .expect("poll websocket dry-run fetch")
+            .is_some()
+        {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(2) {
+            let _ = child.kill();
+            let out = child.wait_with_output().expect("wait killed fetch");
+            panic!(
+                "websocket dry-run waited for stdin\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let out = child
+        .wait_with_output()
+        .expect("wait websocket dry-run fetch");
+    drop(stdin);
+    let res = FetchOutput {
+        status: out.status,
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    };
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(res.stderr.contains("> GET /socket HTTP/1.1"));
+}
+
 #[cfg(unix)]
 #[test]
 fn websocket_interactive_pty_go_case() {
