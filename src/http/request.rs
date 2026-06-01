@@ -131,7 +131,10 @@ pub(super) fn apply_request_timeout(
     request_start: Instant,
 ) -> Result<RequestBuilder, FetchError> {
     if let Some(timeout) = TimeoutBudget::started_at(request_timeout, request_start).remaining()? {
-        req = req.timeout(timeout);
+        let timeout_message = request_timeout
+            .map(request_timeout_message)
+            .unwrap_or_else(|| request_timeout_message(timeout));
+        req = req.timeout_with_message(timeout, timeout_message);
     }
     Ok(req)
 }

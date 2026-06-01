@@ -9,7 +9,7 @@ use url::Url;
 use super::transport::{Client, ClientBuilder, NoProxy, Proxy, redirect};
 use crate::cli::{Cli, HttpVersion};
 use crate::dns::custom;
-use crate::duration::TimeoutBudget;
+use crate::duration::{TimeoutBudget, request_timeout_message};
 use crate::error::FetchError;
 use crate::timing::{DnsTiming, TransportTiming};
 
@@ -83,7 +83,11 @@ pub(crate) async fn build_client_for_url(
     if let Some(timeout) =
         TimeoutBudget::started_at(context.request_timeout, context.request_start).remaining()?
     {
-        builder = builder.timeout(timeout);
+        let timeout_message = context
+            .request_timeout
+            .map(request_timeout_message)
+            .unwrap_or_else(|| request_timeout_message(timeout));
+        builder = builder.timeout_with_message(timeout, timeout_message);
     }
     if let Some(timeout) = context.connect_timeout {
         builder = builder.connect_timeout(timeout);

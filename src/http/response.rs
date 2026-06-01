@@ -856,14 +856,14 @@ pub(super) fn async_response_reader(response: Response) -> (AsyncReadBox, Respon
         let stream_trailers = stream_trailers.clone();
         async move {
             loop {
-                let Some(frame) = transport::read_body_frame(&mut body, deadline)
+                let Some(frame) = transport::read_body_frame(&mut body, deadline.as_ref())
                     .await
                     .map_err(|err| {
                         std::io::Error::other(transport_response_body_error_message(&err))
                     })?
                 else {
                     return Ok::<
-                        Option<(Bytes, (Body, Option<tokio::time::Instant>))>,
+                        Option<(Bytes, (Body, Option<transport::BodyDeadline>))>,
                         std::io::Error,
                     >(None);
                 };
