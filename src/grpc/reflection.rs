@@ -14,6 +14,7 @@ use crate::grpc::framing;
 use crate::grpc::headers as grpc_headers;
 use crate::grpc::status;
 use crate::http::transport::Client;
+use crate::http::{RequestBodyPayload, apply_aws_sigv4, aws_config};
 use crate::proto::Schema;
 
 const REFLECTION_V1_PATH: &str = "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo";
@@ -178,9 +179,10 @@ async fn invoke(
     let request_body =
         framing::frame(&payload, false).map_err(|err| FetchError::Message(err.to_string()))?;
 
+    let headers = reflection_headers(cli, &url, &request_body)?;
     let response = client
         .post(url)
-        .headers(reflection_headers(cli)?)
+        .headers(headers)
         .body(request_body)
         .send()
         .await?;
@@ -209,7 +211,7 @@ async fn invoke(
     Ok(body.messages)
 }
 
-fn reflection_headers(cli: &Cli) -> Result<HeaderMap, FetchError> {
+fn reflection_headers(cli: &Cli, url: &Url, request_body: &[u8]) -> Result<HeaderMap, FetchError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         USER_AGENT,
@@ -217,6 +219,10 @@ fn reflection_headers(cli: &Cli) -> Result<HeaderMap, FetchError> {
     );
     crate::http::apply_headers(&mut headers, &cli.headers)?;
     grpc_headers::apply_standard_headers(&mut headers);
+    if let Some(config) = aws_config(cli.aws_sigv4.as_deref())? {
+        let signed_body = Some(RequestBodyPayload::from_bytes(request_body.to_vec(), None));
+        apply_aws_sigv4(cli, "POST", url, &mut headers, &signed_body, &config)?;
+    }
     crate::http::apply_builder_authorization_headers(&mut headers, cli, None)?;
     Ok(headers)
 }

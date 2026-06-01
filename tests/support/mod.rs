@@ -243,6 +243,13 @@ pub(crate) struct H3TestServer {
 pub(crate) struct ReflectionGrpcServer {
     pub(crate) url: String,
     pub(crate) ca_cert_path: Option<PathBuf>,
+    pub(crate) requests: Arc<Mutex<Vec<TestRequest>>>,
+}
+
+impl ReflectionGrpcServer {
+    pub(crate) fn requests(&self) -> Vec<TestRequest> {
+        self.requests.lock().unwrap().clone()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1669,6 +1676,8 @@ pub(crate) fn start_reflection_grpc_h2c_server_with_behavior(
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let descriptor = reflection_health_descriptor();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1681,8 +1690,9 @@ pub(crate) fn start_reflection_grpc_h2c_server_with_behavior(
                     break;
                 };
                 let descriptor = descriptor.clone();
+                let requests = Arc::clone(&captured_requests);
                 tokio::spawn(async move {
-                    serve_reflection_h2_connection(stream, descriptor, behavior).await;
+                    serve_reflection_h2_connection(stream, descriptor, behavior, requests).await;
                 });
             }
         });
@@ -1690,6 +1700,7 @@ pub(crate) fn start_reflection_grpc_h2c_server_with_behavior(
     ReflectionGrpcServer {
         url,
         ca_cert_path: None,
+        requests,
     }
 }
 
@@ -1733,6 +1744,8 @@ pub(crate) fn start_reflection_grpc_tls_server_with_versions(
         listener.local_addr().unwrap().port()
     );
     let descriptor = reflection_health_descriptor();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_requests = Arc::clone(&requests);
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1746,11 +1759,12 @@ pub(crate) fn start_reflection_grpc_tls_server_with_versions(
                 };
                 let acceptor = acceptor.clone();
                 let descriptor = descriptor.clone();
+                let requests = Arc::clone(&captured_requests);
                 tokio::spawn(async move {
                     let Ok(tls) = acceptor.accept(stream).await else {
                         return;
                     };
-                    serve_reflection_h2_connection(tls, descriptor, behavior).await;
+                    serve_reflection_h2_connection(tls, descriptor, behavior, requests).await;
                 });
             }
         });
@@ -1758,6 +1772,7 @@ pub(crate) fn start_reflection_grpc_tls_server_with_versions(
     ReflectionGrpcServer {
         url,
         ca_cert_path: Some(ca_cert_path),
+        requests,
     }
 }
 
@@ -1772,6 +1787,7 @@ async fn serve_reflection_h2_connection<T>(
     stream: T,
     descriptor: Vec<u8>,
     behavior: ReflectionBehavior,
+    requests: Arc<Mutex<Vec<TestRequest>>>,
 ) where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -1783,8 +1799,9 @@ async fn serve_reflection_h2_connection<T>(
             break;
         };
         let descriptor = descriptor.clone();
+        let requests = Arc::clone(&requests);
         tokio::spawn(async move {
-            handle_reflection_h2_request(request, respond, descriptor, behavior).await;
+            handle_reflection_h2_request(request, respond, descriptor, behavior, requests).await;
         });
     }
 }
@@ -2063,9 +2080,31 @@ async fn handle_reflection_h2_request(
     mut respond: h2::server::SendResponse<bytes::Bytes>,
     descriptor: Vec<u8>,
     behavior: ReflectionBehavior,
+    requests: Arc<Mutex<Vec<TestRequest>>>,
 ) {
-    let path = request.uri().path().to_string();
-    let mut body = request.into_body();
+    let (parts, mut body) = request.into_parts();
+    let path = parts.uri.path().to_string();
+    let request_path = parts
+        .uri
+        .path_and_query()
+        .map(|path| path.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let mut headers = HashMap::new();
+    let mut header_lines = Vec::new();
+    let mut current_name = None;
+    for (name, value) in parts.headers {
+        if let Some(name) = name {
+            current_name = Some(name.as_str().to_ascii_lowercase());
+        }
+        if let Some(name) = &current_name
+            && let Ok(value) = value.to_str()
+        {
+            let value = value.to_string();
+            header_lines.push((name.clone(), value.clone()));
+            headers.insert(name.clone(), value);
+        }
+    }
     let mut raw = Vec::new();
     while let Some(chunk) = body.data().await {
         let Ok(chunk) = chunk else {
@@ -2073,6 +2112,13 @@ async fn handle_reflection_h2_request(
         };
         raw.extend_from_slice(&chunk);
     }
+    requests.lock().unwrap().push(TestRequest {
+        method: parts.method.to_string(),
+        path: request_path,
+        headers,
+        header_lines,
+        body: raw.clone(),
+    });
     let (headers, payload) = match path.as_str() {
         "/grpc.health.v1.Health/Check" => (
             vec![("content-type", "application/grpc+proto")],
