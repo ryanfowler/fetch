@@ -56,31 +56,55 @@ pub(super) fn print_dry_run_body(cli: &Cli, body: &RequestBody) -> Result<(), Fe
     if cli.verbose < 2 {
         eprintln!();
     }
-    if matches!(body.source, RequestBodySource::Stdin) {
-        let mut bytes = Vec::new();
-        std::io::stdin().read_to_end(&mut bytes)?;
-        return print_dry_run_bytes(cli, &bytes);
+    if let Some(materialized) = materialize_dry_run_body(body)? {
+        return print_materialized_dry_run_body(cli, materialized);
     }
     let preview = request_body_preview(body)?;
     if is_printable(&preview) {
         write_request_body_to_stderr(body)?;
     } else {
-        let mut printer = core::Printer::stderr(cli.color.as_deref());
-        core::write_warning_msg_no_flush(&mut printer, "the request body appears to be binary");
-        flush_stderr(printer);
+        print_dry_run_binary_warning(cli);
     }
     Ok(())
 }
 
-pub(super) fn print_dry_run_bytes(cli: &Cli, bytes: &[u8]) -> Result<(), FetchError> {
-    if is_printable(bytes) {
-        std::io::stderr().write_all(bytes)?;
+enum DryRunMaterializedBody {
+    Bytes(Vec<u8>),
+    BinaryWarning,
+}
+
+fn materialize_dry_run_body(
+    body: &RequestBodyPayload,
+) -> Result<Option<DryRunMaterializedBody>, FetchError> {
+    if !matches!(
+        body.source,
+        RequestBodySource::Stdin | RequestBodySource::GrpcJsonStream { .. }
+    ) {
+        return Ok(None);
+    }
+    let bytes = request_body_source_to_bytes(body.source.clone())?;
+    Ok(Some(if is_printable(&bytes) {
+        DryRunMaterializedBody::Bytes(bytes)
     } else {
-        let mut printer = core::Printer::stderr(cli.color.as_deref());
-        core::write_warning_msg_no_flush(&mut printer, "the request body appears to be binary");
-        flush_stderr(printer);
+        DryRunMaterializedBody::BinaryWarning
+    }))
+}
+
+fn print_materialized_dry_run_body(
+    cli: &Cli,
+    body: DryRunMaterializedBody,
+) -> Result<(), FetchError> {
+    match body {
+        DryRunMaterializedBody::Bytes(bytes) => std::io::stderr().write_all(&bytes)?,
+        DryRunMaterializedBody::BinaryWarning => print_dry_run_binary_warning(cli),
     }
     Ok(())
+}
+
+fn print_dry_run_binary_warning(cli: &Cli) {
+    let mut printer = core::Printer::stderr(cli.color.as_deref());
+    core::write_warning_msg_no_flush(&mut printer, "the request body appears to be binary");
+    flush_stderr(printer);
 }
 
 pub(super) fn build_request(

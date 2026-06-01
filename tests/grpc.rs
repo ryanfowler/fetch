@@ -279,6 +279,37 @@ service StreamService {
 }
 
 #[test]
+fn grpc_dry_run_materializes_streaming_stdin_body_once() {
+    let dir = TempDir::new().unwrap();
+    let stream_desc = write_stream_descriptor_set(dir.path());
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            stdin: Some(r#"{"value":"one"}{"value":"two"}"#.to_string()),
+            ..Default::default()
+        },
+        &[
+            "http://127.0.0.1:1/streampkg.StreamService/ClientStream",
+            "--grpc",
+            "--proto-desc",
+            stream_desc.to_str().unwrap(),
+            "-d",
+            "@-",
+            "--dry-run",
+        ],
+    );
+
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(
+        res.stderr
+            .contains("POST /streampkg.StreamService/ClientStream ")
+    );
+    assert!(res.stderr.contains("content-type: application/grpc+proto"));
+    assert!(res.stderr.contains("the request body appears to be binary"));
+}
+
+#[test]
 fn grpc_h2c_stream_frames_and_status_trailers_are_handled() {
     let server_url = start_status_grpc_h2c_server();
     let res = run_fetch(&[
