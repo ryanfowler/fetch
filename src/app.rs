@@ -237,7 +237,7 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?;
     crate::cli::normalize_range_values(&mut cli.ranges).map_err(FetchError::Message)?;
     validate_proto_schema_files(cli)?;
-    validate_client_certificate_flags(direct_cli_sources)?;
+    validate_client_certificate_flags(cli, direct_cli_sources)?;
     validate_auth_credentials(cli)?;
     print_config_debug(cli, config_path.as_deref());
 
@@ -332,8 +332,11 @@ impl DirectCliSources {
     }
 }
 
-fn validate_client_certificate_flags(sources: DirectCliSources) -> Result<(), FetchError> {
-    if sources.key && !sources.cert {
+fn validate_client_certificate_flags(
+    cli: &Cli,
+    sources: DirectCliSources,
+) -> Result<(), FetchError> {
+    if sources.key && cli.cert.is_none() {
         return Err("flag '--key' requires '--cert'".into());
     }
     Ok(())
@@ -1372,11 +1375,21 @@ mod tests {
             Cli::try_parse_from(["fetch", "https://example.com", "--key", "client.key"]).unwrap();
         let sources = DirectCliSources::capture(&cli);
 
-        let err = validate_client_certificate_flags(sources)
+        let err = validate_client_certificate_flags(&cli, sources)
             .unwrap_err()
             .to_string();
 
         assert_eq!(err, "flag '--key' requires '--cert'");
+    }
+
+    #[test]
+    fn direct_key_with_merged_cert_is_allowed() {
+        let mut cli =
+            Cli::try_parse_from(["fetch", "https://example.com", "--key", "client.key"]).unwrap();
+        let sources = DirectCliSources::capture(&cli);
+        cli.cert = Some("client.crt".to_string());
+
+        validate_client_certificate_flags(&cli, sources).unwrap();
     }
 
     #[test]
@@ -1385,7 +1398,7 @@ mod tests {
         let sources = DirectCliSources::capture(&cli);
         cli.key = Some("client.key".to_string());
 
-        validate_client_certificate_flags(sources).unwrap();
+        validate_client_certificate_flags(&cli, sources).unwrap();
     }
 
     #[test]
