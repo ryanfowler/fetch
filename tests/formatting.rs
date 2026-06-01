@@ -347,8 +347,12 @@ fn sse_explicit_request_timeout_aborts_stream_body() {
     assert_exit(&res, 1);
     assert!(res.stdout.is_empty(), "stdout:\n{}", res.stdout);
     assert!(
+        res.stderr.contains("request timed out after 100ms"),
+        "stderr:\n{}",
         res.stderr
-            .contains("response body error: operation timed out"),
+    );
+    assert!(
+        !res.stderr.contains("operation timed out"),
         "stderr:\n{}",
         res.stderr
     );
@@ -382,8 +386,12 @@ fn sse_config_request_timeout_aborts_stream_body() {
     assert_exit(&res, 1);
     assert!(res.stdout.is_empty(), "stdout:\n{}", res.stdout);
     assert!(
+        res.stderr.contains("request timed out after 100ms"),
+        "stderr:\n{}",
         res.stderr
-            .contains("response body error: operation timed out"),
+    );
+    assert!(
+        !res.stderr.contains("operation timed out"),
         "stderr:\n{}",
         res.stderr
     );

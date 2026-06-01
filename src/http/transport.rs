@@ -37,7 +37,7 @@ use tower_service::Service;
 use url::Url;
 
 use crate::cli::HttpVersion;
-use crate::duration::TimeoutBudget;
+use crate::duration::{TimeoutBudget, request_timeout_message};
 use crate::error::FetchError;
 use crate::timing::TransportTiming;
 
@@ -134,6 +134,30 @@ impl StdError for Error {
         self.source
             .as_deref()
             .map(|source| source as &(dyn StdError + 'static))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BodyDeadline {
+    deadline: tokio::time::Instant,
+    timeout_message: String,
+}
+
+impl BodyDeadline {
+    #[cfg(test)]
+    pub(crate) fn new(request_timeout: Duration) -> Self {
+        Self::with_message(request_timeout, request_timeout_message(request_timeout))
+    }
+
+    fn with_message(timeout: Duration, timeout_message: String) -> Self {
+        Self {
+            deadline: tokio::time::Instant::now() + timeout,
+            timeout_message,
+        }
+    }
+
+    fn timeout_error(&self) -> Error {
+        Error::timeout(self.timeout_message.clone())
     }
 }
 
@@ -241,6 +265,7 @@ struct ClientConfig {
     proxies: Vec<Proxy>,
     tls_config: Option<rustls::ClientConfig>,
     request_timeout: Option<Duration>,
+    request_timeout_message: Option<String>,
     connect_timeout: Option<Duration>,
     session: Option<Arc<crate::session::PersistentCookieStore>>,
     connection_timing: Option<crate::http::client::ConnectionTiming>,
@@ -267,6 +292,7 @@ impl Client {
                 proxies: Vec::new(),
                 tls_config: None,
                 request_timeout: None,
+                request_timeout_message: None,
                 connect_timeout: None,
                 session: None,
                 connection_timing: None,
@@ -291,6 +317,7 @@ impl Client {
             body: None,
             version: None,
             timeout: self.config.request_timeout,
+            timeout_message: self.config.request_timeout_message.clone(),
         }
     }
 
@@ -303,9 +330,14 @@ impl Client {
             .version
             .or_else(|| self.config.mode.map(version_for_cli));
         let timeout = TimeoutBudget::new(request.timeout);
-        let body_deadline = request
-            .timeout
-            .map(|duration| tokio::time::Instant::now() + duration);
+        let body_deadline = request.timeout.map(|timeout| {
+            BodyDeadline::with_message(
+                timeout,
+                request
+                    .timeout_message
+                    .unwrap_or_else(|| request_timeout_message(timeout)),
+            )
+        });
         timeout
             .run(self.send(
                 request.method,
@@ -326,7 +358,7 @@ impl Client {
         mut headers: HeaderMap,
         body: Option<Body>,
         version: Option<Version>,
-        body_deadline: Option<tokio::time::Instant>,
+        body_deadline: Option<BodyDeadline>,
     ) -> Result<Result<Response, Error>, FetchError> {
         self.apply_session_cookies(&url, &mut headers);
         self.apply_proxy_authorization(&url, &mut headers)?;
@@ -402,7 +434,7 @@ impl Client {
         headers: HeaderMap,
         body: Option<Body>,
         version: Option<Version>,
-        body_deadline: Option<tokio::time::Instant>,
+        body_deadline: Option<BodyDeadline>,
     ) -> Result<Response, Error> {
         let body = body.unwrap_or_else(|| Body::from(Bytes::new()));
         let request_version = version.unwrap_or(Version::HTTP_11);
@@ -422,7 +454,7 @@ impl Client {
         url: Url,
         headers: HeaderMap,
         body: Option<Body>,
-        body_deadline: Option<tokio::time::Instant>,
+        body_deadline: Option<BodyDeadline>,
     ) -> Result<Response, Error> {
         if url.scheme() != "https" {
             return Err(Error::request(format!(
@@ -465,9 +497,10 @@ impl Client {
             }
         };
         let (mut send, mut recv) = stream.split();
+        let upload_deadline = body_deadline.clone();
         let send_task = tokio::spawn(async move {
             match body {
-                Some(body) => send_h3_body(&mut send, body, body_deadline).await,
+                Some(body) => send_h3_body(&mut send, body, upload_deadline).await,
                 None => send
                     .finish()
                     .await
@@ -658,8 +691,13 @@ impl ClientBuilder {
         self
     }
 
-    pub(crate) fn timeout(mut self, timeout: Duration) -> Self {
+    pub(crate) fn timeout_with_message(
+        mut self,
+        timeout: Duration,
+        timeout_message: impl Into<String>,
+    ) -> Self {
         self.config.request_timeout = Some(timeout);
+        self.config.request_timeout_message = Some(timeout_message.into());
         self
     }
 
@@ -1164,6 +1202,7 @@ pub(crate) struct RequestBuilder {
     body: Option<Body>,
     version: Option<Version>,
     timeout: Option<Duration>,
+    timeout_message: Option<String>,
 }
 
 impl RequestBuilder {
@@ -1184,6 +1223,18 @@ impl RequestBuilder {
 
     pub(crate) fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self.timeout_message
+            .get_or_insert_with(|| request_timeout_message(timeout));
+        self
+    }
+
+    pub(crate) fn timeout_with_message(
+        mut self,
+        timeout: Duration,
+        timeout_message: impl Into<String>,
+    ) -> Self {
+        self.timeout = Some(timeout);
+        self.timeout_message = Some(timeout_message.into());
         self
     }
 
@@ -1198,7 +1249,7 @@ pub(crate) struct Response {
     version: Version,
     headers: HeaderMap,
     body: Body,
-    body_deadline: Option<tokio::time::Instant>,
+    body_deadline: Option<BodyDeadline>,
     remote_addr: Option<SocketAddr>,
 }
 
@@ -1206,7 +1257,7 @@ impl Response {
     fn from_hyper(
         url: Url,
         response: http::Response<Incoming>,
-        body_deadline: Option<tokio::time::Instant>,
+        body_deadline: Option<BodyDeadline>,
     ) -> Self {
         let (parts, body) = response.into_parts();
         let remote_addr = parts.extensions.get::<PeerAddr>().map(|addr| addr.0);
@@ -1227,7 +1278,7 @@ impl Response {
         stream: h3::client::RequestStream<S, Bytes>,
         sender: h3::client::SendRequest<O, Bytes>,
         upload_task: Option<H3UploadTask>,
-        body_deadline: Option<tokio::time::Instant>,
+        body_deadline: Option<BodyDeadline>,
         remote_addr: SocketAddr,
     ) -> Self
     where
@@ -1280,7 +1331,8 @@ impl Response {
 
     pub(crate) async fn chunk(&mut self) -> Result<Option<Bytes>, Error> {
         loop {
-            let Some(frame) = read_body_frame(&mut self.body, self.body_deadline).await? else {
+            let Some(frame) = read_body_frame(&mut self.body, self.body_deadline.as_ref()).await?
+            else {
                 return Ok(None);
             };
             if let Ok(data) = frame.into_data()
@@ -1291,7 +1343,7 @@ impl Response {
         }
     }
 
-    pub(crate) fn into_body_with_deadline(self) -> (Body, Option<tokio::time::Instant>) {
+    pub(crate) fn into_body_with_deadline(self) -> (Body, Option<BodyDeadline>) {
         (self.body, self.body_deadline)
     }
 }
@@ -1312,12 +1364,12 @@ impl From<Response> for http::Response<Body> {
 
 pub(crate) async fn read_body_frame(
     body: &mut Body,
-    deadline: Option<tokio::time::Instant>,
+    deadline: Option<&BodyDeadline>,
 ) -> Result<Option<Frame<Bytes>>, Error> {
     let frame = match deadline {
-        Some(deadline) => tokio::time::timeout_at(deadline, body.frame())
+        Some(deadline) => tokio::time::timeout_at(deadline.deadline, body.frame())
             .await
-            .map_err(|_| Error::timeout("operation timed out"))?,
+            .map_err(|_| deadline.timeout_error())?,
         None => body.frame().await,
     };
     match frame {
@@ -1438,12 +1490,12 @@ where
 async fn send_h3_body<S>(
     send: &mut h3::client::RequestStream<S, Bytes>,
     mut body: Body,
-    deadline: Option<tokio::time::Instant>,
+    deadline: Option<BodyDeadline>,
 ) -> Result<(), Error>
 where
     S: h3::quic::SendStream<Bytes> + Unpin,
 {
-    while let Some(frame) = read_body_frame(&mut body, deadline).await? {
+    while let Some(frame) = read_body_frame(&mut body, deadline.as_ref()).await? {
         if let Ok(data) = frame.into_data()
             && !data.is_empty()
         {

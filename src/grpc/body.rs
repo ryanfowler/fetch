@@ -3,7 +3,7 @@ use http::header::HeaderMap;
 use crate::error::FetchError;
 use crate::grpc::encoding::{self, MessageEncoding};
 use crate::grpc::framing;
-use crate::http::transport::{Body, read_body_frame};
+use crate::http::transport::{Body, BodyDeadline, read_body_frame};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FramedBody {
@@ -21,13 +21,13 @@ pub async fn read_framed_body(
 pub(crate) async fn read_framed_body_with_deadline(
     mut body: Body,
     message_encoding: &MessageEncoding,
-    deadline: Option<tokio::time::Instant>,
+    deadline: Option<BodyDeadline>,
 ) -> Result<FramedBody, FetchError> {
     let mut decoder = framing::FrameDecoder::new();
     let mut messages = Vec::new();
     let mut trailers = HeaderMap::new();
 
-    while let Some(frame) = read_body_frame(&mut body, deadline).await? {
+    while let Some(frame) = read_body_frame(&mut body, deadline.as_ref()).await? {
         match frame.into_data() {
             Ok(data) => {
                 for frame in decoder
@@ -104,12 +104,12 @@ mod tests {
         let body = Body::wrap_stream(futures_util::stream::pending::<
             Result<bytes::Bytes, std::io::Error>,
         >());
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(10);
+        let deadline = BodyDeadline::new(std::time::Duration::from_millis(10));
 
         let err = read_framed_body_with_deadline(body, &MessageEncoding::Identity, Some(deadline))
             .await
             .unwrap_err();
 
-        assert_eq!(err.to_string(), "operation timed out");
+        assert_eq!(err.to_string(), "request timed out after 10ms");
     }
 }
