@@ -292,11 +292,9 @@ async fn lookup(
         return Ok(out);
     }
 
-    let remaining_timeout = timeout.remaining()?;
-    let udp_timeout = udp_dns_timeout(remaining_timeout);
     let doh_client = match &target {
         ResolverTarget::Doh { .. } => Some(
-            crate::dns::doh::client(remaining_timeout)
+            crate::dns::doh::client_with_budget(timeout)
                 .map_err(|err| FetchError::Message(err.to_string()))?,
         ),
         _ => None,
@@ -310,7 +308,7 @@ async fn lookup(
                     lookup_doh_records(client, url, host, query_type).await
                 }
                 (ResolverTarget::Udp { addr, .. }, _) => {
-                    lookup_udp_records(addr, host, query_type, udp_timeout).await
+                    lookup_udp_records(addr, host, query_type, timeout).await
                 }
                 (ResolverTarget::Default { .. }, _) => {
                     unreachable!("default resolver handled earlier")
@@ -421,17 +419,19 @@ async fn lookup_udp_records(
     server_addr: &str,
     host: &str,
     query_type: QueryType,
-    timeout: Duration,
+    timeout: TimeoutBudget,
 ) -> Result<Vec<Record>, QueryError> {
     let id = dns_query_id();
     let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
-    let mut response = crate::dns::transport::query_udp(server_addr, &raw, timeout)
+    let udp_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
+    let mut response = crate::dns::transport::query_udp(server_addr, &raw, udp_timeout)
         .await
         .map_err(QueryError::other)?;
     let raw_records = match wire::parse_response(&response, id) {
         Ok(records) => records,
         Err(err) if err.is_truncated() => {
-            response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
+            let tcp_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
+            response = crate::dns::transport::query_tcp(server_addr, &raw, tcp_timeout)
                 .await
                 .map_err(QueryError::truncated)?;
             wire::parse_response(&response, id).map_err(QueryError::truncated)?
@@ -1349,7 +1349,7 @@ mod tests {
                 label: "A",
                 dns_type: DNS_TYPE_A,
             },
-            Duration::from_secs(1),
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
         )
         .await
         .unwrap();
