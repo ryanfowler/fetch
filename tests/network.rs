@@ -965,6 +965,22 @@ fn mtls_client_certificate_go_cases() {
     assert_eq!(res.stdout, "mtls-success");
     assert!(res.stderr.contains("200 OK"));
 
+    let dir = TempDir::new().unwrap();
+    let config = dir.path().join("mtls-config-cert");
+    fs::write(&config, format!("cert = {cert}\n")).unwrap();
+    let res = run_fetch(&[
+        "--config",
+        config.to_str().unwrap(),
+        "--ca-cert",
+        ca,
+        "--key",
+        key,
+        &mtls.url,
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "mtls-success");
+    assert!(res.stderr.contains("200 OK"));
+
     let res = run_fetch(&["--ca-cert", ca, "--cert", combined, &mtls.url]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "mtls-success");
