@@ -73,13 +73,13 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     write_warnings(cli, &warnings);
     let interactive = should_use_interactive(cli)?;
 
-    let initial_message = websocket_initial_message(cli)?;
     let request = build_handshake_request(cli, &url)?;
     let connector = websocket_connector(cli, &url)?;
     if cli.dry_run {
         print_request_metadata(cli, method, &url, Some(request.headers()));
         return Ok(0);
     }
+    let initial_message = websocket_initial_message(cli)?;
     if cli.verbose >= 2 && !cli.silent {
         print_request_metadata(cli, method, &url, Some(request.headers()));
     }
