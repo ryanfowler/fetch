@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use cookie::{Cookie as RawCookie, SameSite};
@@ -21,6 +21,8 @@ pub enum SessionError {
         "invalid session name '{0}': session names may only contain letters, numbers, hyphens, and underscores"
     )]
     InvalidName(String),
+    #[error("timed out waiting for session lock after {0}")]
+    LockTimeout(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -28,6 +30,8 @@ pub enum SessionError {
     #[error(transparent)]
     Url(#[from] url::ParseError),
 }
+
+const SESSION_LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct LoadedSession {
@@ -513,19 +517,34 @@ impl Drop for SessionLock {
 }
 
 fn acquire_session_lock(path: &Path) -> Result<SessionLock, SessionError> {
+    acquire_session_lock_with_timeout(path, SESSION_LOCK_WAIT_TIMEOUT)
+}
+
+fn acquire_session_lock_with_timeout(
+    path: &Path,
+    timeout: Duration,
+) -> Result<SessionLock, SessionError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     create_sessions_dir(dir)?;
     let file = open_session_lock_file(&session_lock_path(path))?;
+    let started_at = Instant::now();
 
     for attempt in 0.. {
         if try_lock_session_file(&file)? {
             return Ok(SessionLock { file });
         }
+        if started_at.elapsed() >= timeout {
+            return Err(SessionError::LockTimeout(
+                crate::duration::format_go_duration(timeout),
+            ));
+        }
         let multiplier = (attempt + 1).min(10) as u64;
-        thread::sleep(Duration::from_millis(multiplier * 50));
+        let sleep = Duration::from_millis(multiplier * 50);
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        thread::sleep(sleep.min(remaining));
     }
 
-    unreachable!("session lock acquisition loop is unbounded")
+    unreachable!("session lock acquisition loop is unbounded by the iterator")
 }
 
 fn session_lock_path(path: &Path) -> PathBuf {
@@ -789,6 +808,25 @@ mod tests {
                 .iter()
                 .any(|cookie| cookie.name == "second" && cookie.value == "two")
         );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn session_lock_timeout_returns_when_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("held.json");
+        let _held = acquire_session_lock_with_timeout(&path, Duration::from_secs(1)).unwrap();
+
+        let started_at = Instant::now();
+        let result = acquire_session_lock_with_timeout(&path, Duration::from_millis(10));
+        let elapsed = started_at.elapsed();
+
+        match result {
+            Err(SessionError::LockTimeout(timeout)) => assert_eq!(timeout, "10ms"),
+            Err(err) => panic!("expected session lock timeout, got {err}"),
+            Ok(_) => panic!("expected held session lock to time out"),
+        }
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
     }
 
     #[test]
