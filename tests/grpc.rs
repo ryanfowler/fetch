@@ -636,6 +636,20 @@ fn grpc_reflection_h2c_go_cases() {
 }
 
 #[test]
+fn grpc_reflection_rejects_too_many_framed_messages() {
+    let server = start_reflection_grpc_h2c_many_small_frames_server();
+
+    let res = run_fetch(&["--grpc-list", &server.url]);
+
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("gRPC reflection response contains too many messages")
+    );
+    assert!(res.stderr.contains("--proto-file"));
+}
+
+#[test]
 fn grpc_reflection_requests_include_aws_sigv4_headers() {
     let server = start_reflection_grpc_h2c_server(true);
     let res = run_fetch_opts(
