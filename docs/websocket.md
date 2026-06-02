@@ -49,6 +49,10 @@ that is not valid UTF-8 is sent as a binary message. With `--ws-message-mode
 binary`, piped input is streamed as raw byte chunks and newline bytes are
 preserved.
 
+Text and auto stdin modes cap each line at 16 MiB before a newline. Use
+`--ws-message-mode binary` for larger messages or raw byte streams that should
+not be line-delimited.
+
 When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Use Ctrl+C or Ctrl+D to exit.
 
 Control this behavior with `--ws-interactive`:
