@@ -674,10 +674,9 @@ fn write_stdout_message(
         stdout.flush()
     });
 
-    match result {
-        Ok(()) => Ok(MessageOutput::Continue),
-        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(MessageOutput::Closed),
-        Err(err) => Err(err.into()),
+    match core::stdout_write_status(result)? {
+        core::StdoutWriteStatus::Open => Ok(MessageOutput::Continue),
+        core::StdoutWriteStatus::Closed => Ok(MessageOutput::Closed),
     }
 }
 

@@ -53,6 +53,53 @@ fn request_construction_and_data_sources() {
     assert!(req.header("content-length").is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn http_stdout_broken_pipe_exits_cleanly() {
+    let body = vec![b'a'; 2 * 1024 * 1024];
+    let server = TestServer::start(move |_| {
+        TestResponse::ok(body.clone()).header("Content-Type", "text/plain")
+    });
+
+    let mut fetch = Command::new(fetch_bin());
+    fetch.arg(server.url.as_str());
+    fetch.stdout(Stdio::piped()).stderr(Stdio::piped());
+    fetch.env("NO_COLOR", "");
+    fetch.env("HTTP_PROXY", "");
+    fetch.env("HTTPS_PROXY", "");
+    fetch.env("ALL_PROXY", "");
+    fetch.env("NO_PROXY", "*");
+
+    let mut fetch_child = fetch.spawn().expect("spawn fetch");
+    let fetch_stdout = fetch_child.stdout.take().expect("fetch stdout");
+    let head_output = Command::new("head")
+        .args(["-c", "1"])
+        .stdin(Stdio::from(fetch_stdout))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run head");
+    let fetch_output = fetch_child.wait_with_output().expect("wait fetch");
+
+    assert!(
+        head_output.status.success(),
+        "head stderr: {:?}",
+        head_output.stderr
+    );
+    assert_eq!(head_output.stdout, b"a");
+    assert_eq!(
+        fetch_output.status.code(),
+        Some(0),
+        "fetch stderr:\n{}",
+        String::from_utf8_lossy(&fetch_output.stderr)
+    );
+    let fetch_stderr = String::from_utf8_lossy(&fetch_output.stderr);
+    assert!(
+        !fetch_stderr.contains("error") && !fetch_stderr.contains("Broken pipe"),
+        "fetch stderr:\n{fetch_stderr}"
+    );
+}
+
 #[test]
 fn duplicate_cli_headers_are_sent_as_separate_wire_lines() {
     let server = TestServer::start(|_| TestResponse::ok("ok"));
