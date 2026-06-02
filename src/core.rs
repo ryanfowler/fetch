@@ -223,6 +223,10 @@ pub fn bytes_appear_printable(bytes: &[u8]) -> bool {
     if bytes.len() > 1024 {
         preview = &bytes[..1024];
     }
+    bytes_prefix_appears_printable(preview)
+}
+
+pub fn bytes_prefix_appears_printable(preview: &[u8]) -> bool {
     if preview.contains(&0) {
         return false;
     }

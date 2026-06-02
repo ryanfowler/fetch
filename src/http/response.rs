@@ -3,6 +3,8 @@ use super::*;
 const MAX_BUFFERED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DISCARDED_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_DRAIN_DURATION: Duration = Duration::from_millis(250);
+const TERMINAL_BINARY_SCAN_BYTES: usize = 64 * 1024;
+const TERMINAL_BINARY_SCAN_CHUNK_BYTES: usize = 16 * 1024;
 const BINARY_RESPONSE_WARNING: &str =
     "the response body appears to be binary\n\nTo output to the terminal anyway, use '--output -'";
 type ResponseTrailers = Arc<Mutex<HeaderMap>>;
@@ -933,24 +935,36 @@ pub(super) async fn stream_response_to_stdout_with_binary_check(
     target: StdoutStreamTarget,
     mut capture: Option<&mut clipboard::Capture>,
 ) -> Result<i64, FetchError> {
-    let mut first_chunk = vec![0; 16 * 1024];
-    let n = reader.read(&mut first_chunk).await?;
-    if n == 0 {
+    let mut scanned = Vec::with_capacity(TERMINAL_BINARY_SCAN_BYTES);
+    let mut chunk = vec![0; TERMINAL_BINARY_SCAN_CHUNK_BYTES];
+    while scanned.len() < TERMINAL_BINARY_SCAN_BYTES {
+        let limit = (TERMINAL_BINARY_SCAN_BYTES - scanned.len()).min(chunk.len());
+        let n = reader.read(&mut chunk[..limit]).await?;
+        if n == 0 {
+            break;
+        }
+        scanned.extend_from_slice(&chunk[..n]);
+        if !core::bytes_prefix_appears_printable(&scanned) {
+            break;
+        }
+    }
+    if scanned.is_empty() {
         return Ok(0);
     }
 
-    let first_chunk = &first_chunk[..n];
-    if !is_printable(first_chunk) {
+    if !core::bytes_prefix_appears_printable(&scanned) {
         write_warning(cli, BINARY_RESPONSE_WARNING);
         if let Some(capture) = capture.as_mut() {
-            capture.push(first_chunk);
+            capture.push(&scanned);
         }
         let mut sink = tokio::io::sink();
         let drained = copy_async_reader_to_writer(reader, &mut sink, capture).await?;
-        return Ok(i64::try_from(n).unwrap_or(i64::MAX).saturating_add(drained));
+        return Ok(i64::try_from(scanned.len())
+            .unwrap_or(i64::MAX)
+            .saturating_add(drained));
     }
 
-    copy_async_reader_to_stdout_target(reader, target, first_chunk, capture).await
+    copy_async_reader_to_stdout_target(reader, target, &scanned, capture).await
 }
 
 pub(super) async fn copy_async_reader_to_stdout_target(

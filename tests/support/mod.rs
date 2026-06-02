@@ -3290,7 +3290,24 @@ pub(crate) fn run_fetch_pty_with_fake_less(
 pub(crate) fn run_binary_pty_with_fake_less(
     extra_args: &[&str],
 ) -> (String, Option<String>, Option<String>) {
-    let server = TestServer::start(|_| TestResponse::ok(b"abc\0def".to_vec()));
+    run_body_pty_with_fake_less(b"abc\0def".to_vec(), extra_args)
+}
+
+#[cfg(unix)]
+pub(crate) fn run_late_binary_pty_with_fake_less(
+    extra_args: &[&str],
+) -> (String, Option<String>, Option<String>) {
+    let mut body = vec![b'a'; 16 * 1024];
+    body.extend_from_slice(b"delayed\0binary\n");
+    run_body_pty_with_fake_less(body, extra_args)
+}
+
+#[cfg(unix)]
+fn run_body_pty_with_fake_less(
+    body: Vec<u8>,
+    extra_args: &[&str],
+) -> (String, Option<String>, Option<String>) {
+    let server = TestServer::start(move |_| TestResponse::ok(body.clone()));
     let dir = TempDir::new().unwrap();
     install_fake_less(dir.path());
     let less_args = dir.path().join("less.args");

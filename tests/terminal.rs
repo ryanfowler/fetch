@@ -68,6 +68,39 @@ fn terminal_stdout_format_off_warns_instead_of_streaming_binary_response() {
 
 #[cfg(unix)]
 #[test]
+fn terminal_stdout_format_off_warns_when_later_stream_chunk_is_binary() {
+    let (output, less_args, less_input) = run_late_binary_pty_with_fake_less(&["--format", "off"]);
+
+    assert!(
+        output.contains("the response body appears to be binary"),
+        "{output:?}"
+    );
+    assert!(
+        output.contains("To output to the terminal anyway, use '--output -'"),
+        "{output:?}"
+    );
+    assert!(!output.contains("delayed\0binary"), "{output:?}");
+    assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
+    assert!(less_input.is_none(), "pager received input: {less_input:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_stdout_output_dash_allows_later_binary_stream_chunk() {
+    let (output, less_args, less_input) =
+        run_late_binary_pty_with_fake_less(&["--format", "off", "--pager", "off", "--output", "-"]);
+
+    assert!(
+        !output.contains("the response body appears to be binary"),
+        "{output:?}"
+    );
+    assert!(output.contains("delayed\0binary"), "{output:?}");
+    assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
+    assert!(less_input.is_none(), "pager received input: {less_input:?}");
+}
+
+#[cfg(unix)]
+#[test]
 fn pager_on_uses_less_when_stdout_is_not_terminal() {
     let (res, less_args, less_input) = run_fetch_with_fake_less(&["--pager", "on"]);
 
