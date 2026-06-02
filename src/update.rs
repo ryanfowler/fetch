@@ -30,6 +30,8 @@ const TEMP_EXE_SUFFIX: &str = ".__temp.exe";
 const SELF_DELETE_ENV: &str = "FETCH_INTERNAL_UPDATE_SELF_DELETE";
 const MAX_UPDATE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_UPDATE_CHECKSUM_BYTES: u64 = 1024;
+const MAX_UPDATE_UNPACKED_BYTES: u64 = MAX_UPDATE_ARTIFACT_BYTES * 4;
+const MAX_UPDATE_ARCHIVE_ENTRIES: usize = 128;
 
 #[derive(Debug, Deserialize)]
 struct Release {
@@ -691,10 +693,20 @@ fn unpack_artifact(dir: &Path, archive_name: &str, data: &[u8]) -> Result<(), Fe
 }
 
 fn unpack_tar_gz_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
+    unpack_tar_gz_artifact_with_limits(dir, data, ArchiveExtractionLimits::default())
+}
+
+fn unpack_tar_gz_artifact_with_limits(
+    dir: &Path,
+    data: &[u8],
+    limits: ArchiveExtractionLimits,
+) -> Result<(), FetchError> {
     let decoder = GzDecoder::new(data);
     let mut archive = tar::Archive::new(decoder);
+    let mut state = ArchiveExtractionState::new(limits);
     for entry in archive.entries()? {
         let mut entry = entry?;
+        state.account_entry()?;
         let path = entry.path()?.to_string_lossy().into_owned();
         let out = dir.join(safe_archive_path(&path)?);
         if let Some(parent) = out.parent() {
@@ -707,8 +719,7 @@ fn unpack_tar_gz_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
         if !entry.header().entry_type().is_file() {
             continue;
         }
-        let mut file = std::fs::File::create(&out)?;
-        std::io::copy(&mut entry, &mut file)?;
+        copy_archive_entry_to_file(&mut entry, &out, &mut state)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -721,11 +732,21 @@ fn unpack_tar_gz_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
 }
 
 fn unpack_zip_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
+    unpack_zip_artifact_with_limits(dir, data, ArchiveExtractionLimits::default())
+}
+
+fn unpack_zip_artifact_with_limits(
+    dir: &Path,
+    data: &[u8],
+    limits: ArchiveExtractionLimits,
+) -> Result<(), FetchError> {
     let reader = std::io::Cursor::new(data);
     let mut archive =
         zip::ZipArchive::new(reader).map_err(|err| FetchError::Message(format!("zip: {err}")))?;
+    let mut state = ArchiveExtractionState::new(limits);
 
     for index in 0..archive.len() {
+        state.account_entry()?;
         let mut file = archive
             .by_index(index)
             .map_err(|err| FetchError::Message(format!("zip: {err}")))?;
@@ -739,8 +760,7 @@ fn unpack_zip_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
             std::fs::create_dir_all(parent)?;
         }
 
-        let mut out_file = std::fs::File::create(&out)?;
-        std::io::copy(&mut file, &mut out_file)?;
+        copy_archive_entry_to_file(&mut file, &out, &mut state)?;
 
         #[cfg(unix)]
         if let Some(mode) = file.unix_mode() {
@@ -750,6 +770,95 @@ fn unpack_zip_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct ArchiveExtractionLimits {
+    max_entries: usize,
+    max_uncompressed_bytes: u64,
+}
+
+impl Default for ArchiveExtractionLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: MAX_UPDATE_ARCHIVE_ENTRIES,
+            max_uncompressed_bytes: MAX_UPDATE_UNPACKED_BYTES,
+        }
+    }
+}
+
+struct ArchiveExtractionState {
+    limits: ArchiveExtractionLimits,
+    entries: usize,
+    uncompressed_bytes: u64,
+}
+
+impl ArchiveExtractionState {
+    fn new(limits: ArchiveExtractionLimits) -> Self {
+        Self {
+            limits,
+            entries: 0,
+            uncompressed_bytes: 0,
+        }
+    }
+
+    fn account_entry(&mut self) -> Result<(), FetchError> {
+        self.entries = self.entries.checked_add(1).ok_or_else(|| {
+            FetchError::Message("self-update archive entry count overflowed".to_string())
+        })?;
+        if self.entries > self.limits.max_entries {
+            return Err(FetchError::Message(format!(
+                "self-update archive contains too many entries: maximum allowed is {}",
+                self.limits.max_entries
+            )));
+        }
+        Ok(())
+    }
+
+    fn account_bytes(&mut self, bytes: u64) -> Result<(), FetchError> {
+        self.uncompressed_bytes = self.uncompressed_bytes.saturating_add(bytes);
+        if self.uncompressed_bytes > self.limits.max_uncompressed_bytes {
+            return Err(FetchError::Message(format!(
+                "self-update archive uncompressed data exceeded maximum allowed size of {} bytes",
+                self.limits.max_uncompressed_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn remaining_bytes(&self) -> u64 {
+        self.limits
+            .max_uncompressed_bytes
+            .saturating_sub(self.uncompressed_bytes)
+    }
+}
+
+fn copy_archive_entry_to_file<R: std::io::Read>(
+    reader: &mut R,
+    out: &Path,
+    state: &mut ArchiveExtractionState,
+) -> Result<u64, FetchError> {
+    let mut file = std::fs::File::create(out)?;
+    match copy_archive_entry_bounded(reader, &mut file, state) {
+        Ok(bytes) => Ok(bytes),
+        Err(err) => {
+            drop(file);
+            let _ = std::fs::remove_file(out);
+            Err(err)
+        }
+    }
+}
+
+fn copy_archive_entry_bounded<R: std::io::Read, W: std::io::Write>(
+    reader: &mut R,
+    writer: &mut W,
+    state: &mut ArchiveExtractionState,
+) -> Result<u64, FetchError> {
+    let remaining = state.remaining_bytes();
+    let mut limited = std::io::Read::take(&mut *reader, remaining.saturating_add(1));
+    let copied = std::io::copy(&mut limited, writer)?;
+    state.account_bytes(copied)?;
+    Ok(copied)
 }
 
 fn safe_archive_path(name: &str) -> Result<PathBuf, FetchError> {
@@ -1969,6 +2078,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_unpack_zip_artifact_rejects_expanded_size_limit_and_removes_partial_binary() {
+        let readme = vec![b'a'; 10];
+        let binary = vec![b'b'; 10];
+        let archive = create_zip(&[
+            ("README.txt", readme.as_slice(), false),
+            ("fetch.exe", binary.as_slice(), false),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = unpack_zip_artifact_with_limits(
+            dir.path(),
+            &archive,
+            ArchiveExtractionLimits {
+                max_entries: 4,
+                max_uncompressed_bytes: 16,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("uncompressed data exceeded maximum allowed size"),
+            "{err}"
+        );
+        assert!(!dir.path().join("fetch.exe").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_unpack_artifact_path_traversal() {
@@ -2020,6 +2157,35 @@ mod tests {
             std::fs::read_to_string(dir.path().join("fetch")).unwrap(),
             "short"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unpack_tar_gz_artifact_rejects_expanded_size_limit_and_removes_partial_binary() {
+        let readme = vec![b'a'; 10];
+        let binary = vec![b'b'; 10];
+        let archive = create_tar_gz(&[
+            ("README.txt", readme.as_slice(), 0o644, false),
+            ("fetch", binary.as_slice(), 0o755, false),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = unpack_tar_gz_artifact_with_limits(
+            dir.path(),
+            &archive,
+            ArchiveExtractionLimits {
+                max_entries: 4,
+                max_uncompressed_bytes: 16,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("uncompressed data exceeded maximum allowed size"),
+            "{err}"
+        );
+        assert!(!dir.path().join("fetch").exists());
     }
 
     #[test]
