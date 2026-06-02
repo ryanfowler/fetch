@@ -1,10 +1,17 @@
+use crate::duration::format_go_duration;
+
 use std::env;
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+const CLIPBOARD_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const CLIPBOARD_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum CopyOutcome {
@@ -146,6 +153,14 @@ fn command_exists(program: &str) -> bool {
 }
 
 fn write_to_command(command: &ClipboardCommand, bytes: &[u8]) -> CopyOutcome {
+    write_to_command_with_timeout(command, bytes, CLIPBOARD_COMMAND_TIMEOUT)
+}
+
+fn write_to_command_with_timeout(
+    command: &ClipboardCommand,
+    bytes: &[u8],
+    timeout: Duration,
+) -> CopyOutcome {
     let mut child = match Command::new(command.program)
         .args(command.args)
         .stdin(Stdio::piped())
@@ -162,33 +177,106 @@ fn write_to_command(command: &ClipboardCommand, bytes: &[u8]) -> CopyOutcome {
         }
     };
 
-    let write_result = child
-        .stdin
-        .take()
-        .expect("clipboard command stdin is piped")
-        .write_all(bytes);
-    if let Err(err) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return CopyOutcome::Failed {
-            command: command.label(),
-            message: err.to_string(),
-        };
+    let started_at = Instant::now();
+    let write_rx = write_stdin_async(
+        child
+            .stdin
+            .take()
+            .expect("clipboard command stdin is piped"),
+        bytes.to_vec(),
+    );
+    match wait_for_stdin_write(&write_rx, started_at, timeout) {
+        Ok(()) => {}
+        Err(CopyFailure::TimedOut) => {
+            return timeout_child(command, &mut child, timeout);
+        }
+        Err(CopyFailure::Failed(message)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return CopyOutcome::Failed {
+                command: command.label(),
+                message,
+            };
+        }
     }
 
-    match child.wait() {
-        Ok(status) if status.success() => CopyOutcome::Copied {
+    match wait_for_child(&mut child, started_at, timeout) {
+        Ok(Some(status)) if status.success() => CopyOutcome::Copied {
             command: command.label(),
         },
-        Ok(status) => CopyOutcome::Failed {
+        Ok(Some(status)) => CopyOutcome::Failed {
             command: command.label(),
             message: format!("command exited with {status}"),
         },
+        Ok(None) => timeout_child(command, &mut child, timeout),
         Err(err) => CopyOutcome::Failed {
             command: command.label(),
             message: err.to_string(),
         },
     }
+}
+
+enum CopyFailure {
+    TimedOut,
+    Failed(String),
+}
+
+fn write_stdin_async(
+    mut stdin: std::process::ChildStdin,
+    bytes: Vec<u8>,
+) -> Receiver<std::io::Result<()>> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(stdin.write_all(&bytes));
+    });
+    rx
+}
+
+fn wait_for_stdin_write(
+    rx: &Receiver<std::io::Result<()>>,
+    started_at: Instant,
+    timeout: Duration,
+) -> Result<(), CopyFailure> {
+    let Some(remaining) = remaining_timeout(started_at, timeout) else {
+        return Err(CopyFailure::TimedOut);
+    };
+    match rx.recv_timeout(remaining) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(CopyFailure::Failed(err.to_string())),
+        Err(RecvTimeoutError::Timeout) => Err(CopyFailure::TimedOut),
+        Err(RecvTimeoutError::Disconnected) => Err(CopyFailure::Failed(
+            "clipboard stdin writer exited without reporting a result".to_string(),
+        )),
+    }
+}
+
+fn timeout_child(command: &ClipboardCommand, child: &mut Child, timeout: Duration) -> CopyOutcome {
+    let _ = child.kill();
+    let _ = child.wait();
+    CopyOutcome::Failed {
+        command: command.label(),
+        message: format!("command timed out after {}", format_go_duration(timeout)),
+    }
+}
+
+fn wait_for_child(
+    child: &mut Child,
+    started_at: Instant,
+    timeout: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let Some(remaining) = remaining_timeout(started_at, timeout) else {
+            return Ok(None);
+        };
+        thread::sleep(CLIPBOARD_COMMAND_POLL_INTERVAL.min(remaining));
+    }
+}
+
+fn remaining_timeout(started_at: Instant, timeout: Duration) -> Option<Duration> {
+    timeout.checked_sub(started_at.elapsed())
 }
 
 #[cfg(test)]
@@ -247,5 +335,38 @@ mod tests {
             }
         );
         assert_eq!(std::fs::read(&output).unwrap(), b"clipboard-body");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_to_command_times_out_hung_command_after_stdin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = dir.path().join("fake-clipboard");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n/bin/cat >/dev/null\nexec /bin/sleep 5\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let program = Box::leak(script.to_string_lossy().into_owned().into_boxed_str());
+        let command = ClipboardCommand { program, args: &[] };
+        let timeout = Duration::from_millis(100);
+        let started_at = Instant::now();
+
+        assert_eq!(
+            write_to_command_with_timeout(&command, b"clipboard-body", timeout),
+            CopyOutcome::Failed {
+                command: script.to_string_lossy().into_owned(),
+                message: "command timed out after 100ms".to_string()
+            }
+        );
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "clipboard command timeout took {:?}",
+            started_at.elapsed()
+        );
     }
 }
