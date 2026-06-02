@@ -195,9 +195,27 @@ pub fn format_enabled(setting: Option<&str>, is_terminal: bool) -> bool {
     Format::from_setting(setting).enabled(is_terminal)
 }
 
-pub fn write_stdout(bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdoutWriteStatus {
+    Open,
+    Closed,
+}
+
+pub fn is_broken_pipe(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::BrokenPipe
+}
+
+pub fn stdout_write_status(result: std::io::Result<()>) -> std::io::Result<StdoutWriteStatus> {
+    match result {
+        Ok(()) => Ok(StdoutWriteStatus::Open),
+        Err(err) if is_broken_pipe(&err) => Ok(StdoutWriteStatus::Closed),
+        Err(err) => Err(err),
+    }
+}
+
+pub fn write_stdout(bytes: impl AsRef<[u8]>) -> std::io::Result<StdoutWriteStatus> {
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(bytes.as_ref())
+    stdout_write_status(stdout.write_all(bytes.as_ref()))
 }
 
 pub fn bytes_appear_printable(bytes: &[u8]) -> bool {
@@ -548,6 +566,20 @@ mod tests {
         assert!(!format_enabled(None, false));
         assert!(format_enabled(Some("auto"), true));
         assert!(!format_enabled(Some("auto"), false));
+    }
+
+    #[test]
+    fn stdout_write_status_treats_broken_pipe_as_closed() {
+        let err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdout closed");
+
+        assert_eq!(
+            stdout_write_status(Err(err)).unwrap(),
+            StdoutWriteStatus::Closed
+        );
+        assert_eq!(
+            stdout_write_status(Ok(())).unwrap(),
+            StdoutWriteStatus::Open
+        );
     }
 
     #[test]

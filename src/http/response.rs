@@ -215,7 +215,7 @@ pub(super) fn write_stdout_bytes(cli: &Cli, body: &StdoutBody) -> Result<(), Fet
         return write_stdout_bytes_with_pager(&body.bytes);
     }
 
-    std::io::stdout().write_all(&body.bytes)?;
+    core::write_stdout(&body.bytes)?;
     Ok(())
 }
 
@@ -244,7 +244,7 @@ pub(super) fn write_stdout_bytes_with_pager(bytes: &[u8]) -> Result<(), FetchErr
     {
         Ok(child) => child,
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            std::io::stdout().write_all(bytes)?;
+            core::write_stdout(bytes)?;
             return Ok(());
         }
         Err(err) => return Err(err.into()),
@@ -547,8 +547,26 @@ where
     loop {
         let n = reader.read(&mut buf).await?;
         if n == 0 {
-            write_formatted_stream_outputs(&mut stdout, formatter.finish()?, false).await?;
-            stdout.flush().await?;
+            if write_formatted_stream_outputs(&mut stdout, formatter.finish()?, false).await?
+                == core::StdoutWriteStatus::Closed
+            {
+                let clipboard = capture.map(clipboard::Capture::copy);
+                let trailers = captured_trailers(&trailers);
+                return Ok(StreamedOutput {
+                    trailers,
+                    bytes_written: bytes_read,
+                    clipboard,
+                });
+            }
+            if flush_stdout(&mut stdout).await? == core::StdoutWriteStatus::Closed {
+                let clipboard = capture.map(clipboard::Capture::copy);
+                let trailers = captured_trailers(&trailers);
+                return Ok(StreamedOutput {
+                    trailers,
+                    bytes_written: bytes_read,
+                    clipboard,
+                });
+            }
             let clipboard = capture.map(clipboard::Capture::copy);
             let trailers = captured_trailers(&trailers);
             return Ok(StreamedOutput {
@@ -562,7 +580,18 @@ where
             capture.push(&buf[..n]);
         }
         bytes_read = bytes_read.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
-        write_formatted_stream_outputs(&mut stdout, formatter.push_chunk(&buf[..n])?, true).await?;
+        if write_formatted_stream_outputs(&mut stdout, formatter.push_chunk(&buf[..n])?, true)
+            .await?
+            == core::StdoutWriteStatus::Closed
+        {
+            let clipboard = capture.map(clipboard::Capture::copy);
+            let trailers = captured_trailers(&trailers);
+            return Ok(StreamedOutput {
+                trailers,
+                bytes_written: bytes_read,
+                clipboard,
+            });
+        }
     }
 }
 
@@ -570,17 +599,27 @@ pub(super) async fn write_formatted_stream_outputs(
     stdout: &mut tokio::io::Stdout,
     outputs: Vec<Vec<u8>>,
     flush_after_each: bool,
-) -> Result<(), FetchError> {
+) -> Result<core::StdoutWriteStatus, FetchError> {
     for output in outputs {
         if output.is_empty() {
             continue;
         }
-        stdout.write_all(&output).await?;
-        if flush_after_each {
-            stdout.flush().await?;
+        if core::stdout_write_status(stdout.write_all(&output).await)?
+            == core::StdoutWriteStatus::Closed
+        {
+            return Ok(core::StdoutWriteStatus::Closed);
+        }
+        if flush_after_each && flush_stdout(stdout).await? == core::StdoutWriteStatus::Closed {
+            return Ok(core::StdoutWriteStatus::Closed);
         }
     }
-    Ok(())
+    Ok(core::StdoutWriteStatus::Open)
+}
+
+async fn flush_stdout(
+    stdout: &mut tokio::io::Stdout,
+) -> Result<core::StdoutWriteStatus, FetchError> {
+    Ok(core::stdout_write_status(stdout.flush().await)?)
 }
 
 pub(super) struct FormattedSseStream {
@@ -924,7 +963,7 @@ pub(super) async fn copy_async_reader_to_stdout_target(
         StdoutStreamTarget::Direct => {
             let mut stdout = tokio::io::stdout();
             Ok(
-                copy_async_reader_to_writer_with_prefix(reader, &mut stdout, prefix, capture)
+                copy_async_reader_to_stdout_with_prefix(reader, &mut stdout, prefix, capture)
                     .await?,
             )
         }
@@ -956,6 +995,36 @@ where
     }
 }
 
+pub(super) async fn copy_async_reader_to_stdout<W>(
+    reader: &mut AsyncReadBox,
+    writer: &mut W,
+    mut capture: Option<&mut clipboard::Capture>,
+) -> std::io::Result<i64>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = vec![0; 64 * 1024];
+    let mut written = 0i64;
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return match core::stdout_write_status(writer.flush().await)? {
+                core::StdoutWriteStatus::Open => Ok(written),
+                core::StdoutWriteStatus::Closed => Ok(written),
+            };
+        }
+        match core::stdout_write_status(writer.write_all(&buf[..n]).await)? {
+            core::StdoutWriteStatus::Open => {
+                if let Some(capture) = capture.as_mut() {
+                    capture.push(&buf[..n]);
+                }
+                written = written.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
+            }
+            core::StdoutWriteStatus::Closed => return Ok(written),
+        }
+    }
+}
+
 pub(super) async fn copy_async_reader_to_writer_with_prefix<W>(
     reader: &mut AsyncReadBox,
     writer: &mut W,
@@ -976,6 +1045,30 @@ where
     Ok(written.saturating_add(copy_async_reader_to_writer(reader, writer, capture).await?))
 }
 
+pub(super) async fn copy_async_reader_to_stdout_with_prefix<W>(
+    reader: &mut AsyncReadBox,
+    writer: &mut W,
+    prefix: &[u8],
+    mut capture: Option<&mut clipboard::Capture>,
+) -> std::io::Result<i64>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut written = 0i64;
+    if !prefix.is_empty() {
+        match core::stdout_write_status(writer.write_all(prefix).await)? {
+            core::StdoutWriteStatus::Open => {
+                if let Some(capture) = capture.as_mut() {
+                    capture.push(prefix);
+                }
+                written = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
+            }
+            core::StdoutWriteStatus::Closed => return Ok(0),
+        }
+    }
+    Ok(written.saturating_add(copy_async_reader_to_stdout(reader, writer, capture).await?))
+}
+
 pub(super) async fn stream_async_reader_to_pager(
     reader: &mut AsyncReadBox,
     prefix: &[u8],
@@ -991,7 +1084,7 @@ pub(super) async fn stream_async_reader_to_pager(
         Ok(child) => child,
         Err(err) if err.kind() == ErrorKind::NotFound => {
             let mut stdout = tokio::io::stdout();
-            return Ok(copy_async_reader_to_writer_with_prefix(
+            return Ok(copy_async_reader_to_stdout_with_prefix(
                 reader,
                 &mut stdout,
                 prefix,
