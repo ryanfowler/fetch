@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use base64::Engine;
 use futures_util::{Sink, SinkExt, StreamExt};
-use http::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use http::header::{ACCEPT, AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, SET_COOKIE, USER_AGENT};
 #[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -58,6 +58,7 @@ pub fn is_websocket_url(raw: &str) -> bool {
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let mut url = websocket_url(cli.url.as_deref().expect("URL checked by app"))?;
     crate::http::apply_query(&mut url, &cli.query);
+    let session = crate::http::load_session(cli)?;
 
     let method = effective_method(cli);
     let mut warnings = Vec::new();
@@ -73,7 +74,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     write_warnings(cli, &warnings);
     let interactive = should_use_interactive(cli)?;
 
-    let request = build_handshake_request(cli, &url)?;
+    let request = build_handshake_request(cli, &url, session.as_ref())?;
     let connector = websocket_connector(cli, &url)?;
     if cli.dry_run {
         print_request_metadata(cli, method, &url, Some(request.headers()));
@@ -90,6 +91,8 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let connect_timeout = websocket_connect_timeout(cli, request_timeout, request_start)?;
     let connect = async { connect_websocket(cli, &url, request, connector, connect_timeout).await };
     let (stream, response) = request_budget.run(connect).await?;
+    store_handshake_cookies(session.as_ref(), &url, response.headers());
+    crate::http::save_session(cli, session.as_ref());
 
     print_response_metadata(cli, &response);
 
@@ -392,12 +395,13 @@ fn strip_line_ending(line: &mut Vec<u8>) {
 fn build_handshake_request(
     cli: &Cli,
     url: &Url,
+    session: Option<&crate::session::Session>,
 ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, FetchError> {
     let mut request = url
         .as_str()
         .into_client_request()
         .map_err(websocket_error)?;
-    let headers = handshake_headers(cli, url)?;
+    let headers = handshake_headers(cli, url, session)?;
     for (name, value) in &headers {
         let name = WsHeaderName::from_bytes(name.as_str().as_bytes()).map_err(|err| {
             FetchError::Message(format!("invalid header name '{}': {err}", name.as_str()))
@@ -413,7 +417,11 @@ fn build_handshake_request(
     Ok(request)
 }
 
-fn handshake_headers(cli: &Cli, url: &Url) -> Result<HeaderMap, FetchError> {
+fn handshake_headers(
+    cli: &Cli,
+    url: &Url,
+    session: Option<&crate::session::Session>,
+) -> Result<HeaderMap, FetchError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         ACCEPT,
@@ -424,6 +432,7 @@ fn handshake_headers(cli: &Cli, url: &Url) -> Result<HeaderMap, FetchError> {
         HeaderValue::from_str(&core::user_agent()).expect("valid user agent"),
     );
     crate::http::apply_headers(&mut headers, &cli.headers)?;
+    apply_session_cookies(session, url, &mut headers)?;
 
     if let Some(auth) = crate::http::basic_header(cli.basic.as_deref())? {
         headers.insert(
@@ -455,6 +464,53 @@ fn handshake_headers(cli: &Cli, url: &Url) -> Result<HeaderMap, FetchError> {
         .map_err(|err| FetchError::Message(err.to_string()))?;
     }
     Ok(headers)
+}
+
+fn apply_session_cookies(
+    session: Option<&crate::session::Session>,
+    url: &Url,
+    headers: &mut HeaderMap,
+) -> Result<(), FetchError> {
+    if headers.contains_key(COOKIE) {
+        return Ok(());
+    }
+    let Some(session) = session else {
+        return Ok(());
+    };
+    let cookie_url = websocket_cookie_url(url)?;
+    if let Some(cookies) = session.cookie_provider().cookies(&cookie_url) {
+        headers.insert(COOKIE, cookies);
+    }
+    Ok(())
+}
+
+fn store_handshake_cookies(
+    session: Option<&crate::session::Session>,
+    url: &Url,
+    headers: &WsHeaderMap,
+) {
+    let Some(session) = session else {
+        return;
+    };
+    let Ok(cookie_url) = websocket_cookie_url(url) else {
+        return;
+    };
+    session
+        .cookie_provider()
+        .set_cookies(&mut headers.get_all(SET_COOKIE).iter(), &cookie_url);
+}
+
+fn websocket_cookie_url(url: &Url) -> Result<Url, FetchError> {
+    let mut cookie_url = url.clone();
+    let scheme = match cookie_url.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        other => return Err(format!("unsupported url scheme: {other}").into()),
+    };
+    cookie_url
+        .set_scheme(scheme)
+        .map_err(|_| FetchError::Message(format!("unsupported url scheme: {}", url.scheme())))?;
+    Ok(cookie_url)
 }
 
 fn websocket_signing_url(url: &Url) -> Result<Url, FetchError> {
@@ -761,7 +817,8 @@ mod tests {
     #[test]
     fn websocket_headers_include_bearer_auth() {
         let cli = Cli::try_parse_from(["fetch", "--bearer", "token", "ws://example.com"]).unwrap();
-        let headers = handshake_headers(&cli, &Url::parse("ws://example.com").unwrap()).unwrap();
+        let headers =
+            handshake_headers(&cli, &Url::parse("ws://example.com").unwrap(), None).unwrap();
 
         assert_eq!(
             headers.get(ACCEPT).and_then(|value| value.to_str().ok()),
