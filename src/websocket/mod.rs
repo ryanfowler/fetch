@@ -35,6 +35,7 @@ pub mod interactive;
 
 const STDIN_MESSAGE_CHANNEL_CAPACITY: usize = 16;
 const STDIN_BINARY_CHUNK_SIZE: usize = 16 * 1024;
+const STDIN_TEXT_MESSAGE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const BINARY_MESSAGE_WARNING: &str = "the WebSocket message appears to be binary\n\nRedirect stdout to a file or pipe to output binary WebSocket messages";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -347,12 +348,30 @@ fn read_stdin_lines_as_bytes(
     reader: &mut impl BufRead,
     tx: mpsc::Sender<Result<Vec<u8>, io::Error>>,
 ) {
+    read_stdin_lines_as_bytes_with_limit(reader, tx, STDIN_TEXT_MESSAGE_MAX_BYTES);
+}
+
+fn read_stdin_lines_as_bytes_with_limit(
+    reader: &mut impl BufRead,
+    tx: mpsc::Sender<Result<Vec<u8>, io::Error>>,
+    max_message_bytes: usize,
+) {
     loop {
         let mut line = Vec::new();
-        match reader.read_until(b'\n', &mut line) {
+        let read_limit = max_message_bytes.saturating_add(2) as u64;
+        match reader
+            .by_ref()
+            .take(read_limit)
+            .read_until(b'\n', &mut line)
+        {
             Ok(0) => break,
             Ok(_) => {
                 strip_line_ending(&mut line);
+                if line.len() > max_message_bytes {
+                    let _ =
+                        tx.blocking_send(Err(websocket_text_stdin_limit_error(max_message_bytes)));
+                    break;
+                }
                 if tx.blocking_send(Ok(line)).is_err() {
                     break;
                 }
@@ -363,6 +382,15 @@ fn read_stdin_lines_as_bytes(
             }
         }
     }
+}
+
+fn websocket_text_stdin_limit_error(max_message_bytes: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "WebSocket stdin text message exceeds maximum of {max_message_bytes} bytes before a newline; use --ws-message-mode binary for raw streams"
+        ),
+    )
 }
 
 fn read_stdin_binary_chunks(reader: &mut impl Read, tx: mpsc::Sender<Result<Vec<u8>, io::Error>>) {
@@ -976,6 +1004,52 @@ mod tests {
 
         let err = outgoing_message(vec![0xff], WebSocketMessageMode::Text).unwrap_err();
         assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn websocket_text_stdin_reader_rejects_line_over_limit_without_newline() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut reader = io::Cursor::new(b"abcdef".as_slice());
+
+        read_stdin_lines_as_bytes_with_limit(&mut reader, tx, 5);
+
+        let err = rx.blocking_recv().unwrap().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds maximum of 5 bytes"));
+        assert!(err.to_string().contains("--ws-message-mode binary"));
+        assert!(rx.blocking_recv().is_none());
+    }
+
+    #[test]
+    fn websocket_text_stdin_reader_allows_limit_sized_crlf_line() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut reader = io::Cursor::new(b"abcde\r\nx".as_slice());
+
+        read_stdin_lines_as_bytes_with_limit(&mut reader, tx, 5);
+
+        assert_eq!(rx.blocking_recv().unwrap().unwrap(), b"abcde");
+        assert_eq!(rx.blocking_recv().unwrap().unwrap(), b"x");
+        assert!(rx.blocking_recv().is_none());
+    }
+
+    #[test]
+    fn websocket_binary_stdin_reader_streams_chunks() {
+        let input = vec![b'a'; STDIN_BINARY_CHUNK_SIZE * 2 + 7];
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut reader = io::Cursor::new(input.as_slice());
+
+        read_stdin_binary_chunks(&mut reader, tx);
+
+        assert_eq!(
+            rx.blocking_recv().unwrap().unwrap().len(),
+            STDIN_BINARY_CHUNK_SIZE
+        );
+        assert_eq!(
+            rx.blocking_recv().unwrap().unwrap().len(),
+            STDIN_BINARY_CHUNK_SIZE
+        );
+        assert_eq!(rx.blocking_recv().unwrap().unwrap().len(), 7);
+        assert!(rx.blocking_recv().is_none());
     }
 
     #[test]

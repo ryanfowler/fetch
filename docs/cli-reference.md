@@ -555,6 +555,9 @@ Use `--ws-interactive auto|on|off` to control the terminal prompt.
 Use `--ws-message-mode auto|text|binary` to control whether outgoing messages
 are sent as text or binary WebSocket frames.
 
+Piped text/auto input is line-delimited and capped at 16 MiB per line; use
+`--ws-message-mode binary` for larger raw streams.
+
 See [WebSocket documentation](websocket.md) for details.
 
 ## gRPC Options
