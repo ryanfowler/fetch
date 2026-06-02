@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use cookie::{Cookie as RawCookie, SameSite};
@@ -38,6 +40,7 @@ pub struct Session {
     name: String,
     path: PathBuf,
     store: Arc<PersistentCookieStore>,
+    loaded_cookies: Vec<SessionCookie>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +67,13 @@ struct SessionFile {
     cookies: Vec<SessionCookie>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SessionCookieKey {
+    domain: String,
+    path: String,
+    name: String,
+}
+
 #[derive(Debug, Default)]
 pub struct PersistentCookieStore {
     store: RwLock<cookie_store::CookieStore>,
@@ -78,10 +88,11 @@ impl Session {
         let dir = sessions_dir()?;
         let path = dir.join(format!("{name}.json"));
         let store = Arc::new(PersistentCookieStore::default());
-        let session = Session {
+        let mut session = Session {
             name: name.to_string(),
             path,
             store,
+            loaded_cookies: Vec::new(),
         };
 
         let data = match std::fs::read(&session.path) {
@@ -106,6 +117,7 @@ impl Session {
         };
 
         session.store.load_cookies(file.cookies)?;
+        session.loaded_cookies = session.store.session_cookies();
         Ok(LoadedSession {
             session,
             warning: None,
@@ -121,9 +133,14 @@ impl Session {
     }
 
     pub fn save(&self) -> Result<(), SessionError> {
-        let file = SessionFile {
-            cookies: self.store.session_cookies(),
-        };
+        let _lock = acquire_session_lock(&self.path)?;
+        let latest_cookies = read_latest_session_cookies(&self.path)?;
+        let cookies = merge_session_cookies(
+            &self.loaded_cookies,
+            self.store.session_cookies(),
+            latest_cookies,
+        );
+        let file = SessionFile { cookies };
         let mut data = serde_json::to_vec_pretty(&file)?;
         data.push(b'\n');
         atomic_write(&self.path, &data)?;
@@ -232,6 +249,16 @@ impl SessionCookie {
             http_only: cookie.http_only().unwrap_or(false),
             same_site,
         })
+    }
+}
+
+impl SessionCookieKey {
+    fn new(cookie: &SessionCookie) -> Self {
+        Self {
+            domain: cookie.domain.clone(),
+            path: cookie.path.clone(),
+            name: cookie.name.clone(),
+        }
     }
 }
 
@@ -420,6 +447,194 @@ fn format_rfc3339(value: OffsetDateTime) -> Result<String, time::error::Format> 
     value.format(&Rfc3339)
 }
 
+fn read_latest_session_cookies(path: &Path) -> Result<Vec<SessionCookie>, SessionError> {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let file: SessionFile = match serde_json::from_slice(&data) {
+        Ok(file) => file,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let store = PersistentCookieStore::default();
+    store.load_cookies(file.cookies)?;
+    Ok(store.session_cookies())
+}
+
+fn merge_session_cookies(
+    loaded: &[SessionCookie],
+    current: Vec<SessionCookie>,
+    latest: Vec<SessionCookie>,
+) -> Vec<SessionCookie> {
+    let loaded = session_cookie_map(loaded.iter().cloned());
+    let current = session_cookie_map(current);
+    let mut merged = session_cookie_map(latest);
+
+    for (key, loaded_cookie) in &loaded {
+        match current.get(key) {
+            Some(current_cookie) if current_cookie == loaded_cookie => {}
+            Some(current_cookie) => {
+                merged.insert(key.clone(), current_cookie.clone());
+            }
+            None => {
+                merged.remove(key);
+            }
+        }
+    }
+
+    for (key, current_cookie) in current {
+        if !loaded.contains_key(&key) {
+            merged.insert(key, current_cookie);
+        }
+    }
+
+    merged.into_values().collect()
+}
+
+fn session_cookie_map(
+    cookies: impl IntoIterator<Item = SessionCookie>,
+) -> BTreeMap<SessionCookieKey, SessionCookie> {
+    cookies
+        .into_iter()
+        .filter(|cookie| !cookie_is_expired(cookie))
+        .map(|cookie| (SessionCookieKey::new(&cookie), cookie))
+        .collect()
+}
+
+struct SessionLock {
+    file: std::fs::File,
+}
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        let _ = unlock_session_file(&self.file);
+    }
+}
+
+fn acquire_session_lock(path: &Path) -> Result<SessionLock, SessionError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    create_sessions_dir(dir)?;
+    let file = open_session_lock_file(&session_lock_path(path))?;
+
+    for attempt in 0.. {
+        if try_lock_session_file(&file)? {
+            return Ok(SessionLock { file });
+        }
+        let multiplier = (attempt + 1).min(10) as u64;
+        thread::sleep(Duration::from_millis(multiplier * 50));
+    }
+
+    unreachable!("session lock acquisition loop is unbounded")
+}
+
+fn session_lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "session.json".into());
+    path.with_file_name(format!(".{name}.lock"))
+}
+
+fn open_session_lock_file(path: &Path) -> Result<std::fs::File, SessionError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
+}
+
+#[cfg(unix)]
+fn try_lock_session_file(file: &std::fs::File) -> Result<bool, SessionError> {
+    use std::os::fd::AsRawFd;
+
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(true);
+    }
+
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EWOULDBLOCK) || err.raw_os_error() == Some(libc::EAGAIN) {
+        Ok(false)
+    } else {
+        Err(err.into())
+    }
+}
+
+#[cfg(unix)]
+fn unlock_session_file(file: &std::fs::File) -> Result<(), SessionError> {
+    use std::os::fd::AsRawFd;
+
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(windows)]
+fn try_lock_session_file(file: &std::fs::File) -> Result<bool, SessionError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let mut overlapped = OVERLAPPED::default();
+    // SAFETY: the file handle is valid for this File and overlapped points to writable storage.
+    let ok = unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &mut overlapped,
+        )
+    };
+    if ok != 0 {
+        return Ok(true);
+    }
+
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        Ok(false)
+    } else {
+        Err(err.into())
+    }
+}
+
+#[cfg(windows)]
+fn unlock_session_file(file: &std::fs::File) -> Result<(), SessionError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let mut overlapped = OVERLAPPED::default();
+    // SAFETY: the file handle is valid for this File and overlapped points to writable storage.
+    let ok = unsafe { UnlockFileEx(file.as_raw_handle(), 0, u32::MAX, u32::MAX, &mut overlapped) };
+    if ok != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn try_lock_session_file(_file: &std::fs::File) -> Result<bool, SessionError> {
+    Ok(true)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unlock_session_file(_file: &std::fs::File) -> Result<(), SessionError> {
+    Ok(())
+}
+
 fn atomic_write(path: &Path, data: &[u8]) -> Result<(), SessionError> {
     use std::io::Write;
 
@@ -538,6 +753,80 @@ mod tests {
                 .iter()
                 .any(|cookie| cookie.name == "theme" && cookie.value == "dark")
         );
+    }
+
+    #[test]
+    fn test_interleaved_session_saves_merge_distinct_cookies() {
+        let _guard = lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        set_sessions_dir(dir.path());
+        let first = Session::load("concurrent").unwrap().session;
+        let second = Session::load("concurrent").unwrap().session;
+        let url = Url::parse("https://example.com/").unwrap();
+
+        first.store.set_cookies(
+            &mut [HeaderValue::from_static("first=one; Path=/")].iter(),
+            &url,
+        );
+        second.store.set_cookies(
+            &mut [HeaderValue::from_static("second=two; Path=/")].iter(),
+            &url,
+        );
+
+        first.save().unwrap();
+        second.save().unwrap();
+
+        let reloaded = Session::load("concurrent").unwrap().session;
+        let cookies = reloaded.cookies();
+        assert_eq!(cookies.len(), 2);
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.name == "first" && cookie.value == "one")
+        );
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.name == "second" && cookie.value == "two")
+        );
+    }
+
+    #[test]
+    fn test_interleaved_session_save_does_not_restore_stale_deleted_cookie() {
+        let _guard = lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        set_sessions_dir(dir.path());
+        let url = Url::parse("https://example.com/").unwrap();
+        let initial = Session::load("delete-concurrent").unwrap().session;
+        initial.store.set_cookies(
+            &mut [HeaderValue::from_static("token=old; Path=/")].iter(),
+            &url,
+        );
+        initial.save().unwrap();
+
+        let delete_token = Session::load("delete-concurrent").unwrap().session;
+        let set_theme = Session::load("delete-concurrent").unwrap().session;
+        delete_token.store.set_cookies(
+            &mut [HeaderValue::from_static("token=; Path=/; Max-Age=0")].iter(),
+            &url,
+        );
+        set_theme.store.set_cookies(
+            &mut [HeaderValue::from_static("theme=dark; Path=/")].iter(),
+            &url,
+        );
+
+        delete_token.save().unwrap();
+        set_theme.save().unwrap();
+
+        let reloaded = Session::load("delete-concurrent").unwrap().session;
+        let cookies = reloaded.cookies();
+        assert_eq!(cookies.len(), 1);
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.name == "theme" && cookie.value == "dark")
+        );
+        assert!(!cookies.iter().any(|cookie| cookie.name == "token"));
     }
 
     #[test]
