@@ -494,7 +494,7 @@ impl Client {
         };
         let (mut send, mut recv) = stream.split();
         let upload_deadline = body_deadline.clone();
-        let send_task = tokio::spawn(async move {
+        let send_task = H3UploadTask::new(tokio::spawn(async move {
             match body {
                 Some(body) => send_h3_body(&mut send, body, upload_deadline).await,
                 None => send
@@ -502,17 +502,15 @@ impl Client {
                     .await
                     .map_err(|err| Error::body(format!("http3 request body: {err}"))),
             }
-        });
+        }));
         let response = recv.recv_response().await.map_err(|err| {
             Error::with_source(ErrorKind::Request, format!("http3 response: {err}"), err)
         })?;
         let upload_task = if send_task.is_finished() {
-            send_task.await.unwrap_or_else(|err| {
-                Err(Error::body(format!("http3 request body task: {err}")))
-            })?;
+            send_task.await?;
             None
         } else {
-            Some(H3UploadTask::new(send_task))
+            Some(send_task)
         };
         Ok(Response::from_h3(
             url,
@@ -1379,6 +1377,10 @@ impl H3UploadTask {
     fn new(handle: JoinHandle<Result<(), Error>>) -> Self {
         Self { handle }
     }
+
+    fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
 }
 
 impl Future for H3UploadTask {
@@ -1912,6 +1914,35 @@ mod tests {
         .unwrap();
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn h3_upload_task_aborts_when_dropped() {
+        struct NotifyOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for NotifyOnDrop {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let task = H3UploadTask::new(tokio::spawn(async move {
+            let _notify = NotifyOnDrop(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<Result<(), Error>>().await
+        }));
+
+        started_rx.await.unwrap();
+        drop(task);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
