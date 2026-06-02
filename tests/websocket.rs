@@ -55,6 +55,58 @@ fn start_ws_frame_server(reply: Vec<u8>) -> (String, mpsc::Receiver<(u8, Vec<u8>
     (url, seen_rx)
 }
 
+fn start_ws_session_server() -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket session server");
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let (seen_tx, seen_rx) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let seen_tx = seen_tx.clone();
+                    thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut reader = BufReader::new(stream.try_clone().unwrap());
+                        let Some(req) = read_request(&mut reader) else {
+                            return;
+                        };
+                        if !req.header("cookie").contains("sid=abc") {
+                            write_response(
+                                &mut stream,
+                                TestResponse::status(401, "Unauthorized", "missing session"),
+                            );
+                            return;
+                        }
+                        let key = req.header("sec-websocket-key");
+                        let mut sha = Sha1::new();
+                        sha.update(key.as_bytes());
+                        sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                        let accept =
+                            base64::engine::general_purpose::STANDARD.encode(sha.finalize());
+                        let response = format!(
+                            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSet-Cookie: wsid=upgraded; Path=/\r\n\r\n"
+                        );
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            return;
+                        }
+                        let msg = read_ws_text(&mut stream);
+                        let _ = seen_tx.send(msg.clone());
+                        let _ = stream.write_all(&ws_text_frame(msg.as_bytes()));
+                        write_ws_close_and_drain(&mut stream, b"done");
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (url, seen_rx)
+}
+
 #[test]
 fn websocket_noninteractive_go_cases() {
     let (ws_url, seen) = start_ws_echo_server(|_| Ok(()));
@@ -709,6 +761,77 @@ fn websocket_connect_timeout_covers_dns_and_proxy_handshakes() {
     ]);
     assert_exit(&res, 1);
     assert!(res.stderr.contains("request timed out after 50ms"));
+}
+
+#[test]
+fn websocket_sessions_send_and_persist_handshake_cookies() {
+    let dir = TempDir::new().unwrap();
+    let sessions_dir = dir.path().join("sessions");
+    let env = vec![(
+        "FETCH_INTERNAL_SESSIONS_DIR".to_string(),
+        sessions_dir.display().to_string(),
+    )];
+    let http_server = TestServer::start(|req| {
+        if req.path == "/login" {
+            return TestResponse::ok("logged in").header("Set-Cookie", "sid=abc; Path=/");
+        }
+        if req.path == "/check" && req.header("cookie").contains("wsid=upgraded") {
+            return TestResponse::ok("persisted");
+        }
+        TestResponse::status(401, "Unauthorized", "missing cookie")
+    });
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: env.clone(),
+            ..Default::default()
+        },
+        &[
+            &format!("{}/login", http_server.url),
+            "--session",
+            "ws-integ",
+        ],
+    );
+    assert_exit(&res, 0);
+
+    let (ws_url, seen) = start_ws_session_server();
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: env.clone(),
+            ..Default::default()
+        },
+        &[
+            &ws_url,
+            "--session",
+            "ws-integ",
+            "-d",
+            "upgrade",
+            "--format",
+            "off",
+            "--ws-interactive",
+            "off",
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "upgrade"
+    );
+    assert_eq!(res.stdout, "upgrade\n");
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env,
+            ..Default::default()
+        },
+        &[
+            &format!("{}/check", http_server.url),
+            "--session",
+            "ws-integ",
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "persisted");
 }
 
 #[test]

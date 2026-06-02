@@ -17,7 +17,7 @@ pub(crate) fn load_session(cli: &Cli) -> Result<Option<crate::session::Session>,
     Ok(Some(loaded.session))
 }
 
-pub(super) fn save_session(cli: &Cli, session: Option<&crate::session::Session>) {
+pub(crate) fn save_session(cli: &Cli, session: Option<&crate::session::Session>) {
     let Some(session) = session else {
         return;
     };
