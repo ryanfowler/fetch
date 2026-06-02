@@ -11,6 +11,27 @@ pub struct FramedBody {
     pub trailers: HeaderMap,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FramedBodyLimits {
+    context: &'static str,
+    max_messages: usize,
+    max_total_message_bytes: usize,
+}
+
+impl FramedBodyLimits {
+    pub(crate) const fn new(
+        context: &'static str,
+        max_messages: usize,
+        max_total_message_bytes: usize,
+    ) -> Self {
+        Self {
+            context,
+            max_messages,
+            max_total_message_bytes,
+        }
+    }
+}
+
 pub async fn read_framed_body(
     body: Body,
     message_encoding: &MessageEncoding,
@@ -19,12 +40,22 @@ pub async fn read_framed_body(
 }
 
 pub(crate) async fn read_framed_body_with_deadline(
-    mut body: Body,
+    body: Body,
     message_encoding: &MessageEncoding,
     deadline: Option<BodyDeadline>,
 ) -> Result<FramedBody, FetchError> {
+    read_framed_body_with_deadline_and_limits(body, message_encoding, deadline, None).await
+}
+
+pub(crate) async fn read_framed_body_with_deadline_and_limits(
+    mut body: Body,
+    message_encoding: &MessageEncoding,
+    deadline: Option<BodyDeadline>,
+    limits: Option<FramedBodyLimits>,
+) -> Result<FramedBody, FetchError> {
     let mut decoder = framing::FrameDecoder::new();
     let mut messages = Vec::new();
+    let mut total_message_bytes = 0_usize;
     let mut trailers = HeaderMap::new();
 
     while let Some(frame) = read_body_frame(&mut body, deadline.as_ref()).await? {
@@ -36,7 +67,7 @@ pub(crate) async fn read_framed_body_with_deadline(
                 {
                     let data = encoding::decompress_frame(&frame, message_encoding)
                         .map_err(|err| FetchError::Message(err.to_string()))?;
-                    messages.push(data);
+                    push_message(&mut messages, &mut total_message_bytes, data, limits)?;
                 }
             }
             Err(frame) => {
@@ -51,6 +82,40 @@ pub(crate) async fn read_framed_body_with_deadline(
         .finish()
         .map_err(|err| FetchError::Message(err.to_string()))?;
     Ok(FramedBody { messages, trailers })
+}
+
+fn push_message(
+    messages: &mut Vec<Vec<u8>>,
+    total_message_bytes: &mut usize,
+    data: Vec<u8>,
+    limits: Option<FramedBodyLimits>,
+) -> Result<(), FetchError> {
+    if let Some(limits) = limits {
+        let next_message_count = messages.len() + 1;
+        if next_message_count > limits.max_messages {
+            return Err(FetchError::Message(format!(
+                "{} contains too many messages: limit is {}",
+                limits.context, limits.max_messages
+            )));
+        }
+
+        let next_total = total_message_bytes.checked_add(data.len()).ok_or_else(|| {
+            FetchError::Message(format!(
+                "{} exceeds decoded message limit: limit is {} bytes",
+                limits.context, limits.max_total_message_bytes
+            ))
+        })?;
+        if next_total > limits.max_total_message_bytes {
+            return Err(FetchError::Message(format!(
+                "{} exceeds decoded message limit: {} bytes received, limit is {} bytes",
+                limits.context, next_total, limits.max_total_message_bytes
+            )));
+        }
+        *total_message_bytes = next_total;
+    }
+
+    messages.push(data);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -111,5 +176,57 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.to_string(), "request timed out after 10ms");
+    }
+
+    #[tokio::test]
+    async fn reader_applies_total_message_limit_across_many_small_frames() {
+        let mut payload = Vec::new();
+        for _ in 0..5 {
+            payload.extend(framing::frame(b"abc", false).unwrap());
+        }
+        let body = Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+            bytes::Bytes::from(payload),
+        )]));
+        let limits = FramedBodyLimits::new("gRPC reflection response", usize::MAX, 12);
+
+        let err = read_framed_body_with_deadline_and_limits(
+            body,
+            &MessageEncoding::Identity,
+            None,
+            Some(limits),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "gRPC reflection response exceeds decoded message limit: 15 bytes received, limit is 12 bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_applies_message_count_limit() {
+        let mut payload = Vec::new();
+        for _ in 0..3 {
+            payload.extend(framing::frame(b"abc", false).unwrap());
+        }
+        let body = Body::wrap_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(
+            bytes::Bytes::from(payload),
+        )]));
+        let limits = FramedBodyLimits::new("gRPC reflection response", 2, usize::MAX);
+
+        let err = read_framed_body_with_deadline_and_limits(
+            body,
+            &MessageEncoding::Identity,
+            None,
+            Some(limits),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "gRPC reflection response contains too many messages: limit is 2"
+        );
     }
 }

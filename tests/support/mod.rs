@@ -266,6 +266,7 @@ impl ReflectionGrpcServer {
 pub(crate) enum ReflectionBehavior {
     Enabled,
     Disabled,
+    ManySmallFrames,
     V1ErrorResponseUnimplemented,
 }
 
@@ -1696,6 +1697,10 @@ pub(crate) fn start_reflection_grpc_h2c_v1_error_response_server() -> Reflection
     start_reflection_grpc_h2c_server_with_behavior(ReflectionBehavior::V1ErrorResponseUnimplemented)
 }
 
+pub(crate) fn start_reflection_grpc_h2c_many_small_frames_server() -> ReflectionGrpcServer {
+    start_reflection_grpc_h2c_server_with_behavior(ReflectionBehavior::ManySmallFrames)
+}
+
 pub(crate) fn start_reflection_grpc_h2c_server_with_behavior(
     behavior: ReflectionBehavior,
 ) -> ReflectionGrpcServer {
@@ -2172,6 +2177,27 @@ async fn handle_reflection_h2_request(
                         "reflection v1 unavailable",
                     ))),
                 )
+            } else if behavior == ReflectionBehavior::ManySmallFrames {
+                match reflection_response_for_request(&raw, &descriptor) {
+                    Ok(payload) => {
+                        let mut frames = Vec::new();
+                        for _ in 0..129 {
+                            frames.extend(grpc_frame(&payload));
+                        }
+                        (
+                            vec![("content-type", "application/grpc+proto")],
+                            Some(frames),
+                        )
+                    }
+                    Err(_) => (
+                        vec![
+                            ("content-type", "application/grpc+proto"),
+                            ("grpc-status", "5"),
+                            ("grpc-message", "symbol not found"),
+                        ],
+                        None,
+                    ),
+                }
             } else {
                 match reflection_response_for_request(&raw, &descriptor) {
                     Ok(payload) => (

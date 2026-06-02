@@ -21,6 +21,13 @@ const REFLECTION_V1_PATH: &str = "/grpc.reflection.v1.ServerReflection/ServerRef
 const REFLECTION_V1ALPHA_PATH: &str =
     "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo";
 const REFLECTION_PROTOCOLS: [&str; 2] = [REFLECTION_V1_PATH, REFLECTION_V1ALPHA_PATH];
+const MAX_REFLECTION_RESPONSE_MESSAGES: usize = 128;
+const MAX_REFLECTION_RESPONSE_BYTES: usize = framing::MAX_MESSAGE_SIZE;
+const REFLECTION_RESPONSE_LIMITS: body::FramedBodyLimits = body::FramedBodyLimits::new(
+    "gRPC reflection response",
+    MAX_REFLECTION_RESPONSE_MESSAGES,
+    MAX_REFLECTION_RESPONSE_BYTES,
+);
 
 pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
     if cli.has_proto_schema() {
@@ -199,9 +206,13 @@ async fn invoke(
     let headers = response.headers().clone();
     let message_encoding = MessageEncoding::from_headers(&headers);
     let (response_body, body_deadline) = response.into_body_with_deadline();
-    let body =
-        body::read_framed_body_with_deadline(response_body, &message_encoding, body_deadline)
-            .await?;
+    let body = body::read_framed_body_with_deadline_and_limits(
+        response_body,
+        &message_encoding,
+        body_deadline,
+        Some(REFLECTION_RESPONSE_LIMITS),
+    )
+    .await?;
     if let Some(grpc_status) = status::from_headers_or_trailers(&headers, &body.trailers)
         && !grpc_status.ok()
     {
