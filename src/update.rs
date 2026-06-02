@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 
 use crate::cli::Cli;
 use crate::core;
-use crate::duration::{TimeoutBudget, duration_from_seconds};
+use crate::duration::{TimeoutBudget, duration_from_seconds, format_go_duration};
 use crate::error::{FetchError, write_warning_with_separator_with_color};
 use crate::http::{client, transport};
 use crate::output::progress::{self, BarCounter, ProgressPrinter, SpinnerCounter};
@@ -32,6 +32,7 @@ const MAX_UPDATE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_UPDATE_CHECKSUM_BYTES: u64 = 1024;
 const MAX_UPDATE_UNPACKED_BYTES: u64 = MAX_UPDATE_ARTIFACT_BYTES * 4;
 const MAX_UPDATE_ARCHIVE_ENTRIES: usize = 128;
+const UPDATE_LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 struct Release {
@@ -70,8 +71,15 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let client = UpdateClient::new(cli)?;
 
     let cache_dir = cache_dir()?;
-    let _lock = acquire_update_lock(&cache_dir, true, cli.silent, cli.color.as_deref())?
-        .ok_or_else(|| FetchError::Message("unable to acquire update lock".to_string()))?;
+    let lock_timeout = update_lock_wait_timeout(client.timeout);
+    let _lock = acquire_update_lock_with_timeout(
+        &cache_dir,
+        true,
+        cli.silent,
+        cli.color.as_deref(),
+        lock_timeout,
+    )?
+    .ok_or_else(|| FetchError::Message("unable to acquire update lock".to_string()))?;
     let result = update_inner(&client, cli.silent, cli.dry_run).await;
     record_last_attempt_time(&cache_dir);
     result?;
@@ -1351,8 +1359,19 @@ fn acquire_update_lock(
     silent: bool,
     color: Option<&str>,
 ) -> Result<Option<UpdateLock>, FetchError> {
+    acquire_update_lock_with_timeout(dir, block, silent, color, UPDATE_LOCK_WAIT_TIMEOUT)
+}
+
+fn acquire_update_lock_with_timeout(
+    dir: &Path,
+    block: bool,
+    silent: bool,
+    color: Option<&str>,
+    timeout: Duration,
+) -> Result<Option<UpdateLock>, FetchError> {
     std::fs::create_dir_all(dir)?;
     let file = open_lock_file(&dir.join(".update-lock"))?;
+    let started_at = Instant::now();
 
     for attempt in 0.. {
         if try_lock_file(&file)? {
@@ -1361,15 +1380,33 @@ fn acquire_update_lock(
         if !block {
             return Ok(None);
         }
+        if started_at.elapsed() >= timeout {
+            return Err(update_lock_timeout_error(timeout));
+        }
 
         if attempt == 0 && !silent {
             write_warning_with_separator_with_color("waiting on lock to begin updating", color);
         }
         let multiplier = (attempt + 1).min(10) as u64;
-        thread::sleep(Duration::from_millis(multiplier * 50));
+        let sleep = Duration::from_millis(multiplier * 50);
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        thread::sleep(sleep.min(remaining));
     }
 
-    unreachable!("update lock acquisition loop is unbounded")
+    unreachable!("update lock acquisition loop is unbounded by the iterator")
+}
+
+fn update_lock_wait_timeout(request_timeout: Option<Duration>) -> Duration {
+    request_timeout
+        .map(|timeout| timeout.min(UPDATE_LOCK_WAIT_TIMEOUT))
+        .unwrap_or(UPDATE_LOCK_WAIT_TIMEOUT)
+}
+
+fn update_lock_timeout_error(timeout: Duration) -> FetchError {
+    FetchError::Runtime(format!(
+        "timed out waiting for update lock after {}",
+        format_go_duration(timeout)
+    ))
 }
 
 fn open_lock_file(path: &Path) -> Result<std::fs::File, FetchError> {
@@ -1994,6 +2031,49 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn update_lock_timeout_returns_when_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = acquire_update_lock(dir.path(), true, true, None)
+            .unwrap()
+            .unwrap();
+
+        let started_at = Instant::now();
+        let result = acquire_update_lock_with_timeout(
+            dir.path(),
+            true,
+            true,
+            None,
+            Duration::from_millis(10),
+        );
+        let elapsed = started_at.elapsed();
+
+        match result {
+            Err(err) => {
+                assert_eq!(
+                    err.to_string(),
+                    "timed out waiting for update lock after 10ms"
+                );
+            }
+            Ok(_) => panic!("expected held update lock to time out"),
+        }
+        assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+    }
+
+    #[test]
+    fn update_lock_wait_timeout_uses_shorter_request_timeout() {
+        assert_eq!(
+            update_lock_wait_timeout(Some(Duration::from_millis(250))),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            update_lock_wait_timeout(Some(Duration::from_secs(120))),
+            UPDATE_LOCK_WAIT_TIMEOUT
+        );
+        assert_eq!(update_lock_wait_timeout(None), UPDATE_LOCK_WAIT_TIMEOUT);
     }
 
     #[cfg(unix)]
