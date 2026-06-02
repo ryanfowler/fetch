@@ -14,10 +14,10 @@ pub(super) fn redirect_requires_client_refresh(
     if cli.unix.is_some() {
         return false;
     }
-    if cli
-        .proxy
-        .as_deref()
-        .is_some_and(|proxy| !client::proxy_uses_local_target_dns(proxy))
+    if client::effective_proxy_for_url(cli.proxy.as_deref(), http_version, next)
+        .ok()
+        .flatten()
+        .is_some_and(|proxy| !proxy.uses_local_target_dns())
     {
         return false;
     }
