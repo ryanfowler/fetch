@@ -1095,8 +1095,12 @@ impl Proxy {
         self
     }
 
-    pub(crate) fn matches_url(&self, url: &Url) -> bool {
-        self.selected_for(url).is_some()
+    pub(crate) fn selected_for_url(&self, url: &Url) -> Option<Self> {
+        self.selected_for(url)
+    }
+
+    pub(crate) fn uses_local_target_dns(&self) -> bool {
+        self.scheme().is_ok_and(|scheme| scheme == "socks5")
     }
 
     fn applies_to(&self, url: &Url) -> bool {

@@ -127,6 +127,51 @@ fn proxy_config_environment_and_curl_http1_cases() {
 }
 
 #[test]
+fn env_https_proxy_skips_local_target_dns_preresolution() {
+    let target = start_tls_server(|req| {
+        if req.path == "/via-env-proxy" && req.header("host").starts_with("env-proxy-dns.test:") {
+            return TestResponse::ok("env proxy dns ok");
+        }
+        TestResponse::status(400, "Bad Request", req.header("host"))
+    });
+    let target_port = Url::parse(&target.url).unwrap().port().unwrap();
+    let (proxy_url, seen) = start_http_connect_proxy(host_port(&target.url).to_string());
+    let dns_addr = start_udp_dns_server("not-env-proxy-dns.test.", Ipv4Addr::new(127, 0, 0, 1));
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: vec![
+                ("HTTP_PROXY".to_string(), String::new()),
+                ("http_proxy".to_string(), String::new()),
+                ("HTTPS_PROXY".to_string(), proxy_url.clone()),
+                ("https_proxy".to_string(), proxy_url),
+                ("ALL_PROXY".to_string(), String::new()),
+                ("all_proxy".to_string(), String::new()),
+                ("NO_PROXY".to_string(), String::new()),
+                ("no_proxy".to_string(), String::new()),
+            ],
+            ..Default::default()
+        },
+        &[
+            "--dns-server",
+            &dns_addr,
+            "-vvv",
+            "--insecure",
+            "--format",
+            "off",
+            &format!("https://env-proxy-dns.test:{target_port}/via-env-proxy"),
+        ],
+    );
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "env proxy dns ok");
+    let connect_target = seen
+        .recv_timeout(Duration::from_secs(2))
+        .expect("proxy CONNECT request");
+    assert_eq!(connect_target, format!("env-proxy-dns.test:{target_port}"));
+}
+
+#[test]
 fn https_proxy_tls_ignores_origin_tls_settings() {
     let proxy = start_https_proxy(false);
     let ca = proxy.ca_cert_path.to_str().unwrap();

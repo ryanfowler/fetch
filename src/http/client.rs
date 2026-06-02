@@ -40,6 +40,17 @@ pub(crate) struct UrlClient {
     pub(crate) dns_resolution: Option<DnsResolution>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EffectiveProxy {
+    uses_local_target_dns: bool,
+}
+
+impl EffectiveProxy {
+    pub(crate) fn uses_local_target_dns(self) -> bool {
+        self.uses_local_target_dns
+    }
+}
+
 pub(crate) struct ClientBuildContext<'a> {
     pub(crate) mode: ClientMode,
     pub(crate) request_timeout: Option<Duration>,
@@ -61,7 +72,8 @@ pub(crate) async fn build_client_for_url(
         context.request_start,
     )?
     .timeout();
-    let dns_resolution = resolve_dns_for_client(cli, url, dns_timeout).await?;
+    let effective_proxy = effective_proxy_for_url(cli.proxy.as_deref(), http_version, url)?;
+    let dns_resolution = resolve_dns_for_client(cli, url, dns_timeout, effective_proxy).await?;
     let mut builder = Client::builder()
         .use_rustls_tls()
         .no_brotli()
@@ -126,8 +138,9 @@ async fn resolve_dns_for_client(
     cli: &Cli,
     url: &Url,
     timeout: Option<Duration>,
+    effective_proxy: Option<EffectiveProxy>,
 ) -> Result<Option<DnsResolution>, FetchError> {
-    let resolve = resolve_dns_for_client_inner(cli, url, timeout);
+    let resolve = resolve_dns_for_client_inner(cli, url, timeout, effective_proxy);
     TimeoutBudget::new(timeout).run(resolve).await
 }
 
@@ -135,16 +148,14 @@ async fn resolve_dns_for_client_inner(
     cli: &Cli,
     url: &Url,
     timeout: Option<Duration>,
+    effective_proxy: Option<EffectiveProxy>,
 ) -> Result<Option<DnsResolution>, FetchError> {
     let Some(host) = url.host_str() else {
         return Ok(None);
     };
     if host.parse::<IpAddr>().is_ok()
         || cli.unix.is_some()
-        || cli
-            .proxy
-            .as_deref()
-            .is_some_and(|proxy| !proxy_uses_local_target_dns(proxy))
+        || effective_proxy.is_some_and(|proxy| !proxy.uses_local_target_dns())
     {
         return Ok(None);
     }
@@ -286,53 +297,91 @@ fn configure_proxy(
 ) -> Result<ClientBuilder, FetchError> {
     validate_proxy_for_http_version(proxy, version)?;
 
-    if let Some(proxy) = proxy {
-        let proxy_config = Proxy::all(proxy)
-            .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?;
-        return Ok(builder.proxy(proxy_config));
+    let proxy_configs = proxy_configs(proxy)?;
+    if proxy.is_none()
+        && matches!(version, Some(HttpVersion::Http2 | HttpVersion::Http3))
+        && effective_proxy_from_configs(&proxy_configs, url).is_some()
+    {
+        return Err(proxy_http_version_error());
     }
 
-    if matches!(version, Some(HttpVersion::Http2 | HttpVersion::Http3)) {
-        if environment_proxy_for_url(url).is_some() {
-            return Err(proxy_http_version_error());
-        }
-        return Ok(builder);
-    }
-
-    configure_environment_proxies(builder)
+    Ok(configure_proxy_configs(builder, proxy_configs))
 }
 
-fn configure_environment_proxies(mut builder: ClientBuilder) -> Result<ClientBuilder, FetchError> {
+pub(crate) fn effective_proxy_for_url(
+    proxy: Option<&str>,
+    version: Option<HttpVersion>,
+    url: &Url,
+) -> Result<Option<EffectiveProxy>, FetchError> {
+    validate_proxy_for_http_version(proxy, version)?;
+    let proxy_configs = proxy_configs(proxy)?;
+    let effective_proxy = effective_proxy_from_configs(&proxy_configs, url);
+    if proxy.is_none()
+        && matches!(version, Some(HttpVersion::Http2 | HttpVersion::Http3))
+        && effective_proxy.is_some()
+    {
+        return Err(proxy_http_version_error());
+    }
+    Ok(effective_proxy)
+}
+
+fn effective_proxy_from_configs(proxy_configs: &[Proxy], url: &Url) -> Option<EffectiveProxy> {
+    proxy_configs
+        .iter()
+        .find_map(|proxy| proxy.selected_for_url(url))
+        .map(|proxy| EffectiveProxy {
+            uses_local_target_dns: proxy.uses_local_target_dns(),
+        })
+}
+
+fn proxy_configs(proxy: Option<&str>) -> Result<Vec<Proxy>, FetchError> {
+    if let Some(proxy) = proxy {
+        let proxy_config = Proxy::all(proxy).map_err(|err| invalid_proxy_error(proxy, err))?;
+        return Ok(vec![proxy_config]);
+    }
+
+    environment_proxy_configs()
+}
+
+fn environment_proxy_configs() -> Result<Vec<Proxy>, FetchError> {
+    let mut proxies = Vec::new();
     let no_proxy = NoProxy::from_env();
 
     if let Some(proxy) = env_proxy_value(&["HTTP_PROXY", "http_proxy"]) {
         let proxy_config = Proxy::http(&proxy)
-            .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?
+            .map_err(|err| invalid_proxy_error(&proxy, err))?
             .no_proxy(no_proxy.clone());
-        builder = builder.proxy(proxy_config);
+        proxies.push(proxy_config);
     }
 
     if let Some(proxy) = env_proxy_value(&["HTTPS_PROXY", "https_proxy"]) {
         let proxy_config = Proxy::https(&proxy)
-            .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?
+            .map_err(|err| invalid_proxy_error(&proxy, err))?
             .no_proxy(no_proxy.clone());
-        builder = builder.proxy(proxy_config);
+        proxies.push(proxy_config);
     }
 
     if let Some(proxy) = env_proxy_value(&["ALL_PROXY", "all_proxy"]) {
         let proxy_config = Proxy::all(&proxy)
-            .map_err(|err| FetchError::Message(format!("invalid proxy '{proxy}': {err}")))?
+            .map_err(|err| invalid_proxy_error(&proxy, err))?
             .no_proxy(no_proxy);
-        builder = builder.proxy(proxy_config);
+        proxies.push(proxy_config);
     }
 
-    builder = builder.proxy(Proxy::system());
+    proxies.push(Proxy::system());
 
-    Ok(builder)
+    Ok(proxies)
 }
 
-pub(crate) fn proxy_uses_local_target_dns(proxy: &str) -> bool {
-    crate::net::parse_proxy_url(proxy).is_ok_and(|url| url.scheme() == "socks5")
+fn configure_proxy_configs(mut builder: ClientBuilder, proxy_configs: Vec<Proxy>) -> ClientBuilder {
+    for proxy_config in proxy_configs {
+        builder = builder.proxy(proxy_config);
+    }
+    builder
+}
+
+fn invalid_proxy_error(proxy: &str, err: impl std::fmt::Display) -> FetchError {
+    FetchError::Message(format!("invalid proxy '{proxy}': {err}"))
 }
 
 fn env_proxy_value(keys: &[&str]) -> Option<String> {
@@ -352,27 +401,6 @@ fn env_proxy_value(keys: &[&str]) -> Option<String> {
         }
     }
     None
-}
-
-fn environment_proxy_for_url(url: &Url) -> Option<String> {
-    if no_proxy_matches_url(url, env_no_proxy_value().as_deref()) {
-        return None;
-    }
-
-    match url.scheme() {
-        "http" => env_proxy_value(&["HTTP_PROXY", "http_proxy"])
-            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"]))
-            .or_else(|| Proxy::system().matches_url(url).then(String::new)),
-        "https" => env_proxy_value(&["HTTPS_PROXY", "https_proxy"])
-            .or_else(|| env_proxy_value(&["ALL_PROXY", "all_proxy"]))
-            .or_else(|| Proxy::system().matches_url(url).then(String::new)),
-        _ => env_proxy_value(&["ALL_PROXY", "all_proxy"])
-            .or_else(|| Proxy::system().matches_url(url).then(String::new)),
-    }
-}
-
-fn env_no_proxy_value() -> Option<String> {
-    env::var("NO_PROXY").or_else(|_| env::var("no_proxy")).ok()
 }
 
 pub(crate) fn no_proxy_matches_url(url: &Url, no_proxy: Option<&str>) -> bool {
