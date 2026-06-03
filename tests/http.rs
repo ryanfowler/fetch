@@ -1358,6 +1358,15 @@ fn from_curl_individual_go_cases() {
     ]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "key-only-curl-ok");
+    let res = run_fetch(&[
+        "--from-curl",
+        &format!("curl --key {} https://example.com/key-only", key.display()),
+    ]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("client key requires a client certificate")
+    );
     let res = run_fetch(&["--from-curl", &format!("curl -v {}/verbose", server.url)]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "ok");

@@ -472,6 +472,7 @@ ca-cert = /path/to/api-ca.crt
 
 - If `cert` is provided without `key`, the tool will attempt to read the private key from the certificate file (combined PEM format)
 - If the private key cannot be found, an error will be displayed
+- TLS requests reject `key` without `cert`
 - Encrypted private keys are not supported
 
 #### `compress`

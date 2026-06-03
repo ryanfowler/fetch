@@ -22,6 +22,7 @@ use crate::error::{FetchError, write_warning_with_separator_with_color};
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let request_start = Instant::now();
     let url = tls_url(cli.url.as_deref().expect("URL checked by app"))?;
+    super::validate_client_auth_for_tls(cli.cert.as_deref(), cli.key.as_deref())?;
     let ignored = ignored_inspection_flags(cli);
     if !ignored.is_empty() && !cli.silent {
         write_warning_with_separator_with_color(

@@ -66,6 +66,7 @@ pub(crate) async fn build_client_for_url(
     context: &ClientBuildContext<'_>,
 ) -> Result<UrlClient, FetchError> {
     let http_version = context.mode.http_version();
+    validate_client_auth_for_url(cli, url)?;
     let dns_timeout = TimeoutBudget::for_connect(
         context.connect_timeout,
         context.request_timeout,
@@ -112,6 +113,13 @@ pub(crate) async fn build_client_for_url(
         client: builder.build()?,
         dns_resolution,
     })
+}
+
+fn validate_client_auth_for_url(cli: &Cli, url: &Url) -> Result<(), FetchError> {
+    if url.scheme() == "https" {
+        crate::tls::validate_client_auth_for_tls(cli.cert.as_deref(), cli.key.as_deref())?;
+    }
+    Ok(())
 }
 
 pub(crate) fn configure_unix_socket(

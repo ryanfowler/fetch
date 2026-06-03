@@ -268,6 +268,16 @@ pub fn validate_client_key_file(path: &str) -> Result<(), FetchError> {
     validate_client_key(path, &data)
 }
 
+pub(crate) fn validate_client_auth_for_tls(
+    cert_path: Option<&str>,
+    key_path: Option<&str>,
+) -> Result<(), FetchError> {
+    if key_path.is_some() && cert_path.is_none() {
+        return Err("client key requires a client certificate (use --cert)".into());
+    }
+    Ok(())
+}
+
 pub fn client_identity(
     cert_path: Option<&str>,
     key_path: Option<&str>,
