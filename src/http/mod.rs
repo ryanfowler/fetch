@@ -75,6 +75,8 @@ pub(crate) use request::{
     RequestBody, RequestBodyPayload, apply_aws_sigv4, apply_builder_authorization_headers,
     aws_config, basic_header, request_body, request_body_into_bytes,
 };
+#[cfg(test)]
+pub(crate) use request::{request_body_bytes, request_body_content_len, request_body_preview};
 pub(crate) use retry::{is_certificate_validation_message, total_attempts_for_retry};
 
 use encoding::*;

@@ -676,6 +676,7 @@ fetch --from-curl 'https://example.com'
 **Notes:**
 
 - `-b`/`--cookie` only supports inline cookie strings (e.g., `-b 'name=value'`). Cookie jar files are not supported and will return an error.
+- A single `-d @filename` or `-d @-` body streams through fetch's native request body path. Composite data bodies and `--data-urlencode @filename` are materialized for curl compatibility and are capped at 16 MiB.
 - `--data-urlencode` supports `@filename` and `name@filename` forms for reading and URL-encoding file contents.
 - `-n`/`--netrc` is not supported. Use `--basic`, `--bearer`, or an explicit `Authorization` header instead.
 - Semantic curl flags that `fetch` cannot faithfully translate, such as `-f`/`--fail`, `-N`/`--no-buffer`, `--proto-default`, and `--proto-redir`, return an error instead of being ignored.

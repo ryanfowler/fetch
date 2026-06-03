@@ -8,6 +8,7 @@ use crate::core;
 use crate::error::{FetchError, write_cli_error_with_color, write_runtime_error_with_color};
 
 const CURL_DEFAULT_MAX_REDIRECTS: usize = 50;
+const MAX_MATERIALIZED_CURL_DATA_BYTES: usize = 16 * 1024 * 1024;
 
 pub async fn main_entry() -> i32 {
     crate::tls::install_default_crypto_provider();
@@ -438,16 +439,28 @@ fn apply_from_curl(cli: &mut Cli) -> Result<(), FetchError> {
     }
 
     if !parsed.data_values.is_empty() {
-        let data = materialize_curl_data(&parsed.data_values)?;
-        if parsed.get_flag {
-            append_raw_query(&mut url, &String::from_utf8_lossy(&data));
-        } else {
-            cli.data = Some(String::from_utf8_lossy(&data).into_owned());
-            cli.data_is_literal = true;
-            cli.data_literal_bytes = Some(data);
+        if !parsed.get_flag
+            && let Some(value) = streaming_curl_data_value(&parsed.data_values)
+        {
+            cli.data = Some(value.to_string());
+            cli.data_is_literal = false;
+            cli.data_literal_bytes = None;
             if !parsed.has_content_type {
                 cli.headers
                     .push("Content-Type: application/x-www-form-urlencoded".to_string());
+            }
+        } else {
+            let data = materialize_curl_data(&parsed.data_values)?;
+            if parsed.get_flag {
+                append_raw_query(&mut url, &String::from_utf8_lossy(&data));
+            } else {
+                cli.data = Some(String::from_utf8_lossy(&data).into_owned());
+                cli.data_is_literal = true;
+                cli.data_literal_bytes = Some(data);
+                if !parsed.has_content_type {
+                    cli.headers
+                        .push("Content-Type: application/x-www-form-urlencoded".to_string());
+                }
             }
         }
     }
@@ -552,6 +565,16 @@ fn apply_from_curl(cli: &mut Cli) -> Result<(), FetchError> {
     cli.url = Some(url);
     cli.from_curl = None;
     Ok(())
+}
+
+fn streaming_curl_data_value(values: &[from_curl::DataValue]) -> Option<&str> {
+    let [value] = values else {
+        return None;
+    };
+    if value.is_raw || value.is_urlencode {
+        return None;
+    }
+    value.value.starts_with('@').then_some(value.value.as_str())
 }
 
 fn validate_from_curl_exclusives(cli: &Cli) -> Result<(), FetchError> {
@@ -775,49 +798,100 @@ fn materialize_curl_data(values: &[from_curl::DataValue]) -> Result<Vec<u8>, Fet
     let mut out = Vec::new();
     for (idx, value) in values.iter().enumerate() {
         if idx > 0 {
-            out.push(b'&');
+            append_materialized_curl_bytes(&mut out, b"&")?;
         }
         if value.is_raw {
-            out.extend_from_slice(value.value.as_bytes());
+            append_materialized_curl_bytes(&mut out, value.value.as_bytes())?;
         } else if value.is_urlencode {
-            out.extend_from_slice(url_encode_from_value(&value.value)?.as_bytes());
+            append_url_encode_from_value(&value.value, &mut out)?;
         } else {
-            out.extend_from_slice(&read_body_value(&value.value)?);
+            append_body_value(&value.value, &mut out)?;
         }
     }
     Ok(out)
 }
 
-fn read_body_value(value: &str) -> Result<Vec<u8>, FetchError> {
+fn append_body_value(value: &str, out: &mut Vec<u8>) -> Result<(), FetchError> {
     if value == "@-" {
-        let mut buf = Vec::new();
-        std::io::stdin().read_to_end(&mut buf)?;
-        return Ok(buf);
+        let stdin = std::io::stdin();
+        return append_materialized_curl_reader(stdin.lock(), out);
     }
     if let Some(path) = value.strip_prefix('@') {
-        return Ok(std::fs::read(expand_home(path))?);
+        let file = std::fs::File::open(expand_home(path))?;
+        return append_materialized_curl_reader(file, out);
     }
-    Ok(value.as_bytes().to_vec())
+    append_materialized_curl_bytes(out, value.as_bytes())
 }
 
-fn url_encode_from_value(value: &str) -> Result<String, FetchError> {
+fn append_url_encode_from_value(value: &str, out: &mut Vec<u8>) -> Result<(), FetchError> {
     if let Some(path) = value.strip_prefix('@') {
-        let bytes = read_file_for_urlencode(path)?;
-        return Ok(from_curl::query_escape_bytes(&bytes));
+        return append_url_encoded_file(path, out);
     }
 
     if let Some((name, path)) = value.split_once('@')
         && !name.is_empty()
     {
-        let bytes = read_file_for_urlencode(path)?;
-        return Ok(format!("{name}={}", from_curl::query_escape_bytes(&bytes)));
+        append_materialized_curl_bytes(out, name.as_bytes())?;
+        append_materialized_curl_bytes(out, b"=")?;
+        return append_url_encoded_file(path, out);
     }
 
-    Ok(from_curl::query_escape(value))
+    append_query_escaped_bytes(value.as_bytes(), out)
 }
 
-fn read_file_for_urlencode(path: &str) -> Result<Vec<u8>, FetchError> {
-    Ok(std::fs::read(expand_home(path))?)
+fn append_url_encoded_file(path: &str, out: &mut Vec<u8>) -> Result<(), FetchError> {
+    let file = std::fs::File::open(expand_home(path))?;
+    append_query_escaped_reader(file, out)
+}
+
+fn append_query_escaped_reader(mut reader: impl Read, out: &mut Vec<u8>) -> Result<(), FetchError> {
+    let mut buf = [0; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        append_query_escaped_bytes(&buf[..n], out)?;
+    }
+}
+
+fn append_query_escaped_bytes(bytes: &[u8], out: &mut Vec<u8>) -> Result<(), FetchError> {
+    for chunk in url::form_urlencoded::byte_serialize(bytes) {
+        append_materialized_curl_bytes(out, chunk.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn append_materialized_curl_reader(
+    mut reader: impl Read,
+    out: &mut Vec<u8>,
+) -> Result<(), FetchError> {
+    let mut buf = [0; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            return Ok(());
+        }
+        append_materialized_curl_bytes(out, &buf[..n])?;
+    }
+}
+
+fn append_materialized_curl_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), FetchError> {
+    if out
+        .len()
+        .checked_add(bytes.len())
+        .is_none_or(|len| len > MAX_MATERIALIZED_CURL_DATA_BYTES)
+    {
+        return Err(materialized_curl_data_limit_error());
+    }
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn materialized_curl_data_limit_error() -> FetchError {
+    FetchError::Message(format!(
+        "--from-curl data requires materializing more than {MAX_MATERIALIZED_CURL_DATA_BYTES} bytes; use a single -d @file/-d @- body for streaming input"
+    ))
 }
 
 fn expand_home(path: &str) -> String {
@@ -1097,6 +1171,60 @@ mod tests {
     }
 
     #[test]
+    fn from_curl_single_file_data_uses_streaming_body_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.txt");
+        std::fs::write(&path, b"streamed data").unwrap();
+        let body_arg = format!("@{}", curl_test_path(&path));
+        let command = format!("curl -d '{body_arg}' https://example.com");
+        let mut cli = Cli::try_parse_from(["fetch", "--from-curl", &command]).unwrap();
+
+        apply_from_curl(&mut cli).unwrap();
+
+        assert_eq!(cli.data.as_deref(), Some(body_arg.as_str()));
+        assert!(!cli.data_is_literal);
+        assert_eq!(cli.data_literal_bytes, None);
+
+        let body = crate::http::request_body(&cli).unwrap();
+        assert_eq!(
+            crate::http::request_body_content_len(&body),
+            Some("streamed data".len() as u64)
+        );
+        assert!(crate::http::request_body_bytes(&body).is_none());
+        assert_eq!(
+            crate::http::request_body_preview(body.as_ref().unwrap()).unwrap(),
+            b"streamed data"
+        );
+    }
+
+    #[test]
+    fn from_curl_composite_file_data_materialization_is_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.bin");
+        let second = dir.path().join("second.bin");
+        std::fs::File::create(&first)
+            .unwrap()
+            .set_len((MAX_MATERIALIZED_CURL_DATA_BYTES / 2 + 1) as u64)
+            .unwrap();
+        std::fs::File::create(&second)
+            .unwrap()
+            .set_len((MAX_MATERIALIZED_CURL_DATA_BYTES / 2 + 1) as u64)
+            .unwrap();
+        let command = format!(
+            "curl -d '@{}' -d '@{}' https://example.com",
+            curl_test_path(&first),
+            curl_test_path(&second)
+        );
+        let mut cli = Cli::try_parse_from(["fetch", "--from-curl", &command]).unwrap();
+
+        let err = apply_from_curl(&mut cli).unwrap_err().to_string();
+
+        assert!(err.contains("--from-curl data requires materializing more than"));
+        assert!(err.contains(&MAX_MATERIALIZED_CURL_DATA_BYTES.to_string()));
+        assert!(err.contains("single -d @file/-d @- body"));
+    }
+
+    #[test]
     fn from_curl_get_data_appends_materialized_query() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("payload.txt");
@@ -1111,6 +1239,10 @@ mod tests {
             cli.url.as_deref(),
             Some("https://example.com?q=search&limit=10")
         );
+    }
+
+    fn curl_test_path(path: &std::path::Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
     }
 
     #[test]
