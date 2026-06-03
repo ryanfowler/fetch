@@ -2,6 +2,8 @@ mod support;
 
 use support::*;
 
+const WEBSOCKET_RECEIVE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+
 fn start_ws_frame_server(reply: Vec<u8>) -> (String, mpsc::Receiver<(u8, Vec<u8>)>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket frame server");
     listener.set_nonblocking(true).unwrap();
@@ -55,6 +57,35 @@ fn start_ws_frame_server(reply: Vec<u8>) -> (String, mpsc::Receiver<(u8, Vec<u8>
     (url, seen_rx)
 }
 
+fn start_ws_text_push_server(payload: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket text push server");
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let Some(req) = read_request(&mut reader) else {
+            return;
+        };
+        let key = req.header("sec-websocket-key");
+        let mut sha = Sha1::new();
+        sha.update(key.as_bytes());
+        sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        let accept = base64::engine::general_purpose::STANDARD.encode(sha.finalize());
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        );
+        if stream.write_all(response.as_bytes()).is_err() {
+            return;
+        }
+        let _ = stream.write_all(&ws_text_frame(&payload));
+        write_ws_close_and_drain(&mut stream, b"done");
+    });
+    url
+}
+
 fn start_ws_session_server() -> (String, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket session server");
     listener.set_nonblocking(true).unwrap();
@@ -105,6 +136,52 @@ fn start_ws_session_server() -> (String, mpsc::Receiver<String>) {
         }
     });
     (url, seen_rx)
+}
+
+#[test]
+fn websocket_receive_limit_allows_message_just_below_cap() {
+    let payload = vec![b'a'; WEBSOCKET_RECEIVE_LIMIT_BYTES - 1];
+    let ws_url = start_ws_text_push_server(payload);
+    let dir = TempDir::new().unwrap();
+    let stdout_path = dir.path().join("websocket-large-message.txt");
+    let stdout_file = fs::File::create(&stdout_path).unwrap();
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([&ws_url, "--format", "off", "--ws-interactive", "off"]);
+    cmd.stdout(Stdio::from(stdout_file)).stderr(Stdio::piped());
+    cmd.env("NO_COLOR", "");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let output = cmd.output().expect("run websocket receive limit fetch");
+    assert!(
+        output.status.success(),
+        "fetch exited with {}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = fs::read(&stdout_path).unwrap();
+    assert_eq!(stdout.len(), WEBSOCKET_RECEIVE_LIMIT_BYTES);
+    assert_eq!(stdout.first(), Some(&b'a'));
+    assert!(stdout.ends_with(b"a\n"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("exceeds maximum"));
+}
+
+#[test]
+fn websocket_receive_limit_rejects_message_above_cap() {
+    let payload = vec![b'a'; WEBSOCKET_RECEIVE_LIMIT_BYTES + 1];
+    let ws_url = start_ws_text_push_server(payload);
+    let res = run_fetch(&[&ws_url, "--format", "off", "--ws-interactive", "off"]);
+
+    assert_exit(&res, 1);
+    assert!(res.stdout.is_empty(), "stdout len: {}", res.stdout.len());
+    assert!(
+        res.stderr
+            .contains("WebSocket message exceeds maximum of 16777216 bytes"),
+        "stderr:\n{}",
+        res.stderr
+    );
 }
 
 #[test]

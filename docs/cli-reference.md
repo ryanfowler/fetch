@@ -559,6 +559,8 @@ are sent as text or binary WebSocket frames.
 Piped text/auto input is line-delimited and capped at 16 MiB per line; use
 `--ws-message-mode binary` for larger raw streams.
 
+Incoming WebSocket server frames and assembled messages are capped at 16 MiB.
+
 See [WebSocket documentation](websocket.md) for details.
 
 ## gRPC Options
