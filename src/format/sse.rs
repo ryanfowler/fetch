@@ -3,10 +3,7 @@ use serde_json::Value;
 use crate::core::{Printer, Sequence};
 
 #[cfg(test)]
-pub(crate) fn format_event_stream(
-    bytes: &[u8],
-    color: bool,
-) -> Result<String, std::str::Utf8Error> {
+pub(crate) fn format_event_stream(bytes: &[u8], color: bool) -> Result<String, EventStreamError> {
     let mut out = Printer::new(color);
     format_event_stream_to(bytes, &mut out)?;
     Ok(out
@@ -14,12 +11,65 @@ pub(crate) fn format_event_stream(
         .expect("event stream formatter output is valid UTF-8"))
 }
 
-pub fn format_event_stream_to(bytes: &[u8], out: &mut Printer) -> Result<(), std::str::Utf8Error> {
+pub fn format_event_stream_to(bytes: &[u8], out: &mut Printer) -> Result<(), EventStreamError> {
     let input = std::str::from_utf8(bytes)?;
     let mut formatter = EventStreamFormatter::new();
-    formatter.push_str(input, out);
-    formatter.finish(out);
-    Ok(())
+    formatter.push_str(input, out)?;
+    formatter.finish(out)
+}
+
+#[derive(Debug)]
+pub enum EventStreamError {
+    InvalidUtf8(std::str::Utf8Error),
+    PendingBufferTooLarge {
+        kind: PendingBufferKind,
+        max_bytes: usize,
+    },
+}
+
+impl std::fmt::Display for EventStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidUtf8(err) => write!(f, "invalid UTF-8 in event stream: {err}"),
+            Self::PendingBufferTooLarge { kind, max_bytes } => write!(
+                f,
+                "SSE {kind} exceeds {max_bytes} bytes and cannot be formatted as a stream"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EventStreamError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidUtf8(err) => Some(err),
+            Self::PendingBufferTooLarge { .. } => None,
+        }
+    }
+}
+
+impl From<std::str::Utf8Error> for EventStreamError {
+    fn from(err: std::str::Utf8Error) -> Self {
+        Self::InvalidUtf8(err)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PendingBufferKind {
+    Event,
+    Line,
+    Utf8,
+}
+
+impl std::fmt::Display for PendingBufferKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Event => "event",
+            Self::Line => "line",
+            Self::Utf8 => "UTF-8 buffer",
+        };
+        f.write_str(label)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -29,6 +79,7 @@ pub struct EventStreamFormatter {
     line: String,
     seen_first_line: bool,
     pending_cr: bool,
+    max_pending_bytes: Option<usize>,
 }
 
 impl EventStreamFormatter {
@@ -36,7 +87,18 @@ impl EventStreamFormatter {
         Self::default()
     }
 
-    pub fn push_str(&mut self, input: &str, out: &mut Printer) {
+    pub fn with_pending_limit(max_pending_bytes: usize) -> Self {
+        Self {
+            max_pending_bytes: Some(max_pending_bytes),
+            ..Self::default()
+        }
+    }
+
+    pub fn max_pending_bytes(&self) -> Option<usize> {
+        self.max_pending_bytes
+    }
+
+    pub fn push_str(&mut self, input: &str, out: &mut Printer) -> Result<(), EventStreamError> {
         for ch in input.chars() {
             if self.pending_cr {
                 self.pending_cr = false;
@@ -46,47 +108,85 @@ impl EventStreamFormatter {
             }
 
             match ch {
-                '\n' => self.process_line(out),
+                '\n' => self.process_line(out)?,
                 '\r' => {
-                    self.process_line(out);
+                    self.process_line(out)?;
                     self.pending_cr = true;
                 }
-                _ => self.line.push(ch),
+                _ => {
+                    self.ensure_pending_line_len(ch.len_utf8())?;
+                    self.line.push(ch);
+                }
             }
         }
+        Ok(())
     }
 
-    pub fn finish(&mut self, out: &mut Printer) {
+    pub fn finish(&mut self, out: &mut Printer) -> Result<(), EventStreamError> {
         if !self.line.is_empty() {
-            self.process_line(out);
+            self.process_line(out)?;
         }
         if !self.data.is_empty() {
             self.dispatch_event(out);
         }
+        Ok(())
     }
 
-    fn process_line(&mut self, out: &mut Printer) {
+    fn ensure_pending_line_len(&self, additional_bytes: usize) -> Result<(), EventStreamError> {
+        if self
+            .max_pending_bytes
+            .is_some_and(|max| self.line.len().saturating_add(additional_bytes) > max)
+        {
+            return Err(EventStreamError::PendingBufferTooLarge {
+                kind: PendingBufferKind::Line,
+                max_bytes: self.max_pending_bytes.unwrap(),
+            });
+        }
+        Ok(())
+    }
+
+    fn ensure_pending_event_len(
+        &self,
+        current_len: usize,
+        additional_bytes: usize,
+    ) -> Result<(), EventStreamError> {
+        if self
+            .max_pending_bytes
+            .is_some_and(|max| current_len.saturating_add(additional_bytes) > max)
+        {
+            return Err(EventStreamError::PendingBufferTooLarge {
+                kind: PendingBufferKind::Event,
+                max_bytes: self.max_pending_bytes.unwrap(),
+            });
+        }
+        Ok(())
+    }
+
+    fn process_line(&mut self, out: &mut Printer) -> Result<(), EventStreamError> {
+        let mut line = std::mem::take(&mut self.line);
         if !self.seen_first_line {
-            if self.line.starts_with('\u{feff}') {
-                self.line.drain(..'\u{feff}'.len_utf8());
+            if line.starts_with('\u{feff}') {
+                line.drain(..'\u{feff}'.len_utf8());
             }
             self.seen_first_line = true;
         }
 
-        if self.line.is_empty() {
+        if line.is_empty() {
             self.dispatch_event(out);
-            return;
+            return Ok(());
         }
 
-        let (name, value) = self.line.split_once(':').unwrap_or((&self.line, ""));
+        let (name, value) = line.split_once(':').unwrap_or((&line, ""));
         if !name.is_empty() {
             let value = value.strip_prefix(' ').unwrap_or(value);
             match name {
                 "event" => {
+                    self.ensure_pending_event_len(0, value.len())?;
                     self.event_type.clear();
                     self.event_type.push_str(value);
                 }
                 "data" => {
+                    self.ensure_pending_event_len(self.data.len(), value.len().saturating_add(1))?;
                     self.data.push_str(value);
                     self.data.push('\n');
                 }
@@ -94,7 +194,7 @@ impl EventStreamFormatter {
                 _ => {}
             }
         }
-        self.line.clear();
+        Ok(())
     }
 
     fn dispatch_event(&mut self, out: &mut Printer) {
@@ -230,12 +330,14 @@ mod tests {
         let mut formatter = EventStreamFormatter::new();
         let mut got = Printer::new(false);
 
-        formatter.push_str("data: {\"a\"", &mut got);
+        formatter.push_str("data: {\"a\"", &mut got).unwrap();
         assert!(got.bytes().is_empty());
-        formatter.push_str(":1}\r\n", &mut got);
+        formatter.push_str(":1}\r\n", &mut got).unwrap();
         assert!(got.bytes().is_empty());
-        formatter.push_str("\nevent: done\ndata: two\n\n", &mut got);
-        formatter.finish(&mut got);
+        formatter
+            .push_str("\nevent: done\ndata: two\n\n", &mut got)
+            .unwrap();
+        formatter.finish(&mut got).unwrap();
         let got = got
             .into_string()
             .expect("event stream formatter output is valid UTF-8");
@@ -253,6 +355,58 @@ mod tests {
         assert_eq!(
             got,
             "\x1b[1m\x1b[36mevent\x1b[0m: ev1\n\x1b[1m\x1b[36mdata\x1b[0m: { \x1b[34m\x1b[1m\"key\"\x1b[0m: \x1b[32m\"val\"\x1b[0m }\n\n"
+        );
+    }
+
+    #[test]
+    fn errors_when_pending_line_exceeds_limit() {
+        let mut formatter = EventStreamFormatter::with_pending_limit(8);
+        let mut got = Printer::new(false);
+
+        let err = formatter.push_str("data: 123", &mut got).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "SSE line exceeds 8 bytes and cannot be formatted as a stream"
+        );
+        assert!(got.bytes().is_empty());
+    }
+
+    #[test]
+    fn errors_when_pending_event_exceeds_limit() {
+        let mut formatter = EventStreamFormatter::with_pending_limit(8);
+        let mut got = Printer::new(false);
+
+        formatter.push_str("data: ab\n", &mut got).unwrap();
+        formatter.push_str("data: cd\n", &mut got).unwrap();
+        let err = formatter.push_str("data: ef\n", &mut got).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "SSE event exceeds 8 bytes and cannot be formatted as a stream"
+        );
+        assert!(got.bytes().is_empty());
+    }
+
+    #[test]
+    fn pending_event_limit_resets_after_dispatch() {
+        let mut formatter = EventStreamFormatter::with_pending_limit(10);
+        let mut got = Printer::new(false);
+
+        formatter
+            .push_str("data: 1234\ndata: 5678\n\n", &mut got)
+            .unwrap();
+        formatter
+            .push_str("data: abcd\ndata: efgh\n\n", &mut got)
+            .unwrap();
+        formatter.finish(&mut got).unwrap();
+        let got = got
+            .into_string()
+            .expect("event stream formatter output is valid UTF-8");
+
+        assert_eq!(
+            got,
+            "event: message\ndata: 1234\ndata: 5678\n\nevent: message\ndata: abcd\ndata: efgh\n\n"
         );
     }
 }
