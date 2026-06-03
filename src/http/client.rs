@@ -415,26 +415,81 @@ pub(crate) fn no_proxy_matches_url(url: &Url, no_proxy: Option<&str>) -> bool {
         .trim_end_matches(']')
         .to_ascii_lowercase();
     let host_ip = host.parse::<IpAddr>().ok();
+    let url_port = url.port_or_known_default();
     no_proxy.split(',').any(|entry| {
         let entry = entry.trim();
         if entry == "*" {
             return true;
         }
-        if entry.is_empty() {
+        let Some(entry) = parse_no_proxy_entry(entry) else {
+            return false;
+        };
+        if entry
+            .port
+            .is_some_and(|entry_port| url_port != Some(entry_port))
+        {
             return false;
         }
-        if let Some(host_ip) = host_ip {
-            return entry
-                .parse::<IpNet>()
-                .is_ok_and(|network| network.contains(&host_ip))
-                || entry.parse::<IpAddr>().is_ok_and(|ip| ip == host_ip);
-        }
-        let entry = entry.trim_start_matches('.').to_ascii_lowercase();
-        host == entry
-            || host
-                .strip_suffix(&entry)
-                .is_some_and(|prefix| prefix.ends_with('.'))
+        no_proxy_host_matches(&host, host_ip, entry.host)
     })
+}
+
+struct ParsedNoProxyEntry<'a> {
+    host: &'a str,
+    port: Option<u16>,
+}
+
+fn parse_no_proxy_entry(entry: &str) -> Option<ParsedNoProxyEntry<'_>> {
+    if entry.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = entry.strip_prefix('[') {
+        let (host, tail) = rest.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+        let port = match tail.strip_prefix(':') {
+            Some(port) if !port.is_empty() => Some(port.parse().ok()?),
+            Some(_) => return None,
+            None if tail.is_empty() => None,
+            None => return None,
+        };
+        return Some(ParsedNoProxyEntry { host, port });
+    }
+
+    if entry.bytes().filter(|byte| *byte == b':').count() == 1 {
+        let (host, port) = entry.split_once(':')?;
+        if host.is_empty() || port.is_empty() {
+            return None;
+        }
+        return Some(ParsedNoProxyEntry {
+            host,
+            port: Some(port.parse().ok()?),
+        });
+    }
+
+    Some(ParsedNoProxyEntry {
+        host: entry,
+        port: None,
+    })
+}
+
+fn no_proxy_host_matches(host: &str, host_ip: Option<IpAddr>, entry: &str) -> bool {
+    if entry.is_empty() {
+        return false;
+    }
+    if let Some(host_ip) = host_ip {
+        return entry
+            .parse::<IpNet>()
+            .is_ok_and(|network| network.contains(&host_ip))
+            || entry.parse::<IpAddr>().is_ok_and(|ip| ip == host_ip);
+    }
+    let entry = entry.trim_start_matches('.').to_ascii_lowercase();
+    host == entry
+        || host
+            .strip_suffix(&entry)
+            .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 fn configure_http_version(builder: ClientBuilder, mode: ClientMode) -> ClientBuilder {
@@ -578,6 +633,28 @@ mod tests {
         assert!(!no_proxy_matches_url(&url, Some("notexample.com")));
         assert!(!no_proxy_matches_url(&url, Some("")));
         assert!(!no_proxy_matches_url(&url, None));
+    }
+
+    #[test]
+    fn no_proxy_matching_supports_port_qualified_entries() {
+        let host_url = Url::parse("https://api.example.com/path").unwrap();
+        let wrong_port_url = Url::parse("https://api.example.com:444/path").unwrap();
+        let ipv4_url = Url::parse("http://127.0.0.1:3000/api").unwrap();
+        let ipv6_url = Url::parse("http://[::1]:8080/api").unwrap();
+
+        assert!(no_proxy_matches_url(&host_url, Some("api.example.com:443")));
+        assert!(no_proxy_matches_url(&host_url, Some("example.com:443")));
+        assert!(!no_proxy_matches_url(
+            &wrong_port_url,
+            Some("api.example.com:443")
+        ));
+
+        assert!(no_proxy_matches_url(&ipv4_url, Some("127.0.0.1:3000")));
+        assert!(!no_proxy_matches_url(&ipv4_url, Some("127.0.0.1:3001")));
+        assert!(no_proxy_matches_url(&ipv4_url, Some("127.0.0.0/8:3000")));
+
+        assert!(no_proxy_matches_url(&ipv6_url, Some("[::1]:8080")));
+        assert!(!no_proxy_matches_url(&ipv6_url, Some("[::1]:8081")));
     }
 
     #[test]
