@@ -154,6 +154,7 @@ fetch --cert client.crt --key client.key example.com
 ### `--key PATH`
 
 Client private key file for mTLS. Required if `--cert` is a certificate-only file.
+TLS requests reject `--key` without a client certificate.
 
 ```sh
 fetch --cert client.crt --key client.key example.com

@@ -294,6 +294,13 @@ fn config_error_and_metadata_edges() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "key-only-config-ok");
 
+    let res = run_fetch(&["--config", config.to_str().unwrap(), "https://example.com"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("client key requires a client certificate")
+    );
+
     let config = dir.path().join("tls-config");
     fs::write(&config, "min-tls = 1.2\nmax-tls = 1.2\n").unwrap();
     let res = run_fetch(&[

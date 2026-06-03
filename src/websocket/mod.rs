@@ -149,6 +149,7 @@ fn websocket_connector(cli: &Cli, url: &Url) -> Result<Option<Connector>, FetchE
         return Ok(None);
     }
 
+    crate::tls::validate_client_auth_for_tls(cli.cert.as_deref(), cli.key.as_deref())?;
     let min_tls = cli.min_tls.as_deref().or(cli.tls.as_deref()).map(|value| {
         if cli.min_tls.is_some() {
             ("min-tls", value)

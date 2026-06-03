@@ -171,6 +171,7 @@ ca-cert = /path/to/api-ca.crt
 ### Certificate Formats
 
 - Certificates and keys must be in PEM format
+- TLS requests reject a private key without a client certificate, including values from config files or `--from-curl`
 - Encrypted private keys are not supported
 - Combined PEM files should have the certificate before the key
 
