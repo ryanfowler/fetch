@@ -630,11 +630,30 @@ pub(super) struct FormattedSseStream {
 
 impl FormattedSseStream {
     fn new(use_color: bool) -> Self {
+        Self::with_pending_limit(use_color, MAX_BUFFERED_RESPONSE_BYTES)
+    }
+
+    fn with_pending_limit(use_color: bool, max_pending_bytes: usize) -> Self {
         Self {
-            formatter: sse::EventStreamFormatter::new(),
+            formatter: sse::EventStreamFormatter::with_pending_limit(max_pending_bytes),
             pending: Vec::new(),
             use_color,
         }
+    }
+
+    fn ensure_pending_utf8_len_within_limit(&self) -> Result<(), FetchError> {
+        if let Some(max) = self.formatter.max_pending_bytes()
+            && self.pending.len() > max
+        {
+            return Err(FetchError::Message(
+                sse::EventStreamError::PendingBufferTooLarge {
+                    kind: sse::PendingBufferKind::Utf8,
+                    max_bytes: max,
+                }
+                .to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -643,20 +662,17 @@ impl StdoutStreamFormatter for FormattedSseStream {
         self.pending.extend_from_slice(chunk);
         let formatted =
             push_sse_stream_bytes(&mut self.pending, &mut self.formatter, self.use_color)
-                .map_err(invalid_sse_utf8_error)?;
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+        self.ensure_pending_utf8_len_within_limit()?;
         Ok(vec![formatted.into_bytes()])
     }
 
     fn finish(&mut self) -> Result<Vec<Vec<u8>>, FetchError> {
         let formatted =
             finish_sse_stream_formatter(&mut self.pending, &mut self.formatter, self.use_color)
-                .map_err(invalid_sse_utf8_error)?;
+                .map_err(|err| FetchError::Message(err.to_string()))?;
         Ok(vec![formatted.into_bytes()])
     }
-}
-
-pub(super) fn invalid_sse_utf8_error(err: std::str::Utf8Error) -> FetchError {
-    FetchError::Message(format!("invalid UTF-8 in event stream: {err}"))
 }
 
 pub(super) struct FormattedNdjsonStream {
@@ -792,12 +808,12 @@ pub(super) fn push_sse_stream_bytes(
     pending: &mut Vec<u8>,
     formatter: &mut sse::EventStreamFormatter,
     use_color: bool,
-) -> Result<String, std::str::Utf8Error> {
+) -> Result<String, sse::EventStreamError> {
     let mut out = core::Printer::new(use_color);
     loop {
         match std::str::from_utf8(pending) {
             Ok(input) => {
-                formatter.push_str(input, &mut out);
+                formatter.push_str(input, &mut out)?;
                 pending.clear();
                 return Ok(out
                     .into_string()
@@ -810,11 +826,13 @@ pub(super) fn push_sse_stream_bytes(
                         .into_string()
                         .expect("event stream formatter output is valid UTF-8"));
                 }
-                let input = std::str::from_utf8(&pending[..valid_up_to])?.to_string();
-                formatter.push_str(&input, &mut out);
+                {
+                    let input = std::str::from_utf8(&pending[..valid_up_to])?;
+                    formatter.push_str(input, &mut out)?;
+                }
                 pending.drain(..valid_up_to);
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.into()),
         }
     }
 }
@@ -823,11 +841,11 @@ pub(super) fn finish_sse_stream_formatter(
     pending: &mut Vec<u8>,
     formatter: &mut sse::EventStreamFormatter,
     use_color: bool,
-) -> Result<String, std::str::Utf8Error> {
+) -> Result<String, sse::EventStreamError> {
     let mut out = core::Printer::new(use_color);
     let chunk = push_sse_stream_bytes(pending, formatter, use_color)?;
     out.push_str(&chunk);
-    formatter.finish(&mut out);
+    formatter.finish(&mut out)?;
     Ok(out
         .into_string()
         .expect("event stream formatter output is valid UTF-8"))
@@ -1745,6 +1763,39 @@ mod tests {
 
         let cli = Cli::try_parse_from(["fetch", "--format", "off", "https://example.com"]).unwrap();
         assert!(!should_stream_formatted_sse_stdout(&cli, &headers, true));
+    }
+
+    #[test]
+    fn formatted_sse_errors_on_oversized_unterminated_event() {
+        let mut formatter = FormattedSseStream::with_pending_limit(false, 8);
+
+        let err = formatter.push_chunk(b"data: 123").unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "SSE line exceeds 8 bytes and cannot be formatted as a stream"
+        );
+    }
+
+    #[test]
+    fn formatted_sse_pending_limit_resets_after_dispatch() {
+        let mut formatter = FormattedSseStream::with_pending_limit(false, 8);
+        let mut got = Vec::new();
+
+        for output in formatter.push_chunk(b"data: ab\ndata: cd\n\n").unwrap() {
+            got.extend(output);
+        }
+        for output in formatter.push_chunk(b"data: ef\ndata: gh\n\n").unwrap() {
+            got.extend(output);
+        }
+        for output in formatter.finish().unwrap() {
+            got.extend(output);
+        }
+
+        assert_eq!(
+            String::from_utf8(got).unwrap(),
+            "event: message\ndata: ab\ndata: cd\n\nevent: message\ndata: ef\ndata: gh\n\n"
+        );
     }
 
     #[test]
