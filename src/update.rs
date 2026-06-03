@@ -176,17 +176,11 @@ async fn update_inner(
     let checksum = download_checksum(client, release_artifact.checksum_url).await?;
     verify_artifact_checksum(release_artifact.archive_name, &artifact, &checksum)?;
 
-    let temp_dir = std::env::temp_dir().join(format!("fetch-update-{}", unique_suffix()));
-    std::fs::create_dir_all(&temp_dir)?;
-    let unpack_result = unpack_artifact(&temp_dir, release_artifact.archive_name, &artifact);
-    if let Err(err) = unpack_result {
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        return Err(err);
-    }
+    let temp_dir = create_update_temp_dir()?;
+    unpack_artifact(temp_dir.path(), release_artifact.archive_name, &artifact)?;
 
-    let src = temp_dir.join(fetch_filename());
+    let src = temp_dir.path().join(fetch_filename());
     let replace_result = self_replace(&exe_path, &src);
-    let _ = std::fs::remove_dir_all(&temp_dir);
     replace_result?;
 
     write_update_success(silent, version, &latest.tag_name);
@@ -700,6 +694,50 @@ fn unpack_artifact(dir: &Path, archive_name: &str, data: &[u8]) -> Result<(), Fe
     }
 }
 
+struct UpdateTempDir {
+    path: PathBuf,
+}
+
+impl UpdateTempDir {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for UpdateTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn create_update_temp_dir() -> Result<UpdateTempDir, FetchError> {
+    let base = std::env::temp_dir();
+    for _ in 0..100 {
+        let path = base.join(format!("fetch-update-{}", unique_suffix()));
+        match create_private_dir(&path) {
+            Ok(()) => return Ok(UpdateTempDir { path }),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Err(FetchError::Message(
+        "unable to create unique temporary update directory".to_string(),
+    ))
+}
+
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    std::fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+#[cfg(not(unix))]
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir(path)
+}
+
 fn unpack_tar_gz_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
     unpack_tar_gz_artifact_with_limits(dir, data, ArchiveExtractionLimits::default())
 }
@@ -732,7 +770,7 @@ fn unpack_tar_gz_artifact_with_limits(
         {
             use std::os::unix::fs::PermissionsExt;
 
-            let mode = entry.header().mode().unwrap_or(0o755);
+            let mode = entry.header().mode().unwrap_or(0o755) & 0o777;
             std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode))?;
         }
     }
@@ -2097,6 +2135,29 @@ mod tests {
     }
 
     #[test]
+    fn update_temp_dir_is_removed_on_drop() {
+        let path = {
+            let dir = create_update_temp_dir().unwrap();
+            let path = dir.path().to_path_buf();
+            assert!(path.exists());
+            path
+        };
+
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_temp_dir_is_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = create_update_temp_dir().unwrap();
+
+        let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    #[test]
     fn test_unpack_zip_artifact_path_traversal() {
         let tests = [
             ("normal file", "fetch.exe", false),
@@ -2237,6 +2298,24 @@ mod tests {
             std::fs::read_to_string(dir.path().join("fetch")).unwrap(),
             "short"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unpack_tar_gz_artifact_masks_special_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let archive = create_tar_gz(&[("fetch", b"content".as_slice(), 0o4755, false)]);
+        let dir = tempfile::tempdir().unwrap();
+
+        unpack_artifact(dir.path(), "fetch-v1.2.3-linux-amd64.tar.gz", &archive).unwrap();
+
+        let mode = std::fs::metadata(dir.path().join("fetch"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o755);
     }
 
     #[cfg(unix)]
