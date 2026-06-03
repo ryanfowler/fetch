@@ -13,10 +13,12 @@ use http::header::{ACCEPT, AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, SET_CO
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::CapacityError;
 use tokio_tungstenite::tungstenite::http::{
     HeaderMap as WsHeaderMap, HeaderName as WsHeaderName, HeaderValue as WsHeaderValue,
     Version as WsVersion,
 };
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{Connector, client_async_tls_with_config};
 use url::Url;
@@ -36,6 +38,8 @@ pub mod interactive;
 const STDIN_MESSAGE_CHANNEL_CAPACITY: usize = 16;
 const STDIN_BINARY_CHUNK_SIZE: usize = 16 * 1024;
 const STDIN_TEXT_MESSAGE_MAX_BYTES: usize = 16 * 1024 * 1024;
+const WEBSOCKET_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const WEBSOCKET_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const BINARY_MESSAGE_WARNING: &str = "the WebSocket message appears to be binary\n\nRedirect stdout to a file or pipe to output binary WebSocket messages";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,9 +190,17 @@ async fn connect_websocket(
         .map_err(websocket_network_error)?;
     timeout_ws(
         timeout,
-        client_async_tls_with_config(request, stream, None, connector),
+        client_async_tls_with_config(request, stream, Some(websocket_config()), connector),
     )
     .await
+}
+
+fn websocket_config() -> WebSocketConfig {
+    // Keep inbound message allocation policy owned by fetch instead of inheriting
+    // dependency defaults. The limit matches non-interactive text stdin messages.
+    WebSocketConfig::default()
+        .max_frame_size(Some(WEBSOCKET_MAX_FRAME_BYTES))
+        .max_message_size(Some(WEBSOCKET_MAX_MESSAGE_BYTES))
 }
 
 async fn dial_websocket(
@@ -793,6 +805,11 @@ fn websocket_error(err: WsError) -> FetchError {
         return FetchError::Runtime(message[start..].to_string());
     }
     match err {
+        WsError::Capacity(CapacityError::MessageTooLong { size, max_size }) => {
+            FetchError::Runtime(format!(
+                "WebSocket message exceeds maximum of {max_size} bytes (received {size} bytes)"
+            ))
+        }
         WsError::Url(_) | WsError::HttpFormat(_) => FetchError::Message(message),
         _ => FetchError::Runtime(message),
     }
@@ -832,6 +849,27 @@ mod tests {
         let err = websocket_url("https://example.com").unwrap_err();
 
         assert!(err.to_string().contains("unsupported url scheme"));
+    }
+
+    #[test]
+    fn websocket_config_sets_fetch_receive_limits() {
+        let config = websocket_config();
+
+        assert_eq!(config.max_frame_size, Some(WEBSOCKET_MAX_FRAME_BYTES));
+        assert_eq!(config.max_message_size, Some(WEBSOCKET_MAX_MESSAGE_BYTES));
+    }
+
+    #[test]
+    fn websocket_capacity_error_reports_fetch_limit() {
+        let err = websocket_error(WsError::Capacity(CapacityError::MessageTooLong {
+            size: WEBSOCKET_MAX_MESSAGE_BYTES + 1,
+            max_size: WEBSOCKET_MAX_MESSAGE_BYTES,
+        }));
+
+        assert_eq!(
+            err.to_string(),
+            "WebSocket message exceeds maximum of 16777216 bytes (received 16777217 bytes)"
+        );
     }
 
     #[test]

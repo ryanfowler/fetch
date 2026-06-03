@@ -74,6 +74,9 @@ fetch ws://api.example.com/stream --ws-interactive off
 - **Binary messages**: Written as raw bytes to stdout when stdout is redirected or piped. When stdout is a terminal, binary-looking payloads are guarded with a warning instead of being printed.
 - **Formatting**: Use `--format on` to force JSON formatting, or `--format off` to disable it.
 
+Incoming server frames and assembled messages are capped at 16 MiB. Larger
+messages fail with a WebSocket message size diagnostic instead of being printed.
+
 ```sh
 # Force JSON formatting
 fetch ws://api.example.com/stream --format on

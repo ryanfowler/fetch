@@ -3113,6 +3113,12 @@ pub(crate) fn read_ws_frame(reader: &mut impl Read) -> Option<(u8, Vec<u8>)> {
             return None;
         }
         len = u16::from_be_bytes(raw) as usize;
+    } else if len == 127 {
+        let mut raw = [0_u8; 8];
+        if reader.read_exact(&mut raw).is_err() {
+            return None;
+        }
+        len = usize::try_from(u64::from_be_bytes(raw)).ok()?;
     }
     let mut mask = [0_u8; 4];
     if masked && reader.read_exact(&mut mask).is_err() {
@@ -3139,26 +3145,32 @@ pub(crate) fn write_ws_close_and_drain<T: Read + Write>(stream: &mut T, reason: 
 }
 
 pub(crate) fn ws_text_frame(payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + 4);
+    let mut out = Vec::with_capacity(payload.len() + 10);
     out.push(0x81);
     if payload.len() < 126 {
         out.push(payload.len() as u8);
-    } else {
+    } else if payload.len() <= u16::MAX as usize {
         out.push(126);
         out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        out.push(127);
+        out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
     }
     out.extend_from_slice(payload);
     out
 }
 
 pub(crate) fn ws_binary_frame(payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + 4);
+    let mut out = Vec::with_capacity(payload.len() + 10);
     out.push(0x82);
     if payload.len() < 126 {
         out.push(payload.len() as u8);
-    } else {
+    } else if payload.len() <= u16::MAX as usize {
         out.push(126);
         out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        out.push(127);
+        out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
     }
     out.extend_from_slice(payload);
     out
