@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::sync::Mutex;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{Mutex, mpsc};
 
 use crate::cli::Cli;
 use crate::core;
@@ -172,14 +173,23 @@ async fn update_inner(
         eprintln!("Downloading {}\n", latest.tag_name);
     }
 
-    let artifact = download_artifact(client, release_artifact.archive_url, silent).await?;
     let checksum = download_checksum(client, release_artifact.checksum_url).await?;
-    verify_artifact_checksum(release_artifact.archive_name, &artifact, &checksum)?;
 
     let temp_dir = create_update_temp_dir()?;
-    unpack_artifact(temp_dir.path(), release_artifact.archive_name, &artifact)?;
+    let unpack_dir = temp_dir.path().join("unpacked");
+    std::fs::create_dir(&unpack_dir)?;
+    let actual_checksum = download_and_unpack_artifact(
+        client,
+        release_artifact.archive_name,
+        release_artifact.archive_url,
+        &unpack_dir,
+        temp_dir.path(),
+        silent,
+    )
+    .await?;
+    verify_artifact_checksum(release_artifact.archive_name, &actual_checksum, &checksum)?;
 
-    let src = temp_dir.path().join(fetch_filename());
+    let src = unpack_dir.join(fetch_filename());
     let replace_result = self_replace(&exe_path, &src);
     replace_result?;
 
@@ -208,21 +218,98 @@ async fn latest_release(client: &UpdateClient<'_>) -> Result<Release, FetchError
     Ok(release)
 }
 
-async fn download_artifact(
+async fn download_and_unpack_artifact(
     client: &UpdateClient<'_>,
+    archive_name: &str,
     artifact_url: &str,
+    unpack_dir: &Path,
+    scratch_dir: &Path,
     silent: bool,
-) -> Result<Vec<u8>, FetchError> {
-    download_artifact_with_limit(client, artifact_url, silent, MAX_UPDATE_ARTIFACT_BYTES).await
+) -> Result<String, FetchError> {
+    download_and_unpack_artifact_with_limit(
+        client,
+        archive_name,
+        artifact_url,
+        unpack_dir,
+        scratch_dir,
+        silent,
+        MAX_UPDATE_ARTIFACT_BYTES,
+    )
+    .await
 }
 
-async fn download_artifact_with_limit(
+async fn download_and_unpack_artifact_with_limit(
     client: &UpdateClient<'_>,
+    archive_name: &str,
     artifact_url: &str,
+    unpack_dir: &Path,
+    scratch_dir: &Path,
     silent: bool,
     max_artifact_bytes: u64,
-) -> Result<Vec<u8>, FetchError> {
+) -> Result<String, FetchError> {
+    if archive_name.ends_with(".zip") {
+        let archive_path = scratch_dir.join("artifact.zip");
+        let actual = download_artifact_to_file_with_limit(
+            client,
+            artifact_url,
+            &archive_path,
+            silent,
+            max_artifact_bytes,
+        )
+        .await?;
+        unpack_zip_artifact_from_file(unpack_dir, &archive_path)?;
+        Ok(actual)
+    } else if archive_name.ends_with(".tar.gz") || archive_name.ends_with(".tgz") {
+        download_and_unpack_tar_gz_artifact_with_limit(
+            client,
+            artifact_url,
+            unpack_dir,
+            silent,
+            max_artifact_bytes,
+        )
+        .await
+    } else {
+        Err(format!("unsupported self-update archive format: {archive_name}").into())
+    }
+}
+
+async fn download_artifact_to_file_with_limit(
+    client: &UpdateClient<'_>,
+    artifact_url: &str,
+    archive_path: &Path,
+    silent: bool,
+    max_artifact_bytes: u64,
+) -> Result<String, FetchError> {
     let response = update_get_stream(client, artifact_url).await?;
+    let content_length = validate_artifact_response(&response, max_artifact_bytes)?;
+    let mut progress = UpdateDownloadProgress::maybe_start(silent, content_length);
+    let result =
+        write_artifact_response_to_file(response, archive_path, &mut progress, max_artifact_bytes)
+            .await;
+    progress.finish();
+    result
+}
+
+async fn download_and_unpack_tar_gz_artifact_with_limit(
+    client: &UpdateClient<'_>,
+    artifact_url: &str,
+    unpack_dir: &Path,
+    silent: bool,
+    max_artifact_bytes: u64,
+) -> Result<String, FetchError> {
+    let response = update_get_stream(client, artifact_url).await?;
+    let content_length = validate_artifact_response(&response, max_artifact_bytes)?;
+    let mut progress = UpdateDownloadProgress::maybe_start(silent, content_length);
+    let result =
+        unpack_tar_gz_response(response, unpack_dir, &mut progress, max_artifact_bytes).await;
+    progress.finish();
+    result
+}
+
+fn validate_artifact_response(
+    response: &UpdateStreamingResponse,
+    max_artifact_bytes: u64,
+) -> Result<i64, FetchError> {
     if !response.status().is_success() {
         return Err(format!(
             "fetching artifact: downloading artifact: received status: {}",
@@ -237,28 +324,135 @@ async fn download_artifact_with_limit(
         return Err(format!("update artifact is too large: {len} bytes").into());
     }
 
-    let content_length = response
+    Ok(response
         .content_length()
         .and_then(|value| i64::try_from(value).ok())
-        .unwrap_or(-1);
-    let mut progress = UpdateDownloadProgress::maybe_start(silent, content_length);
-    let capacity = response
-        .content_length()
-        .unwrap_or(0)
-        .min(max_artifact_bytes) as usize;
-    let mut artifact = Vec::with_capacity(capacity);
-    let response = response
-        .into_buffered_with_limit(
-            Some(max_artifact_bytes),
-            Some(&mut progress),
-            "update artifact exceeded maximum allowed size",
-        )
-        .await;
-    progress.finish();
-    let response = response?;
-    artifact.extend_from_slice(response.body());
+        .unwrap_or(-1))
+}
 
-    Ok(artifact)
+async fn write_artifact_response_to_file(
+    response: UpdateStreamingResponse,
+    archive_path: &Path,
+    progress: &mut UpdateDownloadProgress,
+    max_artifact_bytes: u64,
+) -> Result<String, FetchError> {
+    let mut file = tokio::fs::File::create(archive_path).await?;
+    let mut hasher = Sha256::new();
+    let mut received = 0u64;
+    let budget = response.budget;
+    let (mut body, _) = response.response.into_body_with_deadline();
+
+    while let Some(data) = next_update_body_data(budget, &mut body).await? {
+        account_artifact_chunk(
+            &mut received,
+            data.len(),
+            max_artifact_bytes,
+            "update artifact exceeded maximum allowed size",
+        )?;
+        hasher.update(&data);
+        progress.add(data.len());
+        file.write_all(&data).await?;
+    }
+    file.flush().await?;
+
+    Ok(finish_sha256_hex(hasher))
+}
+
+async fn unpack_tar_gz_response(
+    response: UpdateStreamingResponse,
+    unpack_dir: &Path,
+    progress: &mut UpdateDownloadProgress,
+    max_artifact_bytes: u64,
+) -> Result<String, FetchError> {
+    let (tx, rx) = mpsc::channel::<bytes::Bytes>(8);
+    let unpack_dir = unpack_dir.to_path_buf();
+    let unpack_task = tokio::task::spawn_blocking(move || {
+        unpack_tar_gz_artifact_from_reader(
+            &unpack_dir,
+            ChannelReader::new(rx),
+            ArchiveExtractionLimits::default(),
+        )
+    });
+
+    let mut hasher = Sha256::new();
+    let mut received = 0u64;
+    let mut send_to_unpack = true;
+    let budget = response.budget;
+    let (mut body, _) = response.response.into_body_with_deadline();
+
+    while let Some(data) = match next_update_body_data(budget, &mut body).await {
+        Ok(data) => data,
+        Err(err) => {
+            drop(tx);
+            let _ = finish_unpack_task(unpack_task).await;
+            return Err(err);
+        }
+    } {
+        if let Err(err) = account_artifact_chunk(
+            &mut received,
+            data.len(),
+            max_artifact_bytes,
+            "update artifact exceeded maximum allowed size",
+        ) {
+            drop(tx);
+            let _ = finish_unpack_task(unpack_task).await;
+            return Err(err);
+        }
+        hasher.update(&data);
+        progress.add(data.len());
+        if send_to_unpack && tx.send(data).await.is_err() {
+            send_to_unpack = false;
+        }
+    }
+
+    drop(tx);
+    finish_unpack_task(unpack_task).await?;
+    Ok(finish_sha256_hex(hasher))
+}
+
+async fn next_update_body_data(
+    budget: TimeoutBudget,
+    body: &mut transport::Body,
+) -> Result<Option<bytes::Bytes>, FetchError> {
+    while let Some(frame) = budget
+        .run(Box::pin(async {
+            match body.frame().await {
+                Some(Ok(frame)) => Ok(Some(frame)),
+                Some(Err(err)) => Err(FetchError::Runtime(format!("response body error: {err}"))),
+                None => Ok(None),
+            }
+        }))
+        .await?
+    {
+        if let Ok(data) = frame.into_data()
+            && !data.is_empty()
+        {
+            return Ok(Some(data));
+        }
+    }
+    Ok(None)
+}
+
+fn account_artifact_chunk(
+    received: &mut u64,
+    chunk_len: usize,
+    max_artifact_bytes: u64,
+    limit_error: &'static str,
+) -> Result<(), FetchError> {
+    let chunk = u64::try_from(chunk_len).unwrap_or(u64::MAX);
+    if received.saturating_add(chunk) > max_artifact_bytes {
+        return Err(limit_error.into());
+    }
+    *received = received.saturating_add(chunk);
+    Ok(())
+}
+
+async fn finish_unpack_task(
+    task: tokio::task::JoinHandle<Result<(), FetchError>>,
+) -> Result<(), FetchError> {
+    task.await.map_err(|err| {
+        FetchError::Runtime(format!("self-update archive unpack task failed: {err}"))
+    })?
 }
 
 async fn download_checksum(
@@ -308,10 +502,9 @@ fn parse_sha256_checksum(contents: &str) -> Result<String, FetchError> {
 
 fn verify_artifact_checksum(
     artifact_name: &str,
-    artifact: &[u8],
+    actual: &str,
     expected: &str,
 ) -> Result<(), FetchError> {
-    let actual = sha256_hex(artifact);
     if actual != expected {
         return Err(FetchError::Message(format!(
             "update artifact checksum mismatch for {artifact_name}: expected {expected}, got {actual}"
@@ -320,8 +513,15 @@ fn verify_artifact_checksum(
     Ok(())
 }
 
+#[cfg(test)]
 fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    finish_sha256_hex(hasher)
+}
+
+fn finish_sha256_hex(hasher: Sha256) -> String {
+    let digest = hasher.finalize();
     hex_encode(&digest)
 }
 
@@ -598,6 +798,54 @@ fn content_length(headers: &HeaderMap) -> Option<u64> {
         .and_then(|value| value.parse().ok())
 }
 
+struct ChannelReader {
+    rx: mpsc::Receiver<bytes::Bytes>,
+    current: Option<bytes::Bytes>,
+    offset: usize,
+}
+
+impl ChannelReader {
+    fn new(rx: mpsc::Receiver<bytes::Bytes>) -> Self {
+        Self {
+            rx,
+            current: None,
+            offset: 0,
+        }
+    }
+}
+
+impl std::io::Read for ChannelReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            if let Some(current) = &self.current {
+                if self.offset < current.len() {
+                    let remaining = &current[self.offset..];
+                    let len = remaining.len().min(out.len());
+                    out[..len].copy_from_slice(&remaining[..len]);
+                    self.offset += len;
+                    if self.offset == current.len() {
+                        self.current = None;
+                        self.offset = 0;
+                    }
+                    return Ok(len);
+                }
+                self.current = None;
+                self.offset = 0;
+            }
+
+            match self.rx.blocking_recv() {
+                Some(bytes) if bytes.is_empty() => {}
+                Some(bytes) => self.current = Some(bytes),
+                None => return Ok(0),
+            }
+        }
+    }
+}
+
 enum UpdateDownloadProgress {
     Bar {
         counter: BarCounter,
@@ -684,6 +932,7 @@ fn release_artifact_for_platform<'a>(
     })
 }
 
+#[cfg(test)]
 fn unpack_artifact(dir: &Path, archive_name: &str, data: &[u8]) -> Result<(), FetchError> {
     if archive_name.ends_with(".zip") {
         unpack_zip_artifact(dir, data)
@@ -738,16 +987,26 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir(path)
 }
 
+#[cfg(test)]
 fn unpack_tar_gz_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
     unpack_tar_gz_artifact_with_limits(dir, data, ArchiveExtractionLimits::default())
 }
 
+#[cfg(test)]
 fn unpack_tar_gz_artifact_with_limits(
     dir: &Path,
     data: &[u8],
     limits: ArchiveExtractionLimits,
 ) -> Result<(), FetchError> {
-    let decoder = GzDecoder::new(data);
+    unpack_tar_gz_artifact_from_reader(dir, data, limits)
+}
+
+fn unpack_tar_gz_artifact_from_reader<R: std::io::Read>(
+    dir: &Path,
+    reader: R,
+    limits: ArchiveExtractionLimits,
+) -> Result<(), FetchError> {
+    let decoder = GzDecoder::new(reader);
     let mut archive = tar::Archive::new(decoder);
     let mut state = ArchiveExtractionState::new(limits);
     for entry in archive.entries()? {
@@ -777,16 +1036,31 @@ fn unpack_tar_gz_artifact_with_limits(
     Ok(())
 }
 
+#[cfg(test)]
 fn unpack_zip_artifact(dir: &Path, data: &[u8]) -> Result<(), FetchError> {
     unpack_zip_artifact_with_limits(dir, data, ArchiveExtractionLimits::default())
 }
 
+#[cfg(test)]
 fn unpack_zip_artifact_with_limits(
     dir: &Path,
     data: &[u8],
     limits: ArchiveExtractionLimits,
 ) -> Result<(), FetchError> {
     let reader = std::io::Cursor::new(data);
+    unpack_zip_artifact_from_reader(dir, reader, limits)
+}
+
+fn unpack_zip_artifact_from_file(dir: &Path, path: &Path) -> Result<(), FetchError> {
+    let file = std::fs::File::open(path)?;
+    unpack_zip_artifact_from_reader(dir, file, ArchiveExtractionLimits::default())
+}
+
+fn unpack_zip_artifact_from_reader<R: std::io::Read + std::io::Seek>(
+    dir: &Path,
+    reader: R,
+    limits: ArchiveExtractionLimits,
+) -> Result<(), FetchError> {
     let mut archive =
         zip::ZipArchive::new(reader).map_err(|err| FetchError::Message(format!("zip: {err}")))?;
     let mut state = ArchiveExtractionState::new(limits);
@@ -1716,10 +1990,19 @@ mod tests {
         let (url, join) =
             start_artifact_response(vec![("Content-Length", "11".to_string())], Vec::new());
         let client = UpdateClient::test(None);
+        let dir = tempfile::tempdir().unwrap();
 
-        let err = download_artifact_with_limit(&client, &url, true, 10)
-            .await
-            .unwrap_err();
+        let err = download_and_unpack_artifact_with_limit(
+            &client,
+            "fetch-v1.2.3-linux-amd64.tar.gz",
+            &url,
+            dir.path(),
+            dir.path(),
+            true,
+            10,
+        )
+        .await
+        .unwrap_err();
         join.join().unwrap();
 
         assert!(
@@ -1735,15 +2018,89 @@ mod tests {
             vec![b"12345".to_vec(), b"67890".to_vec(), b"!".to_vec()],
         );
         let client = UpdateClient::test(None);
+        let dir = tempfile::tempdir().unwrap();
 
-        let err = download_artifact_with_limit(&client, &url, true, 10)
-            .await
-            .unwrap_err();
+        let err = download_and_unpack_artifact_with_limit(
+            &client,
+            "fetch-v1.2.3-linux-amd64.tar.gz",
+            &url,
+            dir.path(),
+            dir.path(),
+            true,
+            10,
+        )
+        .await
+        .unwrap_err();
         join.join().unwrap();
 
         assert!(
             err.to_string()
                 .contains("update artifact exceeded maximum allowed size")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn download_artifact_streams_tar_gz_to_unpack_dir_and_hashes() {
+        let archive = create_tar_gz(&[("fetch", b"content".as_slice(), 0o755, false)]);
+        let expected = sha256_hex(&archive);
+        let (url, join) = start_artifact_response(
+            Vec::new(),
+            archive.chunks(3).map(|chunk| chunk.to_vec()).collect(),
+        );
+        let client = UpdateClient::test(None);
+        let dir = tempfile::tempdir().unwrap();
+
+        let actual = download_and_unpack_artifact_with_limit(
+            &client,
+            "fetch-v1.2.3-linux-amd64.tar.gz",
+            &url,
+            dir.path(),
+            dir.path(),
+            true,
+            MAX_UPDATE_ARTIFACT_BYTES,
+        )
+        .await
+        .unwrap();
+        join.join().unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("fetch")).unwrap(),
+            "content"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_artifact_streams_zip_to_temp_file_and_hashes() {
+        let archive = create_zip(&[("fetch.exe", b"content".as_slice(), false)]);
+        let expected = sha256_hex(&archive);
+        let (url, join) = start_artifact_response(
+            Vec::new(),
+            archive.chunks(3).map(|chunk| chunk.to_vec()).collect(),
+        );
+        let client = UpdateClient::test(None);
+        let dir = tempfile::tempdir().unwrap();
+        let unpack_dir = dir.path().join("unpacked");
+        std::fs::create_dir(&unpack_dir).unwrap();
+
+        let actual = download_and_unpack_artifact_with_limit(
+            &client,
+            "fetch-v1.2.3-windows-amd64.zip",
+            &url,
+            &unpack_dir,
+            dir.path(),
+            true,
+            MAX_UPDATE_ARTIFACT_BYTES,
+        )
+        .await
+        .unwrap();
+        join.join().unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            std::fs::read_to_string(unpack_dir.join("fetch.exe")).unwrap(),
+            "content"
         );
     }
 
@@ -1874,16 +2231,18 @@ mod tests {
         );
 
         let parsed = parse_sha256_checksum(&checksum).unwrap();
+        let actual = sha256_hex(artifact);
 
-        verify_artifact_checksum("fetch-v1.2.3-linux-amd64.tar.gz", artifact, &parsed).unwrap();
+        verify_artifact_checksum("fetch-v1.2.3-linux-amd64.tar.gz", &actual, &parsed).unwrap();
     }
 
     #[test]
     fn update_artifact_checksum_rejects_wrong_digest() {
         let artifact = b"tampered release bytes";
         let checksum = "0000000000000000000000000000000000000000000000000000000000000000";
+        let actual = sha256_hex(artifact);
 
-        let err = verify_artifact_checksum("fetch-v1.2.3-linux-amd64.tar.gz", artifact, checksum)
+        let err = verify_artifact_checksum("fetch-v1.2.3-linux-amd64.tar.gz", &actual, checksum)
             .unwrap_err();
 
         assert!(
