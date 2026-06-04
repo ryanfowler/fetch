@@ -223,7 +223,10 @@ pub(crate) fn grpc_request_body(
         ));
     }
 
-    let raw = if let Some((bytes, _)) = crate::http::request_body_into_bytes(body)? {
+    let limit_error = grpc_request_body_limit_error();
+    let raw = if let Some((bytes, _)) =
+        crate::http::request_body_into_bytes_limited(body, framing::MAX_MESSAGE_SIZE, &limit_error)?
+    {
         json_to_protobuf(&bytes, &method.input())
             .map_err(|err| FetchError::Message(err.to_string()))?
     } else {
@@ -389,13 +392,25 @@ fn field_type(field: &FieldDescriptor) -> String {
 }
 
 fn frame_raw_body(body: crate::http::RequestBody) -> Result<crate::http::RequestBody, FetchError> {
-    let raw = crate::http::request_body_into_bytes(body)?
-        .map(|(bytes, _)| bytes)
-        .unwrap_or_default();
+    let limit_error = grpc_request_body_limit_error();
+    let raw = crate::http::request_body_into_bytes_limited(
+        body,
+        framing::MAX_MESSAGE_SIZE,
+        &limit_error,
+    )?
+    .map(|(bytes, _)| bytes)
+    .unwrap_or_default();
     Ok(Some(crate::http::RequestBodyPayload::from_bytes(
         framing::frame(&raw, false).map_err(|err| FetchError::Message(err.to_string()))?,
         Some(grpc_content_type()),
     )))
+}
+
+fn grpc_request_body_limit_error() -> String {
+    format!(
+        "gRPC request body exceeds maximum of {} bytes",
+        framing::MAX_MESSAGE_SIZE
+    )
 }
 
 pub fn json_to_protobuf(json: &[u8], desc: &MessageDescriptor) -> Result<Vec<u8>, ProtoError> {

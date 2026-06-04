@@ -74,6 +74,7 @@ pub(crate) use metadata::{
 pub(crate) use request::{
     RequestBody, RequestBodyPayload, apply_aws_sigv4, apply_builder_authorization_headers,
     aws_config, basic_header, request_body, request_body_into_bytes,
+    request_body_into_bytes_limited,
 };
 #[cfg(test)]
 pub(crate) use request::{request_body_bytes, request_body_content_len, request_body_preview};

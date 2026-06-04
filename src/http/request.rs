@@ -589,6 +589,19 @@ pub(crate) fn request_body_into_bytes(
     Ok(Some((bytes, content_type)))
 }
 
+pub(crate) fn request_body_into_bytes_limited(
+    body: RequestBody,
+    max_bytes: usize,
+    limit_error: &str,
+) -> Result<MaterializedRequestBody, FetchError> {
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let content_type = body.content_type.clone();
+    let bytes = request_body_source_to_bytes_limited(body.source, max_bytes, limit_error)?;
+    Ok(Some((bytes, content_type)))
+}
+
 pub(crate) fn request_body_source_to_bytes(
     source: RequestBodySource,
 ) -> Result<Vec<u8>, FetchError> {
@@ -608,6 +621,114 @@ pub(crate) fn request_body_source_to_bytes(
             proto::stream_json_to_grpc_frames(&bytes, &desc)
                 .map_err(|err| FetchError::Message(err.to_string()))
         }
+    }
+}
+
+fn request_body_source_to_bytes_limited(
+    source: RequestBodySource,
+    max_bytes: usize,
+    limit_error: &str,
+) -> Result<Vec<u8>, FetchError> {
+    match source {
+        RequestBodySource::Bytes(bytes) => {
+            ensure_materialized_len(bytes.len(), max_bytes, limit_error)?;
+            Ok(bytes.to_vec())
+        }
+        RequestBodySource::File { path, len } => {
+            ensure_materialized_len_u64(len, max_bytes, limit_error)?;
+            let file = std::fs::File::open(path)?;
+            read_to_end_limited(file, max_bytes, limit_error)
+        }
+        RequestBodySource::Stdin => {
+            let stdin = std::io::stdin();
+            read_to_end_limited(stdin.lock(), max_bytes, limit_error)
+        }
+        RequestBodySource::Multipart(multipart) => {
+            ensure_materialized_len_u64(
+                multipart
+                    .content_len()
+                    .map_err(|err| FetchError::Message(err.to_string()))?,
+                max_bytes,
+                limit_error,
+            )?;
+            let mut out = Vec::new();
+            multipart
+                .write_to(LimitedBytesWriter {
+                    out: &mut out,
+                    limit: max_bytes,
+                    limit_error,
+                })
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            Ok(out)
+        }
+        RequestBodySource::GrpcJsonStream { source, desc } => {
+            let bytes = request_body_source_to_bytes_limited(*source, max_bytes, limit_error)?;
+            let framed = proto::stream_json_to_grpc_frames(&bytes, &desc)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            ensure_materialized_len(framed.len(), max_bytes, limit_error)?;
+            Ok(framed)
+        }
+    }
+}
+
+fn read_to_end_limited<R: Read>(
+    reader: R,
+    max_bytes: usize,
+    limit_error: &str,
+) -> Result<Vec<u8>, FetchError> {
+    let mut out = Vec::new();
+    let read_limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    reader.take(read_limit).read_to_end(&mut out)?;
+    ensure_materialized_len(out.len(), max_bytes, limit_error)?;
+    Ok(out)
+}
+
+fn ensure_materialized_len(
+    len: usize,
+    max_bytes: usize,
+    limit_error: &str,
+) -> Result<(), FetchError> {
+    if len > max_bytes {
+        return Err(FetchError::Message(limit_error.to_string()));
+    }
+    Ok(())
+}
+
+fn ensure_materialized_len_u64(
+    len: u64,
+    max_bytes: usize,
+    limit_error: &str,
+) -> Result<(), FetchError> {
+    if len > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+        return Err(FetchError::Message(limit_error.to_string()));
+    }
+    Ok(())
+}
+
+struct LimitedBytesWriter<'a> {
+    out: &'a mut Vec<u8>,
+    limit: usize,
+    limit_error: &'a str,
+}
+
+impl Write for LimitedBytesWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self
+            .out
+            .len()
+            .checked_add(buf.len())
+            .is_none_or(|len| len > self.limit)
+        {
+            return Err(std::io::Error::other(self.limit_error.to_string()));
+        }
+        self.out.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -1067,6 +1188,32 @@ mod tests {
         assert_eq!(
             framed.0,
             crate::grpc::framing::frame(b"hello", false).unwrap()
+        );
+    }
+
+    #[test]
+    fn grpc_request_body_rejects_oversized_file_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::grpc::framing::MAX_MESSAGE_SIZE as u64 + 1)
+            .unwrap();
+        let body = Some(RequestBodyPayload {
+            source: RequestBodySource::File {
+                path: path.display().to_string(),
+                len: crate::grpc::framing::MAX_MESSAGE_SIZE as u64 + 1,
+            },
+            content_type: None,
+        });
+
+        let err = proto::grpc_request_body(body, None).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "gRPC request body exceeds maximum of {} bytes",
+                crate::grpc::framing::MAX_MESSAGE_SIZE
+            )
         );
     }
 }

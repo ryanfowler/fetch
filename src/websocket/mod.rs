@@ -290,10 +290,14 @@ fn interactive_for_mode(mode: Option<&str>, all_terms: bool) -> Result<bool, Fet
 }
 
 fn websocket_initial_message(cli: &Cli) -> Result<Option<Vec<u8>>, FetchError> {
-    Ok(
-        crate::http::request_body_into_bytes(crate::http::request_body(cli)?)?
-            .map(|(bytes, _content_type)| bytes),
-    )
+    let limit_error =
+        format!("WebSocket initial message exceeds maximum of {WEBSOCKET_MAX_MESSAGE_BYTES} bytes");
+    Ok(crate::http::request_body_into_bytes_limited(
+        crate::http::request_body(cli)?,
+        WEBSOCKET_MAX_MESSAGE_BYTES,
+        &limit_error,
+    )?
+    .map(|(bytes, _content_type)| bytes))
 }
 
 async fn send_noninteractive_messages<S>(
@@ -1043,6 +1047,26 @@ mod tests {
 
         let err = outgoing_message(vec![0xff], WebSocketMessageMode::Text).unwrap_err();
         assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn websocket_initial_message_rejects_oversized_file_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(WEBSOCKET_MAX_MESSAGE_BYTES as u64 + 1)
+            .unwrap();
+        let body = format!("@{}", path.display());
+        let cli = Cli::try_parse_from(["fetch", "-d", &body, "ws://example.com"]).unwrap();
+
+        let err = websocket_initial_message(&cli).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "WebSocket initial message exceeds maximum of {WEBSOCKET_MAX_MESSAGE_BYTES} bytes"
+            )
+        );
     }
 
     #[test]
