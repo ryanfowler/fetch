@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -89,7 +90,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     Ok(0)
 }
 
-pub fn maybe_spawn_auto_update(value: &str) {
+pub(crate) fn maybe_spawn_auto_update(value: &str, config_path: Option<&Path>) {
     let Some(interval) = parse_auto_update_interval(value) else {
         return;
     };
@@ -102,7 +103,7 @@ pub fn maybe_spawn_auto_update(value: &str) {
     };
     let mut command = Command::new(path);
     command
-        .args(["--update", "--timeout=300", "--silent"])
+        .args(auto_update_command_args(config_path))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -111,6 +112,22 @@ pub fn maybe_spawn_auto_update(value: &str) {
     } else {
         let _ = command.spawn();
     }
+}
+
+fn auto_update_command_args(config_path: Option<&Path>) -> Vec<OsString> {
+    let mut args = Vec::new();
+    if let Some(path) = config_path {
+        push_arg(&mut args, "--config");
+        args.push(path.as_os_str().to_os_string());
+    }
+    push_arg(&mut args, "--update");
+    push_arg(&mut args, "--timeout=300");
+    push_arg(&mut args, "--silent");
+    args
+}
+
+fn push_arg(args: &mut Vec<OsString>, value: impl Into<OsString>) {
+    args.push(value.into());
 }
 
 #[cfg(windows)]
@@ -2028,6 +2045,26 @@ mod tests {
         assert_eq!(
             headers.get(ACCEPT).and_then(|v| v.to_str().ok()),
             Some(core::DEFAULT_ACCEPT_HEADER)
+        );
+    }
+
+    #[test]
+    fn auto_update_command_args_preserve_explicit_config_only() {
+        let args = auto_update_command_args(Some(Path::new("custom config.ini")));
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            args,
+            vec![
+                "--config",
+                "custom config.ini",
+                "--update",
+                "--timeout=300",
+                "--silent",
+            ]
         );
     }
 
