@@ -29,6 +29,7 @@ const SELF_DELETE_SUFFIX: &str = ".__selfdelete.exe";
 const TEMP_EXE_SUFFIX: &str = ".__temp.exe";
 #[cfg(windows)]
 const SELF_DELETE_ENV: &str = "FETCH_INTERNAL_UPDATE_SELF_DELETE";
+const INTERNAL_UPDATE_URL_ENV: &str = "FETCH_INTERNAL_UPDATE_URL";
 const MAX_UPDATE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_UPDATE_CHECKSUM_BYTES: u64 = 1024;
 const MAX_UPDATE_UNPACKED_BYTES: u64 = MAX_UPDATE_ARTIFACT_BYTES * 4;
@@ -58,6 +59,7 @@ struct UpdateClient<'a> {
     cli: Option<&'a Cli>,
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
+    allow_insecure_http: bool,
     client: Mutex<Option<UpdateCachedClient>>,
 }
 
@@ -560,6 +562,7 @@ impl<'a> UpdateClient<'a> {
             cli: Some(cli),
             timeout,
             connect_timeout,
+            allow_insecure_http: internal_update_url_override_allows_insecure_http(),
             client: Mutex::new(None),
         })
     }
@@ -570,6 +573,29 @@ impl<'a> UpdateClient<'a> {
             cli: None,
             timeout,
             connect_timeout: None,
+            allow_insecure_http: false,
+            client: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    fn test_allow_insecure_http(timeout: Option<Duration>) -> Self {
+        Self {
+            cli: None,
+            timeout,
+            connect_timeout: None,
+            allow_insecure_http: true,
+            client: Mutex::new(None),
+        }
+    }
+
+    #[cfg(test)]
+    fn test_with_cli_allow_insecure_http(cli: &'a Cli, timeout: Option<Duration>) -> Self {
+        Self {
+            cli: Some(cli),
+            timeout,
+            connect_timeout: None,
+            allow_insecure_http: true,
             client: Mutex::new(None),
         }
     }
@@ -580,6 +606,7 @@ impl<'a> UpdateClient<'a> {
 
     async fn get_stream(&self, raw_url: &str) -> Result<UpdateStreamingResponse, FetchError> {
         let mut url = url::Url::parse(raw_url)?;
+        validate_update_url(&url, self.allow_insecure_http)?;
         let request_start = Instant::now();
         let budget = TimeoutBudget::started_at(self.timeout, request_start);
         let mut redirects = 0usize;
@@ -615,9 +642,7 @@ impl<'a> UpdateClient<'a> {
                     "exceeded maximum number of redirects: 10".to_string(),
                 ));
             }
-            url = url
-                .join(location)
-                .map_err(|err| FetchError::Runtime(format!("invalid redirect location: {err}")))?;
+            url = update_redirect_target(&url, location, self.allow_insecure_http)?;
             redirects += 1;
         }
     }
@@ -669,6 +694,31 @@ impl<'a> UpdateClient<'a> {
         };
         client::build_client_for_url(cli, url, &context).await
     }
+}
+
+fn validate_update_url(url: &url::Url, allow_insecure_http: bool) -> Result<(), FetchError> {
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if allow_insecure_http => Ok(()),
+        "http" => Err(FetchError::Message(
+            "refusing insecure self-update URL: self-update downloads require HTTPS".to_string(),
+        )),
+        scheme => Err(FetchError::Message(format!(
+            "unsupported self-update URL scheme '{scheme}': self-update downloads require HTTPS"
+        ))),
+    }
+}
+
+fn update_redirect_target(
+    current_url: &url::Url,
+    location: &str,
+    allow_insecure_http: bool,
+) -> Result<url::Url, FetchError> {
+    let url = current_url
+        .join(location)
+        .map_err(|err| FetchError::Runtime(format!("invalid redirect location: {err}")))?;
+    validate_update_url(&url, allow_insecure_http)?;
+    Ok(url)
 }
 
 fn update_client_origin(url: &url::Url) -> Result<String, FetchError> {
@@ -1462,8 +1512,16 @@ fn current_exe() -> Result<PathBuf, FetchError> {
 }
 
 fn update_url() -> String {
-    std::env::var("FETCH_INTERNAL_UPDATE_URL")
-        .unwrap_or_else(|_| "https://api.github.com".to_string())
+    internal_update_url_override().unwrap_or_else(|| "https://api.github.com".to_string())
+}
+
+fn internal_update_url_override() -> Option<String> {
+    std::env::var(INTERNAL_UPDATE_URL_ENV).ok()
+}
+
+fn internal_update_url_override_allows_insecure_http() -> bool {
+    internal_update_url_override()
+        .is_some_and(|raw_url| url::Url::parse(&raw_url).is_ok_and(|url| url.scheme() == "http"))
 }
 
 fn fetch_filename() -> &'static str {
@@ -1985,11 +2043,55 @@ mod tests {
         assert_eq!(update_client_origin(&url).unwrap(), "http://[::1]:80");
     }
 
+    #[test]
+    fn update_redirect_target_rejects_https_to_http_by_default() {
+        let url = url::Url::parse("https://updates.example/start").unwrap();
+
+        let err =
+            update_redirect_target(&url, "http://updates.example/artifact", false).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("self-update downloads require HTTPS"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_client_rejects_initial_http_by_default() {
+        let client = UpdateClient::test(None);
+
+        let err = update_get(&client, "http://127.0.0.1:1/artifact")
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("self-update downloads require HTTPS"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_client_internal_test_override_allows_local_http_fixture() {
+        let (url, join) = start_artifact_response(
+            vec![("Content-Length", "2".to_string())],
+            vec![b"ok".to_vec()],
+        );
+        let client = UpdateClient::test_allow_insecure_http(None);
+
+        let response = update_get(&client, &url).await.unwrap();
+        join.join().unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"ok");
+    }
+
     #[tokio::test]
     async fn download_artifact_rejects_content_length_above_limit() {
         let (url, join) =
             start_artifact_response(vec![("Content-Length", "11".to_string())], Vec::new());
-        let client = UpdateClient::test(None);
+        let client = UpdateClient::test_allow_insecure_http(None);
         let dir = tempfile::tempdir().unwrap();
 
         let err = download_and_unpack_artifact_with_limit(
@@ -2017,7 +2119,7 @@ mod tests {
             Vec::new(),
             vec![b"12345".to_vec(), b"67890".to_vec(), b"!".to_vec()],
         );
-        let client = UpdateClient::test(None);
+        let client = UpdateClient::test_allow_insecure_http(None);
         let dir = tempfile::tempdir().unwrap();
 
         let err = download_and_unpack_artifact_with_limit(
@@ -2048,7 +2150,7 @@ mod tests {
             Vec::new(),
             archive.chunks(3).map(|chunk| chunk.to_vec()).collect(),
         );
-        let client = UpdateClient::test(None);
+        let client = UpdateClient::test_allow_insecure_http(None);
         let dir = tempfile::tempdir().unwrap();
 
         let actual = download_and_unpack_artifact_with_limit(
@@ -2079,7 +2181,7 @@ mod tests {
             Vec::new(),
             archive.chunks(3).map(|chunk| chunk.to_vec()).collect(),
         );
-        let client = UpdateClient::test(None);
+        let client = UpdateClient::test_allow_insecure_http(None);
         let dir = tempfile::tempdir().unwrap();
         let unpack_dir = dir.path().join("unpacked");
         std::fs::create_dir(&unpack_dir).unwrap();
@@ -2110,7 +2212,7 @@ mod tests {
         let cli =
             <Cli as clap::Parser>::try_parse_from(["fetch", "--update", "--proxy", &proxy_url])
                 .unwrap();
-        let client = UpdateClient::new(&cli).unwrap();
+        let client = UpdateClient::test_with_cli_allow_insecure_http(&cli, None);
 
         let response = update_get(&client, "http://updates.example/artifact")
             .await
@@ -2129,7 +2231,7 @@ mod tests {
     async fn update_redirects_share_one_request_timeout_budget() {
         let (url, join) =
             start_slow_redirect_response(Duration::from_millis(150), Duration::from_millis(150));
-        let client = UpdateClient::test(Some(Duration::from_millis(220)));
+        let client = UpdateClient::test_allow_insecure_http(Some(Duration::from_millis(220)));
 
         let err = update_get(&client, &url).await.unwrap_err();
         let _ = join.join();
