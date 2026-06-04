@@ -1262,6 +1262,9 @@ fn safe_archive_path(name: &str) -> Result<PathBuf, FetchError> {
         match component {
             "" | "." => {}
             ".." => return Err(format!("refusing to unpack unsafe path '{name}'").into()),
+            value if has_unsafe_windows_archive_component(value) => {
+                return Err(format!("refusing to unpack unsafe path '{name}'").into());
+            }
             value => out.push(value),
         }
     }
@@ -1275,6 +1278,22 @@ fn safe_archive_path(name: &str) -> Result<PathBuf, FetchError> {
 fn has_windows_drive_prefix(name: &str) -> bool {
     let bytes = name.as_bytes();
     bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
+}
+
+fn has_unsafe_windows_archive_component(component: &str) -> bool {
+    if component.contains(':') {
+        return true;
+    }
+
+    let basename = component
+        .split_once('.')
+        .map_or(component, |(base, _)| base);
+    let uppercase = basename.to_ascii_uppercase();
+    matches!(uppercase.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || matches!(
+            uppercase.as_bytes(),
+            [b'C', b'O', b'M', b'1'..=b'9'] | [b'L', b'P', b'T', b'1'..=b'9']
+        )
 }
 
 #[cfg(windows)]
@@ -2677,6 +2696,9 @@ mod tests {
                 "\\Windows\\System32\\bad.dll",
                 true,
             ),
+            ("alternate data stream", "fetch.exe:ads", true),
+            ("reserved device name", "CON", true),
+            ("reserved device name with extension", "dir/NUL.txt", true),
         ];
 
         for (name, filename, want_err) in tests {
