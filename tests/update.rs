@@ -149,3 +149,86 @@ fn self_update_go_harness_cases() {
     assert_exit(&res, 0);
     assert!(res.stdout.contains("fetch v1000.0.0-test"));
 }
+
+#[cfg(not(windows))]
+#[test]
+fn auto_update_preserves_explicit_config_proxy() {
+    let dir = TempDir::new().unwrap();
+    let auto_update_bin = dir.path().join("fetch-auto-config");
+    install_update_launcher(&auto_update_bin);
+
+    let update_base = "http://127.0.0.1:1".to_string();
+    let latest_version = "v1001.0.0-config-proxy".to_string();
+    let artifact_name = update_artifact_name(&latest_version);
+    let artifact = make_update_artifact(&latest_version);
+    let checksum = update_artifact_checksum_line(&artifact_name, &artifact);
+    let update_requests = Arc::new(AtomicUsize::new(0));
+    let requests_for_handler = Arc::clone(&update_requests);
+    let proxy_update_base = update_base.clone();
+    let proxy_latest_version = latest_version.clone();
+    let proxy_artifact_name = artifact_name.clone();
+    let proxy_artifact = artifact.clone();
+    let proxy_checksum = checksum.clone();
+    let proxy = TestServer::start(move |req| {
+        if req.path == "http://primary.example/auto-update-config-proxy" {
+            return TestResponse::ok("primary ok");
+        }
+        if req.path == format!("{proxy_update_base}/repos/ryanfowler/fetch/releases/latest") {
+            requests_for_handler.fetch_add(1, Ordering::SeqCst);
+            let body = format!(
+                r#"{{"tag_name":"{proxy_latest_version}","assets":[{{"name":"{proxy_artifact_name}","browser_download_url":"{proxy_update_base}/artifact"}},{{"name":"{proxy_artifact_name}.sha256","browser_download_url":"{proxy_update_base}/artifact.sha256"}}]}}"#
+            );
+            return TestResponse::ok(body).header("Content-Type", "application/json");
+        }
+        if req.path == format!("{proxy_update_base}/artifact") {
+            requests_for_handler.fetch_add(1, Ordering::SeqCst);
+            return TestResponse::ok(proxy_artifact.clone());
+        }
+        if req.path == format!("{proxy_update_base}/artifact.sha256") {
+            requests_for_handler.fetch_add(1, Ordering::SeqCst);
+            return TestResponse::ok(proxy_checksum.clone());
+        }
+        TestResponse::status(400, "Bad Request", format!("unexpected {}", req.path))
+    });
+
+    let config = dir.path().join("config");
+    fs::write(&config, format!("format = off\nproxy = {}\n", proxy.url)).unwrap();
+    let before_modified = fs::metadata(&auto_update_bin).unwrap().modified().unwrap();
+    let res = run_fetch_opts(
+        FetchOpts {
+            bin: Some(auto_update_bin.clone()),
+            env: vec![
+                ("FETCH_INTERNAL_UPDATE_URL".to_string(), update_base),
+                (
+                    "FETCH_INTERNAL_SYNC_AUTO_UPDATE".to_string(),
+                    "1".to_string(),
+                ),
+            ],
+            ..Default::default()
+        },
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "http://primary.example/auto-update-config-proxy",
+            "--auto-update",
+            "0s",
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "primary ok");
+    assert_eq!(update_requests.load(Ordering::SeqCst), 3);
+    assert_ne!(
+        fs::metadata(&auto_update_bin).unwrap().modified().unwrap(),
+        before_modified
+    );
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            bin: Some(auto_update_bin),
+            ..Default::default()
+        },
+        &["--version"],
+    );
+    assert_exit(&res, 0);
+    assert!(res.stdout.contains(&format!("fetch {latest_version}")));
+}

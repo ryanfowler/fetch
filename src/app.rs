@@ -258,7 +258,7 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     }
 
     if let Some(value) = cli.auto_update.as_deref() {
-        crate::update::maybe_spawn_auto_update(value);
+        crate::update::maybe_spawn_auto_update(value, config_path.as_deref());
     }
 
     if cli.inspect_dns {
