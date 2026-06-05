@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::future::Future;
 use std::io::{self, BufRead, Read, Write};
@@ -447,6 +448,7 @@ fn build_handshake_request(
         .into_client_request()
         .map_err(websocket_error)?;
     let headers = handshake_headers(cli, url, session)?;
+    let mut replaced_headers = HashSet::new();
     for (name, value) in &headers {
         let name = WsHeaderName::from_bytes(name.as_str().as_bytes()).map_err(|err| {
             FetchError::Message(format!("invalid header name '{}': {err}", name.as_str()))
@@ -457,7 +459,10 @@ fn build_handshake_request(
                 name.as_str()
             ))
         })?;
-        request.headers_mut().insert(name, value);
+        if replaced_headers.insert(name.clone()) {
+            request.headers_mut().remove(&name);
+        }
+        request.headers_mut().append(name, value);
     }
     Ok(request)
 }
@@ -901,6 +906,40 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer token")
         );
+    }
+
+    #[test]
+    fn websocket_request_preserves_duplicate_cli_headers_and_replaces_defaults() {
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "-H",
+            "X-Test: one",
+            "-H",
+            "X-Test: two",
+            "-H",
+            "Host: vhost.example",
+            "ws://example.com/socket",
+        ])
+        .unwrap();
+        let request =
+            build_handshake_request(&cli, &Url::parse("ws://example.com/socket").unwrap(), None)
+                .unwrap();
+
+        let values = request
+            .headers()
+            .get_all("x-test")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["one", "two"]);
+
+        let hosts = request
+            .headers()
+            .get_all("host")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(hosts, ["vhost.example"]);
     }
 
     #[test]
