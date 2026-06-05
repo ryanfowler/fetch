@@ -395,7 +395,6 @@ async fn unpack_tar_gz_response(
 
     let mut hasher = Sha256::new();
     let mut received = 0u64;
-    let mut send_to_unpack = true;
     let budget = response.budget;
     let (mut body, _) = response.response.into_body_with_deadline();
 
@@ -419,8 +418,11 @@ async fn unpack_tar_gz_response(
         }
         hasher.update(&data);
         progress.add(data.len());
-        if send_to_unpack && tx.send(data).await.is_err() {
-            send_to_unpack = false;
+        if tx.send(data).await.is_err() {
+            finish_unpack_task(unpack_task).await?;
+            return Err(FetchError::Message(
+                "self-update archive unpack task ended before download completed".to_string(),
+            ));
         }
     }
 
@@ -1950,7 +1952,9 @@ mod tests {
     use flate2::write::GzEncoder;
     use std::io::{BufRead, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::task::Poll;
     use std::thread::JoinHandle;
     use tar::{Builder, Header};
 
@@ -2237,6 +2241,65 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("fetch")).unwrap(),
             "content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unpack_tar_gz_response_stops_downloading_after_unpack_fails() {
+        const TAIL_CHUNKS: usize = 64;
+        const TAIL_CHUNK_LEN: usize = 64 * 1024;
+
+        let archive = create_tar_gz(&[("../escape.txt", b"bad".as_slice(), 0o644, false)]);
+        let pulled_chunks = Arc::new(AtomicUsize::new(0));
+        let stream_pulled_chunks = Arc::clone(&pulled_chunks);
+        let mut first_chunk = Some(bytes::Bytes::from(archive));
+        let mut tail_remaining = TAIL_CHUNKS;
+        let stream = futures_util::stream::poll_fn(move |_| {
+            if let Some(chunk) = first_chunk.take() {
+                stream_pulled_chunks.fetch_add(1, Ordering::SeqCst);
+                return Poll::Ready(Some(Ok::<_, std::io::Error>(chunk)));
+            }
+            if tail_remaining == 0 {
+                return Poll::Ready(None);
+            }
+            tail_remaining -= 1;
+            stream_pulled_chunks.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Some(Ok::<_, std::io::Error>(bytes::Bytes::from(vec![
+                b'x';
+                TAIL_CHUNK_LEN
+            ]))))
+        });
+        let response = UpdateStreamingResponse {
+            response: transport::Response::test(
+                StatusCode::OK,
+                HeaderMap::new(),
+                transport::Body::wrap_stream(stream),
+            ),
+            budget: TimeoutBudget::started_at(None, Instant::now()),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut progress = UpdateDownloadProgress::None;
+
+        let err = unpack_tar_gz_response(
+            response,
+            dir.path(),
+            &mut progress,
+            MAX_UPDATE_ARTIFACT_BYTES,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("refusing to unpack unsafe path '../escape.txt'"),
+            "{err}"
+        );
+        let pulled = pulled_chunks.load(Ordering::SeqCst);
+        assert!(
+            pulled < TAIL_CHUNKS + 1,
+            "expected early unpack failure to stop the download, pulled {pulled} of {} chunks",
+            TAIL_CHUNKS + 1
         );
     }
 

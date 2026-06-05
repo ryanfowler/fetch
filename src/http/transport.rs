@@ -1248,6 +1248,19 @@ pub(crate) struct Response {
 }
 
 impl Response {
+    #[cfg(test)]
+    pub(crate) fn test(status: http::StatusCode, headers: HeaderMap, body: Body) -> Self {
+        Self {
+            url: Url::parse("http://updates.example/artifact").expect("static test URL is valid"),
+            status,
+            version: Version::HTTP_11,
+            headers,
+            body,
+            body_deadline: None,
+            remote_addr: None,
+        }
+    }
+
     fn from_hyper(
         url: Url,
         response: http::Response<Incoming>,
