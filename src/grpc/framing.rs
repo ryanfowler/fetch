@@ -123,7 +123,7 @@ impl FrameDecoder {
                     });
                 } else {
                     self.current = Some(PartialFrame {
-                        data: Vec::new(),
+                        data: Vec::with_capacity(length),
                         len: length,
                         compressed,
                     });
