@@ -1285,9 +1285,20 @@ fn has_unsafe_windows_archive_component(component: &str) -> bool {
         return true;
     }
 
-    let basename = component
+    let normalized = component.trim_end_matches([' ', '.']);
+    if normalized.len() != component.len() {
+        return true;
+    }
+    let raw_basename = normalized
         .split_once('.')
-        .map_or(component, |(base, _)| base);
+        .map_or(normalized, |(base, _)| base);
+    let basename = raw_basename.trim_end_matches([' ', '.']);
+    if basename.len() != raw_basename.len() {
+        return true;
+    }
+    if basename.is_empty() {
+        return true;
+    }
     let uppercase = basename.to_ascii_uppercase();
     matches!(uppercase.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || matches!(
@@ -2699,6 +2710,19 @@ mod tests {
             ("alternate data stream", "fetch.exe:ads", true),
             ("reserved device name", "CON", true),
             ("reserved device name with extension", "dir/NUL.txt", true),
+            (
+                "reserved device name with trailing dot",
+                "dir/COM1./fetch.exe",
+                true,
+            ),
+            (
+                "reserved device name with trailing space before extension",
+                "dir/NUL .txt",
+                true,
+            ),
+            ("all-dot windows component", "dir/.../fetch.exe", true),
+            ("trailing-dot component", "fetch.exe.", true),
+            ("trailing-space component", "fetch.exe ", true),
         ];
 
         for (name, filename, want_err) in tests {
