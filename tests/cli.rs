@@ -240,6 +240,77 @@ fn dry_run_prints_effective_request_without_network() {
 }
 
 #[test]
+fn dry_run_truncates_large_file_body_preview() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("large.txt");
+    let tail = "FILE_TAIL_SHOULD_NOT_APPEAR";
+    fs::write(&path, format!("{}{}", "a".repeat(2048), tail)).unwrap();
+
+    let data_arg = format!("@{}", path.display());
+    let res = run_fetch(&["localhost:3000", "--data", &data_arg, "--dry-run"]);
+
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(res.stderr.contains(&"a".repeat(1024)));
+    assert!(res.stderr.contains("truncated after 1024 bytes"));
+    assert!(!res.stderr.contains(tail), "stderr:\n{}", res.stderr);
+    assert!(
+        res.stderr.len() < 1800,
+        "dry-run body preview was not bounded:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn dry_run_truncates_large_stdin_body_preview() {
+    let tail = "STDIN_TAIL_SHOULD_NOT_APPEAR";
+    let res = run_fetch_opts(
+        FetchOpts {
+            stdin: Some(format!("{}{}", "s".repeat(2048), tail)),
+            ..Default::default()
+        },
+        &["localhost:3000", "--data", "@-", "--dry-run"],
+    );
+
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(res.stderr.contains(&"s".repeat(1024)));
+    assert!(res.stderr.contains("truncated after 1024 bytes"));
+    assert!(!res.stderr.contains(tail), "stderr:\n{}", res.stderr);
+    assert!(
+        res.stderr.len() < 1800,
+        "dry-run stdin preview was not bounded:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn dry_run_truncates_multipart_file_body_preview() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("part.txt");
+    let tail = "MULTIPART_TAIL_SHOULD_NOT_APPEAR";
+    fs::write(&path, format!("{}{}", "m".repeat(2048), tail)).unwrap();
+
+    let field = format!("file=@{}", path.display());
+    let res = run_fetch(&["localhost:3000", "--multipart", &field, "--dry-run"]);
+
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(res.stderr.contains("multipart/form-data; boundary="));
+    assert!(
+        res.stderr
+            .contains("Content-Disposition: form-data; name=\"file\"; filename=\"part.txt\"")
+    );
+    assert!(res.stderr.contains("truncated after 1024 bytes"));
+    assert!(!res.stderr.contains(tail), "stderr:\n{}", res.stderr);
+    assert!(
+        res.stderr.len() < 1900,
+        "dry-run multipart preview was not bounded:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
 fn default_scheme_loopback_and_presentation_flags() {
     let server = TestServer::start(|req| {
         if req.path != "/?probe=1" && req.path != "/" {

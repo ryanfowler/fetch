@@ -77,6 +77,50 @@ impl Multipart {
         Ok(out)
     }
 
+    pub fn preview(&self, limit: usize) -> Result<(Vec<u8>, bool), MultipartError> {
+        let total_len = self.content_len()?;
+        let truncated = total_len > u64::try_from(limit).unwrap_or(u64::MAX);
+        let capacity = usize::try_from(total_len).unwrap_or(usize::MAX).min(limit);
+        let mut out = Vec::with_capacity(capacity);
+
+        for field in &self.fields {
+            append_preview(&mut out, limit, b"--");
+            append_preview(&mut out, limit, self.boundary.as_bytes());
+            append_preview(&mut out, limit, b"\r\n");
+            if out.len() >= limit {
+                return Ok((out, truncated));
+            }
+
+            match &field.value {
+                FieldValue::Text(value) => {
+                    append_preview(&mut out, limit, text_header(&field.name).as_bytes());
+                    append_preview(&mut out, limit, value.as_bytes());
+                    append_preview(&mut out, limit, b"\r\n");
+                }
+                FieldValue::File(path) => {
+                    append_preview(&mut out, limit, file_header(&field.name, path)?.as_bytes());
+                    if out.len() < limit {
+                        let remaining = limit - out.len();
+                        let mut file = std::fs::File::open(path)?;
+                        Read::by_ref(&mut file)
+                            .take(u64::try_from(remaining).unwrap_or(u64::MAX))
+                            .read_to_end(&mut out)?;
+                    }
+                    append_preview(&mut out, limit, b"\r\n");
+                }
+            }
+
+            if out.len() >= limit {
+                return Ok((out, truncated));
+            }
+        }
+
+        append_preview(&mut out, limit, b"--");
+        append_preview(&mut out, limit, self.boundary.as_bytes());
+        append_preview(&mut out, limit, b"--\r\n");
+        Ok((out, truncated))
+    }
+
     pub fn write_to<W: Write>(&self, mut out: W) -> Result<(), MultipartError> {
         for field in &self.fields {
             out.write_all(b"--")?;
@@ -131,6 +175,11 @@ impl Multipart {
             state: MultipartStreamState::Field,
         }
     }
+}
+
+fn append_preview(out: &mut Vec<u8>, limit: usize, bytes: &[u8]) {
+    let remaining = limit.saturating_sub(out.len());
+    out.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
 }
 
 fn random_boundary() -> String {

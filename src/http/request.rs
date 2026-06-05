@@ -5,6 +5,8 @@ use std::io::Cursor;
 pub(crate) type RequestBody = Option<RequestBodyPayload>;
 pub(crate) type MaterializedRequestBody = Option<(Vec<u8>, Option<String>)>;
 
+const DRY_RUN_BODY_PREVIEW_BYTES: usize = 1024;
+
 #[derive(Debug, Clone)]
 pub(crate) struct RequestBodyPayload {
     pub(super) source: RequestBodySource,
@@ -56,47 +58,22 @@ pub(super) fn print_dry_run_body(cli: &Cli, body: &RequestBody) -> Result<(), Fe
     if cli.verbose < 2 {
         eprintln!();
     }
-    if let Some(materialized) = materialize_dry_run_body(body)? {
-        return print_materialized_dry_run_body(cli, materialized);
-    }
-    let preview = request_body_preview(body)?;
-    if is_printable(&preview) {
-        write_request_body_to_stderr(body)?;
-    } else {
+    let preview = dry_run_body_preview(body, DRY_RUN_BODY_PREVIEW_BYTES)?;
+    if !is_printable(&preview.bytes) {
         print_dry_run_binary_warning(cli);
+        if preview.truncated {
+            print_dry_run_truncation_warning(cli, DRY_RUN_BODY_PREVIEW_BYTES);
+        }
+        return Ok(());
     }
-    Ok(())
-}
 
-enum DryRunMaterializedBody {
-    Bytes(Vec<u8>),
-    BinaryWarning,
-}
-
-fn materialize_dry_run_body(
-    body: &RequestBodyPayload,
-) -> Result<Option<DryRunMaterializedBody>, FetchError> {
-    if !matches!(
-        body.source,
-        RequestBodySource::Stdin | RequestBodySource::GrpcJsonStream { .. }
-    ) {
-        return Ok(None);
-    }
-    let bytes = request_body_source_to_bytes(body.source.clone())?;
-    Ok(Some(if is_printable(&bytes) {
-        DryRunMaterializedBody::Bytes(bytes)
-    } else {
-        DryRunMaterializedBody::BinaryWarning
-    }))
-}
-
-fn print_materialized_dry_run_body(
-    cli: &Cli,
-    body: DryRunMaterializedBody,
-) -> Result<(), FetchError> {
-    match body {
-        DryRunMaterializedBody::Bytes(bytes) => std::io::stderr().write_all(&bytes)?,
-        DryRunMaterializedBody::BinaryWarning => print_dry_run_binary_warning(cli),
+    let mut stderr = std::io::stderr();
+    stderr.write_all(&preview.bytes)?;
+    if preview.truncated {
+        if !preview.bytes.ends_with(b"\n") {
+            stderr.write_all(b"\n")?;
+        }
+        print_dry_run_truncation_warning(cli, DRY_RUN_BODY_PREVIEW_BYTES);
     }
     Ok(())
 }
@@ -104,6 +81,15 @@ fn print_materialized_dry_run_body(
 fn print_dry_run_binary_warning(cli: &Cli) {
     let mut printer = core::Printer::stderr(cli.color.as_deref());
     core::write_warning_msg_no_flush(&mut printer, "the request body appears to be binary");
+    flush_stderr(printer);
+}
+
+fn print_dry_run_truncation_warning(cli: &Cli, limit: usize) {
+    let mut printer = core::Printer::stderr(cli.color.as_deref());
+    core::write_warning_msg_no_flush(
+        &mut printer,
+        format!("the request body preview was truncated after {limit} bytes"),
+    );
     flush_stderr(printer);
 }
 
@@ -732,63 +718,77 @@ impl Write for LimitedBytesWriter<'_> {
     }
 }
 
-pub(crate) fn request_body_preview(body: &RequestBodyPayload) -> Result<Vec<u8>, FetchError> {
-    match &body.source {
-        RequestBodySource::Bytes(bytes) => Ok(bytes.slice(..bytes.len().min(1024)).to_vec()),
-        RequestBodySource::File { path, .. } => read_file_prefix(path, 1024),
-        RequestBodySource::Stdin => Ok(Vec::new()),
-        RequestBodySource::Multipart(multipart) => {
-            let mut out = Vec::new();
-            let mut writer = PrefixWriter {
-                out: &mut out,
-                limit: 1024,
-            };
-            multipart
-                .write_to(&mut writer)
-                .map_err(|err| FetchError::Message(err.to_string()))?;
-            Ok(out)
-        }
-        RequestBodySource::GrpcJsonStream { .. } => {
-            request_body_source_to_bytes(body.source.clone())
-                .map(|bytes| bytes.into_iter().take(1024).collect())
-        }
-    }
+struct DryRunBodyPreview {
+    bytes: Vec<u8>,
+    truncated: bool,
 }
 
-pub(super) fn write_request_body_to_stderr(body: &RequestBodyPayload) -> Result<(), FetchError> {
-    let mut stderr = std::io::stderr();
-    match &body.source {
-        RequestBodySource::Bytes(bytes) => stderr.write_all(bytes)?,
-        RequestBodySource::File { path, .. } => {
-            let mut file = std::fs::File::open(path)?;
-            std::io::copy(&mut file, &mut stderr)?;
-        }
-        RequestBodySource::Stdin => {}
-        RequestBodySource::Multipart(multipart) => multipart
-            .write_to(&mut stderr)
-            .map_err(|err| FetchError::Message(err.to_string()))?,
-        RequestBodySource::GrpcJsonStream { .. } => {
-            stderr.write_all(&request_body_source_to_bytes(body.source.clone())?)?
-        }
-    }
-    Ok(())
-}
-
-pub(super) struct PrefixWriter<'a> {
-    out: &'a mut Vec<u8>,
+fn dry_run_body_preview(
+    body: &RequestBodyPayload,
     limit: usize,
+) -> Result<DryRunBodyPreview, FetchError> {
+    dry_run_source_preview(&body.source, limit)
 }
 
-impl Write for PrefixWriter<'_> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let remaining = self.limit.saturating_sub(self.out.len());
-        self.out.extend_from_slice(&buf[..buf.len().min(remaining)]);
-        Ok(buf.len())
+fn dry_run_source_preview(
+    source: &RequestBodySource,
+    limit: usize,
+) -> Result<DryRunBodyPreview, FetchError> {
+    match source {
+        RequestBodySource::Bytes(bytes) => Ok(DryRunBodyPreview {
+            bytes: bytes.slice(..bytes.len().min(limit)).to_vec(),
+            truncated: bytes.len() > limit,
+        }),
+        RequestBodySource::File { path, len } => Ok(DryRunBodyPreview {
+            bytes: read_file_prefix(path, limit)?,
+            truncated: *len > u64::try_from(limit).unwrap_or(u64::MAX),
+        }),
+        RequestBodySource::Stdin => read_prefix_preview(std::io::stdin().lock(), limit),
+        RequestBodySource::Multipart(multipart) => {
+            let (bytes, truncated) = multipart
+                .preview(limit)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            Ok(DryRunBodyPreview { bytes, truncated })
+        }
+        RequestBodySource::GrpcJsonStream { source, desc } => {
+            grpc_json_stream_dry_run_preview(source, desc, limit)
+        }
     }
+}
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+fn read_prefix_preview<R: Read>(reader: R, limit: usize) -> Result<DryRunBodyPreview, FetchError> {
+    let read_limit = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let mut limited = reader.take(read_limit);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > limit;
+    bytes.truncate(limit);
+    Ok(DryRunBodyPreview { bytes, truncated })
+}
+
+fn grpc_json_stream_dry_run_preview(
+    source: &RequestBodySource,
+    desc: &prost_reflect::MessageDescriptor,
+    limit: usize,
+) -> Result<DryRunBodyPreview, FetchError> {
+    let input = dry_run_source_preview(source, limit)?;
+    if input.truncated {
+        return Ok(DryRunBodyPreview {
+            bytes: vec![0],
+            truncated: true,
+        });
     }
+    let framed = proto::stream_json_to_grpc_frames(&input.bytes, desc)
+        .map_err(|err| FetchError::Message(err.to_string()))?;
+    Ok(DryRunBodyPreview {
+        bytes: framed.iter().copied().take(limit).collect(),
+        truncated: framed.len() > limit,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn request_body_preview(body: &RequestBodyPayload) -> Result<Vec<u8>, FetchError> {
+    dry_run_body_preview(body, DRY_RUN_BODY_PREVIEW_BYTES).map(|preview| preview.bytes)
 }
 
 pub(super) fn apply_body_content_type(headers: &mut HeaderMap, body: &RequestBody) {
