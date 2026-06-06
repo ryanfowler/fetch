@@ -235,23 +235,52 @@ pub(crate) fn normalize_url(raw: &str) -> Result<Url, FetchError> {
         return Err("empty URL provided".into());
     }
 
-    if raw.contains("://") {
-        let url = Url::parse(raw)?;
-        match url.scheme() {
-            "http" | "https" => Ok(url),
-            "ws" => rewrite_url_scheme(url, "http"),
-            "wss" => rewrite_url_scheme(url, "https"),
-            scheme => Err(format!("unsupported url scheme: {scheme}").into()),
-        }
+    if has_authority_scheme(raw) {
+        normalize_explicit_url(Url::parse(raw)?)
     } else {
-        let probe = Url::parse(&format!("http://{raw}"))?;
-        let scheme = if probe.host_str().is_some_and(is_loopback) {
-            "http"
-        } else {
-            "https"
-        };
-        Url::parse(&format!("{scheme}://{raw}")).map_err(Into::into)
+        normalize_schemeless_url(raw)
     }
+}
+
+fn has_authority_scheme(raw: &str) -> bool {
+    let Some(colon) = raw.find(':') else {
+        return false;
+    };
+    let first_url_delimiter = raw.find(['/', '?', '#']).unwrap_or(raw.len());
+    if colon > first_url_delimiter {
+        return false;
+    }
+    let scheme = &raw[..colon];
+    !scheme.is_empty()
+        && scheme
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| is_scheme_byte(byte, index == 0))
+        && raw[colon + 1..].starts_with("//")
+}
+
+fn is_scheme_byte(byte: u8, first: bool) -> bool {
+    byte.is_ascii_alphabetic()
+        || (!first && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
+}
+
+fn normalize_explicit_url(url: Url) -> Result<Url, FetchError> {
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        "ws" => rewrite_url_scheme(url, "http"),
+        "wss" => rewrite_url_scheme(url, "https"),
+        scheme => Err(format!("unsupported url scheme: {scheme}").into()),
+    }
+}
+
+fn normalize_schemeless_url(raw: &str) -> Result<Url, FetchError> {
+    let probe = Url::parse(&format!("http://{raw}"))?;
+    let scheme = if probe.host_str().is_some_and(is_loopback) {
+        "http"
+    } else {
+        "https"
+    };
+    Url::parse(&format!("{scheme}://{raw}")).map_err(Into::into)
 }
 
 pub(super) fn rewrite_url_scheme(mut url: Url, scheme: &str) -> Result<Url, FetchError> {
@@ -343,6 +372,20 @@ mod tests {
     }
 
     #[test]
+    fn default_scheme_loopback_ip_literals_are_http() {
+        let cases = [
+            ("127.0.0.1:3000/path", "http://127.0.0.1:3000/path"),
+            ("127.255.255.255/path", "http://127.255.255.255/path"),
+            ("[::1]/path", "http://[::1]/path"),
+        ];
+
+        for (raw, want) in cases {
+            let url = normalize_url(raw).unwrap();
+            assert_eq!(url.as_str(), want, "raw URL {raw}");
+        }
+    }
+
+    #[test]
     fn default_scheme_ipv6_loopback_is_http_like_go_hostname() {
         let url = normalize_url("[::1]:3000/path").unwrap();
         assert_eq!(url.as_str(), "http://[::1]:3000/path");
@@ -358,6 +401,90 @@ mod tests {
     fn default_scheme_non_loopback_is_https() {
         let url = normalize_url("example.com/path").unwrap();
         assert_eq!(url.as_str(), "https://example.com/path");
+    }
+
+    #[test]
+    fn default_scheme_non_loopback_ip_literals_are_https() {
+        let cases = [
+            ("192.168.1.1:8080/path", "https://192.168.1.1:8080/path"),
+            ("10.0.0.1/path", "https://10.0.0.1/path"),
+            ("[2001:db8::1]/path", "https://[2001:db8::1]/path"),
+        ];
+
+        for (raw, want) in cases {
+            let url = normalize_url(raw).unwrap();
+            assert_eq!(url.as_str(), want, "raw URL {raw}");
+        }
+    }
+
+    #[test]
+    fn explicit_http_and_https_schemes_are_preserved() {
+        let cases = [
+            ("HTTP://EXAMPLE.COM/path", "http://example.com/path"),
+            (
+                "https://example.com:8443/path?x=1",
+                "https://example.com:8443/path?x=1",
+            ),
+        ];
+
+        for (raw, want) in cases {
+            let url = normalize_url(raw).unwrap();
+            assert_eq!(url.as_str(), want, "raw URL {raw}");
+        }
+    }
+
+    #[test]
+    fn unsupported_explicit_authority_schemes_are_rejected() {
+        let err = normalize_url("ftp://example.com/file").unwrap_err();
+        assert_eq!(err.to_string(), "unsupported url scheme: ftp");
+    }
+
+    #[test]
+    fn authority_scheme_marker_inside_path_does_not_make_url_explicit() {
+        let url = normalize_url("example.com/path://still-a-path?next=http://other").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://example.com/path://still-a-path?next=http://other"
+        );
+    }
+
+    #[test]
+    fn scheme_like_host_port_input_still_uses_default_scheme() {
+        let url = normalize_url("localhost:3000").unwrap();
+        assert_eq!(url.as_str(), "http://localhost:3000/");
+    }
+
+    #[test]
+    fn empty_url_is_rejected_before_parsing() {
+        let err = normalize_url("").unwrap_err();
+        assert_eq!(err.to_string(), "empty URL provided");
+    }
+
+    #[test]
+    fn invalid_schemeless_url_reports_parse_error() {
+        let err = normalize_url("example.com:abc").unwrap_err();
+        assert!(
+            err.to_string().contains("invalid port number"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn authority_scheme_detection_requires_valid_leading_scheme() {
+        let cases = [
+            ("http://example.com", true),
+            ("wss://example.com", true),
+            ("fetch+test://example.com", true),
+            ("1http://example.com", false),
+            ("example.com/path://segment", false),
+            ("example.com?next=https://other", false),
+            ("example.com#https://other", false),
+            ("localhost:3000", false),
+        ];
+
+        for (raw, want) in cases {
+            assert_eq!(has_authority_scheme(raw), want, "raw URL {raw}");
+        }
     }
 
     #[test]
