@@ -4,6 +4,11 @@ A modern HTTP(S) client for the command line.
 
 ![Example of fetch with an image and JSON responses](./assets/example.png)
 
+`fetch` is built for the parts of API work that usually require several
+separate tools: formatted HTTP responses, terminal image rendering, WebSockets,
+gRPC reflection and calls, DNS inspection, TLS certificate inspection, and
+request timing.
+
 ## Features
 
 - **Response formatting** - Automatic formatting and syntax highlighting for JSON, XML, YAML, HTML, CSS, CSV, Markdown, MessagePack, Protocol Buffers, and more
@@ -40,6 +45,76 @@ fetch httpbin.org/json
 
 # Make a request for an image
 fetch picsum.photos/1024/1024
+```
+
+## Examples
+
+### Everyday API Work
+
+```sh
+# POST JSON and format the response automatically
+fetch -m POST -j '{"name":"Ada"}' https://httpbin.org/post
+
+# Reuse cookies across requests with a named session
+fetch --session api -m POST -j '{"user":"me"}' https://example.com/login
+fetch --session api https://example.com/dashboard
+
+# Convert a curl command into a fetch request
+fetch --from-curl 'curl -H "Authorization: Bearer TOKEN" https://api.example.com'
+
+# Show response headers, request+response headers, or full connection details
+fetch -v https://example.com
+fetch -vv https://example.com
+fetch -vvv https://example.com
+```
+
+### DNS, TLS, and Timing Diagnostics
+
+```sh
+# Inspect DNS records, TTLs, resolver backend, and lookup duration
+fetch --inspect-dns example.com
+
+# Run the same DNS inspection through DNS-over-HTTPS
+fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
+
+# Inspect the TLS certificate chain, expiry, SANs, OCSP, ALPN, and cipher suite
+fetch --inspect-tls https://example.com
+
+# Inspect the HTTP/3 QUIC/TLS path
+fetch --inspect-tls --http 3 https://cloudflare.com
+
+# Show a request timing waterfall for DNS, TCP, TLS, TTFB, and body transfer
+fetch --timing https://example.com
+```
+
+### WebSocket and gRPC
+
+```sh
+# Connect to a WebSocket and send an initial JSON message
+fetch wss://echo.websocket.events -j '{"type":"ping"}'
+
+# Discover gRPC services using reflection
+fetch --grpc-list https://localhost:50051
+
+# Describe a gRPC service, method, or message
+fetch --grpc-describe grpc.health.v1.Health http://127.0.0.1:50051
+
+# Make a gRPC call with JSON-to-protobuf conversion
+fetch --grpc -j '{"service":""}' \
+  http://127.0.0.1:50051/grpc.health.v1.Health/Check
+```
+
+### Terminal-Friendly Output
+
+```sh
+# Render images directly in supported terminals
+fetch https://httpbin.org/image/png
+
+# Disable the pager for scripts or small responses
+fetch --pager off https://httpbin.org/json
+
+# Save a response and copy the decoded body to the clipboard
+fetch --copy -o response.json https://httpbin.org/json
 ```
 
 ## Documentation
