@@ -137,47 +137,15 @@ pub fn write_output_reader<R: Read>(
     clobber: bool,
     progress: WriteProgress,
 ) -> Result<i64, OutputError> {
-    let target = Path::new(path);
-    if !clobber {
-        check_output_file(target)?;
-    }
-
-    let absolute_target = absolute_path(target)?;
-    let (temp_path, temp_file) = create_download_temp(&absolute_target)?;
-    let temp_guard = DownloadTempGuard::new(temp_path);
+    let (download, temp_file) = DownloadTemp::create(path, clobber)?;
     let mut temp_file = temp_file;
 
-    let progress_summary = write_temp_body(
-        &mut temp_file,
-        reader,
-        &progress,
-        absolute_target.to_string_lossy().as_ref(),
-    )?;
-    if let Err(err) = temp_file.sync_all() {
-        return Err(OutputError::Io(err));
-    }
-    drop(temp_file);
-
-    let install_result = if clobber {
-        fileutil::atomic_replace_file(temp_guard.path(), &absolute_target)
-    } else {
-        fileutil::atomic_write_new_file(temp_guard.path(), &absolute_target)
+    let progress_summary = {
+        let display_path = download.display_path();
+        write_temp_body(&mut temp_file, reader, &progress, display_path.as_ref())?
     };
-    match install_result {
-        Ok(()) => {
-            if let Some(summary) = progress_summary.summary {
-                summary.finish();
-            }
-            Ok(progress_summary.bytes_written)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(OutputError::FileExists(path.to_string()))
-        }
-        Err(err) => Err(OutputError::FileCheck {
-            path: path.to_string(),
-            source: err,
-        }),
-    }
+
+    install_download_temp(download, temp_file, progress_summary)
 }
 
 pub async fn write_output_async_reader<R: AsyncRead + Unpin>(
@@ -186,45 +154,96 @@ pub async fn write_output_async_reader<R: AsyncRead + Unpin>(
     clobber: bool,
     progress: WriteProgress,
 ) -> Result<i64, OutputError> {
-    let target = Path::new(path);
-    if !clobber {
-        check_output_file(target)?;
-    }
-
-    let absolute_target = absolute_path(target)?;
-    let (temp_path, temp_file) = create_download_temp(&absolute_target)?;
-    let temp_guard = DownloadTempGuard::new(temp_path);
+    let (download, temp_file) = DownloadTemp::create(path, clobber)?;
     let mut temp_file = tokio::fs::File::from_std(temp_file);
 
-    let progress_summary = write_temp_body_async(
-        &mut temp_file,
-        reader,
-        &progress,
-        absolute_target.to_string_lossy().as_ref(),
-    )
-    .await?;
+    let progress_summary = {
+        let display_path = download.display_path();
+        write_temp_body_async(&mut temp_file, reader, &progress, display_path.as_ref()).await?
+    };
+
+    install_download_temp_async(download, temp_file, progress_summary).await
+}
+
+struct DownloadTemp {
+    requested_path: String,
+    target_path: PathBuf,
+    temp_guard: DownloadTempGuard,
+    clobber: bool,
+}
+
+impl DownloadTemp {
+    fn create(path: &str, clobber: bool) -> Result<(Self, File), OutputError> {
+        let target = Path::new(path);
+        if !clobber {
+            check_output_file(target)?;
+        }
+
+        let target_path = absolute_path(target)?;
+        let (temp_path, temp_file) = create_download_temp(&target_path)?;
+        Ok((
+            Self {
+                requested_path: path.to_string(),
+                target_path,
+                temp_guard: DownloadTempGuard::new(temp_path),
+                clobber,
+            },
+            temp_file,
+        ))
+    }
+
+    fn display_path(&self) -> std::borrow::Cow<'_, str> {
+        self.target_path.to_string_lossy()
+    }
+}
+
+fn install_download_temp(
+    download: DownloadTemp,
+    temp_file: File,
+    progress_summary: WriteOutcome,
+) -> Result<i64, OutputError> {
+    if let Err(err) = temp_file.sync_all() {
+        return Err(OutputError::Io(err));
+    }
+    drop(temp_file);
+
+    commit_download_temp(download)?;
+    if let Some(summary) = progress_summary.summary {
+        summary.finish();
+    }
+    Ok(progress_summary.bytes_written)
+}
+
+async fn install_download_temp_async(
+    download: DownloadTemp,
+    temp_file: tokio::fs::File,
+    progress_summary: WriteOutcome,
+) -> Result<i64, OutputError> {
     if let Err(err) = temp_file.sync_all().await {
         return Err(OutputError::Io(err));
     }
     drop(temp_file);
 
-    let install_result = if clobber {
-        fileutil::atomic_replace_file(temp_guard.path(), &absolute_target)
+    commit_download_temp(download)?;
+    if let Some(summary) = progress_summary.summary {
+        summary.finish();
+    }
+    Ok(progress_summary.bytes_written)
+}
+
+fn commit_download_temp(download: DownloadTemp) -> Result<(), OutputError> {
+    let install_result = if download.clobber {
+        fileutil::atomic_replace_file(download.temp_guard.path(), &download.target_path)
     } else {
-        fileutil::atomic_write_new_file(temp_guard.path(), &absolute_target)
+        fileutil::atomic_write_new_file(download.temp_guard.path(), &download.target_path)
     };
     match install_result {
-        Ok(()) => {
-            if let Some(summary) = progress_summary.summary {
-                summary.finish();
-            }
-            Ok(progress_summary.bytes_written)
-        }
+        Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(OutputError::FileExists(path.to_string()))
+            Err(OutputError::FileExists(download.requested_path))
         }
         Err(err) => Err(OutputError::FileCheck {
-            path: path.to_string(),
+            path: download.requested_path,
             source: err,
         }),
     }
@@ -759,6 +778,60 @@ mod tests {
         }
     }
 
+    struct CreateTargetDuringRead {
+        target: PathBuf,
+        emitted: bool,
+    }
+
+    impl std::io::Read for CreateTargetDuringRead {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.emitted {
+                return Ok(0);
+            }
+
+            self.emitted = true;
+            std::fs::write(&self.target, b"raced")?;
+            let bytes = b"new";
+            buf[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    struct CreateTargetDuringAsyncRead {
+        target: PathBuf,
+        emitted: bool,
+    }
+
+    impl AsyncRead for CreateTargetDuringAsyncRead {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.emitted {
+                return Poll::Ready(Ok(()));
+            }
+
+            self.emitted = true;
+            std::fs::write(&self.target, b"raced")?;
+            buf.put_slice(b"new");
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn assert_no_download_temps(dir: &Path) {
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".download"))
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
     #[test]
     fn test_sanitize_filename() {
         let tests = [
@@ -982,6 +1055,51 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
     }
 
+    #[test]
+    fn write_output_reader_preserves_target_created_before_install_without_clobber() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("download.txt");
+        let mut reader = CreateTargetDuringRead {
+            target: path.clone(),
+            emitted: false,
+        };
+
+        let err = write_output_reader(
+            path.to_str().unwrap(),
+            &mut reader,
+            false,
+            WriteProgress::disabled(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, OutputError::FileExists(_)));
+        assert_eq!(std::fs::read(&path).unwrap(), b"raced");
+        assert_no_download_temps(dir.path());
+    }
+
+    #[tokio::test]
+    async fn write_output_async_reader_preserves_target_created_before_install_without_clobber() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("download.txt");
+        let mut reader = CreateTargetDuringAsyncRead {
+            target: path.clone(),
+            emitted: false,
+        };
+
+        let err = write_output_async_reader(
+            path.to_str().unwrap(),
+            &mut reader,
+            false,
+            WriteProgress::disabled(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, OutputError::FileExists(_)));
+        assert_eq!(std::fs::read(&path).unwrap(), b"raced");
+        assert_no_download_temps(dir.path());
+    }
+
     #[tokio::test]
     async fn write_output_emits_static_progress_summary_when_enabled() {
         let dir = tempfile::tempdir().unwrap();
@@ -1022,15 +1140,6 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!path.exists());
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with(".download"))
-            })
-            .collect();
-        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+        assert_no_download_temps(dir.path());
     }
 }
