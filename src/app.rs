@@ -1,4 +1,7 @@
-use clap::{ColorChoice, CommandFactory, Parser};
+use clap::{
+    ColorChoice, CommandFactory, Parser,
+    error::{ContextKind, ContextValue, ErrorKind},
+};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -101,81 +104,112 @@ fn color_setting_from_args(args: impl IntoIterator<Item = String>) -> Option<Str
 }
 
 fn format_parse_error_message(err: &clap::Error) -> String {
-    let msg = err.to_string();
-    let msg = msg.trim().strip_prefix("error: ").unwrap_or(msg.trim());
-    let first_line = msg.lines().next().unwrap_or(msg).trim();
-
-    if let Some(flag) = unknown_flag_from_clap_message(first_line) {
-        return format!("unknown flag '{flag}'");
+    match err.kind() {
+        ErrorKind::UnknownArgument => format_unknown_argument_error(err),
+        ErrorKind::InvalidValue | ErrorKind::ValueValidation => format_invalid_value_error(err),
+        ErrorKind::TooManyValues => format_too_many_values_error(err),
+        ErrorKind::ArgumentConflict => format_argument_conflict_error(err),
+        _ => None,
     }
-    if let Some(flag) = required_arg_flag_from_clap_message(first_line) {
-        return format!("argument required for flag '{flag}'");
-    }
-    if let Some((flag, value, usage)) = invalid_value_from_clap_message(first_line) {
-        return format!("invalid value '{value}' for option '{flag}': {usage}");
-    }
-    if let Some(flag) = no_args_flag_from_clap_message(first_line) {
-        return format!("flag '{flag}' does not take any arguments");
-    }
-    if let Some((first, second)) = exclusive_flags_from_clap_message(first_line) {
-        return format!("flags '{first}' and '{second}' cannot be used together");
-    }
-
-    first_line.to_string()
+    .unwrap_or_else(|| {
+        err.kind()
+            .as_str()
+            .unwrap_or("command line parse error")
+            .to_string()
+    })
 }
 
-fn unknown_flag_from_clap_message(msg: &str) -> Option<&str> {
-    let rest = msg.strip_prefix("unexpected argument '")?;
-    let (arg, _) = rest.split_once('\'')?;
+fn format_unknown_argument_error(err: &clap::Error) -> Option<String> {
+    let arg = context_string(err, ContextKind::InvalidArg)?;
     if arg.starts_with('-') {
-        Some(arg)
+        Some(format!("unknown flag '{}'", flag_name_from_spec(&arg)))
     } else {
         None
     }
 }
 
-fn required_arg_flag_from_clap_message(msg: &str) -> Option<String> {
-    let rest = msg.strip_prefix("a value is required for '")?;
-    let (spec, _) = rest.split_once('\'')?;
-    Some(flag_name_from_spec(spec))
+fn format_invalid_value_error(err: &clap::Error) -> Option<String> {
+    let flag = context_flag(err, ContextKind::InvalidArg)?;
+    let value = context_string(err, ContextKind::InvalidValue)?;
+    if value.is_empty() {
+        return Some(format!("argument required for flag '{flag}'"));
+    }
+
+    let Some(usage) = invalid_value_usage(&flag, err) else {
+        return Some(format!("invalid value '{value}' for option '{flag}'"));
+    };
+    Some(format!(
+        "invalid value '{value}' for option '{flag}': {usage}"
+    ))
 }
 
-fn no_args_flag_from_clap_message(msg: &str) -> Option<String> {
-    if !msg.starts_with("unexpected value ") {
-        return None;
-    }
-    let (_, rest) = msg.split_once(" for '")?;
-    let (spec, _) = rest.split_once('\'')?;
-    Some(flag_name_from_spec(spec))
+fn format_too_many_values_error(err: &clap::Error) -> Option<String> {
+    let flag = context_flag(err, ContextKind::InvalidArg)?;
+    Some(format!("flag '{flag}' does not take any arguments"))
 }
 
-fn exclusive_flags_from_clap_message(msg: &str) -> Option<(String, String)> {
-    let rest = msg.strip_prefix("the argument '")?;
-    let (first, rest) = rest.split_once("' cannot be used")?;
-    let (_, rest) = rest.split_once("with '")?;
-    let (second, _) = rest.split_once('\'')?;
-    Some((flag_name_from_spec(first), flag_name_from_spec(second)))
+fn format_argument_conflict_error(err: &clap::Error) -> Option<String> {
+    let first = context_flag(err, ContextKind::InvalidArg)?;
+    let second = first_context_flag(err, ContextKind::PriorArg)?;
+    if first == second {
+        return Some(format!("flag '{first}' cannot be used multiple times"));
+    }
+    Some(format!(
+        "flags '{first}' and '{second}' cannot be used together"
+    ))
 }
 
-fn invalid_value_from_clap_message(msg: &str) -> Option<(String, String, &'static str)> {
-    let rest = msg.strip_prefix("invalid value '")?;
-    let (value, rest) = rest.split_once('\'')?;
-    let (_, rest) = rest.split_once(" for '")?;
-    let (spec, _) = rest.split_once('\'')?;
-    let flag = flag_name_from_spec(spec);
-    if flag == "--pager" || flag == "--ws-interactive" {
-        return Some((flag, value.to_string(), "must be one of [auto, on, off]"));
-    }
-    if flag == "--color" || flag == "--format" {
-        return Some((flag, value.to_string(), "must be one of [auto, off, on]"));
-    }
+fn invalid_value_usage(flag: &str, err: &clap::Error) -> Option<String> {
     if flag == "--retry" || flag == "--redirects" {
-        return Some((flag, value.to_string(), "must be a non-negative integer"));
+        return Some("must be a non-negative integer".to_string());
     }
     if flag == "--connect-timeout" || flag == "--retry-delay" || flag == "--timeout" {
-        return Some((flag, value.to_string(), "must be a non-negative number"));
+        return Some("must be a non-negative number".to_string());
     }
-    None
+
+    let values = context_strings(err, ContextKind::ValidValue);
+    if values.is_empty() {
+        None
+    } else {
+        Some(format!("must be one of [{}]", values.join(", ")))
+    }
+}
+
+fn context_flag(err: &clap::Error, kind: ContextKind) -> Option<String> {
+    context_string(err, kind).map(|value| flag_name_from_spec(&value))
+}
+
+fn first_context_flag(err: &clap::Error, kind: ContextKind) -> Option<String> {
+    first_context_string(err, kind).map(|value| flag_name_from_spec(&value))
+}
+
+fn context_string(err: &clap::Error, kind: ContextKind) -> Option<String> {
+    first_context_string(err, kind)
+}
+
+fn first_context_string(err: &clap::Error, kind: ContextKind) -> Option<String> {
+    match err.get(kind)? {
+        ContextValue::String(value) => Some(value.clone()),
+        ContextValue::Strings(values) => values.first().cloned(),
+        ContextValue::StyledStr(value) => Some(value.to_string()),
+        ContextValue::StyledStrs(values) => values.first().map(ToString::to_string),
+        ContextValue::Number(value) => Some(value.to_string()),
+        ContextValue::Bool(value) => Some(value.to_string()),
+        ContextValue::None => None,
+        _ => None,
+    }
+}
+
+fn context_strings(err: &clap::Error, kind: ContextKind) -> Vec<String> {
+    match err.get(kind) {
+        Some(ContextValue::String(value)) => vec![value.clone()],
+        Some(ContextValue::Strings(values)) => values.clone(),
+        Some(ContextValue::StyledStr(value)) => vec![value.to_string()],
+        Some(ContextValue::StyledStrs(values)) => values.iter().map(ToString::to_string).collect(),
+        Some(ContextValue::Number(value)) => vec![value.to_string()],
+        Some(ContextValue::Bool(value)) => vec![value.to_string()],
+        _ => Vec::new(),
+    }
 }
 
 fn flag_name_from_spec(spec: &str) -> String {
@@ -1130,6 +1164,38 @@ mod tests {
         for (err, want) in cases {
             assert_eq!(format_parse_error_message(&err), want);
         }
+    }
+
+    #[test]
+    fn clap_parse_errors_use_structured_context() {
+        let mut unknown = clap::Error::new(ErrorKind::UnknownArgument);
+        unknown.insert(
+            ContextKind::InvalidArg,
+            ContextValue::String("--bad".to_string()),
+        );
+        assert_eq!(format_parse_error_message(&unknown), "unknown flag '--bad'");
+
+        let mut invalid = clap::Error::new(ErrorKind::InvalidValue);
+        invalid.insert(
+            ContextKind::InvalidArg,
+            ContextValue::String("--color <OPTION>".to_string()),
+        );
+        invalid.insert(
+            ContextKind::InvalidValue,
+            ContextValue::String("always".to_string()),
+        );
+        invalid.insert(
+            ContextKind::ValidValue,
+            ContextValue::Strings(vec![
+                "auto".to_string(),
+                "off".to_string(),
+                "on".to_string(),
+            ]),
+        );
+        assert_eq!(
+            format_parse_error_message(&invalid),
+            "invalid value 'always' for option '--color': must be one of [auto, off, on]"
+        );
     }
 
     #[test]
