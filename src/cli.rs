@@ -100,7 +100,7 @@ impl PagerMode {
 #[derive(Debug, Parser)]
 #[command(
     name = "fetch",
-    about = "fetch is a modern HTTP(S) client for the command line",
+    about = "A terminal-native API client for HTTP, gRPC, WebSockets, and network debugging.",
     disable_help_flag = true,
     disable_version_flag = true
 )]
