@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use cookie::{Cookie as RawCookie, SameSite};
@@ -14,6 +13,8 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use url::Url;
+
+use crate::fileutil::FileLock;
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -506,45 +507,22 @@ fn session_cookie_map(
         .collect()
 }
 
-struct SessionLock {
-    file: std::fs::File,
-}
-
-impl Drop for SessionLock {
-    fn drop(&mut self) {
-        let _ = unlock_session_file(&self.file);
-    }
-}
-
-fn acquire_session_lock(path: &Path) -> Result<SessionLock, SessionError> {
+fn acquire_session_lock(path: &Path) -> Result<FileLock, SessionError> {
     acquire_session_lock_with_timeout(path, SESSION_LOCK_WAIT_TIMEOUT)
 }
 
 fn acquire_session_lock_with_timeout(
     path: &Path,
     timeout: Duration,
-) -> Result<SessionLock, SessionError> {
+) -> Result<FileLock, SessionError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     create_sessions_dir(dir)?;
-    let file = open_session_lock_file(&session_lock_path(path))?;
-    let started_at = Instant::now();
-
-    for attempt in 0.. {
-        if try_lock_session_file(&file)? {
-            return Ok(SessionLock { file });
-        }
-        if started_at.elapsed() >= timeout {
-            return Err(SessionError::LockTimeout(
-                crate::duration::format_go_duration(timeout),
-            ));
-        }
-        let multiplier = (attempt + 1).min(10) as u64;
-        let sleep = Duration::from_millis(multiplier * 50);
-        let remaining = timeout.saturating_sub(started_at.elapsed());
-        thread::sleep(sleep.min(remaining));
-    }
-
-    unreachable!("session lock acquisition loop is unbounded by the iterator")
+    FileLock::acquire_with_timeout(
+        session_lock_path(path),
+        timeout,
+        || {},
+        |timeout| SessionError::LockTimeout(crate::duration::format_go_duration(timeout)),
+    )
 }
 
 fn session_lock_path(path: &Path) -> PathBuf {
@@ -553,105 +531,6 @@ fn session_lock_path(path: &Path) -> PathBuf {
         .map(|name| name.to_string_lossy())
         .unwrap_or_else(|| "session.json".into());
     path.with_file_name(format!(".{name}.lock"))
-}
-
-fn open_session_lock_file(path: &Path) -> Result<std::fs::File, SessionError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    Ok(options.open(path)?)
-}
-
-#[cfg(unix)]
-fn try_lock_session_file(file: &std::fs::File) -> Result<bool, SessionError> {
-    use std::os::fd::AsRawFd;
-
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        return Ok(true);
-    }
-
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(libc::EWOULDBLOCK) || err.raw_os_error() == Some(libc::EAGAIN) {
-        Ok(false)
-    } else {
-        Err(err.into())
-    }
-}
-
-#[cfg(unix)]
-fn unlock_session_file(file: &std::fs::File) -> Result<(), SessionError> {
-    use std::os::fd::AsRawFd;
-
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error().into())
-    }
-}
-
-#[cfg(windows)]
-fn try_lock_session_file(file: &std::fs::File) -> Result<bool, SessionError> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
-    use windows_sys::Win32::Storage::FileSystem::{
-        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    };
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-
-    let mut overlapped = OVERLAPPED::default();
-    // SAFETY: the file handle is valid for this File and overlapped points to writable storage.
-    let ok = unsafe {
-        LockFileEx(
-            file.as_raw_handle(),
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0,
-            u32::MAX,
-            u32::MAX,
-            &mut overlapped,
-        )
-    };
-    if ok != 0 {
-        return Ok(true);
-    }
-
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
-        Ok(false)
-    } else {
-        Err(err.into())
-    }
-}
-
-#[cfg(windows)]
-fn unlock_session_file(file: &std::fs::File) -> Result<(), SessionError> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-
-    let mut overlapped = OVERLAPPED::default();
-    // SAFETY: the file handle is valid for this File and overlapped points to writable storage.
-    let ok = unsafe { UnlockFileEx(file.as_raw_handle(), 0, u32::MAX, u32::MAX, &mut overlapped) };
-    if ok != 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error().into())
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn try_lock_session_file(_file: &std::fs::File) -> Result<bool, SessionError> {
-    Ok(true)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn unlock_session_file(_file: &std::fs::File) -> Result<(), SessionError> {
-    Ok(())
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<(), SessionError> {
@@ -702,6 +581,7 @@ fn is_false(value: &bool) -> bool {
 mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard};
+    use std::time::Instant;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
