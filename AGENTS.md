@@ -60,6 +60,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - **src/cli** - Command-line argument parsing, shell completion, and `--from-curl` support.
 - **src/config** - INI-format config file parsing with host-specific overrides.
 - **src/core.rs** - Shared printer, color, format, and terminal utilities.
+- **src/fileutil.rs** - Atomic file replacement and shared cross-platform advisory file locks.
 - **src/dns** - DNS-over-HTTPS, UDP DNS, system resolver fallback, and `--inspect-dns`.
 - **src/format** - Response body formatters for JSON, XML, YAML, HTML, CSS, CSV, Markdown, msgpack, protobuf, SSE, NDJSON, gRPC, and images.
 - **src/grpc** - gRPC framing, reflection, status handling, and protobuf request/response support.
@@ -143,6 +144,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - Clipboard command execution is bounded while stdin is written and while waiting for exit; `--copy` kills a clipboard backend that does not finish within the short wait timeout and reports a warning instead of hanging indefinitely.
 - Named session saves take a per-session advisory lock, reload the latest JSON, and merge only local cookie creates/updates/deletes before atomic replacement so concurrent `--session` invocations preserve distinct cookie changes. Session saves use a short bounded lock wait and report a warning instead of hanging indefinitely when another process keeps the session lock.
 - Explicit self-updates use a bounded update-lock wait capped by the request timeout or the fixed update-lock timeout; background auto-update checks keep using nonblocking lock acquisition.
+- Session and update lock acquisition should go through `fileutil::FileLock` so cross-platform open/retry/flock/LockFileEx/unlock behavior stays centralized while call sites own their timeout diagnostics.
 - Self-update release metadata, artifact, checksum, and redirect-target URLs require HTTPS by default; only internal update/test overrides such as an `http://` `FETCH_INTERNAL_UPDATE_URL` may use HTTP for local fixtures.
 - Output-file downloads keep `*.download` temp files behind a drop guard so cancellation paths such as Ctrl-C clean up partial files; Unix atomic installs also sync the parent directory after rename/link updates for stronger crash durability.
 - Self-updates stream release artifacts while calculating SHA-256 on the fly: `.tar.gz`/`.tgz` artifacts unpack directly into the update temp directory through a bounded reader, while `.zip` artifacts stream to a temp archive file first because zip extraction needs seekable input. Non-Windows replacement copies the new executable into the target directory before calling `fileutil::atomic_replace_file` so Unix parent-directory syncs are preserved.

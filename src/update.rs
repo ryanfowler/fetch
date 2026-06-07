@@ -1,7 +1,6 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
@@ -19,6 +18,7 @@ use crate::cli::Cli;
 use crate::core;
 use crate::duration::{TimeoutBudget, duration_from_seconds, format_go_duration};
 use crate::error::{FetchError, write_warning_with_separator_with_color};
+use crate::fileutil::FileLock;
 use crate::http::{client, transport};
 use crate::output::progress::{self, BarCounter, ProgressPrinter, SpinnerCounter};
 
@@ -1762,22 +1762,12 @@ fn update_last_attempt_time(dir: &Path, now: SystemTime) -> Result<(), FetchErro
     Ok(())
 }
 
-struct UpdateLock {
-    file: std::fs::File,
-}
-
-impl Drop for UpdateLock {
-    fn drop(&mut self) {
-        let _ = unlock_file(&self.file);
-    }
-}
-
 fn acquire_update_lock(
     dir: &Path,
     block: bool,
     silent: bool,
     color: Option<&str>,
-) -> Result<Option<UpdateLock>, FetchError> {
+) -> Result<Option<FileLock>, FetchError> {
     acquire_update_lock_with_timeout(dir, block, silent, color, UPDATE_LOCK_WAIT_TIMEOUT)
 }
 
@@ -1787,32 +1777,24 @@ fn acquire_update_lock_with_timeout(
     silent: bool,
     color: Option<&str>,
     timeout: Duration,
-) -> Result<Option<UpdateLock>, FetchError> {
+) -> Result<Option<FileLock>, FetchError> {
     std::fs::create_dir_all(dir)?;
-    let file = open_lock_file(&dir.join(".update-lock"))?;
-    let started_at = Instant::now();
-
-    for attempt in 0.. {
-        if try_lock_file(&file)? {
-            return Ok(Some(UpdateLock { file }));
-        }
-        if !block {
-            return Ok(None);
-        }
-        if started_at.elapsed() >= timeout {
-            return Err(update_lock_timeout_error(timeout));
-        }
-
-        if attempt == 0 && !silent {
-            write_warning_with_separator_with_color("waiting on lock to begin updating", color);
-        }
-        let multiplier = (attempt + 1).min(10) as u64;
-        let sleep = Duration::from_millis(multiplier * 50);
-        let remaining = timeout.saturating_sub(started_at.elapsed());
-        thread::sleep(sleep.min(remaining));
+    let path = dir.join(".update-lock");
+    if !block {
+        return FileLock::try_acquire(path).map_err(FetchError::from);
     }
 
-    unreachable!("update lock acquisition loop is unbounded by the iterator")
+    FileLock::acquire_with_timeout(
+        path,
+        timeout,
+        || {
+            if !silent {
+                write_warning_with_separator_with_color("waiting on lock to begin updating", color);
+            }
+        },
+        update_lock_timeout_error,
+    )
+    .map(Some)
 }
 
 fn update_lock_wait_timeout(request_timeout: Option<Duration>) -> Duration {
@@ -1826,105 +1808,6 @@ fn update_lock_timeout_error(timeout: Duration) -> FetchError {
         "timed out waiting for update lock after {}",
         format_go_duration(timeout)
     ))
-}
-
-fn open_lock_file(path: &Path) -> Result<std::fs::File, FetchError> {
-    let mut options = std::fs::OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    Ok(options.open(path)?)
-}
-
-#[cfg(unix)]
-fn try_lock_file(file: &std::fs::File) -> Result<bool, FetchError> {
-    use std::os::fd::AsRawFd;
-
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        return Ok(true);
-    }
-
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(libc::EWOULDBLOCK) || err.raw_os_error() == Some(libc::EAGAIN) {
-        Ok(false)
-    } else {
-        Err(err.into())
-    }
-}
-
-#[cfg(unix)]
-fn unlock_file(file: &std::fs::File) -> Result<(), FetchError> {
-    use std::os::fd::AsRawFd;
-
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error().into())
-    }
-}
-
-#[cfg(windows)]
-fn try_lock_file(file: &std::fs::File) -> Result<bool, FetchError> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
-    use windows_sys::Win32::Storage::FileSystem::{
-        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    };
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-
-    let mut overlapped = OVERLAPPED::default();
-    // SAFETY: the file handle is valid for this File and overlapped points to writable storage.
-    let ok = unsafe {
-        LockFileEx(
-            file.as_raw_handle(),
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0,
-            u32::MAX,
-            u32::MAX,
-            &mut overlapped,
-        )
-    };
-    if ok != 0 {
-        return Ok(true);
-    }
-
-    let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
-        Ok(false)
-    } else {
-        Err(err.into())
-    }
-}
-
-#[cfg(windows)]
-fn unlock_file(file: &std::fs::File) -> Result<(), FetchError> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-
-    let mut overlapped = OVERLAPPED::default();
-    // SAFETY: the file handle is valid for this File and overlapped points to writable storage.
-    let ok = unsafe { UnlockFileEx(file.as_raw_handle(), 0, u32::MAX, u32::MAX, &mut overlapped) };
-    if ok != 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error().into())
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn try_lock_file(_file: &std::fs::File) -> Result<bool, FetchError> {
-    Ok(true)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn unlock_file(_file: &std::fs::File) -> Result<(), FetchError> {
-    Ok(())
 }
 
 #[cfg(unix)]
