@@ -64,7 +64,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - **src/dns** - DNS-over-HTTPS, UDP DNS, system resolver fallback, and `--inspect-dns`.
 - **src/format** - Response body formatters for JSON, XML, YAML, HTML, CSS, CSV, Markdown, msgpack, protobuf, SSE, NDJSON, gRPC, and images.
 - **src/grpc** - gRPC framing, reflection, status handling, and protobuf request/response support.
-- **src/http** - Core HTTP request construction and execution, multipart uploads, output routing, retries, proxies, TLS, Unix sockets, and timing.
+- **src/http** - Core HTTP request construction and execution, response orchestration, multipart uploads, output routing, retries, proxies, TLS, Unix sockets, and timing.
 - **src/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
 - **src/output** - Response output, progress summaries, and atomic output-file writes.
 - **src/proto** - Protocol buffer descriptor loading, compilation, and dynamic message handling.
@@ -91,7 +91,8 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - gRPC calls and reflection advertise `grpc-accept-encoding: gzip`; response frames with the compressed flag are decompressed with the response `grpc-encoding` before protobuf decoding, with unsupported encodings reported by name.
 - gRPC standard request headers, status extraction from headers/trailers, and full framed-body reads live under `src/grpc`; request execution and reflection should reuse those helpers instead of duplicating protocol handling.
 - gRPC reflection framed-body reads apply reflection-specific decoded-byte and message-count limits before retaining messages; keep reflection discovery bounded even when servers send many individually valid frames.
-- Formatted SSE, NDJSON, and gRPC stdout streaming share `src/http/mod.rs`'s formatter callback driver for decoded reads, clipboard capture, byte counting, trailer extraction, and flushes; keep per-format parsing inside the callbacks. Formatted NDJSON caps each pending unterminated record at `MAX_BUFFERED_RESPONSE_BYTES`.
+- HTTP response handling is split under `src/http/response/`: `stdout.rs` owns terminal/pager policy, `stream.rs` owns decoded streaming and trailer capture, `formatters.rs` owns buffered and streaming body formatting, and `metadata.rs` owns response metadata, timing, clipboard outcomes, and status finalization.
+- Formatted SSE, NDJSON, and gRPC stdout streaming share `src/http/response/stream.rs`'s formatter callback driver for decoded reads, clipboard capture, byte counting, trailer extraction, and flushes; keep per-format parsing inside the callbacks. Formatted NDJSON caps each pending unterminated record at `MAX_BUFFERED_RESPONSE_BYTES`.
 - Client-streaming and bidi gRPC calls stream JSON input into framed protobuf request bodies instead of materializing the whole stream up front; stdin-backed gRPC JSON streams use the shared incremental parser behind a blocking stdin bridge, discard leading whitespace before each message, cap pending incomplete JSON at `framing::MAX_MESSAGE_SIZE`, and Windows pipe stdin is peeked before reads so complete request messages can be sent before EOF without byte-at-a-time reads.
 - Custom UDP DNS queries advertise EDNS(0) and retry truncated responses over TCP.
 - `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP or DoH responses. UDP inspection queries retry truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, render a warning about incomplete results and exit non-zero instead of silently omitting that record type.

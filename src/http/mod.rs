@@ -16,7 +16,6 @@ use base64::Engine;
 use bytes::Bytes;
 #[cfg(test)]
 use flate2::read::GzDecoder;
-use futures_util::stream;
 use http::header::{
     ACCEPT, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap,
     HeaderName, HeaderValue, LOCATION, PROXY_AUTHORIZATION, RANGE, RETRY_AFTER, TRANSFER_ENCODING,
