@@ -4,11 +4,12 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## Project Overview
 
-`fetch` is a modern HTTP(S) client CLI implemented as the Rust Cargo binary
-named `fetch`. It features automatic response formatting (JSON, XML, YAML,
-HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support
-with reflection/discovery and JSON-to-protobuf conversion, and authentication
-(Basic, Digest, Bearer, AWS SigV4).
+`fetch` is a terminal-native API client implemented as the Rust Cargo binary
+named `fetch`. It covers requests, streams, and network debugging with
+automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf,
+msgpack), image rendering in terminals, gRPC support with reflection/discovery
+and JSON-to-protobuf conversion, WebSockets, DNS/TLS inspection, timing, and
+authentication (Basic, Digest, Bearer, AWS SigV4).
 
 ## Common Commands
 

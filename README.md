@@ -1,13 +1,12 @@
 # fetch
 
-A modern HTTP(S) client for the command line.
+A terminal API client for requests, streams, and network debugging.
 
 ![Example of fetch with an image and JSON responses](./assets/example.png)
 
-`fetch` is built for the parts of API work that usually require several
-separate tools: formatted HTTP responses, terminal image rendering, WebSockets,
-gRPC reflection and calls, DNS inspection, TLS certificate inspection, and
-request timing.
+`fetch` combines formatted HTTP responses, terminal image rendering,
+WebSockets, gRPC reflection and calls, DNS inspection, TLS certificate
+inspection, and request timing in one CLI.
 
 ## Features
 
