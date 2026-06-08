@@ -70,7 +70,9 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - **src/proto** - Protocol buffer descriptor loading, compilation, and dynamic message handling.
 - **src/session.rs** - Named cookie sessions with persistent storage across invocations.
 - **src/tls** - TCP and QUIC/TLS inspection.
-- **src/update.rs** - Check for updates, download release artifacts, and self-update.
+- **src/update** - Self-update orchestration, split into release client,
+  archive download/validation, install/replacement, locking, and auto-update
+  scheduling modules.
 - **src/websocket** - WebSocket message loop and interactive terminal prompt.
 
 ### Request Flow
