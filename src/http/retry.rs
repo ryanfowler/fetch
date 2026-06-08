@@ -429,10 +429,33 @@ pub(super) fn print_retry(
         return;
     }
 
-    let prefix = if cli.verbose >= 2 { "* " } else { "" };
-    eprintln!(
-        "{prefix}retry: attempt {next_attempt}/{total_attempts} in {} ({reason})",
-        format_delay(delay)
+    let mut printer = core::Printer::stderr(cli.color.as_deref());
+    write_retry_to(
+        &mut printer,
+        cli.verbose,
+        next_attempt,
+        total_attempts,
+        delay,
+        reason,
+    );
+    core::flush_stderr(printer);
+}
+
+fn write_retry_to(
+    printer: &mut core::Printer,
+    verbosity: u8,
+    next_attempt: usize,
+    total_attempts: usize,
+    delay: Duration,
+    reason: &str,
+) {
+    if verbosity >= 2 {
+        printer.write_info_prefix();
+    }
+    let delay = format_delay(delay);
+    core::write_status_line_no_flush(
+        printer,
+        format_args!("retry: attempt {next_attempt}/{total_attempts} in {delay} ({reason})"),
     );
 }
 
@@ -518,6 +541,42 @@ mod tests {
         assert_eq!(format_delay(Duration::from_millis(250)), "250ms");
         assert_eq!(format_delay(Duration::from_millis(2500)), "2.5s");
         assert_eq!(format_delay(Duration::from_secs(1)), "1.0s");
+    }
+
+    #[test]
+    fn retry_status_renders_through_printer() {
+        let mut printer = core::Printer::new(false);
+        write_retry_to(
+            &mut printer,
+            0,
+            2,
+            3,
+            Duration::from_millis(250),
+            "HTTP 503",
+        );
+
+        assert_eq!(
+            printer.into_string().unwrap(),
+            "retry: attempt 2/3 in 250ms (HTTP 503)\n"
+        );
+    }
+
+    #[test]
+    fn retry_debug_prefix_uses_printer_styling() {
+        let mut printer = core::Printer::new(true);
+        write_retry_to(
+            &mut printer,
+            2,
+            2,
+            3,
+            Duration::from_secs(1),
+            "connection failed",
+        );
+
+        assert_eq!(
+            printer.into_string().unwrap(),
+            "\x1b[2m* \x1b[0mretry: attempt 2/3 in 1.0s (connection failed)\n"
+        );
     }
 
     #[test]

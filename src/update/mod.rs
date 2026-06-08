@@ -36,7 +36,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         lock_timeout,
     )?
     .ok_or_else(|| FetchError::Message("unable to acquire update lock".to_string()))?;
-    let result = update_inner(&client, cli.silent, cli.dry_run).await;
+    let result = update_inner(&client, cli.silent, cli.color.as_deref(), cli.dry_run).await;
     record_last_attempt_time(&cache_dir);
     result?;
     Ok(0)
@@ -45,6 +45,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 async fn update_inner(
     client: &UpdateClient<'_>,
     silent: bool,
+    color: Option<&str>,
     dry_run: bool,
 ) -> Result<(), FetchError> {
     let exe_path = current_exe()?;
@@ -57,20 +58,24 @@ async fn update_inner(
     }
     let version = core::version();
 
-    write_msg(silent, "Fetching latest release...\n");
+    write_update_status(silent, color, "Fetching latest release...\n");
     let latest = latest_release(client).await?;
 
     if latest.tag_name == version {
-        if !silent {
-            eprintln!("Already using the latest version ({}).", latest.tag_name);
-        }
+        write_update_status_line(
+            silent,
+            color,
+            format_args!("Already using the latest version ({}).", latest.tag_name),
+        );
         return Ok(());
     }
 
     if dry_run {
-        if !silent {
-            eprintln!("Update available: {version} -> {}", latest.tag_name);
-        }
+        write_update_status_line(
+            silent,
+            color,
+            format_args!("Update available: {version} -> {}", latest.tag_name),
+        );
         return Ok(());
     }
 
@@ -81,9 +86,11 @@ async fn update_inner(
             goarch()
         ))
     })?;
-    if !silent {
-        eprintln!("Downloading {}\n", latest.tag_name);
-    }
+    write_update_status(
+        silent,
+        color,
+        format_args!("Downloading {}\n\n", latest.tag_name),
+    );
 
     let checksum = download_checksum(client, release_artifact.checksum_url).await?;
 
@@ -105,27 +112,45 @@ async fn update_inner(
     let replace_result = self_replace(&exe_path, &src);
     replace_result?;
 
-    write_update_success(silent, version, &latest.tag_name);
+    write_update_success(silent, color, version, &latest.tag_name);
     Ok(())
 }
 
-fn write_update_success(silent: bool, old_version: &str, new_version: &str) {
+fn write_update_success(silent: bool, color: Option<&str>, old_version: &str, new_version: &str) {
     if silent {
         return;
     }
-    eprintln!("Updated fetch: {old_version} -> {new_version}");
+    let mut printer = core::Printer::stderr(color);
+    write_update_success_to(&mut printer, old_version, new_version);
+    core::flush_stderr(printer);
+}
 
+fn write_update_success_to(printer: &mut core::Printer, old_version: &str, new_version: &str) {
+    core::write_status_line_no_flush(
+        printer,
+        format_args!("Updated fetch: {old_version} -> {new_version}"),
+    );
     let compare_ref = changelog_compare_ref(old_version);
     if !compare_ref.is_empty() {
-        eprintln!(
-            "\nChangelog: https://github.com/ryanfowler/fetch/compare/{compare_ref}...{new_version}"
+        printer.push('\n');
+        core::write_status_line_no_flush(
+            printer,
+            format_args!(
+                "Changelog: https://github.com/ryanfowler/fetch/compare/{compare_ref}...{new_version}"
+            ),
         );
     }
 }
 
-fn write_msg(silent: bool, message: &str) {
+fn write_update_status(silent: bool, color: Option<&str>, message: impl std::fmt::Display) {
     if !silent {
-        eprint!("{message}");
+        core::write_status_with_color(message, color);
+    }
+}
+
+fn write_update_status_line(silent: bool, color: Option<&str>, message: impl std::fmt::Display) {
+    if !silent {
+        core::write_status_line_with_color(message, color);
     }
 }
 
@@ -378,5 +403,16 @@ mod tests {
         for (input, want) in tests {
             assert_eq!(is_version_tag(input), want, "is_version_tag({input:?})");
         }
+    }
+
+    #[test]
+    fn update_success_renders_through_printer() {
+        let mut printer = core::Printer::new(false);
+        write_update_success_to(&mut printer, "v1.2.3", "v1.2.4");
+
+        assert_eq!(
+            printer.into_string().unwrap(),
+            "Updated fetch: v1.2.3 -> v1.2.4\n\nChangelog: https://github.com/ryanfowler/fetch/compare/v1.2.3...v1.2.4\n"
+        );
     }
 }
