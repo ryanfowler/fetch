@@ -1,6 +1,22 @@
 mod support;
 
-use support::*;
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use std::fs;
+use std::io::{BufReader, Write};
+use std::net::{Shutdown, TcpListener};
+#[cfg(unix)]
+use std::process::Command;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+use support::common::{assert_exit, run_fetch};
+#[cfg(unix)]
+use support::common::{fetch_bin, wait_child};
+use support::http::{TestResponse, TestServer, read_request, wait_for_requests};
+#[cfg(unix)]
+use support::pty::{configure_pty_child, open_pty, start_pty_capture};
+use tempfile::TempDir;
 
 #[test]
 fn response_formatting_json_ndjson_xml_yaml_html_csv_css_and_sniffing() {

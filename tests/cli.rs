@@ -1,6 +1,14 @@
 mod support;
 
-use support::*;
+use std::fs;
+use std::path::Path;
+use support::common::{FetchOpts, assert_exit, host_port, run_fetch, run_fetch_opts};
+#[cfg(unix)]
+use support::common::{assert_no_closed_stdout_panic, run_fetch_with_closed_stdout};
+#[cfg(unix)]
+use support::grpc::{start_reflection_grpc_h2c_server, write_health_descriptor_set};
+use support::http::{TestResponse, TestServer};
+use tempfile::TempDir;
 
 #[test]
 fn help_matches_go_harness_expectations() {
@@ -402,5 +410,48 @@ fn config_error_and_metadata_edges() {
         assert_exit(&res, 0);
         assert!(res.stderr.is_empty(), "{flag}: {}", res.stderr);
         assert!(!res.stdout.is_empty());
+    }
+}
+
+#[test]
+fn integration_support_stays_domain_split() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let support_mod = fs::read_to_string(root.join("tests/support/mod.rs")).unwrap();
+    assert!(
+        support_mod.lines().count() <= 40,
+        "tests/support/mod.rs should stay as a small domain-module index"
+    );
+    for module in [
+        "auth",
+        "common",
+        "dns",
+        "grpc",
+        "http",
+        "http3",
+        "proxy",
+        "pty",
+        "terminal",
+        "tls",
+        "update",
+        "websocket",
+    ] {
+        assert!(
+            support_mod.contains(&format!("pub(crate) mod {module};")),
+            "missing support::{module} declaration"
+        );
+    }
+
+    let wildcard_support_import = ["use support", "::*;"].concat();
+    for entry in fs::read_dir(root.join("tests")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(
+            !contents.contains(&wildcard_support_import),
+            "{} should import helpers from specific support modules",
+            path.display()
+        );
     }
 }

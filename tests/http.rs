@@ -1,6 +1,32 @@
 mod support;
 
-use support::*;
+use base64::Engine;
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use std::fs;
+use std::io::{BufReader, Write};
+use std::net::{Ipv4Addr, Shutdown, TcpListener};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
+use support::auth::{md5_hex, parse_digest_auth_params};
+#[cfg(unix)]
+use support::common::fetch_bin;
+use support::common::{
+    FAST_RETRY_DELAY, FetchOpts, accept_tcp_connection, assert_exit, fake_editor, host_port,
+    run_fetch, run_fetch_once, run_fetch_opts, temp_file,
+};
+use support::dns::start_udp_dns_server;
+use support::http::{
+    PartialBodyReplayServer, TestResponse, TestServer, read_request, wait_for_requests,
+    write_response,
+};
+use tempfile::TempDir;
 
 #[test]
 fn request_construction_and_data_sources() {

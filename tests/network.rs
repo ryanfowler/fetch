@@ -1,6 +1,31 @@
 mod support;
 
-use support::*;
+use std::fs;
+use std::io::{Read, Write};
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+use support::common::{
+    FAST_RETRY_DELAY, FetchOpts, assert_exit, host_port, run_fetch, run_fetch_opts,
+};
+use support::dns::{
+    parse_dns_question, start_udp_dns_server, start_udp_dns_server_with_hosts,
+    start_unresponsive_udp_dns_server,
+};
+use support::grpc::{
+    grpc_frame, grpc_frame_with_flag, gzip_bytes, proto_field_string, proto_field_varint,
+};
+use support::http::{TestResponse, TestServer};
+use support::http3::{H3Response, start_http3_server, wait_for_h3_requests};
+use support::proxy::{
+    assert_socks_seen, start_http_connect_proxy, start_https_proxy, start_socks5_proxy,
+    start_stalling_proxy,
+};
+use support::tls::{start_h2_tls_server, start_mtls_server, start_tls_server};
+use tempfile::TempDir;
+use url::Url;
 
 #[test]
 fn proxy_config_environment_and_curl_http1_cases() {

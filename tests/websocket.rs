@@ -1,6 +1,33 @@
 mod support;
 
-use support::*;
+use base64::Engine;
+use sha1::{Digest as Sha1Digest, Sha1};
+use std::fs;
+use std::io::{BufReader, Write};
+use std::net::{Ipv4Addr, TcpListener};
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+use support::common::{
+    FetchOpts, FetchOutput, assert_exit, fetch_bin, run_fetch, run_fetch_once, run_fetch_opts,
+    start_read_capture, url_host_port, wait_child,
+};
+use support::dns::{start_udp_dns_server, start_unresponsive_udp_dns_server};
+use support::http::{TestResponse, TestServer, read_request, write_response};
+use support::proxy::{
+    assert_proxy_seen, assert_socks_seen, start_http_connect_proxy, start_socks5_proxy,
+    start_stalling_proxy,
+};
+#[cfg(unix)]
+use support::pty::{configure_pty_child, open_pty, start_pty_capture};
+use support::websocket::{
+    read_ws_frame, read_ws_text, start_ws_echo_server, start_ws_hold_open_push_server,
+    start_ws_multi_echo_server, start_ws_push_server, start_wss_echo_server,
+    write_ws_close_and_drain, ws_binary_frame, ws_text_frame,
+};
+use tempfile::TempDir;
+use url::Url;
 
 const WEBSOCKET_RECEIVE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 

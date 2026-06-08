@@ -1,6 +1,6 @@
 use std::env;
 use std::fmt;
-use std::io::{Cursor, ErrorKind, Read, Write};
+use std::io::{Cursor, ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
@@ -355,6 +355,7 @@ fn create_temp_image_dir(path: &Path) -> std::io::Result<()> {
 
 #[cfg(unix)]
 fn write_temp_image_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let mut file = std::fs::OpenOptions::new()
