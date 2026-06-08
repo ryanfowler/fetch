@@ -178,8 +178,9 @@ Rust request uploads use a replayable body descriptor instead of a universal `Ve
 
 - Rust unit tests live alongside modules in `src/`.
 - Rust integration tests live in focused files under `tests/`, with shared
-  harness code in `tests/support/mod.rs`, and run the compiled Rust binary via
-  Cargo.
+  harness code split by domain under `tests/support/` (HTTP, TLS, HTTP/3,
+  gRPC, DNS, WebSocket, proxy, PTY, terminal, update, and auth helpers), and
+  run the compiled Rust binary via Cargo.
 - CI runs Rust checks once on Ubuntu and runs the Rust integration harness once on each supported GitHub Actions runner: Ubuntu, macOS, and Windows.
 
 ## Docs

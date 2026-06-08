@@ -1,6 +1,18 @@
+#![cfg(unix)]
+
 mod support;
 
-use support::*;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::Duration;
+use support::common::{assert_exit, fetch_bin, wait_child};
+use support::http::{TestResponse, TestServer};
+use support::terminal::{
+    image_pty_env, run_binary_pty_with_fake_less, run_fetch_pty_with_fake_less,
+    run_fetch_with_fake_less, run_image_pty_with_fake_less, run_image_render_pty,
+};
 
 #[cfg(unix)]
 #[test]

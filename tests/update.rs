@@ -1,6 +1,18 @@
+#![cfg(not(windows))]
+
 mod support;
 
-use support::*;
+use std::fs;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use support::common::{FetchOpts, assert_exit, fetch_version, run_fetch_opts};
+use support::http::{TestResponse, TestServer};
+use support::update::{
+    install_update_launcher, make_update_artifact, update_artifact_checksum_line,
+    update_artifact_name,
+};
+use tempfile::TempDir;
 
 #[cfg(not(windows))]
 #[test]
