@@ -56,7 +56,9 @@ pub(super) fn print_dry_run_body(cli: &Cli, body: &RequestBody) -> Result<(), Fe
         return Ok(());
     };
     if cli.verbose < 2 {
-        eprintln!();
+        let mut printer = core::Printer::stderr(cli.color.as_deref());
+        core::write_status_line_no_flush(&mut printer, "");
+        flush_stderr(printer);
     }
     let preview = dry_run_body_preview(body, DRY_RUN_BODY_PREVIEW_BYTES)?;
     if !is_printable(&preview.bytes) {

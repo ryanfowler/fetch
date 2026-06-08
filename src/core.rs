@@ -432,6 +432,32 @@ pub fn write_warning_separator_no_flush(printer: &mut Printer) {
     printer.push('\n');
 }
 
+pub fn write_status_msg_no_flush(printer: &mut Printer, msg: impl fmt::Display) {
+    printer.push_str(&msg.to_string());
+}
+
+pub fn write_status_line_no_flush(printer: &mut Printer, msg: impl fmt::Display) {
+    write_status_msg_no_flush(printer, msg);
+    printer.push('\n');
+}
+
+pub fn write_status_with_color(msg: impl fmt::Display, color: Option<&str>) {
+    let mut printer = Printer::stderr(color);
+    write_status_msg_no_flush(&mut printer, msg);
+    flush_stderr(printer);
+}
+
+pub fn write_status_line_with_color(msg: impl fmt::Display, color: Option<&str>) {
+    let mut printer = Printer::stderr(color);
+    write_status_line_no_flush(&mut printer, msg);
+    flush_stderr(printer);
+}
+
+pub fn flush_stderr(mut printer: Printer) {
+    let mut stderr = std::io::stderr();
+    let _ = printer.flush_to(&mut stderr);
+}
+
 impl std::io::Write for Printer {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.buf.extend_from_slice(buf);
@@ -676,6 +702,21 @@ mod tests {
         assert_eq!(
             printer.into_string().unwrap(),
             "warning: one\nwarning: two\n\nnext\n"
+        );
+    }
+
+    #[test]
+    fn status_helpers_write_plain_text_without_labels() {
+        let mut printer = Printer::new(false);
+        write_status_msg_no_flush(&mut printer, "Fetching latest release...\n");
+        write_status_line_no_flush(
+            &mut printer,
+            format_args!("Updated fetch: {} -> {}", "v1", "v2"),
+        );
+
+        assert_eq!(
+            printer.into_string().unwrap(),
+            "Fetching latest release...\nUpdated fetch: v1 -> v2\n"
         );
     }
 }
