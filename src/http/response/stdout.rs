@@ -1,17 +1,15 @@
 use super::*;
 
-pub(super) const BINARY_RESPONSE_WARNING: &str =
-    "the response body appears to be binary\n\nTo output to the terminal anyway, use '--output -'";
-
 pub(super) struct StdoutBody {
     pub(super) bytes: Vec<u8>,
     pub(super) content_type: ContentType,
+    pub(super) content_type_label: String,
 }
 
 pub(super) fn write_stdout_bytes(cli: &Cli, body: &StdoutBody) -> Result<(), FetchError> {
     let stdout_is_terminal = core::stdio().stdout_is_terminal();
     if should_warn_for_terminal_binary_stdout(cli, &body.bytes, stdout_is_terminal) {
-        write_warning(cli, BINARY_RESPONSE_WARNING);
+        write_warning(cli, &binary_response_warning(&body.content_type_label));
         return Ok(());
     }
 
@@ -104,6 +102,24 @@ pub(super) fn response_header_content_type(headers: &HeaderMap) -> ContentType {
     content_type::get_content_type(content_type).0
 }
 
+pub(super) fn response_header_content_type_label(headers: &HeaderMap) -> String {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .map(|value| {
+            value
+                .to_str()
+                .unwrap_or("<invalid content-type>")
+                .to_owned()
+        })
+        .unwrap_or_else(|| "<none>".to_owned())
+}
+
+pub(super) fn binary_response_warning(content_type: &str) -> String {
+    format!(
+        "the response body appears to be binary (content type: {content_type})\n\nUse '-o file' to save it, '-o - > file' to redirect raw bytes, or '--image off' to disable terminal image rendering."
+    )
+}
+
 pub(super) fn terminal_binary_stdout_guard_enabled(cli: &Cli, stdout_is_terminal: bool) -> bool {
     stdout_is_terminal && cli.output.as_deref() != Some("-")
 }
@@ -147,6 +163,15 @@ mod tests {
             b"abc\0def",
             true
         ));
+    }
+
+    #[test]
+    fn binary_response_warning_includes_content_type_and_alternatives() {
+        let warning = binary_response_warning("application/octet-stream");
+        assert!(warning.contains("content type: application/octet-stream"));
+        assert!(warning.contains("-o file"));
+        assert!(warning.contains("-o - > file"));
+        assert!(warning.contains("--image off"));
     }
 
     #[test]

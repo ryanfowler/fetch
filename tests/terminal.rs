@@ -14,6 +14,22 @@ use support::terminal::{
     run_fetch_with_fake_less, run_image_pty_with_fake_less, run_image_render_pty,
 };
 
+fn assert_binary_warning_output(output: &str) {
+    assert!(
+        output.contains(
+            "the response body appears to be binary (content type: application/octet-stream)"
+        ),
+        "{output:?}"
+    );
+    assert!(
+        output.contains("\x1b[1m\x1b[33mwarning\x1b[0m: "),
+        "{output:?}"
+    );
+    assert!(output.contains("-o file"), "{output:?}");
+    assert!(output.contains("-o - > file"), "{output:?}");
+    assert!(output.contains("--image off"), "{output:?}");
+}
+
 #[cfg(unix)]
 #[test]
 fn terminal_stdout_uses_less_pager_by_default() {
@@ -39,18 +55,7 @@ fn pager_off_writes_terminal_stdout_directly() {
 fn terminal_stdout_warns_instead_of_printing_binary_response() {
     let (output, less_args, less_input) = run_binary_pty_with_fake_less(&[]);
 
-    assert!(
-        output.contains("the response body appears to be binary"),
-        "{output:?}"
-    );
-    assert!(
-        output.contains("\x1b[1m\x1b[33mwarning\x1b[0m: "),
-        "{output:?}"
-    );
-    assert!(
-        output.contains("To output to the terminal anyway, use '--output -'"),
-        "{output:?}"
-    );
+    assert_binary_warning_output(&output);
     assert!(!output.contains("abc\0def"), "{output:?}");
     assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
     assert!(less_input.is_none(), "pager received input: {less_input:?}");
@@ -61,18 +66,7 @@ fn terminal_stdout_warns_instead_of_printing_binary_response() {
 fn terminal_stdout_format_off_warns_instead_of_streaming_binary_response() {
     let (output, less_args, less_input) = run_binary_pty_with_fake_less(&["--format", "off"]);
 
-    assert!(
-        output.contains("the response body appears to be binary"),
-        "{output:?}"
-    );
-    assert!(
-        output.contains("\x1b[1m\x1b[33mwarning\x1b[0m: "),
-        "{output:?}"
-    );
-    assert!(
-        output.contains("To output to the terminal anyway, use '--output -'"),
-        "{output:?}"
-    );
+    assert_binary_warning_output(&output);
     assert!(!output.contains("abc\0def"), "{output:?}");
     assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
     assert!(less_input.is_none(), "pager received input: {less_input:?}");

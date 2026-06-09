@@ -1,7 +1,8 @@
 use super::*;
 
 use super::stdout::{
-    BINARY_RESPONSE_WARNING, StdoutStreamTarget, terminal_binary_stdout_guard_enabled,
+    StdoutStreamTarget, binary_response_warning, response_header_content_type_label,
+    terminal_binary_stdout_guard_enabled,
 };
 
 pub(super) const MAX_BUFFERED_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -110,8 +111,14 @@ pub(super) async fn stream_response_to_stdout(
     let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
     let mut capture = copy.then(clipboard::Capture::default);
     let bytes_written = if terminal_binary_stdout_guard_enabled(cli, stdout_is_terminal) {
-        stream_response_to_stdout_with_binary_check(cli, &mut reader, target, capture.as_mut())
-            .await?
+        stream_response_to_stdout_with_binary_check(
+            cli,
+            &response_headers,
+            &mut reader,
+            target,
+            capture.as_mut(),
+        )
+        .await?
     } else {
         copy_async_reader_to_stdout_target(&mut reader, target, &[], capture.as_mut()).await?
     };
@@ -315,6 +322,7 @@ fn async_response_reader(response: Response) -> (AsyncReadBox, ResponseTrailers)
 
 async fn stream_response_to_stdout_with_binary_check(
     cli: &Cli,
+    response_headers: &HeaderMap,
     reader: &mut AsyncReadBox,
     target: StdoutStreamTarget,
     mut capture: Option<&mut clipboard::Capture>,
@@ -327,7 +335,10 @@ async fn stream_response_to_stdout_with_binary_check(
 
     let first_chunk = &first_chunk[..n];
     if !is_printable(first_chunk) {
-        write_warning(cli, BINARY_RESPONSE_WARNING);
+        write_warning(
+            cli,
+            &binary_response_warning(&response_header_content_type_label(response_headers)),
+        );
         if let Some(capture) = capture.as_mut() {
             capture.push(first_chunk);
         }

@@ -172,7 +172,9 @@ pub(crate) fn run_fetch_pty_with_fake_less(
 pub(crate) fn run_binary_pty_with_fake_less(
     extra_args: &[&str],
 ) -> (String, Option<String>, Option<String>) {
-    let server = TestServer::start(|_| TestResponse::ok(b"abc\0def".to_vec()));
+    let server = TestServer::start(|_| {
+        TestResponse::ok(b"abc\0def".to_vec()).header("Content-Type", "application/octet-stream")
+    });
     let dir = TempDir::new().unwrap();
     install_fake_less(dir.path());
     let less_args = dir.path().join("less.args");
