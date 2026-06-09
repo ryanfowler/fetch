@@ -22,7 +22,8 @@ fetch http://example.com   # Force HTTP
 
 ### `-m, --method METHOD`
 
-Specify the HTTP method. Default: `GET`.
+Specify the HTTP method. Default: `GET`, or `POST` when a request-body flag is
+used and `--method` is omitted.
 
 **Alias**: `-X`
 
@@ -52,7 +53,10 @@ fetch -q page=1 -q limit=50 example.com
 
 ## Request Body Options
 
-Body options are mutually exclusive - only one can be used per request.
+Payload source options are mutually exclusive - only one of `--data`, `--json`,
+`--xml`, `--form`, or `--multipart` can be used per request. These options, and
+`--edit`, default the request method to `POST` when `--method` is omitted; use
+`-m`/`--method` to send the body with another method.
 
 ### `-d, --data [@]VALUE`
 
@@ -61,7 +65,7 @@ Send a raw request body. Content-Type is auto-detected when using file reference
 ```sh
 fetch -d 'Hello, world!' -m PUT example.com
 fetch -d @data.txt -m PUT example.com
-fetch -d @- -m PUT example.com < data.txt
+fetch -d @- example.com < data.txt
 ```
 
 ### `-j, --json [@]VALUE`
@@ -69,8 +73,8 @@ fetch -d @- -m PUT example.com < data.txt
 Send a JSON request body. Sets `Content-Type: application/json`.
 
 ```sh
-fetch -j '{"hello": "world"}' -m POST example.com
-fetch -j @data.json -m POST example.com
+fetch -j '{"hello": "world"}' example.com
+fetch -j @data.json example.com
 ```
 
 ### `-x, --xml [@]VALUE`
@@ -78,7 +82,7 @@ fetch -j @data.json -m POST example.com
 Send an XML request body. Sets `Content-Type: application/xml`.
 
 ```sh
-fetch -x '<Tag>value</Tag>' -m PUT example.com
+fetch -x '<Tag>value</Tag>' example.com
 fetch -x @data.xml -m PUT example.com
 ```
 
@@ -87,7 +91,7 @@ fetch -x @data.xml -m PUT example.com
 Send a URL-encoded form body. Can be used multiple times.
 
 ```sh
-fetch -f username=john -f password=secret -m POST example.com/login
+fetch -f username=john -f password=secret example.com/login
 ```
 
 ### `-F, --multipart NAME=[@]VALUE`
@@ -95,7 +99,7 @@ fetch -f username=john -f password=secret -m POST example.com/login
 Send a multipart form body. Use `@` prefix for file uploads. Can be used multiple times.
 
 ```sh
-fetch -F hello=world -F file=@document.pdf -m POST example.com/upload
+fetch -F hello=world -F file=@document.pdf example.com/upload
 ```
 
 ### `-e, --edit`
@@ -103,7 +107,7 @@ fetch -F hello=world -F file=@document.pdf -m POST example.com/upload
 Open an editor to modify the request body before sending. Uses `VISUAL` or `EDITOR` environment variables.
 
 ```sh
-fetch --edit -m PUT example.com
+fetch --edit example.com
 ```
 
 ## Authentication
@@ -718,7 +722,7 @@ fetch --complete fish > ~/.config/fish/completions/fetch.fish
 Print request information without sending. When used with `--update`, checks for the latest version without installing.
 
 ```sh
-fetch --dry-run -m POST -j '{"test": true}' example.com
+fetch --dry-run -j '{"test": true}' example.com
 fetch --update --dry-run
 ```
 
@@ -743,6 +747,6 @@ Many options support file references with the `@` prefix:
 - `@~/path` - Home directory expansion
 
 ```sh
-fetch -j @data.json -m POST example.com
-echo '{"test": true}' | fetch -j @- -m POST example.com
+fetch -j @data.json example.com
+echo '{"test": true}' | fetch -j @- example.com
 ```

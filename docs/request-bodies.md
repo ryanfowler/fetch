@@ -4,7 +4,7 @@
 
 ## Overview
 
-Request body options are **mutually exclusive** - you can only use one per request:
+Payload source options are **mutually exclusive** - you can only use one per request:
 
 | Option            | Content-Type                        | Use Case               |
 | ----------------- | ----------------------------------- | ---------------------- |
@@ -13,6 +13,10 @@ Request body options are **mutually exclusive** - you can only use one per reque
 | `-x, --xml`       | `application/xml`                   | XML/SOAP APIs          |
 | `-f, --form`      | `application/x-www-form-urlencoded` | Simple forms           |
 | `-F, --multipart` | `multipart/form-data`               | File uploads           |
+
+When no method is specified, these options default the method to `POST`.
+`--edit` also defaults to `POST` when composing a body. Use `-m`/`--method` to
+send a body with another method, such as `PUT`.
 
 ## Raw Data
 
@@ -28,14 +32,14 @@ fetch -d 'Hello, world!' -m PUT example.com/resource
 
 ```sh
 fetch -d @data.txt -m PUT example.com/resource
-fetch -d @payload.bin -m POST example.com/upload
+fetch -d @payload.bin example.com/upload
 ```
 
 ### From Stdin
 
 ```sh
 echo 'Request body' | fetch -d @- -m PUT example.com/resource
-cat data.json | fetch -d @- -m POST example.com/api
+cat data.json | fetch -d @- example.com/api
 ```
 
 ### Content-Type Detection
@@ -60,7 +64,7 @@ Multipart file parts use the same policy. Some examples are:
 Override with a header:
 
 ```sh
-fetch -d @data.bin -H "Content-Type: application/custom" -m POST example.com
+fetch -d @data.bin -H "Content-Type: application/custom" example.com
 ```
 
 ## JSON Bodies
@@ -70,22 +74,22 @@ The `-j` or `--json` flag sends JSON data and sets `Content-Type: application/js
 ### Inline JSON
 
 ```sh
-fetch -j '{"name": "test", "value": 42}' -m POST example.com/api
+fetch -j '{"name": "test", "value": 42}' example.com/api
 ```
 
 ### From File
 
 ```sh
-fetch -j @payload.json -m POST example.com/api
+fetch -j @payload.json example.com/api
 ```
 
 ### From Stdin
 
 ```sh
-echo '{"key": "value"}' | fetch -j @- -m POST example.com/api
+echo '{"key": "value"}' | fetch -j @- example.com/api
 
 # Build JSON dynamically
-jq -n '{name: "test", time: now}' | fetch -j @- -m POST example.com/api
+jq -n '{name: "test", time: now}' | fetch -j @- example.com/api
 ```
 
 ### Nested JSON
@@ -100,7 +104,7 @@ fetch -j '{
     "theme": "dark",
     "notifications": true
   }
-}' -m POST example.com/api/users
+}' example.com/api/users
 ```
 
 ## XML Bodies
@@ -110,13 +114,13 @@ The `-x` or `--xml` flag sends XML data and sets `Content-Type: application/xml`
 ### Inline XML
 
 ```sh
-fetch -x '<user><name>John</name></user>' -m POST example.com/api
+fetch -x '<user><name>John</name></user>' example.com/api
 ```
 
 ### From File
 
 ```sh
-fetch -x @request.xml -m POST example.com/soap/endpoint
+fetch -x @request.xml example.com/soap/endpoint
 ```
 
 ### SOAP Example
@@ -129,7 +133,7 @@ fetch -x '<?xml version="1.0"?>
       <UserId>123</UserId>
     </GetUser>
   </soap:Body>
-</soap:Envelope>' -m POST example.com/soap
+</soap:Envelope>' example.com/soap
 ```
 
 ## URL-Encoded Forms
@@ -139,7 +143,7 @@ The `-f` or `--form` flag sends URL-encoded form data. Use multiple times for mu
 ### Basic Form
 
 ```sh
-fetch -f username=john -f password=secret -m POST example.com/login
+fetch -f username=john -f password=secret example.com/login
 ```
 
 ### With Special Characters
@@ -147,7 +151,7 @@ fetch -f username=john -f password=secret -m POST example.com/login
 Values are automatically URL-encoded:
 
 ```sh
-fetch -f "message=Hello World!" -f "email=user@example.com" -m POST example.com/contact
+fetch -f "message=Hello World!" -f "email=user@example.com" example.com/contact
 ```
 
 ### Generated Content-Type
@@ -169,7 +173,7 @@ The `-F` or `--multipart` flag sends multipart form data, typically used for fil
 ### Text Fields
 
 ```sh
-fetch -F name=John -F email=john@example.com -m POST example.com/users
+fetch -F name=John -F email=john@example.com example.com/users
 ```
 
 ### File Uploads
@@ -177,8 +181,8 @@ fetch -F name=John -F email=john@example.com -m POST example.com/users
 Use `@` prefix to upload files:
 
 ```sh
-fetch -F file=@document.pdf -m POST example.com/upload
-fetch -F avatar=@photo.jpg -F name=John -m POST example.com/profile
+fetch -F file=@document.pdf example.com/upload
+fetch -F avatar=@photo.jpg -F name=John example.com/profile
 ```
 
 When uploading a file by path, only the file's base name is sent in the multipart `filename` parameter.
@@ -186,7 +190,7 @@ When uploading a file by path, only the file's base name is sent in the multipar
 ### Multiple Files
 
 ```sh
-fetch -F "files=@doc1.pdf" -F "files=@doc2.pdf" -m POST example.com/upload
+fetch -F "files=@doc1.pdf" -F "files=@doc2.pdf" example.com/upload
 ```
 
 ### Mixed Content
@@ -197,7 +201,7 @@ fetch \
   -F "description=A sample upload" \
   -F "file=@document.pdf" \
   -F "thumbnail=@preview.png" \
-  -m POST example.com/documents
+  example.com/documents
 ```
 
 ### Home Directory Expansion
@@ -205,7 +209,7 @@ fetch \
 The `~` is expanded to your home directory:
 
 ```sh
-fetch -F config=@~/config.json -m POST example.com/settings
+fetch -F config=@~/config.json example.com/settings
 ```
 
 ## Editor Integration
@@ -216,7 +220,7 @@ When the request has a recognized Content-Type, the temporary edit file uses the
 ### Basic Usage
 
 ```sh
-fetch --edit -m PUT example.com/resource
+fetch --edit example.com/resource
 ```
 
 ### With Initial Content
@@ -224,7 +228,7 @@ fetch --edit -m PUT example.com/resource
 Combine with other body options to edit before sending:
 
 ```sh
-fetch -j '{"name": "template"}' --edit -m POST example.com/api
+fetch -j '{"name": "template"}' --edit example.com/api
 ```
 
 ### Editor Selection
@@ -236,7 +240,7 @@ The editor is selected in this order:
 3. Well-known editors (`vim`, `nano`, etc.)
 
 ```sh
-EDITOR=code fetch --edit -m POST example.com/api
+EDITOR=code fetch --edit example.com/api
 ```
 
 ## File Reference Syntax
@@ -254,13 +258,13 @@ Body options that accept `[@]VALUE` support these formats:
 
 ```sh
 # Literal value
-fetch -j '{"inline": true}' -m POST example.com
+fetch -j '{"inline": true}' example.com
 
 # From file
-fetch -j @data.json -m POST example.com
+fetch -j @data.json example.com
 
 # From stdin
-cat data.json | fetch -j @- -m POST example.com
+cat data.json | fetch -j @- example.com
 
 # Home directory
 fetch -d @~/Documents/data.txt -m PUT example.com
@@ -268,14 +272,16 @@ fetch -d @~/Documents/data.txt -m PUT example.com
 
 ## Method Inference
 
-When a request body is provided without specifying a method, the default is still GET. Always specify the method explicitly for clarity:
+When a request body flag is provided without `--method`, `fetch` uses `POST`.
+An explicit method always wins, so use `-m PUT`, `-m PATCH`, or even `-m GET`
+when a body must be sent with a different method.
 
 ```sh
-# Explicit POST
-fetch -j '{"data": true}' -m POST example.com
+# Inferred POST
+fetch -j '{"data": true}' example.com
 
-# Don't rely on implicit behavior
-fetch -j '{"data": true}' example.com  # Still uses GET!
+# Explicit override
+fetch -m PUT -j '{"data": true}' example.com
 ```
 
 ## Large Files
@@ -287,7 +293,7 @@ For large file uploads, consider:
 3. **Progress**: Use `-v` to see request/response headers
 
 ```sh
-fetch -F "large=@bigfile.zip" --timeout 300 -v -m POST example.com/upload
+fetch -F "large=@bigfile.zip" --timeout 300 -v example.com/upload
 ```
 
 ## Examples
@@ -299,13 +305,13 @@ fetch -j '{
   "title": "New Post",
   "content": "Hello, World!",
   "published": true
-}' -m POST example.com/api/posts
+}' example.com/api/posts
 ```
 
 ### Form Login
 
 ```sh
-fetch -f username=admin -f password=secret -m POST example.com/login
+fetch -f username=admin -f password=secret example.com/login
 ```
 
 ### File Upload with Metadata
@@ -315,7 +321,7 @@ fetch \
   -F "file=@report.pdf" \
   -F "title=Monthly Report" \
   -F "tags=finance,monthly" \
-  -m POST example.com/documents
+  example.com/documents
 ```
 
 ### GraphQL Query
@@ -323,7 +329,7 @@ fetch \
 ```sh
 fetch -j '{
   "query": "{ user(id: 1) { name email } }"
-}' -m POST example.com/graphql
+}' example.com/graphql
 ```
 
 ### Webhook Payload
@@ -331,7 +337,7 @@ fetch -j '{
 ```sh
 fetch -j @webhook-payload.json \
   -H "X-Webhook-Secret: $WEBHOOK_SECRET" \
-  -m POST example.com/webhooks/receive
+  example.com/webhooks/receive
 ```
 
 ## See Also

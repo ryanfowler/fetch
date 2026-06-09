@@ -325,7 +325,7 @@ pub struct Cli {
         long = "method",
         short_alias = 'X',
         value_name = "METHOD",
-        help = "HTTP method to use [default: GET]"
+        help = "HTTP method to use [default: GET; body=POST]"
     )]
     pub method: Option<String>,
 
@@ -621,9 +621,9 @@ mod tests {
         );
         assert!(help.contains("--pager <MODE>                Control pager use [auto, on, off]"));
         assert!(help.contains("--sort-headers                Sort displayed headers by name"));
-        assert!(
-            help.contains("-m, --method <METHOD>             HTTP method to use [default: GET]")
-        );
+        assert!(help.contains(
+            "-m, --method <METHOD>             HTTP method to use [default: GET; body=POST]"
+        ));
         assert!(
             help.contains("--ws-interactive <MODE>       WebSocket prompt mode [auto, on, off]")
         );
