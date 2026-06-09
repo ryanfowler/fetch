@@ -570,7 +570,8 @@ query = sort=name
 **Type**: Boolean
 **Default**: `false`
 
-Don't determine exit code from HTTP status. Always exit with code 0.
+HTTP 4xx/5xx responses exit nonzero by default. Set `ignore-status = true` to
+ignore HTTP status when choosing the exit code.
 
 ```ini
 # Ignore HTTP status for exit code

@@ -547,7 +547,8 @@ fetch -s example.com
 
 ### `--ignore-status`
 
-Don't use HTTP status code for exit code. Always exit 0 on successful request.
+HTTP 4xx/5xx responses exit nonzero by default; use `--ignore-status` to keep
+the exit code at 0 when the request completes.
 
 ```sh
 fetch --ignore-status example.com/not-found

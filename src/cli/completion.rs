@@ -279,7 +279,7 @@ const FLAGS: &[Flag] = &[
         None,
         "ignore-status",
         "",
-        "Exit code unaffected by HTTP status",
+        "Do not exit nonzero for HTTP 4xx/5xx",
     ),
     Flag {
         short: None,
