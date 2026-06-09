@@ -88,7 +88,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 
 - `--grpc-list` and `--grpc-describe` provide grpcurl-style discovery using reflection or local descriptor files.
 - `--grpc` now automatically tries gRPC reflection when no local schema is supplied.
-- Plaintext loopback gRPC servers are supported via `h2c` for both calls and discovery.
+- Plaintext loopback gRPC servers are supported via `h2c` for calls and discovery; h2c is gRPC-only.
 - Formatted gRPC responses with `Content-Type: application/grpc+proto` stream through `FrameDecoder`, writing each complete message immediately while preserving trailers.
 - gRPC calls and reflection advertise `grpc-accept-encoding: gzip`; response frames with the compressed flag are decompressed with the response `grpc-encoding` before protobuf decoding, with unsupported encodings reported by name.
 - gRPC standard request headers, status extraction from headers/trailers, and full framed-body reads live under `src/grpc`; request execution and reflection should reuse those helpers instead of duplicating protocol handling.
@@ -105,7 +105,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - Rust TLS version options accept only TLS 1.2 and TLS 1.3; legacy TLS 1.0/1.1 values are rejected consistently for CLI flags, config, WebSocket, and inspection paths.
 - Rustls is built with `aws-lc-rs` and `prefer-post-quantum`; keep post-quantum key exchange preference enabled unless there is a concrete compatibility or provider reason to disable it.
 - TLS inspection keeps its custom verifier for certificate display and OCSP capture, but Rustls protocol-version selection and PEM/client-auth material parsing should stay centralized in `src/tls/mod.rs`.
-- Default HTTPS requests should preserve the old reqwest-style protocol preference by offering `h2` and `http/1.1` through ALPN, dispatching to hyper HTTP/2 when `h2` is negotiated and falling back to HTTP/1.1 otherwise. Explicit `--http 1`, `--http 2`, and `--http 3` remain forced protocol selections.
+- Default HTTPS requests should preserve the old reqwest-style protocol preference by offering `h2` and `http/1.1` through ALPN, dispatching to hyper HTTP/2 when `h2` is negotiated and falling back to HTTP/1.1 otherwise. Explicit `--http 1`, `--http 2`, and `--http 3` remain forced protocol selections, not version caps.
 - The custom transport should preserve reqwest's safe default retries for HTTP/2/3 protocol NACKs such as remote `REFUSED_STREAM`, remote `GOAWAY(NO_ERROR)`, and HTTP/3 connection timeout signals, but only when the request body can be replayed.
 - WebSocket terminal sessions use the interactive prompt by default and can be controlled with `--ws-interactive auto|on|off`; output-file/clipboard/retry flags are rejected because the WebSocket path streams through the message loop instead of the normal response pipeline.
 - WebSocket requests require HTTP/1.1 for the upgrade handshake; reject explicit `--http 2` and `--http 3` instead of silently performing an HTTP/1.1 upgrade.

@@ -151,6 +151,11 @@ fetch --unix ~/myapp.sock http://localhost/health
 
 Force a specific HTTP version.
 
+When `--http` is unset, HTTPS requests offer `h2` and then `http/1.1` through
+ALPN, using HTTP/2 when the server negotiates it and falling back to HTTP/1.1
+otherwise. Setting `--http 1`, `--http 2`, or `--http 3` forces that protocol;
+it does not set a version cap.
+
 ### HTTP/1.1
 
 ```sh
@@ -168,11 +173,13 @@ fetch --http 1 example.com
 fetch --http 2 example.com
 ```
 
-- Default behavior (HTTP/2 preferred with fallback)
+- Forces HTTP/2
 - Multiplexed streams
 - Header compression (HPACK)
 - Required for gRPC
-- Automatically uses h2c (HTTP/2 over cleartext) for gRPC requests with `http://` URLs, enabling plaintext HTTP/2 connections to local development servers without TLS
+- Plain `http://` URLs are only supported with forced HTTP/2 for gRPC requests,
+  where `fetch` uses h2c (HTTP/2 over cleartext) for local development servers
+  without TLS
 
 ### HTTP/3 (QUIC)
 
