@@ -166,6 +166,9 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - `--from-curl` should only no-op curl flags that already match fetch defaults or curl presentation-only progress flags. Unsupported semantic flags such as `-n`/`--netrc`, `-f`/`--fail`, `-N`/`--no-buffer`, `--proto-default`, and `--proto-redir` return clear diagnostics instead of being ignored.
 - `--from-curl -d @file` and `-d @-` use the native streaming request body source when they are the single non-`-G` data value. Composite curl data bodies and `--data-urlencode @file` still materialize for curl-compatible concatenation/encoding, but cap the generated body at 16 MiB with a clear diagnostic.
 - The HTTP/2/3 environment-proxy guard implements `NO_PROXY` matching for hosts, domains, IP literals, CIDR ranges, and `*` so env proxies do not incorrectly block direct private-network requests.
+- Body-producing flags (`--data`, `--json`, `--xml`, `--form`,
+  `--multipart`, and `--edit`) infer `POST` when `--method` is omitted.
+  Explicit methods still win, including `-m GET` with a body.
 
 Retryable requests use replayable request bodies so retries and 307/308 redirects can resend data without holding unrelated state.
 Multipart `-F` request bodies are produced with a stable boundary so redirected requests preserve the original body shape.

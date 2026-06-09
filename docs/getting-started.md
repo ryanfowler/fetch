@@ -221,7 +221,7 @@ This is useful for diagnosing latency issues, verifying TLS configuration, and u
 Preview the exact request that would be sent without actually making the HTTP call:
 
 ```sh
-fetch --dry-run -vv -j '{"hello":"world"}' -m POST httpbin.org/post
+fetch --dry-run -vv -j '{"hello":"world"}' httpbin.org/post
 ```
 
 ```
@@ -252,7 +252,7 @@ fetch -X DELETE httpbin.org/delete
 The `-j` flag sets the request body and automatically adds `Content-Type: application/json`:
 
 ```sh
-fetch -j '{"name": "test", "value": 42}' -m POST httpbin.org/post
+fetch -j '{"name": "test", "value": 42}' httpbin.org/post
 ```
 
 ### Adding Headers and Query Parameters
@@ -269,7 +269,7 @@ Query parameters are URL-encoded and appended to the URL automatically.
 ### Sending Form Data
 
 ```sh
-fetch -f name=test -f value=42 -m POST httpbin.org/post
+fetch -f name=test -f value=42 httpbin.org/post
 ```
 
 See [Request Bodies](request-bodies.md) for multipart forms and file uploads.
@@ -315,7 +315,7 @@ Sessions let you persist cookies across multiple requests. This is useful for in
 
 ```sh
 # Log in - cookies are saved to the "myapi" session
-fetch -S myapi -j '{"user":"me","pass":"secret"}' -m POST httpbin.org/cookies/set/token/abc123
+fetch -S myapi -j '{"user":"me","pass":"secret"}' httpbin.org/cookies/set/token/abc123
 
 # Subsequent requests automatically include the saved cookies
 fetch -S myapi httpbin.org/cookies

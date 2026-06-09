@@ -185,14 +185,14 @@ fn dry_run_prints_effective_request_without_network() {
     let res = run_fetch(&["-j", r#"{"key":"val1"}"#, "localhost:3000", "--dry-run"]);
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
-    assert!(res.stderr.contains("GET / HTTP/1.1\n"));
+    assert!(res.stderr.contains("POST / HTTP/1.1\n"));
     assert!(res.stderr.contains("accept: application/json, */*;q=0.5"));
     assert!(res.stderr.contains("accept-encoding: gzip, br, zstd\n"));
     assert!(res.stderr.contains("content-length: 14\n"));
     assert!(res.stderr.contains("content-type: application/json\n"));
     assert!(res.stderr.contains("host: localhost:3000\n"));
     assert!(res.stderr.contains("\n\n{\"key\":\"val1\"}"));
-    assert!(!res.stderr.contains("> GET"));
+    assert!(!res.stderr.contains("> POST"));
 
     let res = run_fetch(&[
         "-j",

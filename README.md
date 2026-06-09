@@ -52,10 +52,10 @@ fetch picsum.photos/1024/1024
 
 ```sh
 # POST JSON and format the response automatically
-fetch -m POST -j '{"name":"Ada"}' https://httpbin.org/post
+fetch -j '{"name":"Ada"}' https://httpbin.org/post
 
 # Reuse cookies across requests with a named session
-fetch --session api -m POST -j '{"user":"me"}' https://example.com/login
+fetch --session api -j '{"user":"me"}' https://example.com/login
 fetch --session api https://example.com/dashboard
 
 # Convert a curl command into a fetch request

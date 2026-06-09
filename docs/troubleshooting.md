@@ -63,7 +63,7 @@ Shows:
 Preview the request without sending:
 
 ```sh
-fetch --dry-run -m POST -j '{"test": true}' example.com
+fetch --dry-run -j '{"test": true}' example.com
 ```
 
 Shows:

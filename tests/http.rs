@@ -35,19 +35,21 @@ fn request_construction_and_data_sources() {
     let res = run_fetch(&[&server.url, "--data", "hello"]);
     assert_exit(&res, 0);
     let req = wait_for_requests(&server, 1).remove(0);
-    assert_eq!(req.method, "GET");
+    assert_eq!(req.method, "POST");
     assert_eq!(req.body_string(), "hello");
     assert_eq!(req.header("content-type"), "text/plain; charset=utf-8");
 
     let res = run_fetch(&[&server.url, "--json", r#"{"key":"val"}"#]);
     assert_exit(&res, 0);
     let req = wait_for_requests(&server, 2).remove(1);
+    assert_eq!(req.method, "POST");
     assert_eq!(req.body_string(), r#"{"key":"val"}"#);
     assert_eq!(req.header("content-type"), "application/json");
 
     let res = run_fetch(&[&server.url, "--xml", "<Tag></Tag>"]);
     assert_exit(&res, 0);
     let req = wait_for_requests(&server, 3).remove(2);
+    assert_eq!(req.method, "POST");
     assert_eq!(req.body_string(), "<Tag></Tag>");
     assert_eq!(req.header("content-type"), "application/xml");
 
@@ -56,12 +58,14 @@ fn request_construction_and_data_sources() {
     let res = run_fetch(&[&server.url, "--data", &format!("@{}", file.display())]);
     assert_exit(&res, 0);
     let req = wait_for_requests(&server, 4).remove(3);
+    assert_eq!(req.method, "POST");
     assert_eq!(req.body_string(), "temp file data");
     assert_eq!(req.header("content-length"), "14");
 
     let res = run_fetch(&[&server.url, "--data", "hello", "-H", "Content-Length: 5"]);
     assert_exit(&res, 0);
     let req = wait_for_requests(&server, 5).remove(4);
+    assert_eq!(req.method, "POST");
     assert_eq!(req.body_string(), "hello");
     assert_eq!(req.header("content-length"), "5");
 
@@ -74,9 +78,16 @@ fn request_construction_and_data_sources() {
     ]);
     assert_exit(&res, 0);
     let req = wait_for_requests(&server, 6).remove(5);
+    assert_eq!(req.method, "POST");
     assert_eq!(req.body_string(), "chunked body");
     assert_eq!(req.header("transfer-encoding"), "chunked");
     assert!(req.header("content-length").is_empty());
+
+    let res = run_fetch(&[&server.url, "--method", "GET", "--json", r#"{"key":"val"}"#]);
+    assert_exit(&res, 0);
+    let req = wait_for_requests(&server, 7).remove(6);
+    assert_eq!(req.method, "GET");
+    assert_eq!(req.body_string(), r#"{"key":"val"}"#);
 }
 
 #[cfg(unix)]
@@ -1214,6 +1225,8 @@ fn request_construction_host_header_form_and_http_version() {
     });
     let res = run_fetch(&[&form_server.url, "-f", "key1=val1", "-f", "key2=val2"]);
     assert_exit(&res, 0);
+    let req = wait_for_requests(&form_server, 1).remove(0);
+    assert_eq!(req.method, "POST");
 
     let res = run_fetch(&[&server.url, "--http", "1"]);
     assert_exit(&res, 0);
@@ -1450,7 +1463,8 @@ fn from_curl_individual_go_cases() {
 #[test]
 fn edit_request_body_matches_go_harness() {
     let server = TestServer::start(|req| {
-        if req.body_string() == r#"{"edited":true}"#
+        if req.method == "POST"
+            && req.body_string() == r#"{"edited":true}"#
             && req.header("content-type") == "application/json"
         {
             TestResponse::ok("ok")

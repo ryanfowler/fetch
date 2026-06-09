@@ -42,11 +42,22 @@ pub(super) fn write_warning_before_output(cli: &Cli, message: &str) {
 }
 
 pub(super) fn effective_method(cli: &Cli) -> &str {
-    if cli.grpc && cli.method.is_none() {
+    if cli.method.is_some() {
+        cli.method()
+    } else if cli.grpc || has_request_body_flag(cli) {
         "POST"
     } else {
         cli.method()
     }
+}
+
+fn has_request_body_flag(cli: &Cli) -> bool {
+    cli.data.is_some()
+        || cli.json.is_some()
+        || cli.xml.is_some()
+        || !cli.form.is_empty()
+        || !cli.multipart.is_empty()
+        || cli.edit
 }
 
 pub(super) fn effective_http_version(
@@ -523,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn method_defaults_and_custom_method_parse_like_go() {
+    fn method_defaults_infer_post_for_body_flags() {
         let cli = Cli::try_parse_from(["fetch", "https://example.com"]).unwrap();
         assert_eq!(cli.method(), "GET");
         assert_eq!(effective_method(&cli), "GET");
@@ -531,6 +542,29 @@ mod tests {
         let cli = Cli::try_parse_from(["fetch", "--method", "PUT", "https://example.com"]).unwrap();
         assert_eq!(cli.method(), "PUT");
         assert_eq!(effective_method(&cli), "PUT");
+
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "--method",
+            "GET",
+            "--json",
+            "{}",
+            "https://example.com",
+        ])
+        .unwrap();
+        assert_eq!(effective_method(&cli), "GET");
+
+        for args in [
+            vec!["fetch", "--data", "body", "https://example.com"],
+            vec!["fetch", "--json", "{}", "https://example.com"],
+            vec!["fetch", "--xml", "<x/>", "https://example.com"],
+            vec!["fetch", "--form", "a=b", "https://example.com"],
+            vec!["fetch", "--multipart", "a=b", "https://example.com"],
+            vec!["fetch", "--edit", "https://example.com"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(effective_method(&cli), "POST");
+        }
     }
 
     #[test]
