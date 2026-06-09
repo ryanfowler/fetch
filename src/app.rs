@@ -713,6 +713,11 @@ fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
         )
         .into());
     }
+    if let Some(method) = cli.method.as_deref()
+        && !method.eq_ignore_ascii_case("GET")
+    {
+        return Err(format!("WebSocket requires GET; method {method} is not supported").into());
+    }
     let conflicting_flag = if cli.clobber {
         Some("clobber")
     } else if cli.copy {
@@ -1514,6 +1519,17 @@ mod tests {
         }
 
         let cli = Cli::try_parse_from(["fetch", "ws://example.com", "--http", "1"]).unwrap();
+        validate_websocket_exclusives(&cli).unwrap();
+    }
+
+    #[test]
+    fn websocket_rejects_non_get_methods() {
+        let cli = Cli::try_parse_from(["fetch", "ws://example.com", "--method", "POST"]).unwrap();
+        let err = validate_websocket_exclusives(&cli).unwrap_err().to_string();
+
+        assert_eq!(err, "WebSocket requires GET; method POST is not supported");
+
+        let cli = Cli::try_parse_from(["fetch", "ws://example.com", "--method", "GET"]).unwrap();
         validate_websocket_exclusives(&cli).unwrap();
     }
 
