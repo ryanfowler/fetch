@@ -68,12 +68,6 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     let method = effective_method(cli);
     let mut warnings = Vec::new();
-    if !cli.method().eq_ignore_ascii_case("GET") {
-        warnings.push(format!(
-            "WebSocket requires GET; ignoring method {}",
-            cli.method()
-        ));
-    }
     if cli.timing {
         warnings.push("--timing is not supported for WebSocket connections".to_string());
     }
