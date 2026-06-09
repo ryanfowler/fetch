@@ -358,13 +358,19 @@ retry-delay = 0.5
 **Type**: String
 **Values**: `1`, `2`, `3`
 
-Specify the highest allowed HTTP version.
+Force a specific HTTP protocol version.
+
+When unset, HTTPS requests offer `h2` and then `http/1.1` through ALPN, using
+HTTP/2 when the server negotiates it and falling back to HTTP/1.1 otherwise.
+Setting this option to `1`, `2`, or `3` forces that protocol; it does not set a
+version cap. Forced HTTP/2 with a plain `http://` URL is only supported for
+gRPC requests, where `fetch` uses h2c (HTTP/2 over cleartext).
 
 ```ini
 # Force HTTP/1.1
 http = 1
 
-# Allow HTTP/2 (default)
+# Force HTTP/2
 http = 2
 ```
 

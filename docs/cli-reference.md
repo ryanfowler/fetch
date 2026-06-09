@@ -456,13 +456,20 @@ fetch --ca-cert ca-cert.pem example.com
 
 ### `--http VERSION`
 
-Force specific HTTP version. Values: `1`, `2`, `3`.
+Force a specific HTTP protocol version. Values: `1`, `2`, `3`.
 
 - `1` - HTTP/1.1
-- `2` - HTTP/2 (default preference)
+- `2` - HTTP/2
 - `3` - HTTP/3 (QUIC)
 
-When `--http 2` is used with an `http://` URL for gRPC requests, `fetch` automatically uses h2c (HTTP/2 over cleartext) to connect without TLS.
+When `--http` is unset, HTTPS requests offer `h2` and then `http/1.1`
+through ALPN, using HTTP/2 when the server negotiates it and falling back to
+HTTP/1.1 otherwise.
+
+`--http 1`, `--http 2`, and `--http 3` force that protocol instead of setting
+a maximum version. `--http 2` with a plain `http://` URL is only supported for
+gRPC requests, where `fetch` uses h2c (HTTP/2 over cleartext) for local
+plaintext servers.
 
 ```sh
 fetch --http 1 example.com
