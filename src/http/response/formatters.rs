@@ -1,6 +1,6 @@
 use super::*;
 
-use super::stdout::{StdoutBody, response_header_content_type};
+use super::stdout::{StdoutBody, response_header_content_type, response_header_content_type_label};
 use super::stream::{MAX_BUFFERED_RESPONSE_BYTES, StdoutStreamFormatter, StreamedOutput};
 
 pub(super) fn should_stream_formatted_sse_stdout(
@@ -386,6 +386,7 @@ pub(super) fn format_stdout_bytes_with_terminal(
         return Ok(StdoutBody {
             bytes: bytes.to_vec(),
             content_type,
+            content_type_label: response_header_content_type_label(headers),
         });
     }
 
@@ -494,6 +495,7 @@ pub(super) fn format_stdout_bytes_with_terminal(
     Ok(StdoutBody {
         bytes,
         content_type,
+        content_type_label: response_header_content_type_label(headers),
     })
 }
 

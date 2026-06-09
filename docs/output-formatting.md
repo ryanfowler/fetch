@@ -358,13 +358,15 @@ The pager uses these flags: `less -FIRX`
 When stdout is a terminal, `fetch` checks if the response appears to be binary data. If so, it displays a warning instead of corrupting your terminal:
 
 ```
-warning: the response body appears to be binary
+warning: the response body appears to be binary (content type: application/octet-stream)
 ```
 
 To force output:
 
 ```sh
+fetch -o file.dat example.com/binary.dat
 fetch -o - example.com/binary.dat > file.dat
+fetch --image off example.com/image.png
 ```
 
 ## Configuration
