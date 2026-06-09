@@ -282,7 +282,7 @@ pub struct Cli {
     #[arg(long, value_name = "VERSION", help = "HTTP version to use [1, 2, 3]")]
     pub http: Option<String>,
 
-    #[arg(long = "ignore-status", help = "Exit code unaffected by HTTP status")]
+    #[arg(long = "ignore-status", help = "Do not exit nonzero for HTTP 4xx/5xx")]
     pub ignore_status: bool,
 
     #[arg(

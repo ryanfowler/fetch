@@ -13,9 +13,12 @@ This guide helps diagnose and fix common issues with `fetch`.
 | 5         | Server error (HTTP 5xx)            |
 | 6         | Other HTTP status or request error |
 
+Unlike curl's default behavior, HTTP 4xx/5xx responses exit nonzero; use
+`--ignore-status` to ignore HTTP status when choosing the exit code.
+
 ### Ignore HTTP Status
 
-To always exit 0 regardless of HTTP status:
+To always exit 0 for completed HTTP requests regardless of status:
 
 ```sh
 fetch --ignore-status example.com/not-found
