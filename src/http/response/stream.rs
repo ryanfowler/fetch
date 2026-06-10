@@ -471,15 +471,16 @@ async fn stream_async_reader_to_pager(
     prefix: &[u8],
     capture: Option<&mut clipboard::Capture>,
 ) -> Result<i64, FetchError> {
-    let mut child = match tokio::process::Command::new("less")
-        .arg("-FIRX")
+    let pager = pager_command();
+    let mut child = match tokio::process::Command::new(&pager.program)
+        .args(&pager.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
     {
         Ok(child) => child,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
+        Err(err) if pager.is_fallback && err.kind() == ErrorKind::NotFound => {
             let mut stdout = tokio::io::stdout();
             return Ok(copy_async_reader_to_stdout_with_prefix(
                 reader,

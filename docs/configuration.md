@@ -143,9 +143,12 @@ image = off
 **Values**: `auto`, `on`, `off`
 **Default**: `auto`
 
-Control piping response body output through the `less -FIRX` pager. `auto` uses
-the pager when stdout is a terminal, `on` forces pager use, and `off` disables
-the pager.
+Control piping response body output through a pager. `auto` uses the pager when
+stdout is a terminal, `on` forces pager use, and `off` disables the pager. When
+paging is enabled, fetch uses `$PAGER` if it is set. Set `NO_PAGER` to disable
+the default `auto` pager. If `$PAGER` is unset, fetch falls back to `less -FIRX`;
+when `$LESS` is set, fetch runs `less` without adding its default flags so your
+`LESS` options apply.
 
 ```ini
 # Disable pager

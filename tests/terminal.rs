@@ -11,7 +11,8 @@ use support::common::{assert_exit, fetch_bin, wait_child};
 use support::http::{TestResponse, TestServer};
 use support::terminal::{
     image_pty_env, run_binary_pty_with_fake_less, run_fetch_pty_with_fake_less,
-    run_fetch_with_fake_less, run_image_pty_with_fake_less, run_image_render_pty,
+    run_fetch_pty_with_fake_less_env, run_fetch_with_fake_less, run_image_pty_with_fake_less,
+    run_image_render_pty,
 };
 
 fn assert_binary_warning_output(output: &str) {
@@ -48,6 +49,45 @@ fn pager_off_writes_terminal_stdout_directly() {
     assert!(output.contains("pager body"), "{output:?}");
     assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
     assert!(less_input.is_none(), "pager received input: {less_input:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_stdout_uses_pager_environment() {
+    let (output, pager_args, pager_input) =
+        run_fetch_pty_with_fake_less_env(&[], &[("PAGER", "less --raw-control-chars")]);
+
+    assert!(output.contains("pager body"), "{output:?}");
+    assert_eq!(pager_args.as_deref(), Some("--raw-control-chars\n"));
+    assert_eq!(pager_input.as_deref(), Some("pager body\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn less_environment_replaces_default_less_flags() {
+    let (output, less_args, less_input) = run_fetch_pty_with_fake_less_env(&[], &[("LESS", "-SR")]);
+
+    assert!(output.contains("pager body"), "{output:?}");
+    assert_eq!(less_args.as_deref(), Some("\n"));
+    assert_eq!(less_input.as_deref(), Some("pager body\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn no_pager_disables_auto_pager_but_not_forced_pager() {
+    let (output, less_args, less_input) =
+        run_fetch_pty_with_fake_less_env(&[], &[("NO_PAGER", "1")]);
+
+    assert!(output.contains("pager body"), "{output:?}");
+    assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
+    assert!(less_input.is_none(), "pager received input: {less_input:?}");
+
+    let (output, less_args, less_input) =
+        run_fetch_pty_with_fake_less_env(&["--pager", "on"], &[("NO_PAGER", "1")]);
+
+    assert!(output.contains("pager body"), "{output:?}");
+    assert_eq!(less_args.as_deref(), Some("-FIRX\n"));
+    assert_eq!(less_input.as_deref(), Some("pager body\n"));
 }
 
 #[cfg(unix)]
