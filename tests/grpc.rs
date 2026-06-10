@@ -389,7 +389,10 @@ fn formatted_grpc_outputs_frames_before_stream_ends() {
     drop(pty.slave);
     let capture = start_pty_capture(&pty.master);
 
-    capture.wait_for(r#""count": "1""#, Duration::from_secs(5));
+    capture.wait_for(
+        "\"\x1b[34m\x1b[1mcount\x1b[0m\": \"\x1b[32m1\x1b[0m\"",
+        Duration::from_secs(5),
+    );
     assert!(
         wait_child(&mut child, Duration::from_millis(100)).is_none(),
         "fetch exited before the gRPC stream closed; PTY output:\n{}",
@@ -411,7 +414,11 @@ fn formatted_grpc_outputs_frames_before_stream_ends() {
         "fetch exited with {status}; PTY output:\n{}",
         capture.output()
     );
-    assert!(capture.output().contains(r#""count": "2""#));
+    assert!(
+        capture
+            .output()
+            .contains("\"\x1b[34m\x1b[1mcount\x1b[0m\": \"\x1b[32m2\x1b[0m\"")
+    );
     drop(pty.master);
     capture.close();
 }

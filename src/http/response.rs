@@ -143,12 +143,14 @@ pub(super) async fn finish_response(
         ));
     }
     if should_stream_formatted_grpc_stdout(cli, &response_headers, stdout_is_terminal) {
+        let use_color = stdio.stdout_color(cli.color.as_deref());
         let streamed = stream_response_to_formatted_grpc_stdout(
             response,
             response_headers.clone(),
             compression,
             cli.copy,
             grpc_method.map(|method| method.output()),
+            use_color,
         )
         .await?;
         return Ok(finalize_streamed_response(
