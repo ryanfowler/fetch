@@ -11,10 +11,13 @@ This guide provides comprehensive documentation for configuring `fetch` using a 
 `fetch` searches for configuration files in the following order:
 
 1. **Specified path**: The file location specified with the `-c` or `--config` flag
-2. **Windows**: `%AppData%\fetch\config`
-3. **Unix-like systems**:
+2. **Default path candidates**:
    - `$XDG_CONFIG_HOME/fetch/config` (if `XDG_CONFIG_HOME` is set)
-   - `$HOME/.config/fetch/config` (fallback)
+   - `$HOME/.config/fetch/config` (if `HOME` is set)
+   - **Windows only**: `%AppData%\fetch\config` (fallback)
+
+On Windows, `fetch` still checks `XDG_CONFIG_HOME` and `HOME` first when those
+environment variables are present, then falls back to `%AppData%\fetch\config`.
 
 ### Configuration Precedence
 
