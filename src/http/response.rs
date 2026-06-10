@@ -5,7 +5,9 @@ mod metadata;
 mod stdout;
 mod stream;
 
-pub(super) use formatters::should_retry_sse_without_compression;
+pub(super) use formatters::{
+    should_retry_sse_without_compression, should_retry_sse_without_compression_for_method,
+};
 pub(super) use stream::{drain_response_body_bounded, response_body_exceeds_discard_bound};
 
 use formatters::{

@@ -328,7 +328,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     DigestRetryContext {
                         client: &request_client.client,
                         client_build: &client_build,
-                        method: request_method,
+                        method: request_method.clone(),
                         headers: headers.clone(),
                         body: request_body.clone(),
                         cli,
@@ -343,14 +343,23 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 let retry_sse_uncompressed =
                     should_retry_sse_without_compression(&response, compression);
                 if retry_sse_uncompressed {
-                    ensure_body_replayable(
-                        original_body_replayable,
-                        "retry SSE without compression",
-                    )?;
-                    headers.remove(ACCEPT_ENCODING);
-                    compression = CompressionMode::Off;
-                    drain_response_body_bounded(response).await;
-                    continue;
+                    if should_retry_sse_without_compression_for_method(&request_method) {
+                        ensure_body_replayable(
+                            original_body_replayable,
+                            "retry SSE without compression",
+                        )?;
+                        headers.remove(ACCEPT_ENCODING);
+                        compression = CompressionMode::Off;
+                        drain_response_body_bounded(response).await;
+                        continue;
+                    }
+                    write_warning_before_output(
+                        cli,
+                        &format!(
+                            "not retrying compressed SSE response without compression for {} because the method is not safe; use --compress off to avoid compression on the first request",
+                            request_method
+                        ),
+                    );
                 }
                 if attempt < retry_count && should_retry_status(status) {
                     ensure_body_replayable(original_body_replayable, "retry")?;
