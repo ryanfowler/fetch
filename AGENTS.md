@@ -13,37 +13,48 @@ authentication (Basic, Digest, Bearer, AWS SigV4).
 
 ## Common Commands
 
-After making any code or documentation changes, AI agents must run:
+After Rust code changes, AI agents must run the fast local gate plus focused
+tests that cover the touched area:
 
 ```bash
 cargo fmt
 cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features --lib --bins
 ```
 
+Then run the narrowest relevant integration test target or test name:
+
 ```bash
-# Run Rust unit tests
-cargo test --all-features
-
-# Run the Rust integration suite against the Rust binary
-cargo test --all-features --test cli --test formatting --test grpc --test http --test network --test terminal --test update --test websocket -- --test-threads=1
-
-# Run a focused Rust test
-cargo test --all-features image::tests
-
-# Build the Rust binary
-cargo build --release
-
-# Format code (CI will fail if not formatted)
-cargo fmt
-
-# Lint
-cargo clippy --locked --all-targets --all-features -- -D warnings
-
-# Format other files
-prettier -w .
-
 # Run a focused Rust integration test
-cargo test --all-features --test http request_construction_and_data_sources
+cargo test --locked --all-features --test http request_construction_and_data_sources
+
+# Run a focused Rust unit test
+cargo test --locked --all-features image::tests
+```
+
+Before opening a PR, after touching shared request/response/transport behavior,
+or when the safe scope is unclear, run the full CI-equivalent test suite:
+
+```bash
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features --lib --bins
+cargo test --locked --all-features --test cli --test formatting --test grpc --test http --test network --test terminal --test update --test websocket -- --test-threads=1
+```
+
+For documentation-only changes, skip Cargo build/lint/test unless the docs
+change Rust examples or generated CLI output. Format only the files that
+changed:
+
+```bash
+prettier -w README.md docs/**/*.md AGENTS.md
+```
+
+Only run release builds when validating release packaging, installer,
+self-update, or target-specific build changes:
+
+```bash
+cargo build --release --locked
 ```
 
 ## Architecture
