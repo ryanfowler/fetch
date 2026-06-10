@@ -87,8 +87,9 @@ pub(super) async fn stream_response_to_formatted_grpc_stdout(
     compression: CompressionMode,
     copy: bool,
     grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
+    use_color: bool,
 ) -> Result<StreamedOutput, FetchError> {
-    let formatter = FormattedGrpcStream::new(&response_headers, grpc_response_desc);
+    let formatter = FormattedGrpcStream::new(&response_headers, grpc_response_desc, use_color);
     super::stream::stream_formatted_response_to_stdout(
         response,
         response_headers,
@@ -235,6 +236,7 @@ struct FormattedGrpcStream {
     decoder: crate::grpc::framing::FrameDecoder,
     grpc_message_encoding: grpc_encoding::MessageEncoding,
     grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
+    use_color: bool,
     frame_index: usize,
     descriptor_wrote_any: bool,
     descriptor_output_ends_with_newline: bool,
@@ -244,11 +246,13 @@ impl FormattedGrpcStream {
     fn new(
         response_headers: &HeaderMap,
         grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
+        use_color: bool,
     ) -> Self {
         Self {
             decoder: crate::grpc::framing::FrameDecoder::new(),
             grpc_message_encoding: grpc_encoding::MessageEncoding::from_headers(response_headers),
             grpc_response_desc,
+            use_color,
             frame_index: 0,
             descriptor_wrote_any: false,
             descriptor_output_ends_with_newline: true,
@@ -257,15 +261,18 @@ impl FormattedGrpcStream {
 
     fn format_frame(&mut self, frame: &crate::grpc::framing::Frame) -> Result<Vec<u8>, FetchError> {
         if let Some(desc) = self.grpc_response_desc.as_ref() {
-            let formatted =
-                proto::format_grpc_frame_with_descriptor(frame, desc, &self.grpc_message_encoding)
-                    .map_err(|err| FetchError::Message(err.to_string()))?;
+            let formatted = format_grpc_frame_with_descriptor_json(
+                frame,
+                desc,
+                &self.grpc_message_encoding,
+                self.use_color,
+            )?;
             let mut output = Vec::new();
             if self.descriptor_wrote_any && !self.descriptor_output_ends_with_newline {
                 output.push(b'\n');
             }
-            output.extend_from_slice(formatted.as_bytes());
-            self.descriptor_output_ends_with_newline = formatted.ends_with('\n');
+            self.descriptor_output_ends_with_newline = formatted.ends_with(b"\n");
+            output.extend_from_slice(&formatted);
             self.descriptor_wrote_any = true;
             return Ok(output);
         }
@@ -280,6 +287,44 @@ impl FormattedGrpcStream {
         self.frame_index += 1;
         Ok(output)
     }
+}
+
+fn format_grpc_frame_with_descriptor_json(
+    frame: &crate::grpc::framing::Frame,
+    desc: &prost_reflect::MessageDescriptor,
+    message_encoding: &grpc_encoding::MessageEncoding,
+    use_color: bool,
+) -> Result<Vec<u8>, FetchError> {
+    let formatted = proto::format_grpc_frame_with_descriptor(frame, desc, message_encoding)
+        .map_err(|err| FetchError::Message(err.to_string()))?;
+    Ok(format_printer_bytes(use_color, |out| {
+        json::format_json_to(formatted.as_bytes(), out)
+    })
+    .unwrap_or_else(|_| formatted.into_bytes()))
+}
+
+fn format_grpc_stream_with_descriptor_json(
+    bytes: &[u8],
+    desc: &prost_reflect::MessageDescriptor,
+    message_encoding: &grpc_encoding::MessageEncoding,
+    use_color: bool,
+) -> Result<Vec<u8>, FetchError> {
+    let frames = crate::grpc::framing::read_frames(bytes)
+        .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
+    let mut out = Vec::new();
+    let mut wrote_any = false;
+    let mut output_ends_with_newline = true;
+    for frame in &frames {
+        let formatted =
+            format_grpc_frame_with_descriptor_json(frame, desc, message_encoding, use_color)?;
+        if wrote_any && !output_ends_with_newline {
+            out.push(b'\n');
+        }
+        output_ends_with_newline = formatted.ends_with(b"\n");
+        out.extend_from_slice(&formatted);
+        wrote_any = true;
+    }
+    Ok(out)
 }
 
 impl StdoutStreamFormatter for FormattedGrpcStream {
@@ -481,9 +526,12 @@ pub(super) fn format_stdout_bytes_with_terminal(
         ContentType::Grpc => {
             let grpc_message_encoding = grpc_encoding::MessageEncoding::from_headers(headers);
             if let Some(desc) = grpc_response_desc {
-                proto::format_grpc_stream_with_descriptor(&bytes, &desc, &grpc_message_encoding)
-                    .map(|formatted| formatted.into_bytes())
-                    .map_err(|err| FetchError::Message(err.to_string()))
+                format_grpc_stream_with_descriptor_json(
+                    &bytes,
+                    &desc,
+                    &grpc_message_encoding,
+                    use_color,
+                )
             } else {
                 grpc_format::format_grpc_stream(&bytes, &grpc_message_encoding)
                     .map(|formatted| formatted.into_bytes())
@@ -616,6 +664,20 @@ mod tests {
             .find_method("testpkg.TestService/Get")
             .unwrap()
             .output()
+    }
+
+    fn test_response_body(text: &str, count: i64) -> Vec<u8> {
+        let desc = test_response_descriptor();
+        let mut msg = DynamicMessage::new(desc.clone());
+        msg.set_field(
+            &desc.get_field_by_name("response_text").unwrap(),
+            ReflectValue::String(text.to_string()),
+        );
+        msg.set_field(
+            &desc.get_field_by_name("count").unwrap(),
+            ReflectValue::I64(count),
+        );
+        msg.encode_to_vec()
     }
 
     #[test]
@@ -987,6 +1049,60 @@ mod tests {
         assert_eq!(json["response_text"], "hello");
         assert_eq!(json["count"], "7");
         assert!(!text.contains("1:"));
+    }
+
+    #[test]
+    fn grpc_descriptor_response_uses_json_color_policy() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/grpc+proto"),
+        );
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "--grpc",
+            "--format",
+            "on",
+            "--color",
+            "on",
+            "https://example.com/testpkg.TestService/Get",
+        ])
+        .unwrap();
+        let body = crate::grpc::framing::frame(&test_response_body("hello", 7), false).unwrap();
+
+        let out = format_stdout_bytes_with_terminal(
+            &cli,
+            &headers,
+            &body,
+            Some(test_response_descriptor()),
+            false,
+            0,
+        )
+        .unwrap();
+        let out = String::from_utf8(out.bytes).unwrap();
+
+        assert!(out.contains("\x1b[34m\x1b[1mresponse_text\x1b[0m"));
+        assert!(out.contains("\x1b[32mhello\x1b[0m"));
+        assert!(!out.contains("1:"));
+    }
+
+    #[test]
+    fn streaming_grpc_descriptor_response_uses_json_color_policy() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/grpc+proto"),
+        );
+        let mut formatter =
+            FormattedGrpcStream::new(&headers, Some(test_response_descriptor()), true);
+        let body = crate::grpc::framing::frame(&test_response_body("hello", 7), false).unwrap();
+
+        let chunks = formatter.push_chunk(&body).unwrap();
+        let out = String::from_utf8(chunks.into_iter().flatten().collect()).unwrap();
+
+        assert!(out.contains("\x1b[34m\x1b[1mresponse_text\x1b[0m"));
+        assert!(out.contains("\x1b[32mhello\x1b[0m"));
+        assert!(!out.contains("1:"));
     }
 
     #[test]
