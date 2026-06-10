@@ -17,6 +17,7 @@ const MIN_ROWS: usize = 5;
 const READ_BUF_SIZE: usize = 256;
 const STDIN_CHAN_BUF: usize = 64;
 const MAX_MESSAGES: usize = 10_000;
+const STATUS_GAP_ROWS: usize = 1;
 
 #[derive(Debug, Default)]
 pub struct LineEditor {
@@ -445,12 +446,12 @@ impl InteractiveMode {
 
     pub fn message_row_count(&self, msg: &MessageEntry) -> Result<usize, FetchError> {
         let Some(data) = msg.data.as_deref() else {
-            return Ok(2);
+            return Ok(1);
         };
         let arrow = msg.arrow.unwrap_or("←");
         let prefix_width = display_width(&format!("{arrow} "));
         let width = self.cols.saturating_sub(prefix_width).max(1);
-        Ok(wrap_display_lines(&self.format_message(data)?, width).len() + 1)
+        Ok(wrap_display_lines(&self.format_message(data)?, width).len())
     }
 
     pub fn format_message(&self, data: &[u8]) -> Result<String, FetchError> {
@@ -613,13 +614,12 @@ impl InteractiveMode {
             }
             write!(out, "{line}")?;
         }
-        self.write_message_spacer(out)
+        Ok(())
     }
 
     fn write_binary<W: Write>(&mut self, out: &mut W, len: usize) -> io::Result<()> {
         self.write_physical_line(out)?;
-        write!(out, "\x1b[2m← [binary {len} bytes]\x1b[0m")?;
-        self.write_message_spacer(out)
+        write!(out, "\x1b[2m← [binary {len} bytes]\x1b[0m")
     }
 
     fn write_physical_line<W: Write>(&mut self, out: &mut W) -> io::Result<()> {
@@ -634,15 +634,8 @@ impl InteractiveMode {
         Ok(())
     }
 
-    fn write_message_spacer<W: Write>(&mut self, out: &mut W) -> io::Result<()> {
-        if self.next_row <= self.scroll_end() {
-            self.write_physical_line(out)?;
-        }
-        Ok(())
-    }
-
     fn scroll_end(&self) -> usize {
-        self.rows.saturating_sub(3).max(1)
+        self.rows.saturating_sub(3 + STATUS_GAP_ROWS).max(1)
     }
 
     fn truncate_messages(&mut self) {
@@ -1350,13 +1343,13 @@ mod tests {
         let mode = InteractiveMode::new(7, false);
 
         let msg = MessageEntry::text("←", b"abcdef");
-        assert_eq!(mode.message_row_count(&msg).unwrap(), 3);
+        assert_eq!(mode.message_row_count(&msg).unwrap(), 2);
 
         let msg = MessageEntry::text("←", b"ab\ncd");
-        assert_eq!(mode.message_row_count(&msg).unwrap(), 3);
+        assert_eq!(mode.message_row_count(&msg).unwrap(), 2);
 
         let msg = MessageEntry::binary(10);
-        assert_eq!(mode.message_row_count(&msg).unwrap(), 2);
+        assert_eq!(mode.message_row_count(&msg).unwrap(), 1);
     }
 
     #[test]
@@ -1456,7 +1449,7 @@ mod tests {
         mode.setup_screen(&mut out, 8, 10, 1).unwrap();
         let out = String::from_utf8(out).unwrap();
 
-        assert!(out.contains("\x1b[1;5r"), "{out:?}");
+        assert!(out.contains("\x1b[1;4r"), "{out:?}");
         assert!(out.contains("\x1b[6;1H\x1b[2K\x1b[90mconnected\x1b[0m"));
         assert!(out.contains("\x1b[8;1H\x1b[2K\x1b[90m──────────\x1b[0m"));
         assert!(out.contains("\x1b[7;1H\x1b[2K\x1b[1m❯ \x1b[0m"));
@@ -1473,8 +1466,8 @@ mod tests {
         mode.setup_screen(&mut out, 8, 10, 7).unwrap();
         let out = String::from_utf8(out).unwrap();
 
-        assert!(out.contains("\x1b[8;1H\n\n\n\n"), "{out:?}");
-        assert_eq!(mode.next_row(), 4);
+        assert!(out.contains("\x1b[8;1H\n\n\n\n\n"), "{out:?}");
+        assert_eq!(mode.next_row(), 3);
     }
 
     #[test]

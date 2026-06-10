@@ -176,7 +176,7 @@ fn image_rendering_pty_go_cases() {
 
 #[cfg(unix)]
 #[test]
-fn request_ctrl_c_reports_signal_go_case() {
+fn request_ctrl_c_exits_successfully() {
     let (started_tx, started_rx) = mpsc::channel();
     let release = Arc::new(AtomicUsize::new(0));
     let release_for_handler = Arc::clone(&release);
@@ -215,15 +215,12 @@ fn request_ctrl_c_reports_signal_go_case() {
         .expect("wait fetch after SIGINT");
     release.store(1, Ordering::SeqCst);
     let output = child.wait_with_output().expect("collect signal output");
-    assert_eq!(status.code(), Some(1));
+    assert_eq!(status.code(), Some(0));
     assert!(
         output.stdout.is_empty(),
         "stdout = {:?}, want empty",
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("received signal: interrupt"),
-        "stderr = {stderr:?}, want signal error"
-    );
+    assert!(stderr.is_empty(), "stderr = {stderr:?}, want empty");
 }

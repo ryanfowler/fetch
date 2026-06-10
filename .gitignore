@@ -1,5 +1,6 @@
 /.claude
 /.zig-cache
 /bin
+/local-test-servers
 /scratch
 /target
