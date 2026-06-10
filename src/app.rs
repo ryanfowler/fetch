@@ -40,15 +40,20 @@ pub async fn main_entry() -> i32 {
                 1
             }
         },
-        message = shutdown_signal_message() => {
-            write_runtime_error_with_color(FetchError::Runtime(message), signal_color.as_deref());
-            1
+        signal = shutdown_signal() => {
+            match signal {
+                ShutdownSignal::Interrupt => 0,
+                ShutdownSignal::Terminate(message) => {
+                    write_runtime_error_with_color(FetchError::Runtime(message), signal_color.as_deref());
+                    1
+                }
+            }
         }
     }
 }
 
 #[cfg(unix)]
-async fn shutdown_signal_message() -> String {
+async fn shutdown_signal() -> ShutdownSignal {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut interrupt = signal(SignalKind::interrupt()).ok();
@@ -56,9 +61,9 @@ async fn shutdown_signal_message() -> String {
     let mut terminate = signal(SignalKind::terminate()).ok();
 
     tokio::select! {
-        _ = recv_signal(&mut interrupt) => "received signal: interrupt".to_string(),
-        _ = recv_signal(&mut hangup) => "received signal: hangup".to_string(),
-        _ = recv_signal(&mut terminate) => "received signal: terminated".to_string(),
+        _ = recv_signal(&mut interrupt) => ShutdownSignal::Interrupt,
+        _ = recv_signal(&mut hangup) => ShutdownSignal::Terminate("received signal: hangup".to_string()),
+        _ = recv_signal(&mut terminate) => ShutdownSignal::Terminate("received signal: terminated".to_string()),
     }
 }
 
@@ -72,9 +77,14 @@ async fn recv_signal(signal: &mut Option<tokio::signal::unix::Signal>) {
 }
 
 #[cfg(not(unix))]
-async fn shutdown_signal_message() -> String {
+async fn shutdown_signal() -> ShutdownSignal {
     let _ = tokio::signal::ctrl_c().await;
-    "received signal: interrupt".to_string()
+    ShutdownSignal::Interrupt
+}
+
+enum ShutdownSignal {
+    Interrupt,
+    Terminate(String),
 }
 
 fn handle_parse_error(err: clap::Error, color: Option<&str>) -> i32 {

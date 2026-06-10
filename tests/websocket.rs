@@ -602,6 +602,54 @@ fn websocket_flushes_noninteractive_stdout_while_socket_stays_open() {
     server.join().expect("join hold-open websocket server");
 }
 
+#[cfg(unix)]
+#[test]
+fn websocket_noninteractive_ctrl_c_exits_successfully() {
+    let (ws_url, shutdown, server) = start_ws_hold_open_push_server(b"message before interrupt");
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([&ws_url, "--format", "off", "--ws-interactive", "off"]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.env("NO_COLOR", "");
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let mut child = cmd.spawn().expect("spawn websocket ctrl-c fetch");
+    let _stdin = child.stdin.take().expect("child stdin");
+    let stdout = start_read_capture(child.stdout.take().expect("child stdout"));
+    let stderr = start_read_capture(child.stderr.take().expect("child stderr"));
+
+    stdout.wait_for("message before interrupt\n", Duration::from_secs(5));
+    let rc = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+    assert_eq!(rc, 0, "failed to send SIGINT");
+    let status = wait_child(&mut child, Duration::from_secs(5))
+        .unwrap_or_else(|| {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "fetch did not exit after SIGINT; stdout:\n{}\nstderr:\n{}",
+                stdout.output(),
+                stderr.output()
+            )
+        })
+        .expect("wait websocket ctrl-c fetch");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "fetch exited with {status}; stdout:\n{}\nstderr:\n{}",
+        stdout.output(),
+        stderr.output()
+    );
+    assert!(stderr.output().is_empty(), "stderr:\n{}", stderr.output());
+    let _ = shutdown.send(());
+    stdout.close();
+    stderr.close();
+    server.join().expect("join hold-open websocket server");
+}
+
 #[test]
 fn websocket_receives_json_text_binary_and_query_handshake() {
     let ws_url = start_ws_push_server(|req| {
