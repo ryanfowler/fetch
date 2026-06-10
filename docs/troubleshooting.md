@@ -321,8 +321,9 @@ fetch --grpc --proto-file service.proto \
 ### Config File Not Loading
 
 1. **Check location**:
-   - Windows: `%AppData%\fetch\config`
-   - macOS/Linux: `~/.config/fetch/config`
+   - `$XDG_CONFIG_HOME/fetch/config` if `XDG_CONFIG_HOME` is set
+   - `$HOME/.config/fetch/config` if `HOME` is set
+   - Windows fallback: `%AppData%\fetch\config`
 
 2. **Specify explicitly**:
 
