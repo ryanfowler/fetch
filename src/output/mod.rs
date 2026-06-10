@@ -37,6 +37,12 @@ pub enum OutputError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct ResolvedOutputPath {
+    pub path: Option<String>,
+    pub warning: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct WriteProgress {
     printer: Option<ProgressPrinter>,
@@ -86,32 +92,59 @@ pub fn resolve_output_path(
     remote_header_name: bool,
     url: &Url,
     headers: &HeaderMap,
-) -> Result<Option<String>, OutputError> {
+) -> Result<ResolvedOutputPath, OutputError> {
     if let Some(path) = output {
         if path == "-" {
-            return Ok(None);
+            return Ok(ResolvedOutputPath {
+                path: None,
+                warning: None,
+            });
         }
-        return Ok(Some(path.to_string()));
+        return Ok(ResolvedOutputPath {
+            path: Some(path.to_string()),
+            warning: None,
+        });
     }
     if !remote_name {
-        return Ok(None);
+        return Ok(ResolvedOutputPath {
+            path: None,
+            warning: None,
+        });
     }
 
-    if remote_header_name
-        && let Some(filename) = content_disposition_filename(headers)
-        && let Ok(filename) = sanitize_filename(&filename)
-    {
-        return Ok(Some(filename));
+    let mut content_disposition_not_used = false;
+    if remote_header_name {
+        if let Some(filename) = content_disposition_filename(headers)
+            && let Ok(filename) = sanitize_filename(&filename)
+        {
+            return Ok(ResolvedOutputPath {
+                path: Some(filename),
+                warning: None,
+            });
+        }
+        content_disposition_not_used = true;
     }
 
     if let Some(filename) = filename_from_url_path(url) {
-        return Ok(Some(filename));
+        return Ok(ResolvedOutputPath {
+            path: Some(filename),
+            warning: content_disposition_not_used.then(|| {
+                "Content-Disposition filename was not usable; falling back to URL filename"
+                    .to_string()
+            }),
+        });
     }
 
     if let Some(host) = url.host_str()
         && !host.is_empty()
     {
-        return Ok(Some(host.to_string()));
+        return Ok(ResolvedOutputPath {
+            path: Some(host.to_string()),
+            warning: content_disposition_not_used.then(|| {
+                "Content-Disposition filename was not usable; falling back to host filename"
+                    .to_string()
+            }),
+        });
     }
 
     Err(OutputError::UnableToInferFileName)
@@ -887,11 +920,12 @@ mod tests {
         let url = Url::parse("http://example.com/dir/path_to_file.txt?ignored=yes").unwrap();
         let headers = HeaderMap::new();
 
-        let path = resolve_output_path(None, true, false, &url, &headers)
-            .unwrap()
-            .unwrap();
+        let resolved = resolve_output_path(None, true, false, &url, &headers).unwrap();
+
+        let path = resolved.path.unwrap();
 
         assert_eq!(path, "path_to_file.txt");
+        assert_eq!(resolved.warning, None);
     }
 
     #[test]
@@ -903,11 +937,12 @@ mod tests {
             r#"attachment; filename="cd-filename.txt""#.parse().unwrap(),
         );
 
-        let path = resolve_output_path(None, true, false, &url, &headers)
-            .unwrap()
-            .unwrap();
+        let resolved = resolve_output_path(None, true, false, &url, &headers).unwrap();
+
+        let path = resolved.path.unwrap();
 
         assert_eq!(path, "url-filename.txt");
+        assert_eq!(resolved.warning, None);
     }
 
     #[test]
@@ -919,11 +954,12 @@ mod tests {
             r#"attachment; filename="cd-filename.txt""#.parse().unwrap(),
         );
 
-        let path = resolve_output_path(None, true, true, &url, &headers)
-            .unwrap()
-            .unwrap();
+        let resolved = resolve_output_path(None, true, true, &url, &headers).unwrap();
+
+        let path = resolved.path.unwrap();
 
         assert_eq!(path, "cd-filename.txt");
+        assert_eq!(resolved.warning, None);
     }
 
     #[test]
@@ -937,11 +973,12 @@ mod tests {
                 .unwrap(),
         );
 
-        let path = resolve_output_path(None, true, true, &url, &headers)
-            .unwrap()
-            .unwrap();
+        let resolved = resolve_output_path(None, true, true, &url, &headers).unwrap();
+
+        let path = resolved.path.unwrap();
 
         assert_eq!(path, "malicious.txt");
+        assert_eq!(resolved.warning, None);
     }
 
     #[test]
@@ -953,11 +990,12 @@ mod tests {
             r#"attachment; filename="dir/subdir\\evil.txt""#.parse().unwrap(),
         );
 
-        let path = resolve_output_path(None, true, true, &url, &headers)
-            .unwrap()
-            .unwrap();
+        let resolved = resolve_output_path(None, true, true, &url, &headers).unwrap();
+
+        let path = resolved.path.unwrap();
 
         assert_eq!(path, "evil.txt");
+        assert_eq!(resolved.warning, None);
     }
 
     #[test]
@@ -969,11 +1007,29 @@ mod tests {
             r#"attachment; filename="..""#.parse().unwrap(),
         );
 
-        let path = resolve_output_path(None, true, true, &url, &headers)
-            .unwrap()
-            .unwrap();
+        let resolved = resolve_output_path(None, true, true, &url, &headers).unwrap();
+
+        let path = resolved.path.unwrap();
 
         assert_eq!(path, "fallback.txt");
+        assert_eq!(
+            resolved.warning.as_deref(),
+            Some("Content-Disposition filename was not usable; falling back to URL filename")
+        );
+    }
+
+    #[test]
+    fn remote_header_name_falls_back_to_url_when_content_disposition_missing() {
+        let url = Url::parse("http://example.com/fallback.txt").unwrap();
+        let headers = HeaderMap::new();
+
+        let resolved = resolve_output_path(None, true, true, &url, &headers).unwrap();
+
+        assert_eq!(resolved.path.as_deref(), Some("fallback.txt"));
+        assert_eq!(
+            resolved.warning.as_deref(),
+            Some("Content-Disposition filename was not usable; falling back to URL filename")
+        );
     }
 
     #[test]
@@ -981,11 +1037,26 @@ mod tests {
         let url = Url::parse("http://example.com/").unwrap();
         let headers = HeaderMap::new();
 
-        let path = resolve_output_path(None, true, false, &url, &headers)
-            .unwrap()
-            .unwrap();
+        let resolved = resolve_output_path(None, true, false, &url, &headers).unwrap();
+
+        let path = resolved.path.unwrap();
 
         assert_eq!(path, "example.com");
+        assert_eq!(resolved.warning, None);
+    }
+
+    #[test]
+    fn remote_header_name_falls_back_to_hostname_when_url_filename_missing() {
+        let url = Url::parse("http://example.com/").unwrap();
+        let headers = HeaderMap::new();
+
+        let resolved = resolve_output_path(None, true, true, &url, &headers).unwrap();
+
+        assert_eq!(resolved.path.as_deref(), Some("example.com"));
+        assert_eq!(
+            resolved.warning.as_deref(),
+            Some("Content-Disposition filename was not usable; falling back to host filename")
+        );
     }
 
     #[test]
@@ -993,9 +1064,10 @@ mod tests {
         let url = Url::parse("http://example.com/file.txt").unwrap();
         let headers = HeaderMap::new();
 
-        let path = resolve_output_path(Some("-"), false, false, &url, &headers).unwrap();
+        let resolved = resolve_output_path(Some("-"), false, false, &url, &headers).unwrap();
 
-        assert_eq!(path, None);
+        assert_eq!(resolved.path, None);
+        assert_eq!(resolved.warning, None);
     }
 
     #[test]
