@@ -166,7 +166,7 @@ pager = on
 **Type**: Boolean
 **Default**: `false`
 
-Suppress verbose output. Only warnings and errors are written to stderr.
+Suppress verbose output. Only errors are written to stderr.
 
 ```ini
 # Enable silent mode
