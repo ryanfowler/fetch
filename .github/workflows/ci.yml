@@ -32,7 +32,7 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Rust unit tests
-        run: cargo test --locked --all-features --bins
+        run: cargo test --locked --all-features --lib --bins
 
   integration:
     name: integration (${{ matrix.os }})
