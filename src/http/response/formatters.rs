@@ -43,6 +43,10 @@ pub(in crate::http) fn should_retry_sse_without_compression(
         })
 }
 
+pub(in crate::http) fn should_retry_sse_without_compression_for_method(method: &Method) -> bool {
+    matches!(*method, Method::GET | Method::HEAD)
+}
+
 pub(super) async fn stream_response_to_formatted_sse_stdout(
     response: Response,
     response_headers: HeaderMap,
@@ -647,6 +651,25 @@ mod tests {
 
         let cli = Cli::try_parse_from(["fetch", "--format", "off", "https://example.com"]).unwrap();
         assert!(!should_stream_formatted_sse_stdout(&cli, &headers, true));
+    }
+
+    #[test]
+    fn compressed_sse_retry_is_limited_to_safe_methods() {
+        assert!(should_retry_sse_without_compression_for_method(
+            &Method::GET
+        ));
+        assert!(should_retry_sse_without_compression_for_method(
+            &Method::HEAD
+        ));
+        assert!(!should_retry_sse_without_compression_for_method(
+            &Method::POST
+        ));
+        assert!(!should_retry_sse_without_compression_for_method(
+            &Method::PUT
+        ));
+        assert!(!should_retry_sse_without_compression_for_method(
+            &Method::DELETE
+        ));
     }
 
     #[test]

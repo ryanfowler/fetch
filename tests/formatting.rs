@@ -564,6 +564,22 @@ fn additional_formatting_sse_charset_image_and_compression_cases() {
     let requests = wait_for_requests(&compressed, 3);
     assert_eq!(requests[1].header("accept-encoding"), "gzip, br, zstd");
     assert_eq!(requests[2].header("accept-encoding"), "");
+    let res = run_fetch(&[
+        &format!("{}/sse", compressed.url),
+        "--format",
+        "on",
+        "--data",
+        "state-change",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "event: message\ndata: compressed\n\n");
+    assert!(
+        res.stderr
+            .contains("not retrying compressed SSE response without compression for POST")
+    );
+    let requests = wait_for_requests(&compressed, 4);
+    assert_eq!(requests[3].method, "POST");
+    assert_eq!(requests[3].header("accept-encoding"), "gzip, br, zstd");
     let res = run_fetch(&[&compressed.url, "--discard"]);
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
