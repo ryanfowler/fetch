@@ -1049,6 +1049,9 @@ fn output_file_modes_match_go_harness() {
             "Content-Disposition",
             "attachment; filename=\"from-header.txt\"",
         ),
+        "/missing-header.txt" => TestResponse::ok("missing-header-body"),
+        "/invalid-header.txt" => TestResponse::ok("invalid-header-body")
+            .header("Content-Disposition", "attachment; filename=\"..\""),
         "/traversal" => TestResponse::ok("bad")
             .header("Content-Disposition", "attachment; filename=\"../bad.txt\""),
         _ => TestResponse::ok("body"),
@@ -1083,6 +1086,60 @@ fn output_file_modes_match_go_harness() {
     assert_eq!(
         fs::read_to_string(dir.path().join("from-header.txt")).unwrap(),
         "header-body"
+    );
+    assert!(
+        !res.stderr
+            .contains("Content-Disposition filename was not usable"),
+        "stderr:\n{}",
+        res.stderr
+    );
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            cwd: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+        &[
+            &format!("{}/missing-header.txt", server.url),
+            "--remote-name",
+            "--remote-header-name",
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("missing-header.txt")).unwrap(),
+        "missing-header-body"
+    );
+    assert!(
+        res.stderr.contains(
+            "warning: Content-Disposition filename was not usable; falling back to URL filename"
+        ),
+        "stderr:\n{}",
+        res.stderr
+    );
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            cwd: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        },
+        &[
+            &format!("{}/invalid-header.txt", server.url),
+            "--remote-name",
+            "--remote-header-name",
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(
+        fs::read_to_string(dir.path().join("invalid-header.txt")).unwrap(),
+        "invalid-header-body"
+    );
+    assert!(
+        res.stderr.contains(
+            "warning: Content-Disposition filename was not usable; falling back to URL filename"
+        ),
+        "stderr:\n{}",
+        res.stderr
     );
 
     let out = dir.path().join("explicit.txt");

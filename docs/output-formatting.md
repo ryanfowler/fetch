@@ -317,7 +317,8 @@ fetch -O example.com/files/document.pdf
 
 ### `-J, --remote-header-name`
 
-Use filename from `Content-Disposition` header:
+Use filename from `Content-Disposition` header. If no usable header filename is
+available, fetch warns and falls back to the URL filename:
 
 ```sh
 fetch -O -J example.com/download

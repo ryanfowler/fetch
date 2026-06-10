@@ -61,7 +61,7 @@ pub(super) async fn finish_response(
         ));
     }
 
-    let output_path = output::resolve_output_path(
+    let resolved_output = output::resolve_output_path(
         cli.output.as_deref(),
         cli.remote_name,
         cli.remote_header_name,
@@ -69,7 +69,10 @@ pub(super) async fn finish_response(
         &response_headers,
     )
     .map_err(|err| FetchError::Message(err.to_string()))?;
-    if let Some(path) = output_path {
+    if let Some(warning) = &resolved_output.warning {
+        write_warning(cli, warning);
+    }
+    if let Some(path) = resolved_output.path {
         let progress = if cli.silent {
             output::WriteProgress::disabled()
         } else {
