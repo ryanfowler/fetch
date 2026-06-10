@@ -335,7 +335,7 @@ fetch -o output.json --clobber example.com/data
 
 ## Pager
 
-By default, when stdout is a terminal, `fetch` pipes response body output through `less` for easier navigation. Image responses bypass the pager so native terminal image protocols are interpreted by the terminal. The `-F` flag makes `less` exit immediately when the output fits on one screen.
+By default, when stdout is a terminal, `fetch` pipes response body output through a pager for easier navigation. Image responses bypass the pager so native terminal image protocols are interpreted by the terminal.
 
 ### Pager Mode
 
@@ -347,7 +347,9 @@ fetch --pager off example.com/large-response
 
 ### Pager Environment
 
-The pager uses these flags: `less -FIRX`
+When paging is enabled, fetch uses `$PAGER` if it is set. Set `NO_PAGER` to disable the default `auto` pager. If `$PAGER` is unset, fetch falls back to `less -FIRX`. When `$LESS` is set, fetch runs `less` without adding its default flags so your `LESS` options apply.
+
+The fallback `less -FIRX` flags are:
 
 - `-F` - Quit if output fits on screen
 - `-I` - Case-insensitive search

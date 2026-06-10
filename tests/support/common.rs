@@ -81,6 +81,9 @@ pub(crate) fn run_fetch_once(opts: FetchOpts, args: &[&str]) -> FetchOutput {
     cmd.args(args);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.env("NO_COLOR", "");
+    cmd.env_remove("PAGER");
+    cmd.env_remove("LESS");
+    cmd.env_remove("NO_PAGER");
     cmd.env("HTTP_PROXY", "");
     cmd.env("HTTPS_PROXY", "");
     cmd.env("ALL_PROXY", "");

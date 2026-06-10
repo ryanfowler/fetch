@@ -54,10 +54,12 @@ written to stderr. This makes commands like `fetch example.com/api | jq .` work
 without mixing diagnostics into the pipe.
 
 When stdout is a terminal, supported response bodies are formatted and may open
-in `less -FIRX`; use `--pager off` to write directly. When stdout is redirected
-or piped, formatting turns off by default; use `--format on` to force formatted
-output in a pipe. Binary-looking responses are not printed to a terminal unless
-you explicitly choose an output path with `-o file`, force raw stdout with
+in the pager from `$PAGER`; set `NO_PAGER` or use `--pager off` to write
+directly. If `$PAGER` is unset, fetch falls back to `less -FIRX` and honors
+`$LESS` instead of adding default flags. When stdout is redirected or piped,
+formatting turns off by default; use `--format on` to force formatted output in
+a pipe. Binary-looking responses are not printed to a terminal unless you
+explicitly choose an output path with `-o file`, force raw stdout with
 `-o - > file`, or disable terminal image rendering with `--image off`.
 
 ## Examples

@@ -269,7 +269,7 @@ fetch --image off example.com/photo.jpg
 
 ### `--pager MODE`
 
-Control piping response body output to a pager (`less -FIRX`). Values:
+Control piping response body output to a pager. Values:
 
 - `auto` - Use the pager when stdout is a terminal (default)
 - `on` - Force pager use
@@ -278,6 +278,11 @@ Control piping response body output to a pager (`less -FIRX`). Values:
 ```sh
 fetch --pager off example.com
 ```
+
+When paging is enabled, fetch uses `$PAGER` if it is set. Set `NO_PAGER` to
+disable the default `auto` pager. If `$PAGER` is unset, fetch falls back to
+`less -FIRX`; when `$LESS` is set, fetch runs `less` without adding its default
+flags so your `LESS` options apply.
 
 ## Sessions
 

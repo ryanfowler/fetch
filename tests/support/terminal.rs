@@ -114,6 +114,14 @@ pub(crate) fn install_fake_less(dir: &Path) -> PathBuf {
 pub(crate) fn run_fetch_pty_with_fake_less(
     extra_args: &[&str],
 ) -> (String, Option<String>, Option<String>) {
+    run_fetch_pty_with_fake_less_env(extra_args, &[])
+}
+
+#[cfg(unix)]
+pub(crate) fn run_fetch_pty_with_fake_less_env(
+    extra_args: &[&str],
+    env_overrides: &[(&str, &str)],
+) -> (String, Option<String>, Option<String>) {
     let server = TestServer::start(|_| TestResponse::ok("pager body\n"));
     let dir = TempDir::new().unwrap();
     install_fake_less(dir.path());
@@ -134,12 +142,18 @@ pub(crate) fn run_fetch_pty_with_fake_less(
     cmd.args(extra_args);
     cmd.env("TERM", "xterm-256color");
     cmd.env("PATH", path);
+    cmd.env_remove("PAGER");
+    cmd.env_remove("LESS");
+    cmd.env_remove("NO_PAGER");
     cmd.env("FETCH_TEST_LESS_ARGS", &less_args);
     cmd.env("FETCH_TEST_LESS_INPUT", &less_input);
     cmd.env("HTTP_PROXY", "");
     cmd.env("HTTPS_PROXY", "");
     cmd.env("ALL_PROXY", "");
     cmd.env("NO_PROXY", "*");
+    for (key, value) in env_overrides {
+        cmd.env(key, value);
+    }
     configure_pty_child(&mut cmd, &pty.slave);
     let mut child = cmd.spawn().expect("spawn fetch under PTY");
     drop(pty.slave);
@@ -194,6 +208,9 @@ pub(crate) fn run_binary_pty_with_fake_less(
     cmd.args(extra_args);
     cmd.env("TERM", "xterm-256color");
     cmd.env("PATH", path);
+    cmd.env_remove("PAGER");
+    cmd.env_remove("LESS");
+    cmd.env_remove("NO_PAGER");
     cmd.env("FETCH_TEST_LESS_ARGS", &less_args);
     cmd.env("FETCH_TEST_LESS_INPUT", &less_input);
     cmd.env("HTTP_PROXY", "");
@@ -253,6 +270,9 @@ pub(crate) fn run_image_pty_with_fake_less(
     let mut cmd = Command::new(fetch_bin());
     cmd.args([server.url.as_str(), "--format", "on"]);
     cmd.env("PATH", path);
+    cmd.env_remove("PAGER");
+    cmd.env_remove("LESS");
+    cmd.env_remove("NO_PAGER");
     cmd.env("FETCH_TEST_LESS_ARGS", &less_args);
     cmd.env("FETCH_TEST_LESS_INPUT", &less_input);
     cmd.env("HTTP_PROXY", "");
