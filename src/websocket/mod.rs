@@ -437,11 +437,16 @@ fn build_handshake_request(
     url: &Url,
     session: Option<&crate::session::Session>,
 ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, FetchError> {
-    let mut request = url
+    let mut request_url = url.clone();
+    let url_basic_auth =
+        crate::http::extract_url_basic_auth(&mut request_url).map(|(username, password)| {
+            crate::http::basic_auth_header_value(&username, password.as_deref())
+        });
+    let mut request = request_url
         .as_str()
         .into_client_request()
         .map_err(websocket_error)?;
-    let headers = handshake_headers(cli, url, session)?;
+    let headers = handshake_headers(cli, &request_url, session, url_basic_auth)?;
     let mut replaced_headers = HashSet::new();
     for (name, value) in &headers {
         let name = WsHeaderName::from_bytes(name.as_str().as_bytes()).map_err(|err| {
@@ -465,6 +470,7 @@ fn handshake_headers(
     cli: &Cli,
     url: &Url,
     session: Option<&crate::session::Session>,
+    url_basic_auth: Option<HeaderValue>,
 ) -> Result<HeaderMap, FetchError> {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -475,6 +481,9 @@ fn handshake_headers(
         USER_AGENT,
         HeaderValue::from_str(&core::user_agent()).expect("valid user agent"),
     );
+    if let Some(auth) = url_basic_auth {
+        headers.insert(AUTHORIZATION, auth);
+    }
     crate::http::apply_headers(&mut headers, &cli.headers)?;
     apply_session_cookies(session, url, &mut headers)?;
 
@@ -888,7 +897,7 @@ mod tests {
     fn websocket_headers_include_bearer_auth() {
         let cli = Cli::try_parse_from(["fetch", "--bearer", "token", "ws://example.com"]).unwrap();
         let headers =
-            handshake_headers(&cli, &Url::parse("ws://example.com").unwrap(), None).unwrap();
+            handshake_headers(&cli, &Url::parse("ws://example.com").unwrap(), None, None).unwrap();
 
         assert_eq!(
             headers.get(ACCEPT).and_then(|value| value.to_str().ok()),
@@ -900,6 +909,40 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer token")
         );
+    }
+
+    #[test]
+    fn websocket_request_uses_url_basic_auth_and_strips_userinfo() {
+        let cli =
+            Cli::try_parse_from(["fetch", "ws://url%20user:open%20sesame@example.com/socket"])
+                .unwrap();
+
+        let request = build_handshake_request(
+            &cli,
+            &Url::parse("ws://url%20user:open%20sesame@example.com/socket").unwrap(),
+            None,
+        )
+        .unwrap();
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode("url user:open sesame");
+        let expected = format!("Basic {encoded}");
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("host")
+                .and_then(|value| value.to_str().ok()),
+            Some("example.com")
+        );
+        let request_uri = request.uri().to_string();
+        assert!(!request_uri.contains("url%20user"));
+        assert!(!request_uri.contains("open%20sesame"));
     }
 
     #[test]
