@@ -185,6 +185,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 
 Retryable requests use replayable request bodies so retries and 307/308 redirects can resend data without holding unrelated state.
 Multipart `-F` request bodies are produced with a stable boundary so redirected requests preserve the original body shape.
+Multipart file parts resolve their rendered per-part headers, detected content type, and file length when the `Multipart` value is built; preview, buffered writes, length calculation, and async streaming should reuse that stored request shape instead of regenerating headers or re-sniffing files.
 Rust request uploads use a replayable body descriptor instead of a universal `Vec<u8>`: literal/form/edit/gRPC bodies remain buffered when required, while `@file`, `@-`, JSON/XML file inputs, and multipart file parts stream into hyper request bodies. File and multipart sources can be reopened for retries and 307/308 redirects; stdin streams once and reports an error if a replay is required.
 
 ### Content Type Detection

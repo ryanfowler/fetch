@@ -1111,20 +1111,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn request_body_content_len_propagates_multipart_errors() {
+    fn request_body_propagates_multipart_header_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("evil\nname.txt");
         std::fs::write(&path, b"payload").unwrap();
-        let multipart =
-            multipart::Multipart::from_cli_fields(&[format!("file=@{}", path.display())])
-                .unwrap()
-                .unwrap();
-        let body = Some(RequestBodyPayload {
-            source: RequestBodySource::Multipart(multipart),
-            content_type: None,
-        });
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "--multipart",
+            &format!("file=@{}", path.display()),
+            "https://example.com",
+        ])
+        .unwrap();
 
-        let err = request_body_content_len(&body).unwrap_err().to_string();
+        let err = request_body(&cli).unwrap_err().to_string();
 
         assert!(err.contains("invalid multipart filename"));
     }

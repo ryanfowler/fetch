@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -32,14 +33,20 @@ pub struct Multipart {
 
 #[derive(Debug, Clone)]
 struct Field {
-    name: String,
+    header: String,
     value: FieldValue,
 }
 
 #[derive(Debug, Clone)]
 enum FieldValue {
     Text(String),
-    File(PathBuf),
+    File(FilePart),
+}
+
+#[derive(Debug, Clone)]
+struct FilePart {
+    path: PathBuf,
+    len: u64,
 }
 
 impl Multipart {
@@ -53,14 +60,13 @@ impl Multipart {
             let (name, value) = raw.split_once('=').unwrap_or((raw, ""));
             let name = name.trim().to_string();
             validate_multipart_disposition_value("field name", &name)?;
-            let value = if let Some(path) = value.strip_prefix('@') {
+            let field = if let Some(path) = value.strip_prefix('@') {
                 let path = expand_home(path);
-                validate_file(&path)?;
-                FieldValue::File(PathBuf::from(path))
+                file_field(&name, PathBuf::from(path))?
             } else {
-                FieldValue::Text(value.to_string())
+                text_field(&name, value)
             };
-            fields.push(Field { name, value });
+            fields.push(field);
         }
 
         Ok(Some(Self {
@@ -95,16 +101,16 @@ impl Multipart {
 
             match &field.value {
                 FieldValue::Text(value) => {
-                    append_preview(&mut out, limit, text_header(&field.name).as_bytes());
+                    append_preview(&mut out, limit, field.header.as_bytes());
                     append_preview(&mut out, limit, value.as_bytes());
                     append_preview(&mut out, limit, b"\r\n");
                 }
-                FieldValue::File(path) => {
-                    append_preview(&mut out, limit, file_header(&field.name, path)?.as_bytes());
+                FieldValue::File(file) => {
+                    append_preview(&mut out, limit, field.header.as_bytes());
                     if out.len() < limit {
                         let remaining = limit - out.len();
-                        let mut file = std::fs::File::open(path)?;
-                        Read::by_ref(&mut file)
+                        let mut input = std::fs::File::open(&file.path)?;
+                        Read::by_ref(&mut input)
                             .take(u64::try_from(remaining).unwrap_or(u64::MAX))
                             .read_to_end(&mut out)?;
                     }
@@ -131,13 +137,13 @@ impl Multipart {
 
             match &field.value {
                 FieldValue::Text(value) => {
-                    out.write_all(text_header(&field.name).as_bytes())?;
+                    out.write_all(field.header.as_bytes())?;
                     out.write_all(value.as_bytes())?;
                     out.write_all(b"\r\n")?;
                 }
-                FieldValue::File(path) => {
-                    out.write_all(file_header(&field.name, path)?.as_bytes())?;
-                    let mut file = std::fs::File::open(path)?;
+                FieldValue::File(file) => {
+                    out.write_all(field.header.as_bytes())?;
+                    let mut file = std::fs::File::open(&file.path)?;
                     std::io::copy(&mut file, &mut out)?;
                     out.write_all(b"\r\n")?;
                 }
@@ -151,12 +157,12 @@ impl Multipart {
     }
 
     pub fn content_len(&self) -> Result<u64, MultipartError> {
-        self.content_len_with_file_len(|path| Ok(std::fs::metadata(path)?.len()))
+        self.content_len_with_file_len(|file| Ok(file.len))
     }
 
     fn content_len_with_file_len(
         &self,
-        mut file_len: impl FnMut(&Path) -> Result<u64, MultipartError>,
+        mut file_len: impl FnMut(&FilePart) -> Result<u64, MultipartError>,
     ) -> Result<u64, MultipartError> {
         let mut len = 0_u64;
         for field in &self.fields {
@@ -165,12 +171,12 @@ impl Multipart {
             add_len(&mut len, 2)?;
             match &field.value {
                 FieldValue::Text(value) => {
-                    add_usize_len(&mut len, text_header(&field.name).len())?;
+                    add_usize_len(&mut len, field.header.len())?;
                     add_usize_len(&mut len, value.len())?;
                 }
-                FieldValue::File(path) => {
-                    add_usize_len(&mut len, file_header(&field.name, path)?.len())?;
-                    add_len(&mut len, file_len(path)?)?;
+                FieldValue::File(file) => {
+                    add_usize_len(&mut len, field.header.len())?;
+                    add_len(&mut len, file_len(file)?)?;
                 }
             }
             add_len(&mut len, 2)?;
@@ -211,18 +217,18 @@ fn random_boundary() -> String {
     format!("fetch-{:032x}", rand::random::<u128>())
 }
 
-fn validate_file(path: &str) -> Result<(), MultipartError> {
+fn validate_file_path(path: &Path) -> Result<std::fs::Metadata, MultipartError> {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(MultipartError::FileDoesNotExist(path.to_string()));
+            return Err(MultipartError::FileDoesNotExist(path.display().to_string()));
         }
         Err(err) => return Err(err.into()),
     };
     if metadata.is_dir() {
-        return Err(MultipartError::FileIsDirectory(path.to_string()));
+        return Err(MultipartError::FileIsDirectory(path.display().to_string()));
     }
-    Ok(())
+    Ok(metadata)
 }
 
 fn expand_home(path: &str) -> String {
@@ -245,20 +251,38 @@ fn text_header(name: &str) -> String {
     )
 }
 
-fn file_header(name: &str, path: &Path) -> Result<String, MultipartError> {
+fn text_field(name: &str, value: &str) -> Field {
+    Field {
+        header: text_header(name),
+        value: FieldValue::Text(value.to_string()),
+    }
+}
+
+fn file_field(name: &str, path: PathBuf) -> Result<Field, MultipartError> {
+    let metadata = validate_file_path(&path)?;
     let filename = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     validate_multipart_disposition_value("filename", &filename)?;
-    let content_type = detect_content_type(path)?;
+    let content_type = detect_content_type(&path)?;
 
-    Ok(format!(
+    Ok(Field {
+        header: file_header(name, &filename, content_type),
+        value: FieldValue::File(FilePart {
+            path,
+            len: metadata.len(),
+        }),
+    })
+}
+
+fn file_header(name: &str, filename: &str, content_type: &str) -> String {
+    format!(
         "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
         escape_multipart_string(name),
-        escape_multipart_string(&filename),
+        escape_multipart_string(filename),
         content_type,
-    ))
+    )
 }
 
 fn validate_multipart_disposition_value(
@@ -301,8 +325,11 @@ pub struct MultipartStream {
     state: MultipartStreamState,
 }
 
+type OpenFileFuture = Pin<Box<dyn Future<Output = std::io::Result<tokio::fs::File>> + Send>>;
+
 enum MultipartStreamState {
     Field,
+    OpeningFile { header: Bytes, open: OpenFileFuture },
     File(tokio::fs::File),
     FileCrlf,
     Done,
@@ -328,30 +355,35 @@ impl Stream for MultipartStream {
                             chunk.extend_from_slice(b"--");
                             chunk.extend_from_slice(self.multipart.boundary.as_bytes());
                             chunk.extend_from_slice(b"\r\n");
-                            chunk.extend_from_slice(text_header(&field.name).as_bytes());
+                            chunk.extend_from_slice(field.header.as_bytes());
                             chunk.extend_from_slice(value.as_bytes());
                             chunk.extend_from_slice(b"\r\n");
                             self.index += 1;
                             return Poll::Ready(Some(Ok(Bytes::from(chunk))));
                         }
-                        FieldValue::File(path) => {
-                            let header = match file_header(&field.name, path) {
-                                Ok(header) => header,
-                                Err(err) => return Poll::Ready(Some(Err(err))),
-                            };
-                            let file = match std::fs::File::open(path) {
-                                Ok(file) => tokio::fs::File::from_std(file),
-                                Err(err) => return Poll::Ready(Some(Err(err.into()))),
-                            };
+                        FieldValue::File(file) => {
                             let mut chunk = Vec::new();
                             chunk.extend_from_slice(b"--");
                             chunk.extend_from_slice(self.multipart.boundary.as_bytes());
                             chunk.extend_from_slice(b"\r\n");
-                            chunk.extend_from_slice(header.as_bytes());
-                            self.state = MultipartStreamState::File(file);
-                            return Poll::Ready(Some(Ok(Bytes::from(chunk))));
+                            chunk.extend_from_slice(field.header.as_bytes());
+                            self.state = MultipartStreamState::OpeningFile {
+                                header: Bytes::from(chunk),
+                                open: Box::pin(tokio::fs::File::open(file.path.clone())),
+                            };
+                            continue;
                         }
                     }
+                }
+                MultipartStreamState::OpeningFile { header, open } => {
+                    let file = match open.as_mut().poll(cx) {
+                        Poll::Ready(Ok(file)) => file,
+                        Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err.into()))),
+                        Poll::Pending => return Poll::Pending,
+                    };
+                    let header = std::mem::replace(header, Bytes::new());
+                    self.state = MultipartStreamState::File(file);
+                    return Poll::Ready(Some(Ok(header)));
                 }
                 MultipartStreamState::File(file) => {
                     let mut bytes = [0_u8; 8192];
@@ -521,11 +553,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("evil\nname.txt");
         std::fs::write(&path, b"payload").unwrap();
-        let multipart = Multipart::from_cli_fields(&[format!("file=@{}", path.display())])
-            .unwrap()
-            .unwrap();
-
-        let err = multipart.open().unwrap_err();
+        let err = Multipart::from_cli_fields(&[format!("file=@{}", path.display())]).unwrap_err();
 
         assert!(err.to_string().contains("invalid multipart filename"));
     }
