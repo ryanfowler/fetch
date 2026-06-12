@@ -1268,7 +1268,7 @@ mod tests {
 
         let body = crate::http::request_body(&cli).unwrap();
         assert_eq!(
-            crate::http::request_body_content_len(&body),
+            crate::http::request_body_content_len(&body).unwrap(),
             Some("streamed data".len() as u64)
         );
         assert!(crate::http::request_body_bytes(&body).is_none());

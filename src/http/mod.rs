@@ -188,7 +188,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             )?;
         }
         apply_builder_authorization_headers(&mut dry_run_headers, cli, None)?;
-        print_request_metadata(cli, &method, &url, &dry_run_headers, &body, http_version);
+        print_request_metadata(cli, &method, &url, &dry_run_headers, &body, http_version)?;
         print_dry_run_body(cli, &body)?;
         return Ok(0);
     }
@@ -235,7 +235,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     &attempt_headers,
                     &request_body,
                     http_version,
-                );
+                )?;
             }
             if cli.verbose >= 3
                 && !cli.silent

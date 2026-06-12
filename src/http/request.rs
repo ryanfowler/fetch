@@ -104,7 +104,7 @@ pub(super) fn build_request(
     cli: &Cli,
     authorization: RequestAuthorization<'_>,
 ) -> Result<RequestBuilder, FetchError> {
-    if let Some(len) = inferred_request_body_content_len(&headers, &body) {
+    if let Some(len) = inferred_request_body_content_len(&headers, &body)? {
         headers.insert(
             CONTENT_LENGTH,
             HeaderValue::from_str(&len.to_string())
@@ -484,37 +484,41 @@ pub(crate) fn request_body_bytes(body: &RequestBody) -> Option<&[u8]> {
     }
 }
 
-pub(crate) fn request_body_content_len(body: &RequestBody) -> Option<u64> {
-    match body.as_ref()? {
-        RequestBodyPayload {
+pub(crate) fn request_body_content_len(body: &RequestBody) -> Result<Option<u64>, FetchError> {
+    match body.as_ref() {
+        None => Ok(None),
+        Some(RequestBodyPayload {
             source: RequestBodySource::Bytes(bytes),
             ..
-        } => Some(bytes.len() as u64),
-        RequestBodyPayload {
+        }) => Ok(Some(bytes.len() as u64)),
+        Some(RequestBodyPayload {
             source: RequestBodySource::File { len, .. },
             ..
-        } => Some(*len),
-        RequestBodyPayload {
+        }) => Ok(Some(*len)),
+        Some(RequestBodyPayload {
             source: RequestBodySource::Multipart(multipart),
             ..
-        } => multipart.content_len().ok(),
-        RequestBodyPayload {
+        }) => multipart
+            .content_len()
+            .map(Some)
+            .map_err(|err| FetchError::Message(err.to_string())),
+        Some(RequestBodyPayload {
             source: RequestBodySource::Stdin,
             ..
-        } => None,
-        RequestBodyPayload {
+        }) => Ok(None),
+        Some(RequestBodyPayload {
             source: RequestBodySource::GrpcJsonStream { .. },
             ..
-        } => None,
+        }) => Ok(None),
     }
 }
 
 pub(super) fn inferred_request_body_content_len(
     headers: &HeaderMap,
     body: &RequestBody,
-) -> Option<u64> {
+) -> Result<Option<u64>, FetchError> {
     if headers.contains_key(CONTENT_LENGTH) || headers.contains_key(TRANSFER_ENCODING) {
-        return None;
+        return Ok(None);
     }
     request_body_content_len(body)
 }
@@ -1103,6 +1107,26 @@ mod tests {
             err,
             format!("file '{}' is a directory", dir.path().display())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_body_content_len_propagates_multipart_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evil\nname.txt");
+        std::fs::write(&path, b"payload").unwrap();
+        let multipart =
+            multipart::Multipart::from_cli_fields(&[format!("file=@{}", path.display())])
+                .unwrap()
+                .unwrap();
+        let body = Some(RequestBodyPayload {
+            source: RequestBodySource::Multipart(multipart),
+            content_type: None,
+        });
+
+        let err = request_body_content_len(&body).unwrap_err().to_string();
+
+        assert!(err.contains("invalid multipart filename"));
     }
 
     #[test]
