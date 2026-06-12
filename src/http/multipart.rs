@@ -18,6 +18,8 @@ pub enum MultipartError {
     FileIsDirectory(String),
     #[error("invalid multipart {kind}: value contains ASCII control character")]
     InvalidDispositionValue { kind: &'static str },
+    #[error("multipart body is too large to compute Content-Length")]
+    BodyTooLarge,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -149,22 +151,33 @@ impl Multipart {
     }
 
     pub fn content_len(&self) -> Result<u64, MultipartError> {
+        self.content_len_with_file_len(|path| Ok(std::fs::metadata(path)?.len()))
+    }
+
+    fn content_len_with_file_len(
+        &self,
+        mut file_len: impl FnMut(&Path) -> Result<u64, MultipartError>,
+    ) -> Result<u64, MultipartError> {
         let mut len = 0_u64;
         for field in &self.fields {
-            len += 2 + self.boundary.len() as u64 + 2;
+            add_len(&mut len, 2)?;
+            add_usize_len(&mut len, self.boundary.len())?;
+            add_len(&mut len, 2)?;
             match &field.value {
                 FieldValue::Text(value) => {
-                    len += text_header(&field.name).len() as u64;
-                    len += value.len() as u64;
+                    add_usize_len(&mut len, text_header(&field.name).len())?;
+                    add_usize_len(&mut len, value.len())?;
                 }
                 FieldValue::File(path) => {
-                    len += file_header(&field.name, path)?.len() as u64;
-                    len += std::fs::metadata(path)?.len();
+                    add_usize_len(&mut len, file_header(&field.name, path)?.len())?;
+                    add_len(&mut len, file_len(path)?)?;
                 }
             }
-            len += 2;
+            add_len(&mut len, 2)?;
         }
-        len += 2 + self.boundary.len() as u64 + 4;
+        add_len(&mut len, 2)?;
+        add_usize_len(&mut len, self.boundary.len())?;
+        add_len(&mut len, 4)?;
         Ok(len)
     }
 
@@ -175,6 +188,18 @@ impl Multipart {
             state: MultipartStreamState::Field,
         }
     }
+}
+
+fn add_len(len: &mut u64, amount: u64) -> Result<(), MultipartError> {
+    *len = len
+        .checked_add(amount)
+        .ok_or(MultipartError::BodyTooLarge)?;
+    Ok(())
+}
+
+fn add_usize_len(len: &mut u64, amount: usize) -> Result<(), MultipartError> {
+    let amount = u64::try_from(amount).map_err(|_| MultipartError::BodyTooLarge)?;
+    add_len(len, amount)
 }
 
 fn append_preview(out: &mut Vec<u8>, limit: usize, bytes: &[u8]) {
@@ -424,6 +449,38 @@ mod tests {
         assert!(body.contains("name=\"field\""));
         assert!(body.contains("value"));
         assert!(multipart.content_type().contains(&multipart.boundary));
+    }
+
+    #[test]
+    fn multipart_content_len_matches_open_body_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.txt");
+        std::fs::write(&path, b"file payload").unwrap();
+        let multipart = Multipart::from_cli_fields(&[
+            "field=value".to_string(),
+            format!("file=@{}", path.display()),
+        ])
+        .unwrap()
+        .unwrap();
+        let body = multipart.open().unwrap();
+
+        assert_eq!(multipart.content_len().unwrap(), body.len() as u64);
+    }
+
+    #[test]
+    fn multipart_content_len_reports_body_too_large_on_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.txt");
+        std::fs::write(&path, b"x").unwrap();
+        let multipart = Multipart::from_cli_fields(&[format!("file=@{}", path.display())])
+            .unwrap()
+            .unwrap();
+
+        let err = multipart
+            .content_len_with_file_len(|_| Ok(u64::MAX))
+            .unwrap_err();
+
+        assert!(matches!(err, MultipartError::BodyTooLarge));
     }
 
     #[test]

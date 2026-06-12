@@ -106,7 +106,7 @@ pub(super) fn print_request_metadata(
     headers: &HeaderMap,
     body: &RequestBody,
     http_version: Option<HttpVersion>,
-) {
+) -> Result<(), FetchError> {
     let mut printer = core::Printer::stderr(cli.color.as_deref());
     let debug = cli.verbose >= 2;
     if debug {
@@ -123,7 +123,7 @@ pub(super) fn print_request_metadata(
     printer.push_str("\n");
     let mut lines = header_lines(headers);
     lines.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
-    if let Some(len) = inferred_request_body_content_len(headers, body) {
+    if let Some(len) = inferred_request_body_content_len(headers, body)? {
         lines.push(("content-length".to_string(), len.to_string()));
     }
     let host = headers
@@ -152,6 +152,7 @@ pub(super) fn print_request_metadata(
         printer.push_str("\n");
     }
     flush_stderr(printer);
+    Ok(())
 }
 
 pub(super) fn is_printable(bytes: &[u8]) -> bool {
