@@ -295,6 +295,37 @@ fn websocket_noninteractive_go_cases() {
         "auth"
     );
 
+    let (url_auth_url, url_auth_seen) = start_ws_echo_server(|req| {
+        let auth = req.header("authorization");
+        let raw = auth.strip_prefix("Basic ").unwrap_or_default();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(raw)
+            .unwrap_or_default();
+        if decoded == b"url user:open sesame" {
+            Ok(())
+        } else {
+            Err(format!("unexpected authorization header: {auth}"))
+        }
+    });
+    let mut url_auth_url = Url::parse(&url_auth_url).unwrap();
+    url_auth_url.set_path("/socket");
+    url_auth_url.set_username("url user").unwrap();
+    url_auth_url.set_password(Some("open sesame")).unwrap();
+    let res = run_fetch(&[
+        url_auth_url.as_str(),
+        "-d",
+        "url auth",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(
+        url_auth_seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "url auth"
+    );
+
     let res = run_fetch(&[&ws_url, "--grpc"]);
     assert_exit(&res, 1);
     assert!(res.stderr.contains("websocket") || res.stderr.contains("grpc"));

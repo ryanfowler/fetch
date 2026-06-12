@@ -78,6 +78,7 @@ pub(crate) use request::{
 #[cfg(test)]
 pub(crate) use request::{request_body_bytes, request_body_content_len, request_body_preview};
 pub(crate) use retry::{is_certificate_validation_message, total_attempts_for_retry};
+pub(crate) use transport::{basic_auth_header_value, extract_url_basic_auth};
 
 use encoding::*;
 use metadata::*;

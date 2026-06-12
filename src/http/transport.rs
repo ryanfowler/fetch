@@ -1528,7 +1528,7 @@ fn version_for_cli(version: HttpVersion) -> Version {
     }
 }
 
-fn extract_url_basic_auth(url: &mut Url) -> Option<(String, Option<String>)> {
+pub(crate) fn extract_url_basic_auth(url: &mut Url) -> Option<(String, Option<String>)> {
     let username = url.username().to_string();
     let password = url.password().map(str::to_string);
     if username.is_empty() && password.is_none() {
@@ -1555,7 +1555,7 @@ fn extract_url_basic_auth(url: &mut Url) -> Option<(String, Option<String>)> {
     Some((username, password))
 }
 
-fn basic_auth_header_value(username: &str, password: Option<&str>) -> HeaderValue {
+pub(crate) fn basic_auth_header_value(username: &str, password: Option<&str>) -> HeaderValue {
     let raw = format!("{}:{}", username, password.unwrap_or_default());
     let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
     let mut value =
