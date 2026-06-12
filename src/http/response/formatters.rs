@@ -388,6 +388,12 @@ pub(super) fn finish_sse_stream_formatter(
     let mut out = core::Printer::new(use_color);
     let chunk = push_sse_stream_bytes(pending, formatter, use_color)?;
     out.push_str(&chunk);
+    if !pending.is_empty() {
+        return match std::str::from_utf8(pending) {
+            Ok(_) => unreachable!("pending SSE UTF-8 bytes should have been consumed"),
+            Err(err) => Err(err.into()),
+        };
+    }
     formatter.finish(&mut out)?;
     Ok(out
         .into_string()
@@ -764,6 +770,43 @@ mod tests {
         assert_eq!(
             String::from_utf8(got).unwrap(),
             "event: message\ndata: ab\ndata: cd\n\nevent: message\ndata: ef\ndata: gh\n\n"
+        );
+    }
+
+    #[test]
+    fn formatted_sse_stream_accepts_split_multibyte_utf8() {
+        let mut formatter = FormattedSseStream::with_pending_limit(false, 32);
+        let mut got = Vec::new();
+
+        for output in formatter.push_chunk(b"data: caf\xc3").unwrap() {
+            got.extend(output);
+        }
+        for output in formatter.push_chunk(b"\xa9\n\n").unwrap() {
+            got.extend(output);
+        }
+        for output in formatter.finish().unwrap() {
+            got.extend(output);
+        }
+
+        assert_eq!(
+            String::from_utf8(got).unwrap(),
+            "event: message\ndata: caf\u{e9}\n\n"
+        );
+    }
+
+    #[test]
+    fn formatted_sse_stream_errors_on_incomplete_trailing_utf8() {
+        let mut formatter = FormattedSseStream::with_pending_limit(false, 32);
+
+        assert_eq!(
+            formatter.push_chunk(b"data: caf\xc3").unwrap(),
+            vec![Vec::<u8>::new()]
+        );
+        let err = formatter.finish().unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "invalid UTF-8 in event stream: incomplete utf-8 byte sequence from index 0"
         );
     }
 
