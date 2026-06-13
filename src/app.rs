@@ -812,19 +812,23 @@ fn apply_proto_restriction(raw_url: &str, allowed_proto: &str) -> Result<String,
 
     let (allow_http, allow_https) = from_curl::parse_allowed_proto(allowed_proto);
     if let Some((scheme, _rest)) = raw_url.split_once("://") {
-        match scheme {
-            "http" if !allow_http => {
+        if scheme.eq_ignore_ascii_case("http") {
+            if !allow_http {
                 return Err(
                     format!("protocol 'http' not allowed by --proto {allowed_proto:?}").into(),
                 );
             }
-            "https" if !allow_https => {
+            return Ok(raw_url.to_string());
+        }
+        if scheme.eq_ignore_ascii_case("https") {
+            if !allow_https {
                 return Err(
                     format!("protocol 'https' not allowed by --proto {allowed_proto:?}").into(),
                 );
             }
-            _ => return Ok(raw_url.to_string()),
+            return Ok(raw_url.to_string());
         }
+        return Ok(raw_url.to_string());
     }
 
     if !allow_http && !allow_https {
@@ -1360,16 +1364,17 @@ mod tests {
     }
 
     #[test]
-    fn from_curl_proto_restriction_rejects_disallowed_scheme() {
-        let mut cli = Cli::try_parse_from([
-            "fetch",
-            "--from-curl",
+    fn from_curl_proto_restriction_rejects_disallowed_scheme_case_insensitively() {
+        for command in [
             "curl --proto '=https' http://example.com",
-        ])
-        .unwrap();
+            "curl --proto '=https' HTTP://example.com",
+            "curl --proto '=http' HTTPS://example.com",
+        ] {
+            let mut cli = Cli::try_parse_from(["fetch", "--from-curl", command]).unwrap();
 
-        let err = apply_from_curl(&mut cli).unwrap_err().to_string();
-        assert!(err.contains("not allowed by --proto"));
+            let err = apply_from_curl(&mut cli).unwrap_err().to_string();
+            assert!(err.contains("not allowed by --proto"), "{command}: {err}");
+        }
     }
 
     #[test]
