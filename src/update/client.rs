@@ -13,6 +13,7 @@ use crate::error::FetchError;
 use crate::http::{client, transport};
 
 const INTERNAL_UPDATE_URL_ENV: &str = "FETCH_INTERNAL_UPDATE_URL";
+const MAX_UPDATE_RELEASE_METADATA_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct Release {
@@ -45,7 +46,14 @@ pub(super) async fn latest_release(client: &UpdateClient<'_>) -> Result<Release,
         "{}/repos/ryanfowler/fetch/releases/latest",
         update_url().trim_end_matches('/')
     );
-    let response = update_get(client, &url).await?;
+    latest_release_from_url(client, &url).await
+}
+
+async fn latest_release_from_url(
+    client: &UpdateClient<'_>,
+    url: &str,
+) -> Result<Release, FetchError> {
+    let response = update_get_stream(client, url).await?;
     if !response.status().is_success() {
         return Err(format!(
             "unable to fetch the latest release: received status: {}",
@@ -53,19 +61,28 @@ pub(super) async fn latest_release(client: &UpdateClient<'_>) -> Result<Release,
         )
         .into());
     }
+
+    if let Some(len) = response.content_length()
+        && len > MAX_UPDATE_RELEASE_METADATA_BYTES
+    {
+        return Err(format!(
+            "unable to fetch the latest release: release metadata is too large: {len} bytes"
+        )
+        .into());
+    }
+
+    let response = response
+        .into_buffered_with_limit(
+            Some(MAX_UPDATE_RELEASE_METADATA_BYTES),
+            "unable to fetch the latest release: release metadata exceeded maximum allowed size",
+        )
+        .await?;
     let release: Release = serde_json::from_slice(response.body())
         .map_err(|err| FetchError::Message(format!("unable to fetch the latest release: {err}")))?;
     if release.tag_name.is_empty() {
         return Err("unable to fetch the latest release: no tag found".into());
     }
     Ok(release)
-}
-
-pub(super) async fn update_get(
-    client: &UpdateClient<'_>,
-    url: &str,
-) -> Result<UpdateResponse, FetchError> {
-    client.get(url).await
 }
 
 pub(super) async fn update_get_stream(
@@ -128,10 +145,6 @@ impl<'a> UpdateClient<'a> {
             allow_insecure_http: true,
             client: Mutex::new(None),
         }
-    }
-
-    async fn get(&self, raw_url: &str) -> Result<UpdateResponse, FetchError> {
-        self.get_stream(raw_url).await?.into_buffered().await
     }
 
     async fn get_stream(&self, raw_url: &str) -> Result<UpdateStreamingResponse, FetchError> {
@@ -282,15 +295,10 @@ fn is_update_redirect(status: StatusCode) -> bool {
 
 #[derive(Debug)]
 pub(super) struct UpdateResponse {
-    status: StatusCode,
     body: bytes::Bytes,
 }
 
 impl UpdateResponse {
-    pub(super) fn status(&self) -> StatusCode {
-        self.status
-    }
-
     pub(super) fn body(&self) -> &[u8] {
         &self.body
     }
@@ -314,18 +322,12 @@ impl UpdateStreamingResponse {
         content_length(self.headers())
     }
 
-    pub(super) async fn into_buffered(self) -> Result<UpdateResponse, FetchError> {
-        self.into_buffered_with_limit(None, "response body exceeded maximum allowed size")
-            .await
-    }
-
     pub(super) async fn into_buffered_with_limit(
         self,
         max_body_bytes: Option<u64>,
         limit_error: &'static str,
     ) -> Result<UpdateResponse, FetchError> {
         let budget = self.budget;
-        let status = self.response.status();
         let headers = self.response.headers().clone();
         let (mut body, _) = self.response.into_body_with_deadline();
         let capacity = content_length(&headers)
@@ -361,7 +363,6 @@ impl UpdateStreamingResponse {
             bytes.extend_from_slice(&data);
         }
         Ok(UpdateResponse {
-            status,
             body: bytes::Bytes::from(bytes),
         })
     }
@@ -436,13 +437,26 @@ mod tests {
         );
     }
 
+    async fn test_update_get_buffered(
+        client: &UpdateClient<'_>,
+        url: &str,
+    ) -> Result<(StatusCode, UpdateResponse), FetchError> {
+        let response = update_get_stream(client, url).await?;
+        let status = response.status();
+        let response = response
+            .into_buffered_with_limit(None, "response body exceeded maximum allowed size")
+            .await?;
+        Ok((status, response))
+    }
+
     #[tokio::test]
     async fn update_client_rejects_initial_http_by_default() {
         let client = UpdateClient::test(None);
 
-        let err = update_get(&client, "http://127.0.0.1:1/artifact")
-            .await
-            .unwrap_err();
+        let err = match update_get_stream(&client, "http://127.0.0.1:1/artifact").await {
+            Ok(_) => panic!("expected insecure update URL to be rejected"),
+            Err(err) => err,
+        };
 
         assert!(
             err.to_string()
@@ -459,11 +473,28 @@ mod tests {
         );
         let client = UpdateClient::test_allow_insecure_http(None);
 
-        let response = update_get(&client, &url).await.unwrap();
+        let (status, response) = test_update_get_buffered(&client, &url).await.unwrap();
         join.join().unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.body(), b"ok");
+    }
+
+    #[tokio::test]
+    async fn latest_release_rejects_metadata_content_length_above_limit() {
+        let too_large = MAX_UPDATE_RELEASE_METADATA_BYTES + 1;
+        let (url, join) =
+            start_artifact_response(vec![("Content-Length", too_large.to_string())], Vec::new());
+        let client = UpdateClient::test_allow_insecure_http(None);
+
+        let err = latest_release_from_url(&client, &url)
+            .await
+            .unwrap_err()
+            .to_string();
+        join.join().unwrap();
+
+        assert!(err.contains("release metadata is too large"), "{err}");
+        assert!(err.contains(&too_large.to_string()), "{err}");
     }
 
     #[tokio::test]
@@ -474,12 +505,13 @@ mod tests {
                 .unwrap();
         let client = UpdateClient::test_with_cli_allow_insecure_http(&cli, None);
 
-        let response = update_get(&client, "http://updates.example/artifact")
-            .await
-            .unwrap();
+        let (status, response) =
+            test_update_get_buffered(&client, "http://updates.example/artifact")
+                .await
+                .unwrap();
         let request_line = join.join().unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(response.body(), b"proxied update");
         assert!(
             request_line.starts_with("GET http://updates.example/artifact HTTP/1.1"),
@@ -493,7 +525,10 @@ mod tests {
             start_slow_redirect_response(Duration::from_millis(150), Duration::from_millis(150));
         let client = UpdateClient::test_allow_insecure_http(Some(Duration::from_millis(220)));
 
-        let err = update_get(&client, &url).await.unwrap_err();
+        let err = match update_get_stream(&client, &url).await {
+            Ok(_) => panic!("expected shared timeout budget to expire"),
+            Err(err) => err,
+        };
         let _ = join.join();
 
         assert!(

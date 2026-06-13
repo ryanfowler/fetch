@@ -62,6 +62,7 @@ pub struct ParsedCurl {
     pub has_content_type: bool,
     pub has_accept: bool,
     pub allowed_proto: String,
+    json_defaults: bool,
 }
 
 pub fn parse(command: &str) -> Result<ParsedCurl, String> {
@@ -171,6 +172,23 @@ fn post_process(parsed: &mut ParsedCurl) -> Result<(), String> {
             parsed.method = "POST".to_string();
         } else if !parsed.upload_file.is_empty() {
             parsed.method = "PUT".to_string();
+        }
+    }
+
+    if parsed.json_defaults {
+        if !parsed.has_content_type {
+            parsed.headers.push(Header {
+                name: "Content-Type".to_string(),
+                value: "application/json".to_string(),
+            });
+            parsed.has_content_type = true;
+        }
+        if !parsed.has_accept {
+            parsed.headers.push(Header {
+                name: "Accept".to_string(),
+                value: "application/json".to_string(),
+            });
+            parsed.has_accept = true;
         }
     }
 
@@ -303,20 +321,7 @@ fn parse_long_flag(
                 is_raw: false,
                 is_urlencode: false,
             });
-            if !parsed.has_content_type {
-                parsed.headers.push(Header {
-                    name: "Content-Type".to_string(),
-                    value: "application/json".to_string(),
-                });
-                parsed.has_content_type = true;
-            }
-            if !parsed.has_accept {
-                parsed.headers.push(Header {
-                    name: "Accept".to_string(),
-                    value: "application/json".to_string(),
-                });
-                parsed.has_accept = true;
-            }
+            parsed.json_defaults = true;
             Ok(consumed)
         }
         "form" => {
@@ -1021,6 +1026,31 @@ mod tests {
                 .iter()
                 .any(|h| h.name == "Accept" && h.value == "application/json")
         );
+    }
+
+    #[test]
+    fn test_parse_json_custom_headers_suppress_defaults_regardless_of_order() {
+        for command in [
+            r#"curl --json '{"ok":true}' -H 'Accept: text/plain' -H 'Content-Type: application/custom' https://example.com"#,
+            r#"curl -H 'Accept: text/plain' -H 'Content-Type: application/custom' --json '{"ok":true}' https://example.com"#,
+        ] {
+            let parsed = parse(command).unwrap();
+            let content_types: Vec<_> = parsed
+                .headers
+                .iter()
+                .filter(|header| header.name.eq_ignore_ascii_case("content-type"))
+                .map(|header| header.value.as_str())
+                .collect();
+            let accepts: Vec<_> = parsed
+                .headers
+                .iter()
+                .filter(|header| header.name.eq_ignore_ascii_case("accept"))
+                .map(|header| header.value.as_str())
+                .collect();
+
+            assert_eq!(content_types, vec!["application/custom"], "{command}");
+            assert_eq!(accepts, vec!["text/plain"], "{command}");
+        }
     }
 
     #[test]
