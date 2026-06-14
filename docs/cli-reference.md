@@ -663,7 +663,7 @@ Cannot be combined with other request-specifying flags (URL, `--method`, `--head
 fetch --from-curl 'curl https://example.com'
 
 # POST with JSON
-fetch --from-curl 'curl -X POST -H "Content-Type: application/json" -d {"key":"value"} https://example.com'
+fetch --from-curl "curl -X POST -H 'Content-Type: application/json' -d '{\"key\":\"value\"}' https://example.com"
 
 # With authentication
 fetch --from-curl 'curl -u user:pass https://example.com'
