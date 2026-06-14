@@ -635,7 +635,7 @@ fn websocket_flushes_noninteractive_stdout_while_socket_stays_open() {
 
 #[cfg(unix)]
 #[test]
-fn websocket_noninteractive_ctrl_c_exits_successfully() {
+fn websocket_noninteractive_ctrl_c_exits_interrupted() {
     let (ws_url, shutdown, server) = start_ws_hold_open_push_server(b"message before interrupt");
     let mut cmd = Command::new(fetch_bin());
     cmd.args([&ws_url, "--format", "off", "--ws-interactive", "off"]);
@@ -669,7 +669,7 @@ fn websocket_noninteractive_ctrl_c_exits_successfully() {
         .expect("wait websocket ctrl-c fetch");
     assert_eq!(
         status.code(),
-        Some(0),
+        Some(130),
         "fetch exited with {status}; stdout:\n{}\nstderr:\n{}",
         stdout.output(),
         stderr.output()

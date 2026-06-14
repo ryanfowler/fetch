@@ -561,6 +561,8 @@ the exit code at 0 when the request completes.
 fetch --ignore-status example.com/not-found
 ```
 
+Interrupted requests, such as Ctrl-C/SIGINT, exit 130.
+
 ## WebSocket
 
 Use `ws://` or `wss://` URL schemes to open a WebSocket connection:
