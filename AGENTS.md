@@ -29,7 +29,7 @@ Then run the narrowest relevant integration test target or test name:
 cargo test --locked --all-features --test http request_construction_and_data_sources
 
 # Run a focused Rust unit test
-cargo test --locked --all-features image::tests
+cargo test --locked --all-features image::
 ```
 
 Before opening a PR, after touching shared request/response/transport behavior,
@@ -76,7 +76,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - **src/format** - Response body formatters for JSON, XML, YAML, HTML, CSS, CSV, Markdown, msgpack, protobuf, SSE, NDJSON, gRPC, and images.
 - **src/grpc** - gRPC framing, reflection, status handling, and protobuf request/response support.
 - **src/http** - Core HTTP request construction and execution, response orchestration, multipart uploads, output routing, retries, proxies, TLS, Unix sockets, and timing.
-- **src/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
+- **src/image** - Terminal image rendering split by concern: decoding and external adapters, EXIF orientation, terminal capability detection, and Kitty/iTerm2/block renderers.
 - **src/output** - Response output, progress summaries, and atomic output-file writes.
 - **src/proto** - Protocol buffer descriptor loading, compilation, and dynamic message handling.
 - **src/session.rs** - Named cookie sessions with persistent storage across invocations.
