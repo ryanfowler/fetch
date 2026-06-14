@@ -175,6 +175,10 @@ fetch -o response.json example.com/api/data
 fetch -o - example.com/file.bin > output.bin
 ```
 
+Output files receive the decoded response body by default. If the response uses
+`Content-Encoding` for a `.gz`, `.br`, or `.zst` asset, use `--compress off` for
+byte-for-byte downloads.
+
 ### `-O, --remote-name`
 
 Write response body to current directory using the filename from the URL.
@@ -498,6 +502,9 @@ Control response compression negotiation. Values: `auto`, `br`/`brotli`, `gzip`,
 - `gzip` - request gzip compression only
 - `zstd` - request zstd compression only
 - `off` - disable automatic compression negotiation and decompression
+
+Output files also receive decoded/decompressed bodies by default. Use
+`--compress off` for byte-for-byte downloads of `.gz`, `.br`, or `.zst` assets.
 
 In `auto` mode, compressed SSE (`text/event-stream`) responses are retried
 without `Accept-Encoding` so streaming events can be delivered promptly instead
