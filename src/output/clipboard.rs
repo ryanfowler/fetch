@@ -340,26 +340,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn write_to_command_times_out_hung_command_after_stdin() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let script = dir.path().join("fake-clipboard");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\n/bin/cat >/dev/null\nexec /bin/sleep 5\n",
-        )
-        .unwrap();
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
-
-        let program = Box::leak(script.to_string_lossy().into_owned().into_boxed_str());
-        let command = ClipboardCommand { program, args: &[] };
+        static ARGS: &[&str] = &["-c", "/bin/cat >/dev/null; exec /bin/sleep 5"];
+        let command = ClipboardCommand {
+            program: "/bin/sh",
+            args: ARGS,
+        };
         let timeout = Duration::from_millis(100);
         let started_at = Instant::now();
 
         assert_eq!(
             write_to_command_with_timeout(&command, b"clipboard-body", timeout),
             CopyOutcome::Failed {
-                command: script.to_string_lossy().into_owned(),
+                command: "/bin/sh".to_string(),
                 message: "command timed out after 100ms".to_string()
             }
         );

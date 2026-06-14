@@ -218,7 +218,7 @@ const FLAGS: &[Flag] = &[
         "USER:PASS",
         "Enable HTTP digest authentication",
     ),
-    flag(None, "discard", "", "Discard the response body"),
+    flag(None, "discard", "", "Do not print the response body"),
     flag(
         None,
         "dns-server",
