@@ -645,7 +645,7 @@ header = X-API-Key: admin-key
 - Section names should be the exact hostname (without protocol or path), or a wildcard pattern like `*.domain.com`
 - Host-specific settings override global settings
 - Command-line flags override both global and host-specific settings
-- Multiple headers and query parameters are merged (host-specific first, then global)
+- Multiple headers and query parameters are merged in order: global first, then the matched host section, then command-line flags
 
 ## Configuration Examples
 
