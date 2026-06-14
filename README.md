@@ -56,10 +56,12 @@ without mixing diagnostics into the pipe.
 When stdout is a terminal, supported response bodies are formatted and may open
 in the pager from `$PAGER`; set `NO_PAGER` or use `--pager off` to write
 directly. If `$PAGER` is unset, fetch falls back to `less -FIRX` and honors
-`$LESS` instead of adding default flags. When stdout is redirected or piped,
-formatting turns off by default; use `--format on` to force formatted output in
-a pipe. Binary-looking responses are not printed to a terminal unless you
-explicitly choose an output path with `-o file`, force raw stdout with
+`$LESS` instead of adding default flags. `$PAGER` is split with POSIX
+shell-style quoting, but fetch launches the pager directly and does not
+interpret shell operators such as pipes or redirects. When stdout is redirected
+or piped, formatting turns off by default; use `--format on` to force formatted
+output in a pipe. Binary-looking responses are not printed to a terminal unless
+you explicitly choose an output path with `-o file`, force raw stdout with
 `-o - > file`, or disable terminal image rendering with `--image off`.
 
 ## Examples

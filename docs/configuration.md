@@ -151,7 +151,9 @@ stdout is a terminal, `on` forces pager use, and `off` disables the pager. When
 paging is enabled, fetch uses `$PAGER` if it is set. Set `NO_PAGER` to disable
 the default `auto` pager. If `$PAGER` is unset, fetch falls back to `less -FIRX`;
 when `$LESS` is set, fetch runs `less` without adding its default flags so your
-`LESS` options apply.
+`LESS` options apply. `$PAGER` is split with POSIX shell-style quoting, but
+fetch launches the pager directly and does not interpret shell operators such as
+pipes or redirects.
 
 ```ini
 # Disable pager
