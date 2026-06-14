@@ -327,6 +327,9 @@ Compression modes:
 - `zstd` requests and decompresses zstd only
 - `off` sends no automatic `Accept-Encoding` header and leaves compressed response bodies untouched
 
+Output files receive decoded/decompressed bodies by default too. Use
+`--compress off` for byte-for-byte downloads of `.gz`, `.br`, or `.zst` assets.
+
 For SSE (`text/event-stream`) responses in `auto` mode, `fetch` retries without
 `Accept-Encoding` when the server replies with compressed content. This avoids
 common buffering behavior that prevents events from appearing as they arrive.
@@ -336,6 +339,7 @@ Using `off` is useful when:
 - Testing compression behavior
 - Server has compression bugs
 - You want to see raw compressed data
+- You need a byte-for-byte output-file download
 
 ## Range Requests
 

@@ -296,7 +296,9 @@ Write response body to a file:
 fetch -o response.json example.com/api/data
 ```
 
-Formatting is disabled when writing to a file.
+Formatting is disabled when writing to a file, but compression decoding is still
+enabled by default. If the response uses `Content-Encoding` for a `.gz`, `.br`,
+or `.zst` asset, use `--compress off` for byte-for-byte downloads.
 
 ### `-o -` (Stdout)
 
@@ -407,10 +409,10 @@ fetch --format on example.com/api | tee response.json
 fetch --format on --color on example.com/api | less -R
 ```
 
-### Raw Binary Download
+### Byte-for-Byte Download
 
 ```sh
-fetch -o archive.zip example.com/download.zip
+fetch --compress off -o archive.tar.gz example.com/archive.tar.gz
 ```
 
 ## See Also

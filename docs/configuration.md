@@ -509,6 +509,10 @@ compress = zstd
 compress = off
 ```
 
+Output files receive decoded/decompressed bodies by default too. Use
+`compress = off` or `--compress off` for byte-for-byte downloads of `.gz`,
+`.br`, or `.zst` assets.
+
 When `compress = auto`, compressed SSE (`text/event-stream`) responses are
 retried without `Accept-Encoding` so events can be displayed as they arrive.
 

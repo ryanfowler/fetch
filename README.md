@@ -130,6 +130,9 @@ fetch --pager off https://httpbin.org/json
 
 # Save a response and copy the decoded body to the clipboard
 fetch --copy -o response.json https://httpbin.org/json
+
+# Preserve response bytes for compressed downloads
+fetch --compress off -o archive.tar.gz https://example.com/archive.tar.gz
 ```
 
 ## Documentation
