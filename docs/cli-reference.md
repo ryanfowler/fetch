@@ -10,11 +10,13 @@ fetch [OPTIONS] [URL]
 
 ## URL Handling
 
-When no scheme is provided, `fetch` defaults to HTTPS. Loopback addresses (`localhost`, `127.0.0.1`) default to HTTP.
+When no scheme is provided, `fetch` defaults to HTTPS for hostnames. `localhost` and all IP literals default to HTTP.
 
 ```sh
 fetch example.com          # https://example.com
 fetch localhost:3000       # http://localhost:3000
+fetch 192.168.1.1:8080     # http://192.168.1.1:8080
+fetch 1.1.1.1              # http://1.1.1.1
 fetch http://example.com   # Force HTTP
 ```
 
