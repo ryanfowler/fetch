@@ -122,7 +122,7 @@ where
     F: FnMut(&str) -> Option<String>,
 {
     if let Some(value) = get_env("PAGER") {
-        let args = split_command_args(&value);
+        let args = shlex::split(&value).unwrap_or_default();
         if let Some((program, args)) = args.split_first() {
             return PagerCommand {
                 program: program.clone(),
@@ -141,43 +141,6 @@ where
         },
         is_fallback: true,
     }
-}
-
-fn split_command_args(value: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut cur = Vec::new();
-    let bytes = value.trim().as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() {
-        match bytes[idx] {
-            b' ' | b'\t' => {
-                if !cur.is_empty() {
-                    args.push(String::from_utf8_lossy(&cur).into_owned());
-                    cur.clear();
-                }
-                idx += 1;
-            }
-            b'\'' | b'"' => {
-                let quote = bytes[idx];
-                idx += 1;
-                while idx < bytes.len() && bytes[idx] != quote {
-                    cur.push(bytes[idx]);
-                    idx += 1;
-                }
-                if idx < bytes.len() {
-                    idx += 1;
-                }
-            }
-            ch => {
-                cur.push(ch);
-                idx += 1;
-            }
-        }
-    }
-    if !cur.is_empty() {
-        args.push(String::from_utf8_lossy(&cur).into_owned());
-    }
-    args
 }
 
 pub(super) fn response_header_content_type(headers: &HeaderMap) -> ContentType {
@@ -294,6 +257,38 @@ mod tests {
                 program: "/usr/local/bin/my pager".to_string(),
                 args: vec!["--plain".to_string()],
                 is_fallback: false,
+            }
+        );
+    }
+
+    #[test]
+    fn pager_command_uses_shlex_for_pager_environment() {
+        let got = pager_command_with_env(|name| match name {
+            "PAGER" => Some(r#"less --prompt='fetch > ' --pattern=a\ b"#.to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            got,
+            PagerCommand {
+                program: "less".to_string(),
+                args: vec!["--prompt=fetch > ".to_string(), "--pattern=a b".to_string(),],
+                is_fallback: false,
+            }
+        );
+    }
+
+    #[test]
+    fn pager_command_falls_back_for_invalid_pager_environment() {
+        let got = pager_command_with_env(|name| match name {
+            "PAGER" => Some(r#"less "unterminated"#.to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            got,
+            PagerCommand {
+                program: "less".to_string(),
+                args: vec!["-FIRX".to_string()],
+                is_fallback: true,
             }
         );
     }
