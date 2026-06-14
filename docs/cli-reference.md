@@ -223,7 +223,9 @@ fetch --copy -o response.json example.com/api/data
 
 ### `--discard`
 
-Discard the response body. Useful for checking status codes, viewing headers (with `-v`), or measuring timing (with `--timing`) without printing the response body.
+Do not print the response body. Useful for checking status codes, viewing headers (with `-v`), or measuring timing (with `--timing`) without writing the body to stdout.
+
+`--discard` still reads the response body to completion. Use `-m HEAD` when you want to ask the server to avoid transferring a response body.
 
 Cannot be combined with `--output`, `--remote-name`, or `--copy`.
 
@@ -231,6 +233,7 @@ Cannot be combined with `--output`, `--remote-name`, or `--copy`.
 fetch --discard example.com
 fetch --discard -v example.com              # View headers only
 fetch --discard --timing example.com        # Measure timing only
+fetch -m HEAD example.com                   # Avoid body transfer when supported
 ```
 
 ## Formatting Options

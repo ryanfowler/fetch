@@ -213,7 +213,7 @@ pub struct Cli {
     #[arg(
         long,
         conflicts_with_all = ["copy", "output", "remote_name"],
-        help = "Discard the response body"
+        help = "Do not print the response body"
     )]
     pub discard: bool,
 
