@@ -13,10 +13,11 @@ This guide helps diagnose and fix common issues with `fetch`.
 | 4         | Client error (HTTP 4xx)              |
 | 5         | Server error (HTTP 5xx)              |
 | 6         | Other HTTP status                    |
+| 130       | Interrupted by Ctrl-C/SIGINT         |
 
 Unlike curl's default behavior, HTTP 4xx/5xx and other non-2xx/3xx responses
 exit nonzero; use `--ignore-status` to ignore HTTP status when choosing the
-exit code. gRPC status errors always exit 1.
+exit code. Interrupted requests exit 130. gRPC status errors always exit 1.
 
 ### Ignore HTTP Status
 

@@ -176,7 +176,7 @@ fn image_rendering_pty_go_cases() {
 
 #[cfg(unix)]
 #[test]
-fn request_ctrl_c_exits_successfully() {
+fn request_ctrl_c_exits_interrupted() {
     let (started_tx, started_rx) = mpsc::channel();
     let release = Arc::new(AtomicUsize::new(0));
     let release_for_handler = Arc::clone(&release);
@@ -215,7 +215,7 @@ fn request_ctrl_c_exits_successfully() {
         .expect("wait fetch after SIGINT");
     release.store(1, Ordering::SeqCst);
     let output = child.wait_with_output().expect("collect signal output");
-    assert_eq!(status.code(), Some(0));
+    assert_eq!(status.code(), Some(130));
     assert!(
         output.stdout.is_empty(),
         "stdout = {:?}, want empty",

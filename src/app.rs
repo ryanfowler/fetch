@@ -12,6 +12,7 @@ use crate::error::{FetchError, write_cli_error_with_color, write_runtime_error_w
 
 const CURL_DEFAULT_MAX_REDIRECTS: usize = 50;
 const MAX_MATERIALIZED_CURL_DATA_BYTES: usize = 16 * 1024 * 1024;
+const INTERRUPTED_EXIT_CODE: i32 = 130;
 
 pub async fn main_entry() -> i32 {
     crate::tls::install_default_crypto_provider();
@@ -42,7 +43,7 @@ pub async fn main_entry() -> i32 {
         },
         signal = shutdown_signal() => {
             match signal {
-                ShutdownSignal::Interrupt => 0,
+                ShutdownSignal::Interrupt => INTERRUPTED_EXIT_CODE,
                 ShutdownSignal::Terminate(message) => {
                     write_runtime_error_with_color(FetchError::Runtime(message), signal_color.as_deref());
                     1
