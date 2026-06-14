@@ -1,6 +1,7 @@
 use super::*;
 
 use std::collections::HashSet;
+use std::net::IpAddr;
 
 pub(crate) fn load_session(cli: &Cli) -> Result<Option<crate::session::Session>, FetchError> {
     let Some(name) = cli.session.as_deref() else {
@@ -287,7 +288,7 @@ fn normalize_explicit_url(url: Url) -> Result<Url, FetchError> {
 
 fn normalize_schemeless_url(raw: &str) -> Result<Url, FetchError> {
     let probe = Url::parse(&format!("http://{raw}"))?;
-    let scheme = if probe.host_str().is_some_and(is_loopback) {
+    let scheme = if probe.host_str().is_some_and(defaults_to_http) {
         "http"
     } else {
         "https"
@@ -316,6 +317,18 @@ pub(super) fn is_loopback(host: &str) -> bool {
             .parse::<std::net::IpAddr>()
             .map(|ip| ip.is_loopback())
             .unwrap_or(false)
+}
+
+fn defaults_to_http(host: &str) -> bool {
+    is_loopback(host) || ip_literal(host).is_some()
+}
+
+fn ip_literal(host: &str) -> Option<IpAddr> {
+    let host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    host.parse::<IpAddr>().ok()
 }
 
 pub(crate) fn apply_query(url: &mut Url, query: &[String]) {
@@ -416,11 +429,23 @@ mod tests {
     }
 
     #[test]
-    fn default_scheme_non_loopback_ip_literals_are_https() {
+    fn default_scheme_ip_literals_are_http() {
         let cases = [
-            ("192.168.1.1:8080/path", "https://192.168.1.1:8080/path"),
-            ("10.0.0.1/path", "https://10.0.0.1/path"),
-            ("[2001:db8::1]/path", "https://[2001:db8::1]/path"),
+            ("10.0.0.1/path", "http://10.0.0.1/path"),
+            ("172.16.0.1/path", "http://172.16.0.1/path"),
+            ("172.31.255.255/path", "http://172.31.255.255/path"),
+            ("172.32.0.1/path", "http://172.32.0.1/path"),
+            ("192.168.1.1:8080/path", "http://192.168.1.1:8080/path"),
+            ("169.254.10.20/path", "http://169.254.10.20/path"),
+            ("1.1.1.1/path", "http://1.1.1.1/path"),
+            ("[fc00::1]/path", "http://[fc00::1]/path"),
+            ("[fd00::1]/path", "http://[fd00::1]/path"),
+            ("[fe80::1]/path", "http://[fe80::1]/path"),
+            ("[2001:db8::1]/path", "http://[2001:db8::1]/path"),
+            (
+                "[2001:4860:4860::8888]/path",
+                "http://[2001:4860:4860::8888]/path",
+            ),
         ];
 
         for (raw, want) in cases {

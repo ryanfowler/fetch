@@ -184,6 +184,8 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - Body-producing flags (`--data`, `--json`, `--xml`, `--form`,
   `--multipart`, and `--edit`) infer `POST` when `--method` is omitted.
   Explicit methods still win, including `-m GET` with a body.
+- Schemeless URLs default to HTTPS for hostnames, but `localhost` and all IP
+  literals default to HTTP.
 
 Retryable requests use replayable request bodies so retries and 307/308 redirects can resend data without holding unrelated state.
 Multipart `-F` request bodies are produced with a stable boundary so redirected requests preserve the original body shape.

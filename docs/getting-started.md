@@ -63,14 +63,15 @@ When no scheme is provided, `fetch` defaults to HTTPS:
 
 ```sh
 fetch example.com        # Uses https://example.com
-fetch 192.168.1.1:8080   # Uses https://192.168.1.1:8080
 ```
 
-Loopback addresses default to HTTP for local development:
+Loopback addresses and IP literals default to HTTP:
 
 ```sh
 fetch localhost:3000     # Uses http://localhost:3000
 fetch 127.0.0.1:8080     # Uses http://127.0.0.1:8080
+fetch 192.168.1.1:8080   # Uses http://192.168.1.1:8080
+fetch 1.1.1.1            # Uses http://1.1.1.1
 ```
 
 You can always specify the scheme explicitly:
