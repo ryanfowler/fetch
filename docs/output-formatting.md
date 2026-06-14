@@ -398,13 +398,13 @@ fetch --format off example.com/api | jq '.users[0]'
 ### Save Pretty JSON
 
 ```sh
-fetch example.com/api | tee response.json
+fetch --format on example.com/api | tee response.json
 ```
 
 ### Force Colors in Pipe
 
 ```sh
-fetch --color on example.com/api | less -R
+fetch --format on --color on example.com/api | less -R
 ```
 
 ### Raw Binary Download
