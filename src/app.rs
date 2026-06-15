@@ -812,7 +812,11 @@ fn apply_proto_restriction(raw_url: &str, allowed_proto: &str) -> Result<String,
     }
 
     let (allow_http, allow_https) = from_curl::parse_allowed_proto(allowed_proto);
-    if let Some((scheme, _rest)) = raw_url.split_once("://") {
+    if crate::http::has_authority_scheme(raw_url) {
+        let scheme = raw_url
+            .split_once(':')
+            .map(|(scheme, _rest)| scheme)
+            .unwrap_or_default();
         if scheme.eq_ignore_ascii_case("http") {
             if !allow_http {
                 return Err(
@@ -1401,6 +1405,18 @@ mod tests {
             (
                 "curl --proto '=http' example.com/path",
                 "http://example.com/path",
+            ),
+            (
+                "curl --proto '=http' example.com/path://still",
+                "http://example.com/path://still",
+            ),
+            (
+                "curl --proto '=http' example.com/path?next=https://other",
+                "http://example.com/path?next=https://other",
+            ),
+            (
+                "curl --proto '=http' example.com/path#next=https://other",
+                "http://example.com/path#next=https://other",
             ),
         ] {
             let mut cli = Cli::try_parse_from(["fetch", "--from-curl", command]).unwrap();

@@ -255,7 +255,7 @@ pub(crate) fn normalize_url(raw: &str) -> Result<Url, FetchError> {
     }
 }
 
-fn has_authority_scheme(raw: &str) -> bool {
+pub(crate) fn has_authority_scheme(raw: &str) -> bool {
     let Some(colon) = raw.find(':') else {
         return false;
     };
