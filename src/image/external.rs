@@ -1,14 +1,15 @@
 use std::env;
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ::image::DynamicImage;
+use crate::duration::format_go_duration;
 
 use super::ImageError;
-use super::decode::decode_image_std;
+use super::decode::{DecodedImage, decode_image_std};
+use super::orientation::orient_image;
 
 const TEMP_IMAGE_DIR_CREATE_ATTEMPTS: u32 = 100;
 const IMAGE_PATH_ARG: &str = "IMAGE_PATH";
@@ -20,6 +21,7 @@ struct Adaptor {
     name: &'static str,
     args: &'static [&'static str],
     env: &'static [(&'static str, &'static str)],
+    orientation_applied: bool,
 }
 
 const ADAPTORS: &[Adaptor] = &[
@@ -27,11 +29,13 @@ const ADAPTORS: &[Adaptor] = &[
         name: "vips",
         args: &["copy", IMAGE_PATH_ARG, ".jpeg"],
         env: &[("VIPS_MAX_MEM", "512MB")],
+        orientation_applied: false,
     },
     Adaptor {
         name: "magick",
         args: &[IMAGE_PATH_ARG, "-flatten", "-auto-orient", "jpeg:-"],
         env: &[("MAGICK_MEMORY_LIMIT", "512MiB")],
+        orientation_applied: true,
     },
     Adaptor {
         name: "ffmpeg",
@@ -53,23 +57,24 @@ const ADAPTORS: &[Adaptor] = &[
             "pipe:1",
         ],
         env: &[],
+        orientation_applied: true,
     },
 ];
 
-pub(crate) fn decode_with_adaptors(bytes: &[u8]) -> Result<DynamicImage, ImageError> {
+pub(crate) fn decode_with_adaptors(bytes: &[u8]) -> Result<DecodedImage, ImageError> {
     let dir = TempImageDir::create()?;
     let image_path = dir.path.join("fetch-temp-image");
     write_temp_image_file(&image_path, bytes)?;
 
     for adaptor in ADAPTORS {
-        if let Ok(img) = decode_adaptor(&image_path, *adaptor) {
-            return Ok(img);
+        if let Ok(decoded) = decode_adaptor(&image_path, *adaptor) {
+            return Ok(decoded);
         }
     }
     Err(ImageError::Message("unable to decode image".to_string()))
 }
 
-fn decode_adaptor(path: &Path, adaptor: Adaptor) -> Result<DynamicImage, ImageError> {
+fn decode_adaptor(path: &Path, adaptor: Adaptor) -> Result<DecodedImage, ImageError> {
     let mut cmd = Command::new(adaptor.name);
     for arg in adaptor.args {
         if *arg == IMAGE_PATH_ARG {
@@ -94,16 +99,32 @@ fn decode_adaptor(path: &Path, adaptor: Adaptor) -> Result<DynamicImage, ImageEr
             adaptor.name, ADAPTOR_STDOUT_CAP
         )));
     }
-    decode_image_std(&output.stdout)
+    let img = decode_image_std(&output.stdout)?;
+    let img = if adaptor.orientation_applied {
+        img
+    } else {
+        orient_image(&output.stdout, img)
+    };
+    Ok(DecodedImage::already_oriented(img))
 }
 
+#[derive(Debug)]
 struct AdaptorOutput {
     status: ExitStatus,
     stdout: Vec<u8>,
     stdout_truncated: bool,
 }
 
-fn run_adaptor(mut cmd: Command, name: &str) -> Result<AdaptorOutput, ImageError> {
+fn run_adaptor(cmd: Command, name: &str) -> Result<AdaptorOutput, ImageError> {
+    run_adaptor_with_timeout(cmd, name, ADAPTOR_TIMEOUT)
+}
+
+fn run_adaptor_with_timeout(
+    mut cmd: Command,
+    name: &str,
+    timeout: Duration,
+) -> Result<AdaptorOutput, ImageError> {
+    prepare_adaptor_command(&mut cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -113,19 +134,20 @@ fn run_adaptor(mut cmd: Command, name: &str) -> Result<AdaptorOutput, ImageError
         .take()
         .ok_or_else(|| ImageError::Message(format!("{name} stdout unavailable")))?;
     let stdout_reader = thread::spawn(move || read_capped(stdout, ADAPTOR_STDOUT_CAP));
-    let deadline = Instant::now() + ADAPTOR_TIMEOUT;
+    let deadline = Instant::now() + timeout;
 
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
+            terminate_adaptor(&mut child);
+            if stdout_reader.is_finished() {
+                let _ = stdout_reader.join();
+            }
             return Err(ImageError::Message(format!(
-                "{name} timed out after {} seconds",
-                ADAPTOR_TIMEOUT.as_secs()
+                "{name} timed out after {}",
+                format_go_duration(timeout)
             )));
         }
         thread::sleep(Duration::from_millis(10));
@@ -140,6 +162,35 @@ fn run_adaptor(mut cmd: Command, name: &str) -> Result<AdaptorOutput, ImageError
         stdout_truncated,
     })
 }
+
+#[cfg(unix)]
+fn prepare_adaptor_command(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn prepare_adaptor_command(_cmd: &mut Command) {}
+
+fn terminate_adaptor(child: &mut Child) {
+    kill_adaptor_process_group(child);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn kill_adaptor_process_group(child: &Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // The adapter is spawned as a process-group leader, so this also catches helpers it starts.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_adaptor_process_group(_child: &Child) {}
 
 fn read_capped<R: Read>(mut reader: R, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
     let mut out = Vec::new();
@@ -282,5 +333,24 @@ mod tests {
         let (out, truncated) = read_capped(Cursor::new(b"abc"), 4).unwrap();
         assert_eq!(out, b"abc");
         assert!(!truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adaptor_timeout_does_not_wait_for_inherited_stdout() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 5 >&1 & sleep 5"]);
+        let started_at = Instant::now();
+
+        let err = run_adaptor_with_timeout(command, "fake-adaptor", Duration::from_millis(100))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("fake-adaptor timed out after"), "{err}");
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "adapter timeout took {:?}",
+            started_at.elapsed()
+        );
     }
 }

@@ -15,10 +15,11 @@ pub(crate) fn write_blocks(
 ) -> Vec<u8> {
     let (cols, rows) = image_block_output_dimensions(img, term_width, term_height);
     let target_width = cols.max(1);
-    let target_height = (rows * 2).max(1);
+    let target_height = rows.saturating_mul(2).max(1);
     let dst = resize_image(img, target_width, target_height);
 
     let mut out = String::new();
+    let mut ansi = AnsiState::default();
     for row in 0..rows {
         let top_y = row * 2;
         let bottom_y = top_y + 1;
@@ -29,11 +30,11 @@ pub(crate) fn write_blocks(
             } else {
                 None
             };
-            write_block(&mut out, top, bottom, true_color);
+            write_block(&mut out, &mut ansi, top, bottom, true_color);
         }
+        ansi.reset(&mut out);
         out.push('\n');
     }
-    out.push_str("\x1b[0m");
     out.into_bytes()
 }
 
@@ -43,15 +44,20 @@ fn image_block_output_dimensions(
     term_height: u32,
 ) -> (u32, u32) {
     let cols = term_width.max(1);
-    let rows = (2 * term_height * 4 / 5).max(1);
+    let rows = scaled_u32(term_height, 8, 5).max(1);
     let (width, height) = img.dimensions();
+    if width == 0 || height == 0 {
+        return (1, 1);
+    }
     if width <= cols && height <= rows {
         return (width.max(1), (height / 2 + height % 2).max(1));
     }
-    if cols.saturating_mul(height) <= width.saturating_mul(rows) {
-        return (cols, ((height * cols) / width / 2).max(1));
+    if product_u64(cols, height) <= product_u64(width, rows) {
+        let height_pixels = product_u64(height, cols) / u64::from(width);
+        return (cols, u64_to_u32(height_pixels / 2).max(1));
     }
-    (((width * rows) / height).max(1), (rows / 2).max(1))
+    let scaled_width = product_u64(width, rows) / u64::from(height);
+    (u64_to_u32(scaled_width).max(1), (rows / 2).max(1))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,27 +80,75 @@ fn pixel_to_color(pixel: Rgba<u8>) -> Option<RgbColor> {
 
 fn write_block(
     out: &mut String,
+    ansi: &mut AnsiState,
     top: Option<RgbColor>,
     bottom: Option<RgbColor>,
     true_color: bool,
 ) {
     match (top, bottom) {
-        (None, None) => out.push(' '),
+        (None, None) => {
+            ansi.clear_fg(out);
+            ansi.clear_bg(out);
+            out.push(' ');
+        }
         (Some(top), None) => {
-            ansi_fg(out, top, true_color);
+            ansi.clear_bg(out);
+            ansi.set_fg(out, top, true_color);
             out.push('▀');
-            out.push_str("\x1b[0m");
         }
         (None, Some(bottom)) => {
-            ansi_fg(out, bottom, true_color);
+            ansi.clear_bg(out);
+            ansi.set_fg(out, bottom, true_color);
             out.push('▄');
-            out.push_str("\x1b[0m");
         }
         (Some(top), Some(bottom)) => {
-            ansi_bg(out, top, true_color);
-            ansi_fg(out, bottom, true_color);
+            ansi.set_bg(out, top, true_color);
+            ansi.set_fg(out, bottom, true_color);
             out.push('▄');
+        }
+    }
+}
+
+#[derive(Default)]
+struct AnsiState {
+    fg: Option<RgbColor>,
+    bg: Option<RgbColor>,
+}
+
+impl AnsiState {
+    fn set_fg(&mut self, out: &mut String, color: RgbColor, true_color: bool) {
+        if self.fg == Some(color) {
+            return;
+        }
+        ansi_fg(out, color, true_color);
+        self.fg = Some(color);
+    }
+
+    fn set_bg(&mut self, out: &mut String, color: RgbColor, true_color: bool) {
+        if self.bg == Some(color) {
+            return;
+        }
+        ansi_bg(out, color, true_color);
+        self.bg = Some(color);
+    }
+
+    fn clear_fg(&mut self, out: &mut String) {
+        if self.fg.take().is_some() {
+            out.push_str("\x1b[39m");
+        }
+    }
+
+    fn clear_bg(&mut self, out: &mut String) {
+        if self.bg.take().is_some() {
+            out.push_str("\x1b[49m");
+        }
+    }
+
+    fn reset(&mut self, out: &mut String) {
+        if self.fg.is_some() || self.bg.is_some() {
             out.push_str("\x1b[0m");
+            self.fg = None;
+            self.bg = None;
         }
     }
 }
@@ -206,12 +260,25 @@ fn bool_to_int(value: bool) -> u8 {
     u8::from(value)
 }
 
+fn scaled_u32(value: u32, numerator: u64, denominator: u64) -> u32 {
+    let scaled = u64::from(value).saturating_mul(numerator) / denominator.max(1);
+    u64_to_u32(scaled)
+}
+
+fn product_u64(left: u32, right: u32) -> u64 {
+    u64::from(left) * u64::from(right)
+}
+
+fn u64_to_u32(value: u64) -> u32 {
+    value.min(u64::from(u32::MAX)) as u32
+}
+
 fn resize_for_term(img: &DynamicImage, term_width_px: u32, term_height_px: u32) -> DynamicImage {
     if term_width_px == 0 || term_height_px == 0 {
         return img.clone();
     }
 
-    let term_height_px = (term_height_px * 4 / 5).max(1);
+    let term_height_px = scaled_u32(term_height_px, 4, 5).max(1);
     let (width, height) = img.dimensions();
     if width <= term_width_px && height <= term_height_px {
         return img.clone();
@@ -284,7 +351,21 @@ mod tests {
     #[test]
     fn write_blocks_uses_foreground_and_background_colors() {
         let out = String::from_utf8(write_blocks(&img_1x2(), 1, 1, true)).unwrap();
-        assert_eq!(out, "\x1b[48;2;255;0;0m\x1b[38;2;0;0;255m▄\x1b[0m\n\x1b[0m");
+        assert_eq!(out, "\x1b[48;2;255;0;0m\x1b[38;2;0;0;255m▄\x1b[0m\n");
+    }
+
+    #[test]
+    fn image_dimension_math_handles_extreme_terminal_sizes() {
+        let img = DynamicImage::ImageRgba8(RgbaImage::new(8192, 8192));
+
+        assert_eq!(image_block_output_dimensions(&img, u32::MAX, 1), (1, 1));
+        assert_eq!(
+            image_block_output_dimensions(&img, u32::MAX, u32::MAX),
+            (8192, 4096)
+        );
+
+        let resized = resize_for_term(&img, u32::MAX, u32::MAX);
+        assert_eq!(resized.dimensions(), (8192, 8192));
     }
 
     #[test]
