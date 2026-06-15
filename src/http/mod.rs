@@ -68,7 +68,8 @@ mod retry;
 pub(crate) mod transport;
 
 pub(crate) use metadata::{
-    apply_headers, apply_query, load_session, normalize_url, request_target, save_session,
+    apply_headers, apply_query, has_authority_scheme, load_session, normalize_url, request_target,
+    save_session,
 };
 pub(crate) use request::{
     RequestBody, RequestBodyPayload, apply_aws_sigv4, apply_builder_authorization_headers,
