@@ -15,12 +15,42 @@ pub enum DecodeMode {
     External,
 }
 
+#[derive(Debug)]
+pub(crate) struct DecodedImage {
+    image: DynamicImage,
+    orientation_applied: bool,
+}
+
+impl DecodedImage {
+    pub(crate) fn needs_orientation(image: DynamicImage) -> Self {
+        Self {
+            image,
+            orientation_applied: false,
+        }
+    }
+
+    pub(crate) fn already_oriented(image: DynamicImage) -> Self {
+        Self {
+            image,
+            orientation_applied: true,
+        }
+    }
+
+    pub(crate) fn orientation_applied(&self) -> bool {
+        self.orientation_applied
+    }
+
+    pub(crate) fn into_image(self) -> DynamicImage {
+        self.image
+    }
+}
+
 pub(crate) fn decode_image(
     bytes: &[u8],
     decode_mode: DecodeMode,
-) -> Result<DynamicImage, ImageError> {
+) -> Result<DecodedImage, ImageError> {
     match decode_image_std(bytes) {
-        Ok(img) => Ok(img),
+        Ok(img) => Ok(DecodedImage::needs_orientation(img)),
         Err(err) if decode_mode == DecodeMode::BuiltIn => Err(err),
         Err(err) => match decode_with_adaptors(bytes) {
             Ok(img) => Ok(img),

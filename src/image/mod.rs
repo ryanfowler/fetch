@@ -41,7 +41,7 @@ fn render_with_options(
     decode_mode: DecodeMode,
     options: RenderOptions,
 ) -> Result<Vec<u8>, ImageError> {
-    let img = orient_image(bytes, decode_image(bytes, decode_mode)?);
+    let img = oriented_decoded_image(bytes, decode_image(bytes, decode_mode)?);
     if img.width() == 0 || img.height() == 0 {
         return Ok(Vec::new());
     }
@@ -57,10 +57,19 @@ fn render_with_options(
     }
 }
 
+fn oriented_decoded_image(bytes: &[u8], decoded: decode::DecodedImage) -> ::image::DynamicImage {
+    if decoded.orientation_applied() {
+        decoded.into_image()
+    } else {
+        orient_image(bytes, decoded.into_image())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::decode::DecodedImage;
     use super::terminal::{Protocol, RenderOptions, TerminalSize};
-    use super::{DecodeMode, render_with_options};
+    use super::{DecodeMode, oriented_decoded_image, render_with_options};
     use ::image::codecs::png::PngEncoder;
     use ::image::{ColorType, DynamicImage, ImageEncoder, Rgba, RgbaImage};
 
@@ -105,7 +114,68 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(out).unwrap(),
-            "\x1b[48;2;255;0;0m\x1b[38;2;0;0;255m▄\x1b[0m\n\x1b[0m"
+            "\x1b[48;2;255;0;0m\x1b[38;2;0;0;255m▄\x1b[0m\n"
         );
+    }
+
+    #[test]
+    fn built_in_decode_applies_input_orientation_once() {
+        let img = DynamicImage::ImageRgba8({
+            let mut img = RgbaImage::new(2, 1);
+            img.put_pixel(0, 0, Rgba([1, 0, 0, 255]));
+            img.put_pixel(1, 0, Rgba([2, 0, 0, 255]));
+            img
+        });
+
+        let oriented = oriented_decoded_image(
+            &jpeg_with_orientation(6),
+            DecodedImage::needs_orientation(img),
+        )
+        .to_rgba8();
+
+        assert_eq!(oriented.dimensions(), (1, 2));
+        assert_eq!(oriented.get_pixel(0, 0)[0], 1);
+        assert_eq!(oriented.get_pixel(0, 1)[0], 2);
+    }
+
+    #[test]
+    fn external_decode_does_not_apply_input_orientation_twice() {
+        let already_oriented = DynamicImage::ImageRgba8({
+            let mut img = RgbaImage::new(1, 2);
+            img.put_pixel(0, 0, Rgba([1, 0, 0, 255]));
+            img.put_pixel(0, 1, Rgba([2, 0, 0, 255]));
+            img
+        });
+
+        let got = oriented_decoded_image(
+            &jpeg_with_orientation(6),
+            DecodedImage::already_oriented(already_oriented),
+        )
+        .to_rgba8();
+
+        assert_eq!(got.dimensions(), (1, 2));
+        assert_eq!(got.get_pixel(0, 0)[0], 1);
+        assert_eq!(got.get_pixel(0, 1)[0], 2);
+    }
+
+    fn jpeg_with_orientation(orientation: u16) -> Vec<u8> {
+        let mut app1 = Vec::new();
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(&0x4d4d_u16.to_be_bytes());
+        app1.extend_from_slice(&42_u16.to_be_bytes());
+        app1.extend_from_slice(&8_u32.to_be_bytes());
+        app1.extend_from_slice(&1_u16.to_be_bytes());
+        app1.extend_from_slice(&0x0112_u16.to_be_bytes());
+        app1.extend_from_slice(&3_u16.to_be_bytes());
+        app1.extend_from_slice(&1_u32.to_be_bytes());
+        app1.extend_from_slice(&orientation.to_be_bytes());
+        app1.extend_from_slice(&0_u16.to_be_bytes());
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0xffd8_u16.to_be_bytes());
+        bytes.extend_from_slice(&0xffe1_u16.to_be_bytes());
+        bytes.extend_from_slice(&u16::try_from(app1.len() + 2).unwrap().to_be_bytes());
+        bytes.extend_from_slice(&app1);
+        bytes
     }
 }
