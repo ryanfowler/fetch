@@ -278,6 +278,13 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     let direct_cli_sources = DirectCliSources::capture(cli);
 
     apply_from_curl(cli)?;
+    let direct_inspection_ignored_flags = if cli.inspect_dns {
+        crate::dns::inspect::ignored_inspection_flags(cli)
+    } else if cli.inspect_tls {
+        crate::tls::inspect::ignored_inspection_flags(cli)
+    } else {
+        Vec::new()
+    };
     let config_path = crate::config::apply(cli)?;
     crate::config::validate(cli)?;
     crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?;
@@ -307,11 +314,11 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     }
 
     if cli.inspect_dns {
-        return crate::dns::inspect::execute(cli).await;
+        return crate::dns::inspect::execute(cli, &direct_inspection_ignored_flags).await;
     }
 
     if cli.inspect_tls {
-        return crate::tls::inspect::execute(cli).await;
+        return crate::tls::inspect::execute(cli, &direct_inspection_ignored_flags).await;
     }
 
     let is_websocket = cli

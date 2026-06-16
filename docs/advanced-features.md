@@ -51,6 +51,8 @@ fetch --inspect-dns example.com
 fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 ```
 
+Request-only CLI flags warn that no HTTP request will be sent and those flags have no effect when used with `--inspect-dns`; config-file defaults do not trigger this warning.
+
 The output shows the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, address count, record count, lookup duration, and per-record TTLs. UDP DNS inspection advertises EDNS(0) and retries truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, `fetch` warns that the results are incomplete and exits with a non-zero status.
 
 ### Configuration File
@@ -264,7 +266,7 @@ Output includes:
 
 Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
 
-HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning when used with `--inspect-tls`.
+Request-only CLI flags (e.g. `--data`, `--timing`, `--grpc`) warn that no HTTP request will be sent and those flags have no effect when used with `--inspect-tls`; config-file defaults do not trigger this warning.
 
 `--dns-server` applies to TLS inspection too, so certificate diagnostics can use
 the same UDP or DNS-over-HTTPS resolver override as normal requests. When

@@ -151,13 +151,15 @@ enum ResolverTarget {
     Doh { label: String, url: Url },
 }
 
-pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
+pub async fn execute(cli: &Cli, ignored_flags: &[&'static str]) -> Result<i32, FetchError> {
     let request_start = Instant::now();
     let url = crate::http::normalize_url(cli.url.as_deref().expect("URL checked by app"))?;
-    let ignored = ignored_inspection_flags(cli);
-    if !ignored.is_empty() && !cli.silent {
+    if !ignored_flags.is_empty() && !cli.silent {
         write_warning_with_separator_with_color(
-            format!("--inspect-dns ignores: {}", ignored.join(", ")),
+            format!(
+                "No HTTP request will be sent; these flags have no effect: {}",
+                ignored_flags.join(", ")
+            ),
             cli.color.as_deref(),
         );
     }
@@ -1015,7 +1017,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
+pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     let mut ignored = Vec::new();
     if cli.data.is_some() || cli.json.is_some() || cli.xml.is_some() {
         ignored.push("--data/--json/--xml");
@@ -1035,6 +1037,15 @@ fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     if cli.grpc_list {
         ignored.push("--grpc-list");
     }
+    if cli.proto_desc.is_some() {
+        ignored.push("--proto-desc");
+    }
+    if !cli.proto_files.is_empty() {
+        ignored.push("--proto-file");
+    }
+    if !cli.proto_imports.is_empty() {
+        ignored.push("--proto-import");
+    }
     if cli.output.is_some() {
         ignored.push("--output");
     }
@@ -1046,6 +1057,9 @@ fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     }
     if cli.copy {
         ignored.push("--copy");
+    }
+    if cli.clobber {
+        ignored.push("--clobber");
     }
     if cli.method.is_some() {
         ignored.push("--method");
@@ -1065,6 +1079,12 @@ fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     if cli.retry() > 0 {
         ignored.push("--retry");
     }
+    if cli.retry_delay.is_some() {
+        ignored.push("--retry-delay");
+    }
+    if cli.redirects.is_some() {
+        ignored.push("--redirects");
+    }
     if !cli.ranges.is_empty() {
         ignored.push("--range");
     }
@@ -1079,6 +1099,9 @@ fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     }
     if cli.unix.is_some() {
         ignored.push("--unix");
+    }
+    if cli.http.is_some() {
+        ignored.push("--http");
     }
     if cli.inspect_tls {
         ignored.push("--inspect-tls");
@@ -1113,8 +1136,29 @@ fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     if cli.insecure {
         ignored.push("--insecure");
     }
+    if cli.compress.is_some() || cli.no_encode {
+        ignored.push("--compress/--no-encode");
+    }
     if cli.format.is_some() {
         ignored.push("--format");
+    }
+    if cli.image.is_some() {
+        ignored.push("--image");
+    }
+    if cli.pager.is_some() {
+        ignored.push("--pager");
+    }
+    if cli.ignore_status {
+        ignored.push("--ignore-status");
+    }
+    if cli.sort_headers {
+        ignored.push("--sort-headers");
+    }
+    if cli.ws_interactive.is_some() {
+        ignored.push("--ws-interactive");
+    }
+    if cli.ws_message_mode.is_some() {
+        ignored.push("--ws-message-mode");
     }
     if cli.dry_run {
         ignored.push("--dry-run");
@@ -1588,17 +1632,41 @@ mod tests {
             "-d",
             "body",
             "--grpc",
+            "--proto-file",
+            "Cargo.toml",
+            "--proto-import",
+            ".",
             "--output",
             "out.txt",
             "--copy",
+            "--clobber",
+            "--compress",
+            "off",
+            "--http",
+            "2",
+            "--image",
+            "off",
+            "--pager",
+            "off",
+            "--ignore-status",
             "--timing",
             "--proxy",
             "http://proxy.test",
+            "--redirects",
+            "1",
+            "--retry-delay",
+            "0.1",
+            "--sort-headers",
             "--bearer",
             "token",
             "--insecure",
             "--format",
             "off",
+            "--ws-interactive",
+            "off",
+            "--ws-message-mode",
+            "text",
+            "--dry-run",
         ])
         .unwrap();
 
@@ -1607,13 +1675,27 @@ mod tests {
             [
                 "--data/--json/--xml",
                 "--grpc",
+                "--proto-file",
+                "--proto-import",
                 "--output",
                 "--copy",
+                "--clobber",
+                "--retry-delay",
+                "--redirects",
                 "--timing",
                 "--proxy",
+                "--http",
                 "--bearer",
                 "--insecure",
+                "--compress/--no-encode",
                 "--format",
+                "--image",
+                "--pager",
+                "--ignore-status",
+                "--sort-headers",
+                "--ws-interactive",
+                "--ws-message-mode",
+                "--dry-run",
             ]
         );
     }

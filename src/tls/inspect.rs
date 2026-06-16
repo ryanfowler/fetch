@@ -19,14 +19,16 @@ use crate::core::{self, Printer, Sequence};
 use crate::duration::{TimeoutBudget, duration_from_seconds};
 use crate::error::{FetchError, write_warning_with_separator_with_color};
 
-pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
+pub async fn execute(cli: &Cli, ignored_flags: &[&'static str]) -> Result<i32, FetchError> {
     let request_start = Instant::now();
     let url = tls_url(cli.url.as_deref().expect("URL checked by app"))?;
     super::validate_client_auth_for_tls(cli.cert.as_deref(), cli.key.as_deref())?;
-    let ignored = ignored_inspection_flags(cli);
-    if !ignored.is_empty() && !cli.silent {
+    if !ignored_flags.is_empty() && !cli.silent {
         write_warning_with_separator_with_color(
-            format!("--inspect-tls ignores: {}", ignored.join(", ")),
+            format!(
+                "No HTTP request will be sent; these flags have no effect: {}",
+                ignored_flags.join(", ")
+            ),
             cli.color.as_deref(),
         );
     }
@@ -547,7 +549,7 @@ fn alpn_protocols(http_version: Option<HttpVersion>) -> &'static [&'static str] 
     }
 }
 
-fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
+pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     let mut ignored = Vec::new();
     if cli.data.is_some() || cli.json.is_some() || cli.xml.is_some() {
         ignored.push("--data/--json/--xml");
@@ -567,6 +569,15 @@ fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     if cli.grpc_list {
         ignored.push("--grpc-list");
     }
+    if cli.proto_desc.is_some() {
+        ignored.push("--proto-desc");
+    }
+    if !cli.proto_files.is_empty() {
+        ignored.push("--proto-file");
+    }
+    if !cli.proto_imports.is_empty() {
+        ignored.push("--proto-import");
+    }
     if cli.output.is_some() {
         ignored.push("--output");
     }
@@ -578,6 +589,9 @@ fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     }
     if cli.copy {
         ignored.push("--copy");
+    }
+    if cli.clobber {
+        ignored.push("--clobber");
     }
     if cli.method.is_some() {
         ignored.push("--method");
@@ -597,6 +611,12 @@ fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     if cli.retry() > 0 {
         ignored.push("--retry");
     }
+    if cli.retry_delay.is_some() {
+        ignored.push("--retry-delay");
+    }
+    if cli.redirects.is_some() {
+        ignored.push("--redirects");
+    }
     if !cli.ranges.is_empty() {
         ignored.push("--range");
     }
@@ -611,6 +631,45 @@ fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     }
     if cli.unix.is_some() {
         ignored.push("--unix");
+    }
+    if cli.bearer.is_some() {
+        ignored.push("--bearer");
+    }
+    if cli.basic.is_some() {
+        ignored.push("--basic");
+    }
+    if cli.digest.is_some() {
+        ignored.push("--digest");
+    }
+    if cli.aws_sigv4.is_some() {
+        ignored.push("--aws-sigv4");
+    }
+    if cli.compress.is_some() || cli.no_encode {
+        ignored.push("--compress/--no-encode");
+    }
+    if cli.format.is_some() {
+        ignored.push("--format");
+    }
+    if cli.image.is_some() {
+        ignored.push("--image");
+    }
+    if cli.pager.is_some() {
+        ignored.push("--pager");
+    }
+    if cli.ignore_status {
+        ignored.push("--ignore-status");
+    }
+    if cli.sort_headers {
+        ignored.push("--sort-headers");
+    }
+    if cli.ws_interactive.is_some() {
+        ignored.push("--ws-interactive");
+    }
+    if cli.ws_message_mode.is_some() {
+        ignored.push("--ws-message-mode");
+    }
+    if cli.dry_run {
+        ignored.push("--dry-run");
     }
     ignored
 }
@@ -1541,12 +1600,38 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             "-d",
             "body",
             "--grpc",
+            "--proto-file",
+            "Cargo.toml",
+            "--proto-import",
+            ".",
             "--output",
             "out.txt",
             "--copy",
+            "--clobber",
+            "--compress",
+            "off",
+            "--image",
+            "off",
+            "--pager",
+            "off",
+            "--ignore-status",
             "--timing",
             "--proxy",
             "http://proxy.test",
+            "--redirects",
+            "1",
+            "--retry-delay",
+            "0.1",
+            "--sort-headers",
+            "--bearer",
+            "token",
+            "--format",
+            "off",
+            "--ws-interactive",
+            "off",
+            "--ws-message-mode",
+            "text",
+            "--dry-run",
         ])
         .unwrap();
 
@@ -1555,10 +1640,25 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             [
                 "--data/--json/--xml",
                 "--grpc",
+                "--proto-file",
+                "--proto-import",
                 "--output",
                 "--copy",
+                "--clobber",
+                "--retry-delay",
+                "--redirects",
                 "--timing",
-                "--proxy"
+                "--proxy",
+                "--bearer",
+                "--compress/--no-encode",
+                "--format",
+                "--image",
+                "--pager",
+                "--ignore-status",
+                "--sort-headers",
+                "--ws-interactive",
+                "--ws-message-mode",
+                "--dry-run",
             ]
         );
     }
