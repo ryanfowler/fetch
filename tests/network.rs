@@ -635,6 +635,41 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert!(res.stderr.contains("Addresses: 2"));
     assert!(res.stderr.contains("Records:"));
 
+    let res = run_fetch(&[
+        "--inspect-dns",
+        "--data",
+        "hi",
+        "--compress",
+        "off",
+        "127.0.0.1",
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(
+        res.stderr
+            .contains("No HTTP request will be sent; these flags have no effect")
+    );
+    assert!(res.stderr.contains("--data/--json/--xml"));
+    assert!(res.stderr.contains("--compress/--no-encode"));
+    assert!(!res.stderr.contains("--inspect-dns ignores"));
+
+    let dir = TempDir::new().unwrap();
+    let config = dir.path().join("config");
+    fs::write(
+        &config,
+        "compress = off\nformat = off\npager = off\ntiming = true\n",
+    )
+    .unwrap();
+    let res = run_fetch(&[
+        "--config",
+        config.to_str().unwrap(),
+        "--inspect-dns",
+        "127.0.0.1",
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(!res.stderr.contains("No HTTP request will be sent"));
+
     let res = run_fetch(&["--silent", "--inspect-dns", "--data", "hi", "127.0.0.1"]);
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
@@ -1038,6 +1073,47 @@ fn tls_certificate_validation_inspection_and_bounds_cases() {
     assert!(res.stdout.is_empty());
     assert!(res.stderr.contains("TLS"));
     assert!(res.stderr.contains("Certificate") || res.stderr.contains("certificate"));
+
+    let res = run_fetch(&[
+        "--inspect-tls",
+        "--insecure",
+        "--data",
+        "hi",
+        "--bearer",
+        "token",
+        "--format",
+        "off",
+        &tls.url,
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(
+        res.stderr
+            .contains("No HTTP request will be sent; these flags have no effect")
+    );
+    assert!(res.stderr.contains("--data/--json/--xml"));
+    assert!(res.stderr.contains("--bearer"));
+    assert!(res.stderr.contains("--format"));
+    assert!(!res.stderr.contains("--insecure"));
+    assert!(!res.stderr.contains("--inspect-tls ignores"));
+
+    let dir = TempDir::new().unwrap();
+    let config = dir.path().join("config");
+    fs::write(
+        &config,
+        "compress = off\nformat = off\npager = off\ntiming = true\n",
+    )
+    .unwrap();
+    let res = run_fetch(&[
+        "--config",
+        config.to_str().unwrap(),
+        "--inspect-tls",
+        "--insecure",
+        &tls.url,
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(!res.stderr.contains("No HTTP request will be sent"));
 
     let stalling_tls = start_stalling_proxy("https");
     let res = run_fetch(&[

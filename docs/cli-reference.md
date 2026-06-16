@@ -388,7 +388,7 @@ fetch --dns-server https://1.1.1.1/dns-query example.com
 
 ### `--inspect-dns`
 
-Inspect DNS resolution for the URL hostname only (no HTTP request is made). Displays the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, along with per-record TTLs, address count, record count, and lookup duration. UDP DNS inspection advertises EDNS(0) and retries truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, `fetch` warns that the results are incomplete and exits with a non-zero status.
+Inspect DNS resolution for the URL hostname only (no HTTP request is made). Displays the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, along with per-record TTLs, address count, record count, and lookup duration. UDP DNS inspection advertises EDNS(0) and retries truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, `fetch` warns that the results are incomplete and exits with a non-zero status. Request-only CLI flags warn that no HTTP request will be sent and those flags have no effect; config-file defaults do not trigger this warning.
 
 ```sh
 fetch --inspect-dns example.com
@@ -445,7 +445,7 @@ fetch --min-tls 1.2 --max-tls 1.2 example.com
 
 ### `--inspect-tls`
 
-Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. With `--http 3`, inspection uses a QUIC handshake and offers `h3` ALPN. HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning.
+Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. With `--http 3`, inspection uses a QUIC handshake and offers `h3` ALPN. Request-only CLI flags (e.g. `--data`, `--timing`, `--grpc`) warn that no HTTP request will be sent and those flags have no effect; config-file defaults do not trigger this warning.
 
 ```sh
 fetch --inspect-tls example.com
