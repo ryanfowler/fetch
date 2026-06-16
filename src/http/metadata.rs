@@ -122,6 +122,15 @@ pub(super) fn print_request_metadata(
     printer.push_str(" ");
     printer.write_styled(request_protocol_label(http_version), &[core::Sequence::Dim]);
     printer.push_str("\n");
+    if cli.dry_run {
+        if debug {
+            printer.write_request_prefix();
+        }
+        printer.write_styled("url", &[core::Sequence::Bold, core::Sequence::Blue]);
+        printer.push_str(": ");
+        printer.push_str(url.as_str());
+        printer.push_str("\n");
+    }
     let mut lines = header_lines(headers);
     lines.retain(|(name, _)| !name.eq_ignore_ascii_case("host"));
     if let Some(len) = inferred_request_body_content_len(headers, body)? {
@@ -296,6 +305,22 @@ fn normalize_schemeless_url(raw: &str) -> Result<Url, FetchError> {
     Url::parse(&format!("{scheme}://{raw}")).map_err(Into::into)
 }
 
+pub(super) fn schemeless_plaintext_hint_url(raw: &str, url: &Url) -> Option<String> {
+    if has_authority_scheme(raw) || url.scheme() != "https" {
+        return None;
+    }
+    let mut plaintext_url = url.clone();
+    plaintext_url.set_scheme("http").ok()?;
+    let mut hint = plaintext_url.to_string();
+    if plaintext_url.path() == "/"
+        && plaintext_url.query().is_none()
+        && plaintext_url.fragment().is_none()
+    {
+        hint.pop();
+    }
+    Some(hint)
+}
+
 pub(super) fn rewrite_url_scheme(mut url: Url, scheme: &str) -> Result<Url, FetchError> {
     let original = url.scheme().to_string();
     url.set_scheme(scheme)
@@ -426,6 +451,33 @@ mod tests {
     fn default_scheme_non_loopback_is_https() {
         let url = normalize_url("example.com/path").unwrap();
         assert_eq!(url.as_str(), "https://example.com/path");
+    }
+
+    #[test]
+    fn schemeless_plaintext_hint_rewrites_only_default_https_urls() {
+        let url = normalize_url("example.com:8080/path?debug=true").unwrap();
+        assert_eq!(
+            schemeless_plaintext_hint_url("example.com:8080/path?debug=true", &url).as_deref(),
+            Some("http://example.com:8080/path?debug=true")
+        );
+
+        let root_url = normalize_url("example.com:8080").unwrap();
+        assert_eq!(
+            schemeless_plaintext_hint_url("example.com:8080", &root_url).as_deref(),
+            Some("http://example.com:8080")
+        );
+
+        let explicit = normalize_url("https://example.com:8080/path").unwrap();
+        assert_eq!(
+            schemeless_plaintext_hint_url("https://example.com:8080/path", &explicit),
+            None
+        );
+
+        let loopback = normalize_url("localhost:8080/path").unwrap();
+        assert_eq!(
+            schemeless_plaintext_hint_url("localhost:8080/path", &loopback),
+            None
+        );
     }
 
     #[test]

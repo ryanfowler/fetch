@@ -422,7 +422,8 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 if let Some(message) = timeout_error_message(cli, &err) {
                     break Err(FetchError::Runtime(message));
                 }
-                let message = transport_request_error_message(&err);
+                let mut message = transport_request_error_message(&err);
+                append_schemeless_plaintext_hint(&mut message, cli, &url, &request_url, &err);
                 if is_certificate_validation_error(&err) {
                     break Err(FetchError::CertificateValidation(message));
                 }

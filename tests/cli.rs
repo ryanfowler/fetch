@@ -186,6 +186,7 @@ fn dry_run_prints_effective_request_without_network() {
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
     assert!(res.stderr.contains("POST / HTTP/1.1\n"));
+    assert!(res.stderr.contains("url: http://localhost:3000/\n"));
     assert!(res.stderr.contains("accept: application/json, */*;q=0.5"));
     assert!(res.stderr.contains("accept-encoding: gzip, br, zstd\n"));
     assert!(res.stderr.contains("content-length: 14\n"));
@@ -233,6 +234,13 @@ fn dry_run_prints_effective_request_without_network() {
     assert!(res.stderr.contains("content-length: 99\n"));
     assert!(!res.stderr.contains("content-length: 5\n"));
     assert_eq!(res.stderr.matches("content-length:").count(), 1);
+
+    let res = run_fetch(&["example.com:8080/path?debug=true", "--dry-run"]);
+    assert_exit(&res, 0);
+    assert!(
+        res.stderr
+            .contains("url: https://example.com:8080/path?debug=true\n")
+    );
 
     let res = run_fetch(&[
         "localhost:3000",

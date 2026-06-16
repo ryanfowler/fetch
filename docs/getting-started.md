@@ -81,6 +81,10 @@ fetch http://example.com   # Force HTTP
 fetch https://localhost    # Force HTTPS for localhost
 ```
 
+If a schemeless hostname such as `example.com:8080` defaults to HTTPS but the
+port is serving plaintext HTTP, `fetch` includes a hint to retry with the
+equivalent `http://` URL.
+
 ## Understanding the Output
 
 `fetch` separates its output into two streams:

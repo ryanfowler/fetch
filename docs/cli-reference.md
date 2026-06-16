@@ -10,7 +10,10 @@ fetch [OPTIONS] [URL]
 
 ## URL Handling
 
-When no scheme is provided, `fetch` defaults to HTTPS for hostnames. `localhost` and all IP literals default to HTTP.
+When no scheme is provided, `fetch` defaults to HTTPS for hostnames. `localhost`
+and all IP literals default to HTTP. If a schemeless hostname defaults to HTTPS
+and the connection fails during setup, `fetch` suggests the equivalent
+`http://` URL for plaintext services.
 
 ```sh
 fetch example.com          # https://example.com
@@ -752,7 +755,9 @@ fetch --complete fish > ~/.config/fish/completions/fetch.fish
 
 ### `--dry-run`
 
-Print request information without sending. When used with `--update`, checks for the latest version without installing.
+Print request information without sending, including the normalized absolute
+URL. When used with `--update`, checks for the latest version without
+installing.
 
 ```sh
 fetch --dry-run -j '{"test": true}' example.com

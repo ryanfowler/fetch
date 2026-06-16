@@ -75,6 +75,7 @@ fetch --dry-run -j '{"test": true}' example.com
 Shows:
 
 - Complete request that would be sent
+- Normalized absolute URL after schemeless URL defaults and query flags
 - Headers and body
 - Useful for debugging authentication and body formatting
 
