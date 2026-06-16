@@ -21,14 +21,21 @@ environment variables are present, then falls back to `%AppData%\fetch\config`.
 
 ### Configuration Precedence
 
-Settings are applied in the following order of precedence (highest to lowest):
+Scalar settings are applied in the following order of precedence (highest to
+lowest):
 
 1. **Command line flags** - Override all other settings
 2. **Domain-specific configuration** - Host-specific settings in config file
 3. **Global configuration** - Global settings in config file
 4. **Default values** - Built-in application defaults
 
-This allows you to set global defaults and override them per-domain or per-command as needed.
+In short: scalar options override; list options merge global -> host -> CLI.
+Repeatable options such as `header`, `query`, and `ca-cert` are applied in this
+order: global config first, then the matched host section, then command-line
+flags.
+
+This allows you to set global defaults, override scalar values per-domain or
+per-command, and add shared list values without losing more specific entries.
 
 ### File Structure
 
@@ -234,6 +241,7 @@ sort-headers = true
 #### `ca-cert`
 
 **Type**: CA certificate path
+**Repeatable**: Yes
 **Default**: System default
 
 Use a custom CA cert pool.
@@ -241,6 +249,10 @@ Use a custom CA cert pool.
 ```ini
 # Set to filepath to cert file
 ca-cert = ca-cert.pem
+
+# Multiple custom roots are appended in order
+ca-cert = internal-root.pem
+ca-cert = partner-root.pem
 ```
 
 #### `dns-server`
@@ -651,9 +663,9 @@ header = X-API-Key: admin-key
 ### Host Section Rules
 
 - Section names should be the exact hostname (without protocol or path), or a wildcard pattern like `*.domain.com`
-- Host-specific settings override global settings
-- Command-line flags override both global and host-specific settings
-- Multiple headers and query parameters are merged in order: global first, then the matched host section, then command-line flags
+- Scalar host-specific settings override global settings
+- Scalar command-line flags override both global and host-specific settings
+- List settings such as `header`, `query`, and `ca-cert` merge in order: global first, then the matched host section, then command-line flags
 
 ## Configuration Examples
 

@@ -340,12 +340,15 @@ fetch --grpc --proto-file service.proto \
 
 ### Settings Not Applied
 
-**Precedence** (highest to lowest):
+**Scalar precedence** (highest to lowest):
 
 1. Command-line flags
 2. Host-specific config
 3. Global config
 4. Defaults
+
+List options such as `header`, `query`, and `ca-cert` merge in order: global
+config, then the matched host-specific section, then command-line flags.
 
 Use dry-run to verify:
 
