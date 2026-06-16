@@ -287,6 +287,32 @@ pub(super) fn transport_request_error_message(err: &transport::Error) -> String 
     message
 }
 
+pub(super) fn append_schemeless_plaintext_hint(
+    message: &mut String,
+    cli: &Cli,
+    original_url: &Url,
+    request_url: &Url,
+    err: &transport::Error,
+) {
+    if !err.is_connect()
+        || url_client_endpoint(original_url) != url_client_endpoint(request_url)
+        || is_certificate_validation_error(err)
+    {
+        return;
+    }
+
+    let Some(raw_url) = cli.url.as_deref() else {
+        return;
+    };
+    let Some(plaintext_url) = schemeless_plaintext_hint_url(raw_url, request_url) else {
+        return;
+    };
+    message.push('\n');
+    message.push_str("If this is a plaintext service, use ");
+    message.push_str(&plaintext_url);
+    message.push('.');
+}
+
 pub(super) fn transport_response_body_error_message(err: &transport::Error) -> String {
     let mut details = Vec::new();
     let mut source = err.source();

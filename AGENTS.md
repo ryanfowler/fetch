@@ -186,7 +186,9 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
   `--multipart`, and `--edit`) infer `POST` when `--method` is omitted.
   Explicit methods still win, including `-m GET` with a body.
 - Schemeless URLs default to HTTPS for hostnames, but `localhost` and all IP
-  literals default to HTTP.
+  literals default to HTTP. Dry-run output includes the normalized absolute URL,
+  and schemeless HTTPS connect/TLS failures suggest the equivalent `http://`
+  URL for plaintext services.
 
 Retryable requests use replayable request bodies so retries and 307/308 redirects can resend data without holding unrelated state.
 Multipart `-F` request bodies are produced with a stable boundary so redirected requests preserve the original body shape.

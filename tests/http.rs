@@ -90,6 +90,54 @@ fn request_construction_and_data_sources() {
     assert_eq!(req.body_string(), r#"{"key":"val"}"#);
 }
 
+#[test]
+fn schemeless_https_connect_error_suggests_plaintext_url() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind plaintext listener");
+    listener
+        .set_nonblocking(true)
+        .expect("set plaintext listener nonblocking");
+    let port = listener.local_addr().expect("local addr").port();
+    let join = thread::spawn(move || {
+        for _ in 0..2 {
+            let Ok(mut stream) =
+                accept_tcp_connection(&listener, Duration::from_secs(5), "plaintext TLS hint")
+            else {
+                return;
+            };
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok");
+            let _ = stream.flush();
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+    });
+
+    let dns_addr = start_udp_dns_server("fetch-plaintext-hint.test.", Ipv4Addr::new(127, 0, 0, 1));
+    let raw_url = format!("fetch-plaintext-hint.test:{port}/status");
+    let res = run_fetch_once(FetchOpts::default(), &["--dns-server", &dns_addr, &raw_url]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains(&format!(
+            "If this is a plaintext service, use http://fetch-plaintext-hint.test:{port}/status."
+        )),
+        "missing plaintext hint\nstderr:\n{}",
+        res.stderr
+    );
+
+    let explicit_url = format!("https://fetch-plaintext-hint.test:{port}/status");
+    let res = run_fetch_once(
+        FetchOpts::default(),
+        &["--dns-server", &dns_addr, &explicit_url],
+    );
+    assert_exit(&res, 1);
+    assert!(
+        !res.stderr.contains("plaintext service"),
+        "explicit HTTPS should not get schemeless hint\nstderr:\n{}",
+        res.stderr
+    );
+
+    join.join().expect("plaintext listener thread");
+}
+
 #[cfg(unix)]
 #[test]
 fn http_stdout_broken_pipe_exits_cleanly() {
