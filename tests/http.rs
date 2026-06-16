@@ -206,34 +206,30 @@ fn config_merges_global_host_and_cli_options() {
 }
 
 #[test]
-fn config_duplicate_host_section_replaces_previous_section() {
-    let server = TestServer::start(|req| {
-        if req.path.contains("old=1") || !req.path.contains("new=1") {
-            return TestResponse::status(400, "Bad Request", "bad query");
-        }
-        if !req.header("x-old").is_empty() || req.header("x-new") != "yes" {
-            return TestResponse::status(400, "Bad Request", "bad header");
-        }
-        TestResponse::ok("duplicate")
-    });
-    let host = server
-        .url
-        .trim_start_matches("http://")
-        .split(':')
-        .next()
-        .unwrap();
+fn config_duplicate_host_section_is_rejected() {
     let dir = TempDir::new().unwrap();
     let config = dir.path().join("config");
     fs::write(
         &config,
-        format!(
-            "format = off\n\n[{host}]\nheader = X-Old: yes\nquery = old=1\n\n[{host}]\nheader = X-New: yes\nquery = new=1\n"
-        ),
+        "format = off\n\n[example.com]\nheader = X-Old: yes\nquery = old=1\n\n[example.com]\nheader = X-New: yes\nquery = new=1\n",
     )
     .unwrap();
-    let res = run_fetch(&["--config", config.to_str().unwrap(), &server.url]);
-    assert_exit(&res, 0);
-    assert_eq!(res.stdout, "duplicate");
+    let res = run_fetch(&["--config", config.to_str().unwrap(), "http://example.com"]);
+    assert_exit(&res, 1);
+    assert!(res.stdout.is_empty(), "stdout: {}", res.stdout);
+    assert!(res.stderr.contains("config file"), "{}", res.stderr);
+    assert!(res.stderr.contains("line 7"), "{}", res.stderr);
+    assert!(
+        res.stderr
+            .contains("duplicate host section '[example.com]'"),
+        "{}",
+        res.stderr
+    );
+    assert!(
+        res.stderr.contains("first defined on line 3"),
+        "{}",
+        res.stderr
+    );
 }
 
 #[test]

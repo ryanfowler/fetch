@@ -663,6 +663,7 @@ header = X-API-Key: admin-key
 ### Host Section Rules
 
 - Section names should be the exact hostname (without protocol or path), or a wildcard pattern like `*.domain.com`
+- Duplicate host section names are rejected. Names are compared case-insensitively after trimming, so `[API.example.com]` and `[api.example.com]` are duplicates.
 - Scalar host-specific settings override global settings
 - Scalar command-line flags override both global and host-specific settings
 - List settings such as `header`, `query`, and `ca-cert` merge in order: global first, then the matched host section, then command-line flags

@@ -902,6 +902,7 @@ fn parse_file(path: &Path, contents: &str) -> Result<ConfigFile, String> {
         hosts: HashMap::new(),
         path: path.to_path_buf(),
     };
+    let mut host_lines = HashMap::new();
     let mut current_host: Option<String> = None;
 
     for (line_num, raw_line) in numbered_lines(contents) {
@@ -913,6 +914,16 @@ fn parse_file(path: &Path, contents: &str) -> Result<ConfigFile, String> {
         if line.starts_with('[') && line.ends_with(']') {
             let host = line[1..line.len() - 1].trim().to_ascii_lowercase();
             validate_host_section(path, line_num, &host)?;
+            if let Some(first_line) = host_lines.get(&host) {
+                return Err(file_error(
+                    path,
+                    line_num,
+                    &format!(
+                        "duplicate host section '[{host}]' (first defined on line {first_line})"
+                    ),
+                ));
+            }
+            host_lines.insert(host.clone(), line_num);
             current_host = Some(host.clone());
             file.hosts.insert(host, ConfigValues::default());
             continue;
@@ -1860,26 +1871,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_file_replaces_duplicate_host_sections_like_go() {
+    fn parse_file_rejects_duplicate_host_sections() {
         let path = PathBuf::from("test/config");
-        let file = parse_file(
+        let err = parse_file(
             &path,
-            "
-              [api.example.com]
-              header = X-Old: yes
-              color = off
+            "[Api.Example.com]
+             header = X-Old: yes
 
-              [api.example.com]
-              header = X-New: yes
-              format = on
+             [api.example.com]
+             header = X-New: yes
             ",
         )
-        .unwrap();
-        let cfg = file.host_config("api.example.com").unwrap();
+        .unwrap_err();
 
-        assert_eq!(cfg.headers, vec!["X-New: yes"]);
-        assert_eq!(cfg.color, None);
-        assert_eq!(cfg.format.as_deref(), Some("on"));
+        assert!(err.contains("line 4"), "{err}");
+        assert!(
+            err.contains("duplicate host section '[api.example.com]'"),
+            "{err}"
+        );
+        assert!(err.contains("first defined on line 1"), "{err}");
     }
 
     #[test]
