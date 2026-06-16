@@ -766,6 +766,9 @@ fetch --update --dry-run
 | `AWS_ACCESS_KEY_ID`     | AWS access key for `--aws-sigv4`                          |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for `--aws-sigv4`                          |
 | `AWS_SESSION_TOKEN`     | AWS session token for temporary `--aws-sigv4` credentials |
+| `PAGER`                 | Pager command for response bodies when paging is enabled  |
+| `LESS`                  | Options for `less`; disables fetch's default `less` flags |
+| `NO_PAGER`              | Disable the default `auto` pager when set                 |
 | `VISUAL` / `EDITOR`     | Editor for `--edit` option                                |
 | `HTTPS_PROXY`           | HTTPS proxy URL                                           |
 | `HTTP_PROXY`            | HTTP proxy URL                                            |
