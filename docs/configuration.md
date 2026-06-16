@@ -53,6 +53,8 @@ option = host_specific_value
 **Default**: `false` (disabled)
 
 Enable or disable automatic updates, or set the minimum interval between update checks.
+See [Updates](updates.md) for background update behavior, cache files, locking,
+verification, and timeout/proxy behavior.
 
 ```ini
 # Enable auto-update with default 24-hour interval
@@ -741,3 +743,4 @@ Validation errors may include:
 - [CLI Reference](cli-reference.md) - All command-line options
 - [Authentication](authentication.md) - Detailed authentication setup
 - [Advanced Features](advanced-features.md) - DNS, proxies, and TLS configuration
+- [Updates](updates.md) - Manual and automatic update behavior

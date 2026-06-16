@@ -330,11 +330,20 @@ Update `fetch` to the latest version:
 fetch --update
 ```
 
+Check for an available update without installing it:
+
+```sh
+fetch --update --dry-run
+```
+
 Or enable automatic updates in your [configuration file](configuration.md):
 
 ```ini
 auto-update = true
 ```
+
+See [Updates](updates.md) for details about release source, checksum
+verification, permissions, background behavior, and cache files.
 
 ## Shell Completions
 
@@ -358,4 +367,5 @@ fetch --complete fish > ~/.config/fish/completions/fetch.fish
 - **[Authentication](authentication.md)** - Learn about authentication options
 - **[Request Bodies](request-bodies.md)** - Send JSON, XML, forms, and files
 - **[Output Formatting](output-formatting.md)** - Formatting and syntax highlighting details
+- **[Updates](updates.md)** - Keep `fetch` current
 - **[Image Rendering](image-rendering.md)** - Rendering images in the terminal

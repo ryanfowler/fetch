@@ -737,6 +737,8 @@ Print build information. Use `-v --buildinfo` to include dependency details.
 ### `--update`
 
 Update fetch binary in place. Use with `--dry-run` to check for updates without installing.
+See [Updates](updates.md) for release source, verification, permissions,
+background auto-update behavior, and cache/lock files.
 
 ### `--complete SHELL`
 
