@@ -149,6 +149,7 @@ fetch --compress off -o archive.tar.gz https://example.com/archive.tar.gz
 - **[WebSocket](docs/websocket.md)** - Bidirectional WebSocket connections
 - **[gRPC](docs/grpc.md)** - Making gRPC requests with Protocol Buffers
 - **[Advanced Features](docs/advanced-features.md)** - DNS, proxies, TLS, HTTP versions, and more
+- **[Updates](docs/updates.md)** - Manual updates, auto-update behavior, verification, and update files
 - **[Troubleshooting](docs/troubleshooting.md)** - Common issues, debugging, and exit codes
 
 ## License
