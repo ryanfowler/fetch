@@ -59,55 +59,6 @@ impl Format {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WsInteractiveMode {
-    Auto,
-    On,
-    Off,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpVersion {
-    Default,
-    Http1,
-    Http2,
-    Http3,
-}
-
-impl HttpVersion {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Http1 => "HTTP/1.1",
-            Self::Http2 => "HTTP/2.0",
-            Self::Http3 => "HTTP/3.0",
-            Self::Default => "",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImageSetting {
-    Unknown,
-    Auto,
-    External,
-    Off,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Verbosity {
-    Silent,
-    Normal,
-    Verbose,
-    ExtraVerbose,
-    Debug,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyVal<T> {
-    pub key: String,
-    pub val: T,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalSize {
     pub cols: usize,
     pub rows: usize,
