@@ -132,7 +132,13 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
     if cli.grpc && grpc_method.is_none() {
         let request_requires_schema = grpc_request_requires_schema(cli);
-        match crate::grpc::reflection::schema_for_call(cli, &url, &initial_client.client).await {
+        match Box::pin(crate::grpc::reflection::schema_for_call(
+            cli,
+            &url,
+            &initial_client.client,
+        ))
+        .await
+        {
             Ok(schema) => match proto::method_for_url(&schema, &url) {
                 Ok(method) => grpc_method = Some(method),
                 Err(err) if request_requires_schema => return Err(err),

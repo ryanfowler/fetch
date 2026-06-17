@@ -240,7 +240,7 @@ impl std::fmt::Display for RuntimeErrorWithColor {
 }
 
 async fn run(mut cli: Cli) -> Result<i32, RuntimeErrorWithColor> {
-    match run_inner(&mut cli).await {
+    match Box::pin(run_inner(&mut cli)).await {
         Ok(code) => Ok(code),
         Err(error) => Err(RuntimeErrorWithColor {
             error,
@@ -318,7 +318,11 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     }
 
     if cli.inspect_tls {
-        return crate::tls::inspect::execute(cli, &direct_inspection_ignored_flags).await;
+        return Box::pin(crate::tls::inspect::execute(
+            cli,
+            &direct_inspection_ignored_flags,
+        ))
+        .await;
     }
 
     let is_websocket = cli
@@ -334,14 +338,14 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     }
     if is_websocket {
         validate_websocket_exclusives(cli)?;
-        return crate::websocket::execute(cli).await;
+        return Box::pin(crate::websocket::execute(cli)).await;
     }
 
     if cli.has_grpc_discovery() {
-        return crate::grpc::reflection::execute_discovery(cli).await;
+        return Box::pin(crate::grpc::reflection::execute_discovery(cli)).await;
     }
 
-    crate::http::execute(cli).await
+    Box::pin(crate::http::execute(cli)).await
 }
 
 fn normalize_extra_args(cli: &mut Cli) -> Result<(), FetchError> {
@@ -1597,7 +1601,7 @@ mod tests {
     async fn websocket_interactive_requires_websocket_url() {
         let cli = Cli::try_parse_from(["fetch", "https://example.com", "--ws-interactive", "off"])
             .unwrap();
-        let err = run(cli).await.unwrap_err().to_string();
+        let err = Box::pin(run(cli)).await.unwrap_err().to_string();
 
         assert!(err.contains("requires a ws:// or wss:// URL"));
     }

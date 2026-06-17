@@ -89,7 +89,13 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let request_timeout = websocket_request_timeout(cli)?;
     let request_budget = TimeoutBudget::started_at(request_timeout, request_start);
     let connect_timeout = websocket_connect_timeout(cli, request_timeout, request_start)?;
-    let connect = async { connect_websocket(cli, &url, request, connector, connect_timeout).await };
+    let connect = Box::pin(connect_websocket(
+        cli,
+        &url,
+        request,
+        connector,
+        connect_timeout,
+    ));
     let (stream, response) = request_budget.run(connect).await?;
     store_handshake_cookies(session.as_ref(), &url, response.headers());
     crate::http::save_session(cli, session.as_ref());
@@ -180,13 +186,13 @@ async fn connect_websocket(
     ),
     FetchError,
 > {
-    let stream = dial_websocket(cli, url, timeout)
+    let stream = Box::pin(dial_websocket(cli, url, timeout))
         .await
         .map_err(websocket_network_error)?;
-    timeout_ws(
+    Box::pin(timeout_ws(
         timeout,
         client_async_tls_with_config(request, stream, Some(websocket_config()), connector),
-    )
+    ))
     .await
 }
 
@@ -203,12 +209,12 @@ async fn dial_websocket(
     url: &Url,
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
-    crate::net::dial_url(
+    Box::pin(crate::net::dial_url(
         url,
         cli.proxy.as_deref(),
         cli.dns_server.as_deref(),
         timeout,
-    )
+    ))
     .await
 }
 
