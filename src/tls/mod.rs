@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme, SupportedProtocolVersion};
+use rustls::{DigitallySignedStruct, SignatureScheme, SupportedProtocolVersion};
 
 use crate::error::FetchError;
 
@@ -109,35 +109,6 @@ pub fn rustls_protocol_versions(
         ));
     }
     Ok(versions)
-}
-
-pub fn rustls_client_config(
-    ca_cert_paths: &[String],
-    cert_path: Option<&str>,
-    key_path: Option<&str>,
-    insecure: bool,
-    min_tls: Option<(&str, &str)>,
-    max_tls: Option<&str>,
-) -> Result<rustls::ClientConfig, FetchError> {
-    install_default_crypto_provider();
-
-    let versions = rustls_protocol_versions(min_tls, max_tls)?;
-    let builder = rustls::ClientConfig::builder_with_protocol_versions(&versions);
-    let builder = if insecure {
-        builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
-    } else {
-        builder.with_root_certificates(rustls_root_store(ca_cert_paths)?)
-    };
-
-    if let Some((certs, key)) = rustls_client_auth(cert_path, key_path)? {
-        builder
-            .with_client_auth_cert(certs, key)
-            .map_err(|err| FetchError::Message(err.to_string()))
-    } else {
-        Ok(builder.with_no_client_auth())
-    }
 }
 
 pub fn rustls_platform_client_config() -> Result<rustls::ClientConfig, FetchError> {
@@ -312,19 +283,6 @@ pub fn client_identity(
         )
         .into()),
     }
-}
-
-fn rustls_root_store(ca_cert_paths: &[String]) -> Result<RootCertStore, FetchError> {
-    let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let native_certs = rustls_native_certs::load_native_certs().certs;
-    let _ = roots.add_parsable_certificates(native_certs);
-
-    for cert in custom_ca_certificates(ca_cert_paths)? {
-        roots
-            .add(cert)
-            .map_err(|err| FetchError::Message(format!("invalid CA certificate: {err}")))?;
-    }
-    Ok(roots)
 }
 
 fn custom_ca_certificates(
