@@ -41,8 +41,6 @@ use crate::duration::{TimeoutBudget, request_timeout_message};
 use crate::error::FetchError;
 use crate::timing::TransportTiming;
 
-const HTTP3_HAPPY_EYEBALLS_FALLBACK_DELAY: Duration = Duration::from_millis(300);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErrorKind {
     Request,
@@ -1619,66 +1617,10 @@ async fn connect_http3(
     if fallback.is_empty() {
         connect_http3_sequence(endpoint, preferred, host, timeout).await
     } else {
-        connect_http3_happy_eyeballs(endpoint, preferred, fallback, host, timeout).await
-    }
-}
-
-async fn connect_http3_happy_eyeballs(
-    endpoint: quinn::Endpoint,
-    preferred: Vec<SocketAddr>,
-    fallback: Vec<SocketAddr>,
-    host: String,
-    timeout: TimeoutBudget,
-) -> Result<quinn::Connection, FetchError> {
-    let preferred = connect_http3_sequence(endpoint.clone(), preferred, host.clone(), timeout);
-    tokio::pin!(preferred);
-    let delay = tokio::time::sleep(HTTP3_HAPPY_EYEBALLS_FALLBACK_DELAY);
-    tokio::pin!(delay);
-
-    tokio::select! {
-        result = &mut preferred => {
-            return match result {
-                Ok(connection) => Ok(connection),
-                Err(_) => match connect_http3_sequence(endpoint, fallback, host, timeout).await {
-                    Ok(connection) => Ok(connection),
-                    Err(fallback_err) => Err(fallback_err),
-                },
-            };
-        }
-        _ = &mut delay => {}
-    }
-
-    let fallback = connect_http3_sequence(endpoint, fallback, host, timeout);
-    tokio::pin!(fallback);
-    let mut preferred_done = false;
-    let mut fallback_done = false;
-    let mut preferred_err = None;
-    let mut fallback_err = None;
-
-    loop {
-        if preferred_done && fallback_done {
-            return Err(fallback_err
-                .take()
-                .or(preferred_err)
-                .expect("at least one HTTP/3 connect error exists"));
-        }
-
-        tokio::select! {
-            result = &mut preferred, if !preferred_done => match result {
-                Ok(connection) => return Ok(connection),
-                Err(err) => {
-                    preferred_err = Some(err);
-                    preferred_done = true;
-                }
-            },
-            result = &mut fallback, if !fallback_done => match result {
-                Ok(connection) => return Ok(connection),
-                Err(err) => {
-                    fallback_err = Some(err);
-                    fallback_done = true;
-                }
-            },
-        }
+        crate::net::race_preferred_fallback(preferred, fallback, move |addrs| {
+            connect_http3_sequence(endpoint.clone(), addrs, host.clone(), timeout)
+        })
+        .await
     }
 }
 
