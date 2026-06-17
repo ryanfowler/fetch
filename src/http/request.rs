@@ -182,8 +182,7 @@ pub(crate) fn apply_builder_authorization_headers(
 pub(super) fn transport_request_version_for_cli(
     cli: &Cli,
 ) -> Result<Option<http::Version>, FetchError> {
-    let version =
-        crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?;
+    let version = crate::cli::selected_http_version(cli).map_err(FetchError::Message)?;
     Ok(match effective_http_version(cli, version) {
         Some(HttpVersion::Http1) => Some(http::Version::HTTP_11),
         Some(HttpVersion::Http2) => Some(http::Version::HTTP_2),

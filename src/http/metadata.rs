@@ -213,9 +213,10 @@ pub(super) fn validate_http_version_options(
     unix_socket: Option<&str>,
 ) -> Result<(), FetchError> {
     match version {
-        Some(HttpVersion::Http2) if url.scheme() == "http" && !allow_h2c => {
-            Err("http2: unsupported scheme".into())
-        }
+        Some(HttpVersion::Http2) if url.scheme() == "http" && !allow_h2c => Err(
+            "plain HTTP/2 is only supported for gRPC h2c; use https://, --grpc, or --http 1."
+                .into(),
+        ),
         Some(HttpVersion::Http3) if unix_socket.is_some() => {
             Err("cannot use a unix socket with HTTP/3.0".into())
         }
@@ -777,12 +778,15 @@ mod tests {
     }
 
     #[test]
-    fn http2_plain_http_rejects_like_go_transport() {
+    fn http2_plain_http_rejects_with_h2c_guidance() {
         let url = Url::parse("http://127.0.0.1:3000/").unwrap();
         let err =
             validate_http_version_options(Some(HttpVersion::Http2), &url, false, None).unwrap_err();
 
-        assert_eq!(err.to_string(), "http2: unsupported scheme");
+        assert_eq!(
+            err.to_string(),
+            "plain HTTP/2 is only supported for gRPC h2c; use https://, --grpc, or --http 1."
+        );
     }
 
     #[test]

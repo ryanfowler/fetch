@@ -33,8 +33,7 @@ pub async fn execute(cli: &Cli, ignored_flags: &[&'static str]) -> Result<i32, F
         );
     }
 
-    let http_version =
-        crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?;
+    let http_version = crate::cli::selected_http_version(cli).map_err(FetchError::Message)?;
 
     let request_timeout = inspection_request_timeout(cli)?;
     let connect_timeout = inspection_connect_timeout(cli, request_timeout, request_start)?;

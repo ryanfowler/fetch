@@ -279,8 +279,34 @@ pub struct Cli {
     #[arg(short = 'h', long, help = "Print help")]
     pub help: bool,
 
-    #[arg(long, value_name = "VERSION", help = "HTTP version to use [1, 2, 3]")]
+    #[arg(
+        long,
+        value_name = "VERSION",
+        conflicts_with_all = ["http1", "http2", "http3"],
+        help = "HTTP version to use [1, 2, 3]"
+    )]
     pub http: Option<String>,
+
+    #[arg(
+        long = "http1",
+        conflicts_with_all = ["http", "http2", "http3"],
+        hide = true
+    )]
+    pub http1: bool,
+
+    #[arg(
+        long = "http2",
+        conflicts_with_all = ["http", "http1", "http3"],
+        hide = true
+    )]
+    pub http2: bool,
+
+    #[arg(
+        long = "http3",
+        conflicts_with_all = ["http", "http1", "http2"],
+        hide = true
+    )]
+    pub http3: bool,
 
     #[arg(long = "ignore-status", help = "Do not exit nonzero for HTTP 4xx/5xx")]
     pub ignore_status: bool,
@@ -568,6 +594,36 @@ pub fn parse_http_version(value: Option<&str>) -> Result<Option<HttpVersion>, St
     }
 }
 
+pub fn selected_http_version(cli: &Cli) -> Result<Option<HttpVersion>, String> {
+    if cli.http1 {
+        Ok(Some(HttpVersion::Http1))
+    } else if cli.http2 {
+        Ok(Some(HttpVersion::Http2))
+    } else if cli.http3 {
+        Ok(Some(HttpVersion::Http3))
+    } else {
+        parse_http_version(cli.http.as_deref())
+    }
+}
+
+pub fn has_http_version_flag(cli: &Cli) -> bool {
+    cli.http.is_some() || cli.http1 || cli.http2 || cli.http3
+}
+
+pub fn http_version_flag_name(cli: &Cli) -> Option<&'static str> {
+    if cli.http.is_some() {
+        Some("http")
+    } else if cli.http1 {
+        Some("http1")
+    } else if cli.http2 {
+        Some("http2")
+    } else if cli.http3 {
+        Some("http3")
+    } else {
+        None
+    }
+}
+
 fn normalize_range_value(value: &str) -> Result<String, String> {
     let value = value.trim();
     let Some((start, end)) = value.split_once('-') else {
@@ -632,6 +688,9 @@ mod tests {
                 "--ws-message-mode <MODE>      WebSocket frame mode [auto, text, binary]"
             )
         );
+        assert!(!help.contains("--http1"));
+        assert!(!help.contains("--http2"));
+        assert!(!help.contains("--http3"));
 
         for line in help.lines() {
             assert!(
@@ -746,6 +805,20 @@ mod tests {
         for (arg, want) in tests {
             let cli = Cli::try_parse_from(["fetch", "--http", arg, "http://example.com"]).unwrap();
             assert_eq!(parse_http_version(cli.http.as_deref()).unwrap(), want);
+        }
+    }
+
+    #[test]
+    fn http_alias_flags_select_protocol_versions() {
+        let tests = [
+            ("--http1", Some(HttpVersion::Http1)),
+            ("--http2", Some(HttpVersion::Http2)),
+            ("--http3", Some(HttpVersion::Http3)),
+        ];
+
+        for (arg, want) in tests {
+            let cli = Cli::try_parse_from(["fetch", arg, "http://example.com"]).unwrap();
+            assert_eq!(selected_http_version(&cli).unwrap(), want);
         }
     }
 

@@ -478,6 +478,7 @@ fetch --ca-cert ca-cert.pem example.com
 ### `--http VERSION`
 
 Force a specific HTTP protocol version. Values: `1`, `2`, `3`.
+Aliases: `--http1`, `--http2`, `--http3`.
 
 - `1` - HTTP/1.1
 - `2` - HTTP/2
@@ -494,6 +495,7 @@ plaintext servers.
 
 ```sh
 fetch --http 1 example.com
+fetch --http2 example.com
 fetch --http 3 example.com
 fetch --grpc --http 2 http://localhost:50051/pkg.Svc/Method  # uses h2c
 ```

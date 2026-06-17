@@ -312,7 +312,7 @@ config_options! {
         documented_keys: ["http"],
         cli_flags: ["http"],
         trim: ConfigValueTrim::Both,
-        cli_source: |cli| cli.http.is_some(),
+        cli_source: |cli| crate::cli::has_http_version_flag(cli),
         parse: |path, line_num, config, _key, value| {
             validate_choice(path, line_num, "http", value, &["1", "2", "3"])?;
             config.http = Some(value.to_string());
@@ -320,7 +320,7 @@ config_options! {
         },
         overlay: |target, higher| choose(&mut target.http, &higher.http),
         apply: |cli, values, _sources| {
-            if cli.http.is_none() {
+            if !crate::cli::has_http_version_flag(cli) {
                 cli.http = values.http.clone();
             }
         },
@@ -2068,6 +2068,7 @@ mod tests {
               color = on
               compress = zstd
               format = on
+              http = 1
               retry = 2
               retry-delay = 0.5
             ",
@@ -2081,6 +2082,7 @@ mod tests {
             "gzip",
             "--format",
             "off",
+            "--http2",
             "--retry",
             "0",
             "--retry-delay",
@@ -2095,6 +2097,10 @@ mod tests {
         assert_eq!(cli.color.as_deref(), Some("off"));
         assert_eq!(cli.compress.as_deref(), Some("gzip"));
         assert_eq!(cli.format.as_deref(), Some("off"));
+        assert_eq!(
+            crate::cli::selected_http_version(&cli).unwrap(),
+            Some(crate::cli::HttpVersion::Http2)
+        );
         assert_eq!(cli.retry, Some(0));
         assert_eq!(cli.retry_delay, Some(1.0));
     }
