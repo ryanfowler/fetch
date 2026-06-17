@@ -156,7 +156,7 @@ fn websocket_connector(cli: &Cli, url: &Url) -> Result<Option<Connector>, FetchE
             ("tls", value)
         }
     });
-    let config = crate::tls::rustls_client_config(
+    let config = crate::tls::rustls_platform_client_config_with_options(
         &cli.ca_cert,
         cli.cert.as_deref(),
         cli.key.as_deref(),
