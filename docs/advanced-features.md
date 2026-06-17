@@ -151,7 +151,8 @@ fetch --unix ~/myapp.sock http://localhost/health
 
 ### `--http VERSION`
 
-Force a specific HTTP version.
+Force a specific HTTP version. `--http1`, `--http2`, and `--http3` are aliases
+for `--http 1`, `--http 2`, and `--http 3`.
 
 When `--http` is unset, HTTPS requests offer `h2` and then `http/1.1` through
 ALPN, using HTTP/2 when the server negotiates it and falling back to HTTP/1.1
@@ -173,6 +174,7 @@ fetch --http 1 example.com
 
 ```sh
 fetch --http 2 example.com
+fetch --http2 example.com
 ```
 
 - Forces HTTP/2

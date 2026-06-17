@@ -275,6 +275,9 @@ const FLAGS: &[Flag] = &[
         aliases: &[],
         values: HTTP_VALUES,
     },
+    flag(None, "http1", "", "Force HTTP/1.1"),
+    flag(None, "http2", "", "Force HTTP/2"),
+    flag(None, "http3", "", "Force HTTP/3"),
     flag(
         None,
         "ignore-status",

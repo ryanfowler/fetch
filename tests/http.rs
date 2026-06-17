@@ -1333,7 +1333,23 @@ fn request_construction_host_header_form_and_http_version() {
     assert_exit(&res, 0);
     let res = run_fetch(&[&server.url, "--http", "2"]);
     assert_exit(&res, 1);
-    assert!(res.stderr.contains("http2:"));
+    assert!(
+        res.stderr.contains(
+            "plain HTTP/2 is only supported for gRPC h2c; use https://, --grpc, or --http 1."
+        ),
+        "{}",
+        res.stderr
+    );
+
+    let res = run_fetch(&[&server.url, "--http2"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains(
+            "plain HTTP/2 is only supported for gRPC h2c; use https://, --grpc, or --http 1."
+        ),
+        "{}",
+        res.stderr
+    );
 }
 
 #[test]

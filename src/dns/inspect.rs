@@ -1100,8 +1100,13 @@ pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     if cli.unix.is_some() {
         ignored.push("--unix");
     }
-    if cli.http.is_some() {
-        ignored.push("--http");
+    if let Some(flag) = crate::cli::http_version_flag_name(cli) {
+        ignored.push(match flag {
+            "http1" => "--http1",
+            "http2" => "--http2",
+            "http3" => "--http3",
+            _ => "--http",
+        });
     }
     if cli.inspect_tls {
         ignored.push("--inspect-tls");

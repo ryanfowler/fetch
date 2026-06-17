@@ -287,7 +287,7 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     };
     let config_path = crate::config::apply(cli)?;
     crate::config::validate(cli)?;
-    crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?;
+    crate::cli::selected_http_version(cli).map_err(FetchError::Message)?;
     crate::cli::normalize_range_values(&mut cli.ranges).map_err(FetchError::Message)?;
     validate_proto_schema_files(cli)?;
     validate_client_certificate_flags(cli, direct_cli_sources)?;
@@ -682,8 +682,8 @@ fn validate_from_curl_exclusives(cli: &Cli) -> Result<(), FetchError> {
         Some("min-tls")
     } else if cli.tls.is_some() {
         Some("tls")
-    } else if cli.http.is_some() {
-        Some("http")
+    } else if let Some(flag) = crate::cli::http_version_flag_name(cli) {
+        Some(flag)
     } else if cli.cert.is_some() {
         Some("cert")
     } else if cli.key.is_some() {
@@ -721,8 +721,7 @@ fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
         .and_then(|url| url.split_once("://").map(|(scheme, _)| scheme))
         .unwrap_or("ws")
         .to_ascii_lowercase();
-    if let Some(version) =
-        crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?
+    if let Some(version) = crate::cli::selected_http_version(cli).map_err(FetchError::Message)?
         && version != crate::cli::HttpVersion::Http1
     {
         return Err(format!(

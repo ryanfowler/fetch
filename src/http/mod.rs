@@ -91,8 +91,7 @@ use transport::{Body, Client, RequestBuilder, Response};
 type AsyncReadBox = Pin<Box<dyn AsyncRead + Send>>;
 
 pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
-    let http_version =
-        crate::cli::parse_http_version(cli.http.as_deref()).map_err(FetchError::Message)?;
+    let http_version = crate::cli::selected_http_version(cli).map_err(FetchError::Message)?;
     let http_version = effective_http_version(cli, http_version);
     let mut url = normalize_url(cli.url.as_deref().expect("URL checked by app"))?;
     apply_query(&mut url, &cli.query);
