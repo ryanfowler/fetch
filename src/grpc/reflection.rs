@@ -66,7 +66,7 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
 
     if cli.grpc_list {
         core::write_stdout(service_list_output(
-            list_services(cli, &url, &client).await?,
+            Box::pin(list_services(cli, &url, &client)).await?,
         ))?;
         return Ok(0);
     }
@@ -75,7 +75,7 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
         return Err("gRPC discovery requires --grpc-list or --grpc-describe".into());
     };
     let symbol = normalize_reflection_symbol(symbol);
-    let schema = schema_for_symbol(cli, &url, &client, &symbol).await?;
+    let schema = Box::pin(schema_for_symbol(cli, &url, &client, &symbol)).await?;
     core::write_stdout(crate::proto::describe_symbol(&schema, &symbol)?)?;
     Ok(0)
 }
@@ -91,13 +91,21 @@ fn service_list_output(services: Vec<String>) -> String {
 
 pub async fn schema_for_call(cli: &Cli, url: &Url, client: &Client) -> Result<Schema, FetchError> {
     let service = service_from_path(url.path())?;
-    schema_for_symbol(cli, url, client, service).await
+    Box::pin(schema_for_symbol(cli, url, client, service)).await
 }
 
 async fn list_services(cli: &Cli, url: &Url, client: &Client) -> Result<Vec<String>, FetchError> {
     let mut last_unimplemented = None;
     for (index, path) in REFLECTION_PROTOCOLS.iter().enumerate() {
-        match invoke(cli, url, client, path, build_reflection_list_request()).await {
+        match Box::pin(invoke(
+            cli,
+            url,
+            client,
+            path,
+            build_reflection_list_request(),
+        ))
+        .await
+        {
             Ok(frames) => {
                 let Some(first) = frames.first() else {
                     return Err(reflection_unavailable("empty reflection response"));
@@ -134,13 +142,13 @@ async fn schema_for_symbol(
 ) -> Result<Schema, FetchError> {
     let mut last_unimplemented = None;
     'protocols: for (index, path) in REFLECTION_PROTOCOLS.iter().enumerate() {
-        match invoke(
+        match Box::pin(invoke(
             cli,
             url,
             client,
             path,
             build_reflection_symbol_request(symbol),
-        )
+        ))
         .await
         {
             Ok(frames) => {
@@ -187,12 +195,7 @@ async fn invoke(
         framing::frame(&payload, false).map_err(|err| FetchError::Message(err.to_string()))?;
 
     let headers = reflection_headers(cli, &url, &request_body)?;
-    let response = client
-        .post(url)
-        .headers(headers)
-        .body(request_body)
-        .send()
-        .await?;
+    let response = Box::pin(client.post(url).headers(headers).body(request_body).send()).await?;
     let status_code = response.status();
     if status_code != StatusCode::OK {
         return Err(format!(

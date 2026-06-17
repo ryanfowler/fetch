@@ -38,7 +38,7 @@ pub async fn execute(cli: &Cli, ignored_flags: &[&'static str]) -> Result<i32, F
     let request_timeout = inspection_request_timeout(cli)?;
     let connect_timeout = inspection_connect_timeout(cli, request_timeout, request_start)?;
     let inspection = TimeoutBudget::started_at(request_timeout, request_start)
-        .run(inspect(cli, &url, http_version, connect_timeout))
+        .run(Box::pin(inspect(cli, &url, http_version, connect_timeout)))
         .await?;
 
     if !cli.silent {
