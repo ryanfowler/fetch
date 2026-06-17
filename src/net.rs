@@ -93,7 +93,10 @@ pub(crate) async fn connect_first(
         return connect_sequence(preferred, timeout).await;
     }
 
-    connect_happy_eyeballs(preferred, fallback, timeout).await
+    race_preferred_fallback(preferred, fallback, move |addrs| {
+        connect_sequence(addrs, timeout)
+    })
+    .await
 }
 
 pub(crate) fn split_addrs_by_first_family(
@@ -110,17 +113,37 @@ pub(crate) fn split_addrs_by_first_family(
         .partition(|addr| addr.is_ipv4() == first_is_ipv4))
 }
 
-async fn connect_happy_eyeballs(
+pub(crate) async fn race_preferred_fallback<T, Start, Fut>(
     preferred: Vec<SocketAddr>,
     fallback: Vec<SocketAddr>,
-    timeout: TimeoutBudget,
-) -> Result<TcpStream, FetchError> {
-    let mut preferred = ConnectTask::new(preferred, timeout);
+    start: Start,
+) -> Result<T, FetchError>
+where
+    T: Send + 'static,
+    Start: Fn(Vec<SocketAddr>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, FetchError>> + Send + 'static,
+{
+    race_preferred_fallback_after_delay(preferred, fallback, HAPPY_EYEBALLS_FALLBACK_DELAY, start)
+        .await
+}
+
+async fn race_preferred_fallback_after_delay<T, Start, Fut>(
+    preferred: Vec<SocketAddr>,
+    fallback: Vec<SocketAddr>,
+    fallback_delay: Duration,
+    start: Start,
+) -> Result<T, FetchError>
+where
+    T: Send + 'static,
+    Start: Fn(Vec<SocketAddr>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, FetchError>> + Send + 'static,
+{
+    let mut preferred = HappyEyeballsTask::new(start(preferred));
     let mut fallback_addrs = Some(fallback);
-    let mut fallback_task: Option<ConnectTask> = None;
+    let mut fallback_task: Option<HappyEyeballsTask<T>> = None;
     let mut preferred_err = None;
     let mut fallback_err = None;
-    let delay = tokio::time::sleep(HAPPY_EYEBALLS_FALLBACK_DELAY);
+    let delay = tokio::time::sleep(fallback_delay);
     tokio::pin!(delay);
 
     loop {
@@ -133,10 +156,9 @@ async fn connect_happy_eyeballs(
 
         if preferred_err.is_some() {
             if fallback_task.is_none() && fallback_err.is_none() {
-                fallback_task = Some(ConnectTask::new(
+                fallback_task = Some(HappyEyeballsTask::new(start(
                     fallback_addrs.take().expect("fallback addresses exist"),
-                    timeout,
-                ));
+                )));
             }
             if let Some(task) = fallback_task.as_mut() {
                 match task.await {
@@ -164,17 +186,15 @@ async fn connect_happy_eyeballs(
                     Ok(stream) => return Ok(stream),
                     Err(err) => {
                         preferred_err = Some(err);
-                        fallback_task = Some(ConnectTask::new(
+                        fallback_task = Some(HappyEyeballsTask::new(start(
                             fallback_addrs.take().expect("fallback addresses exist"),
-                            timeout,
-                        ));
+                        )));
                     }
                 },
                 _ = &mut delay => {
-                    fallback_task = Some(ConnectTask::new(
+                    fallback_task = Some(HappyEyeballsTask::new(start(
                         fallback_addrs.take().expect("fallback addresses exist"),
-                        timeout,
-                    ));
+                    )));
                 }
             }
         } else {
@@ -196,20 +216,23 @@ async fn connect_happy_eyeballs(
     }
 }
 
-struct ConnectTask {
-    handle: JoinHandle<Result<TcpStream, FetchError>>,
+struct HappyEyeballsTask<T> {
+    handle: JoinHandle<Result<T, FetchError>>,
 }
 
-impl ConnectTask {
-    fn new(addrs: Vec<SocketAddr>, timeout: TimeoutBudget) -> Self {
+impl<T> HappyEyeballsTask<T>
+where
+    T: Send + 'static,
+{
+    fn new(future: impl Future<Output = Result<T, FetchError>> + Send + 'static) -> Self {
         Self {
-            handle: tokio::spawn(connect_sequence(addrs, timeout)),
+            handle: tokio::spawn(future),
         }
     }
 }
 
-impl Future for ConnectTask {
-    type Output = Result<TcpStream, FetchError>;
+impl<T> Future for HappyEyeballsTask<T> {
+    type Output = Result<T, FetchError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.handle).poll(cx).map(|result| {
@@ -220,7 +243,7 @@ impl Future for ConnectTask {
     }
 }
 
-impl Drop for ConnectTask {
+impl<T> Drop for HappyEyeballsTask<T> {
     fn drop(&mut self) {
         self.handle.abort();
     }
@@ -791,5 +814,83 @@ mod tests {
                 SocketAddr::new("127.0.0.2".parse().unwrap(), 443)
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn happy_eyeballs_starts_fallback_immediately_after_preferred_failure() {
+        let preferred = vec![SocketAddr::new("::1".parse().unwrap(), 443)];
+        let fallback = vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 443)];
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            race_preferred_fallback_after_delay(
+                preferred,
+                fallback,
+                Duration::from_secs(1),
+                |addrs| async move {
+                    if addrs[0].is_ipv4() {
+                        Ok("fallback")
+                    } else {
+                        Err(FetchError::Runtime("preferred failed".to_string()))
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("fallback should not wait for the delay")
+        .unwrap();
+
+        assert_eq!(result, "fallback");
+    }
+
+    #[tokio::test]
+    async fn happy_eyeballs_starts_fallback_after_delay_while_preferred_is_pending() {
+        let preferred = vec![SocketAddr::new("::1".parse().unwrap(), 443)];
+        let fallback = vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 443)];
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            race_preferred_fallback_after_delay(
+                preferred,
+                fallback,
+                Duration::from_millis(20),
+                |addrs| async move {
+                    if addrs[0].is_ipv4() {
+                        Ok("fallback")
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        Ok("preferred")
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("fallback should start after the delay")
+        .unwrap();
+
+        assert_eq!(result, "fallback");
+    }
+
+    #[tokio::test]
+    async fn happy_eyeballs_prefers_fallback_error_when_both_families_fail() {
+        let preferred = vec![SocketAddr::new("::1".parse().unwrap(), 443)];
+        let fallback = vec![SocketAddr::new("127.0.0.1".parse().unwrap(), 443)];
+
+        let err = race_preferred_fallback_after_delay(
+            preferred,
+            fallback,
+            Duration::from_secs(1),
+            |addrs| async move {
+                if addrs[0].is_ipv4() {
+                    Err::<(), _>(FetchError::Runtime("fallback failed".to_string()))
+                } else {
+                    Err::<(), _>(FetchError::Runtime("preferred failed".to_string()))
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "fallback failed");
     }
 }
