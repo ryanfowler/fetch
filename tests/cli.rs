@@ -253,6 +253,19 @@ fn dry_run_prints_effective_request_without_network() {
     assert_exit(&res, 0);
     assert!(res.stderr.contains("transfer-encoding: chunked\n"));
     assert!(!res.stderr.contains("content-length:"));
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: vec![
+                ("HTTP_PROXY".to_string(), ":bad".to_string()),
+                ("http_proxy".to_string(), ":bad".to_string()),
+            ],
+            ..Default::default()
+        },
+        &["-j", r#"{"key":"val1"}"#, "localhost:3000", "--dry-run"],
+    );
+    assert_exit(&res, 0);
+    assert!(res.stderr.contains("POST / HTTP/1.1\n"));
 }
 
 #[test]

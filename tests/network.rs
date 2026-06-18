@@ -11,8 +11,10 @@ use support::common::{
     FAST_RETRY_DELAY, FetchOpts, assert_exit, host_port, run_fetch, run_fetch_opts,
 };
 use support::dns::{
-    parse_dns_question, start_udp_dns_server, start_udp_dns_server_with_hosts,
-    start_unresponsive_udp_dns_server,
+    parse_dns_question, start_udp_dns_server, start_udp_dns_server_dropping_https,
+    start_udp_dns_server_with_hosts, start_udp_dns_server_with_https,
+    start_udp_dns_server_with_https_target_dropping_target,
+    start_udp_dns_server_with_https_targets_dropping_targets, start_unresponsive_udp_dns_server,
 };
 use support::grpc::{
     grpc_frame, grpc_frame_with_flag, gzip_bytes, proto_field_string, proto_field_varint,
@@ -495,6 +497,316 @@ fn http3_go_harness_cases() {
     );
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "welcome h3");
+}
+
+#[test]
+fn default_https_uses_http3_from_https_dns_record() {
+    let h3 = start_http3_server(|req| {
+        if req.path == "/auto-h3" {
+            return H3Response::ok("auto h3 ok").header("Content-Type", "text/plain");
+        }
+        H3Response::status(404, "not found")
+    });
+    let h3_port = Url::parse(&h3.url).unwrap().port().unwrap();
+    let dns_addr =
+        start_udp_dns_server_with_https("localhost.", Ipv4Addr::new(127, 0, 0, 1), h3_port);
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        h3.ca_cert_path.to_str().unwrap(),
+        "--timing",
+        &format!("https://localhost:{h3_port}/auto-h3"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "auto h3 ok");
+    assert!(res.stderr.contains("HTTP/3.0 200 OK"), "{}", res.stderr);
+    assert!(res.stderr.contains("DNS"), "{}", res.stderr);
+    assert!(res.stderr.contains("QUIC"), "{}", res.stderr);
+    let requests = wait_for_h3_requests(&h3, 1);
+    assert_eq!(requests[0].path, "/auto-h3");
+}
+
+#[test]
+fn default_https_falls_back_to_tcp_when_auto_http3_blackholes_without_duplicate_post() {
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let count_for_handler = request_count.clone();
+    let tls = start_tls_server(move |req| {
+        count_for_handler.fetch_add(1, Ordering::SeqCst);
+        if req.path == "/auto-fallback" && req.body == b"post-body" {
+            return TestResponse::ok("tcp fallback ok");
+        }
+        TestResponse::status(400, "Bad Request", format!("{:?}", req.body))
+    });
+    let tls_port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let quic_blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let quic_port = quic_blackhole.local_addr().unwrap().port();
+    let dns_addr =
+        start_udp_dns_server_with_https("localhost.", Ipv4Addr::new(127, 0, 0, 1), quic_port);
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        "--connect-timeout",
+        "1",
+        "-d",
+        "post-body",
+        &format!("https://localhost:{tls_port}/auto-fallback"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "tcp fallback ok");
+    assert!(res.stderr.contains("HTTP/1.1 200 OK"), "{}", res.stderr);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn default_https_auto_http3_does_not_wait_for_dropped_https_dns_record() {
+    let tls = start_tls_server(|req| {
+        if req.path == "/auto-h3-dropped-https-record" {
+            return TestResponse::ok("tcp without h3 delay");
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let tls_port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server_dropping_https("localhost.", Ipv4Addr::new(127, 0, 0, 1));
+
+    let start = std::time::Instant::now();
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        &format!("https://localhost:{tls_port}/auto-h3-dropped-https-record"),
+    ]);
+    let elapsed = start.elapsed();
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "tcp without h3 delay");
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "request waited too long for dropped HTTPS RR: {elapsed:?}\nstderr:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn default_https_auto_http3_does_not_wait_for_dropped_svcb_target_dns_record() {
+    let tls = start_tls_server(|req| {
+        if req.path == "/auto-h3-dropped-svcb-target" {
+            return TestResponse::ok("tcp without target delay");
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let tls_port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server_with_https_target_dropping_target(
+        "localhost.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        "h3.localhost.",
+        tls_port,
+    );
+
+    let start = std::time::Instant::now();
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        &format!("https://localhost:{tls_port}/auto-h3-dropped-svcb-target"),
+    ]);
+    let elapsed = start.elapsed();
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "tcp without target delay");
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "request waited too long for dropped SVCB target lookup: {elapsed:?}\nstderr:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn default_https_auto_http3_uses_one_budget_for_dropped_svcb_target_dns_records() {
+    let tls = start_tls_server(|req| {
+        if req.path == "/auto-h3-multiple-dropped-svcb-targets" {
+            return TestResponse::ok("tcp after shared discovery budget");
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let tls_port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let (dns_addr, target_queries) = start_udp_dns_server_with_https_targets_dropping_targets(
+        "localhost.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        vec![
+            "h3-a.localhost.",
+            "h3-b.localhost.",
+            "h3-c.localhost.",
+            "h3-d.localhost.",
+            "h3-e.localhost.",
+        ],
+        tls_port,
+    );
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        &format!("https://localhost:{tls_port}/auto-h3-multiple-dropped-svcb-targets"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "tcp after shared discovery budget");
+    assert_eq!(
+        target_queries.load(Ordering::SeqCst),
+        1,
+        "auto-H3 target resolution should spend one shared discovery budget\nstderr:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn default_https_auto_http3_small_connect_timeout_skips_dropped_https_dns_record() {
+    let tls = start_tls_server(|req| {
+        if req.path == "/auto-h3-small-timeout-dropped-https-record" {
+            return TestResponse::ok("tcp despite small budget");
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let tls_port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server_dropping_https("localhost.", Ipv4Addr::new(127, 0, 0, 1));
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        "--connect-timeout",
+        "0.2",
+        &format!("https://localhost:{tls_port}/auto-h3-small-timeout-dropped-https-record"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "tcp despite small budget");
+    assert!(res.stderr.contains("HTTP/1.1 200 OK"), "{}", res.stderr);
+}
+
+#[test]
+fn default_https_auto_http3_connect_timeout_caps_dropped_svcb_target_dns_record() {
+    let tls = start_tls_server(|req| {
+        if req.path == "/auto-h3-connect-timeout-dropped-svcb-target" {
+            return TestResponse::ok("tcp after capped target lookup");
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let tls_port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server_with_https_target_dropping_target(
+        "localhost.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        "h3.localhost.",
+        tls_port,
+    );
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        "--connect-timeout",
+        "0.5",
+        &format!("https://localhost:{tls_port}/auto-h3-connect-timeout-dropped-svcb-target"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "tcp after capped target lookup");
+    assert!(res.stderr.contains("HTTP/1.1 200 OK"), "{}", res.stderr);
+}
+
+#[test]
+fn default_https_auto_http3_small_connect_timeout_skips_https_record_discovery() {
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let count_for_handler = request_count.clone();
+    let tls = start_tls_server(move |_| {
+        count_for_handler.fetch_add(1, Ordering::SeqCst);
+        TestResponse::ok("tcp because h3 discovery was skipped")
+    });
+    let tls_port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let quic_blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let quic_port = quic_blackhole.local_addr().unwrap().port();
+    let dns_addr =
+        start_udp_dns_server_with_https("localhost.", Ipv4Addr::new(127, 0, 0, 1), quic_port);
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        "--connect-timeout",
+        "0.2",
+        &format!("https://localhost:{tls_port}/auto-h3-small-timeout-h3-record"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "tcp because h3 discovery was skipped");
+    assert!(res.stderr.contains("HTTP/1.1 200 OK"), "{}", res.stderr);
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn explicit_http3_remains_strict_and_does_not_fallback_to_tcp() {
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let count_for_handler = request_count.clone();
+    let tls = start_tls_server(move |_| {
+        count_for_handler.fetch_add(1, Ordering::SeqCst);
+        TestResponse::ok("unexpected tcp")
+    });
+
+    let res = run_fetch(&[
+        "--http",
+        "3",
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        "--connect-timeout",
+        "0.2",
+        &format!("{}/strict-h3", tls.url),
+    ]);
+
+    assert_exit(&res, 1);
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn explicit_http2_bypasses_auto_http3_discovery() {
+    let h3 = start_http3_server(|_| H3Response::ok("unexpected h3"));
+    let h3_port = Url::parse(&h3.url).unwrap().port().unwrap();
+    let h2 = start_h2_tls_server(|req| {
+        if req.path == "/explicit-h2" {
+            return TestResponse::ok("h2 ok");
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let h2_port = Url::parse(&h2.url).unwrap().port().unwrap();
+    let dns_addr =
+        start_udp_dns_server_with_https("localhost.", Ipv4Addr::new(127, 0, 0, 1), h3_port);
+
+    let res = run_fetch(&[
+        "--http",
+        "2",
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        h2.ca_cert_path.to_str().unwrap(),
+        &format!("https://localhost:{h2_port}/explicit-h2"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "h2 ok");
+    assert!(res.stderr.contains("HTTP/2.0 200 OK"), "{}", res.stderr);
+    assert!(h3.requests().is_empty());
 }
 
 #[test]

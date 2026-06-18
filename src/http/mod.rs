@@ -129,13 +129,14 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         session: session.as_ref(),
         connect_timing: Some(&connect_timing),
     };
-    let initial_client = client::build_client_for_url(cli, &url, &client_build).await?;
+    let mut initial_client = None;
     if cli.grpc && grpc_method.is_none() {
+        let reflection_client = client::build_client_for_url(cli, &url, &client_build).await?;
         let request_requires_schema = grpc_request_requires_schema(cli);
         match Box::pin(crate::grpc::reflection::schema_for_call(
             cli,
             &url,
-            &initial_client.client,
+            &reflection_client.client,
         ))
         .await
         {
@@ -147,6 +148,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             Err(err) if request_requires_schema => return Err(err),
             Err(_) => {}
         }
+        initial_client = Some(reflection_client);
     }
     let method_name = effective_method(cli);
     let method = Method::from_bytes(method_name.as_bytes())
@@ -199,6 +201,11 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         print_dry_run_body(cli, &body)?;
         return Ok(0);
     }
+
+    let initial_client = match initial_client {
+        Some(client) => client,
+        None => client::build_client_for_url(cli, &url, &client_build).await?,
+    };
 
     let retry_count = cli.retry();
     let retry_delay = duration_from_seconds("retry-delay", cli.retry_delay())?;

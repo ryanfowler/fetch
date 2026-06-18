@@ -507,9 +507,8 @@ fn resource_value(
                 .0;
             format!("{priority} {weight} {port} {target}")
         }
-        DNS_TYPE_SVCB | DNS_TYPE_HTTPS => {
-            parse_svcb_rdata(rdata).unwrap_or_else(|| format!("0x{}", hex_encode(rdata)))
-        }
+        DNS_TYPE_SVCB | DNS_TYPE_HTTPS => crate::dns::svcb::format_rdata(rdata)
+            .unwrap_or_else(|| format!("0x{}", hex_encode(rdata))),
         DNS_TYPE_CAA => format_caa(rdata),
         _ => return Ok(None),
     };
@@ -853,120 +852,14 @@ fn type_label(typ: u16) -> String {
 }
 
 fn normalize_doh_value(typ: u16, value: &str) -> String {
-    let Some(raw) = parse_generic_rdata(value) else {
+    let Some(raw) = crate::dns::svcb::parse_generic_rdata(value) else {
         return value.to_string();
     };
     match typ {
-        DNS_TYPE_SVCB | DNS_TYPE_HTTPS => {
-            parse_svcb_rdata(&raw).unwrap_or_else(|| format!("0x{}", hex_encode(&raw)))
-        }
+        DNS_TYPE_SVCB | DNS_TYPE_HTTPS => crate::dns::svcb::format_rdata(&raw)
+            .unwrap_or_else(|| format!("0x{}", hex_encode(&raw))),
         DNS_TYPE_CAA => format_caa(&raw),
         _ => format!("0x{}", hex_encode(&raw)),
-    }
-}
-
-fn parse_generic_rdata(value: &str) -> Option<Vec<u8>> {
-    let fields: Vec<_> = value.split_whitespace().collect();
-    if fields.len() < 3 || fields[0] != r"\#" {
-        return None;
-    }
-    let want_len = fields[1].parse::<usize>().ok()?;
-    let raw = hex_decode(&fields[2..].join(""))?;
-    (raw.len() == want_len).then_some(raw)
-}
-
-fn parse_svcb_rdata(raw: &[u8]) -> Option<String> {
-    if raw.len() < 3 {
-        return None;
-    }
-    let priority = u16::from_be_bytes([raw[0], raw[1]]);
-    let (target, mut offset) = unpack_dns_name(raw, 2)?;
-    let mut params = Vec::new();
-    while offset < raw.len() {
-        if offset + 4 > raw.len() {
-            return None;
-        }
-        let key = u16::from_be_bytes([raw[offset], raw[offset + 1]]);
-        let len = usize::from(u16::from_be_bytes([raw[offset + 2], raw[offset + 3]]));
-        offset += 4;
-        if offset + len > raw.len() {
-            return None;
-        }
-        params.push(format_svc_param(key, &raw[offset..offset + len]));
-        offset += len;
-    }
-    let mut parts = vec![priority.to_string(), target];
-    parts.extend(params);
-    Some(parts.join(" "))
-}
-
-fn unpack_dns_name(raw: &[u8], mut offset: usize) -> Option<(String, usize)> {
-    let mut labels = Vec::new();
-    loop {
-        let len = *raw.get(offset)?;
-        offset += 1;
-        if len == 0 {
-            let name = if labels.is_empty() {
-                ".".to_string()
-            } else {
-                format!("{}.", labels.join("."))
-            };
-            return Some((name, offset));
-        }
-        if len & 0xc0 != 0 {
-            return None;
-        }
-        let len = usize::from(len);
-        let label = raw.get(offset..offset + len)?;
-        labels.push(String::from_utf8_lossy(label).into_owned());
-        offset += len;
-    }
-}
-
-fn format_svc_param(key: u16, value: &[u8]) -> String {
-    match key {
-        1 => {
-            let mut alpns = Vec::new();
-            let mut offset = 0;
-            while offset < value.len() {
-                let len = usize::from(value[offset]);
-                offset += 1;
-                if offset + len > value.len() {
-                    return format!("ALPN=0x{}", hex_encode(value));
-                }
-                alpns.push(String::from_utf8_lossy(&value[offset..offset + len]).into_owned());
-                offset += len;
-            }
-            format!("ALPN={}", alpns.join(","))
-        }
-        2 => "NoDefaultALPN".to_string(),
-        3 if value.len() == 2 => {
-            let port = u16::from_be_bytes([value[0], value[1]]);
-            format!("Port={port}")
-        }
-        3 => format!("Port=0x{}", hex_encode(value)),
-        4 if value.len().is_multiple_of(4) => {
-            let ips = value
-                .chunks_exact(4)
-                .map(|chunk| IpAddr::from([chunk[0], chunk[1], chunk[2], chunk[3]]).to_string())
-                .collect::<Vec<_>>();
-            format!("IPv4Hint={}", ips.join(","))
-        }
-        4 => format!("IPv4Hint=0x{}", hex_encode(value)),
-        6 if value.len().is_multiple_of(16) => {
-            let ips = value
-                .chunks_exact(16)
-                .map(|chunk| {
-                    let mut octets = [0u8; 16];
-                    octets.copy_from_slice(chunk);
-                    IpAddr::from(octets).to_string()
-                })
-                .collect::<Vec<_>>();
-            format!("IPv6Hint={}", ips.join(","))
-        }
-        6 => format!("IPv6Hint=0x{}", hex_encode(value)),
-        7 => format!("DOHPath={:?}", String::from_utf8_lossy(value)),
-        _ => format!("key{key}=0x{}", hex_encode(value)),
     }
 }
 
@@ -992,29 +885,6 @@ fn hex_encode(raw: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
-}
-
-fn hex_decode(raw: &str) -> Option<Vec<u8>> {
-    if !raw.len().is_multiple_of(2) {
-        return None;
-    }
-    raw.as_bytes()
-        .chunks_exact(2)
-        .map(|chunk| {
-            let hi = hex_digit(chunk[0])?;
-            let lo = hex_digit(chunk[1])?;
-            Some((hi << 4) | lo)
-        })
-        .collect()
-}
-
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {

@@ -484,14 +484,21 @@ Aliases: `--http1`, `--http2`, `--http3`.
 - `2` - HTTP/2
 - `3` - HTTP/3 (QUIC)
 
-When `--http` is unset, HTTPS requests offer `h2` and then `http/1.1`
-through ALPN, using HTTP/2 when the server negotiates it and falling back to
-HTTP/1.1 otherwise.
+When `--http` is unset, direct HTTPS requests use DNS HTTPS/SVCB records to
+discover `h3` endpoints. With `--dns-server`, HTTPS-record discovery uses that
+custom UDP or DoH resolver. Without `--dns-server`, it uses the platform
+resolver, matching normal address lookup. If a usable `h3` record exists,
+`fetch` races QUIC connection setup against the normal TCP/TLS path and sends
+the request once on the winning transport. If the HTTPS-record lookup fails,
+times out, is unsupported by the OS resolver, or returns no usable `h3` record,
+HTTPS offers `h2` then `http/1.1` through ALPN. Proxy and Unix socket requests
+also use the normal ALPN path.
 
 `--http 1`, `--http 2`, and `--http 3` force that protocol instead of setting
 a maximum version. `--http 2` with a plain `http://` URL is only supported for
 gRPC requests, where `fetch` uses h2c (HTTP/2 over cleartext) for local
-plaintext servers.
+plaintext servers. Use `--http 1` or `--http 2` to opt out of automatic
+HTTP/3; forced `--http 3` remains strict and does not fall back to TCP.
 
 ```sh
 fetch --http 1 example.com

@@ -63,11 +63,22 @@ pub(crate) fn parse_response<'a>(
     raw: &'a [u8],
     expected_id: u16,
 ) -> Result<Vec<ResourceRecord<'a>>, WireError> {
+    parse_response_inner(raw, Some(expected_id))
+}
+
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+pub(crate) fn parse_response_without_id(raw: &[u8]) -> Result<Vec<ResourceRecord<'_>>, WireError> {
+    parse_response_inner(raw, None)
+}
+
+fn parse_response_inner<'a>(
+    raw: &'a [u8],
+    expected_id: Option<u16>,
+) -> Result<Vec<ResourceRecord<'a>>, WireError> {
     if raw.len() < 12 {
         return Err(WireError("short DNS response".to_string()));
     }
-    let id = read_u16(raw, 0)?;
-    if id != expected_id {
+    if expected_id.is_some_and(|expected_id| read_u16(raw, 0).is_ok_and(|id| id != expected_id)) {
         return Err(WireError("mismatched DNS response ID".to_string()));
     }
     let flags = read_u16(raw, 2)?;
