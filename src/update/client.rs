@@ -224,6 +224,7 @@ impl<'a> UpdateClient<'a> {
             return Ok(client::UrlClient {
                 client: builder.build()?,
                 dns_resolution: None,
+                runtime_dns_resolution: None,
             });
         };
 

@@ -108,7 +108,7 @@ pub(crate) fn client_with_budget(budget: TimeoutBudget) -> Result<DohClient, Dns
     Ok(DohClient { budget, client })
 }
 
-async fn lookup_doh_type_with_client(
+pub(crate) async fn lookup_doh_type_with_client(
     client: &DohClient,
     server_url: &Url,
     host: &str,

@@ -157,13 +157,14 @@ for `--http 1`, `--http 2`, and `--http 3`.
 When `--http` is unset, direct HTTPS requests use DNS HTTPS/SVCB records to
 discover `h3`. With `--dns-server`, HTTPS-record discovery uses that custom UDP
 or DoH resolver. Without `--dns-server`, it uses the platform resolver,
-matching normal address lookup. Discovery runs in parallel with the normal
-address lookup and does not delay it; if a usable record is ready by then,
-`fetch` races QUIC connection setup against the normal TCP/TLS path and sends
-the request once on the winning transport. If the HTTPS-record lookup is still
-pending, fails, is unsupported by the OS resolver, or returns no usable `h3`
-record, HTTPS uses the normal ALPN path and offers `h2` then `http/1.1`. Proxy
-and Unix socket requests also use the normal ALPN path.
+matching normal address lookup. HTTPS-record discovery and normal A/AAAA lookup
+run in parallel. `fetch` starts the TCP/TLS path as soon as normal DNS produces
+a usable address, and a usable `h3` candidate that is discovered before TCP/TLS
+wins races QUIC setup against it. The request is sent once on the winning
+transport. If HTTPS-record discovery is too slow, fails, is unsupported by the
+OS resolver, or returns no usable `h3` record, HTTPS uses the normal ALPN path
+and offers `h2` then `http/1.1`. Proxy and Unix socket requests also use the
+normal ALPN path.
 
 Setting `--http 1`, `--http 2`, or `--http 3` forces that protocol; it does not
 set a version cap. Use `--http 1` or `--http 2` to opt out of automatic HTTP/3.
@@ -210,9 +211,12 @@ By default, `fetch` negotiates the best available version:
 
 1. Uses DNS HTTPS/SVCB records from the platform resolver, or from
    `--dns-server` when set, to discover `h3` candidates for direct HTTPS
-2. Races QUIC setup against TCP/TLS when a usable `h3` candidate exists
-3. Otherwise offers HTTP/2 via ALPN
-4. Falls back to HTTP/1.1 if needed
+2. Resolves A and AAAA in parallel and starts TCP/TLS as soon as an address is
+   usable
+3. Races QUIC setup against TCP/TLS when a usable `h3` candidate is discovered
+   before TCP/TLS wins
+4. Otherwise offers HTTP/2 via ALPN
+5. Falls back to HTTP/1.1 if needed
 
 ## TLS Configuration
 

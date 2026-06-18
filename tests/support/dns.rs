@@ -4,8 +4,10 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::thread;
+use std::time::Duration;
 
 const TYPE_A: u16 = 1;
+const TYPE_AAAA: u16 = 28;
 const TYPE_HTTPS: u16 = 65;
 
 pub(crate) fn start_udp_dns_server(host: &'static str, ip: Ipv4Addr) -> String {
@@ -112,6 +114,40 @@ pub(crate) fn start_udp_dns_server_dropping_https(host: &'static str, ip: Ipv4Ad
                 continue;
             };
             if name == host && qtype == TYPE_HTTPS {
+                continue;
+            }
+            let answer = if name == host && qtype == TYPE_A {
+                Some((TYPE_A, ip.octets().to_vec()))
+            } else {
+                None
+            };
+            let resp = dns_response(&buf[..n], question_end, answer);
+            let _ = socket.send_to(&resp, peer);
+        }
+    });
+    addr
+}
+
+pub(crate) fn start_udp_dns_server_with_delayed_aaaa(
+    host: &'static str,
+    ip: Ipv4Addr,
+    delay: Duration,
+) -> String {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            if name == host && qtype == TYPE_AAAA {
+                let resp = dns_response(&buf[..n], question_end, None);
+                let socket = socket.try_clone().expect("clone udp dns server socket");
+                thread::spawn(move || {
+                    thread::sleep(delay);
+                    let _ = socket.send_to(&resp, peer);
+                });
                 continue;
             }
             let answer = if name == host && qtype == TYPE_A {

@@ -27,7 +27,6 @@ use hyper_util::client::proxy::matcher;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::ServerName;
-use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -38,9 +37,10 @@ use tower_service::Service;
 use url::Url;
 
 use crate::cli::HttpVersion;
+use crate::dns::svcb::{HttpsRecordResolver, SvcbRecord};
 use crate::duration::{TimeoutBudget, request_timeout_message};
 use crate::error::FetchError;
-use crate::timing::TransportTiming;
+use crate::timing::{DnsTiming, TransportTiming};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErrorKind {
@@ -286,8 +286,11 @@ struct ClientConfig {
     connect_timeout: Option<Duration>,
     session: Option<Arc<crate::session::PersistentCookieStore>>,
     connection_timing: Option<crate::http::client::ConnectionTiming>,
+    dns_resolution: Option<crate::http::client::DnsResolutionHandle>,
+    dns_server: Option<String>,
     local_address: Option<IpAddr>,
     auto_http3: Option<AutoHttp3Config>,
+    auto_http3_discovery: bool,
 }
 
 pub(crate) struct ClientBuilder {
@@ -314,8 +317,11 @@ impl Client {
                 connect_timeout: None,
                 session: None,
                 connection_timing: None,
+                dns_resolution: None,
+                dns_server: None,
                 local_address: None,
                 auto_http3: None,
+                auto_http3_discovery: false,
             },
         }
     }
@@ -383,7 +389,9 @@ impl Client {
         self.apply_proxy_authorization(&url, &mut headers)?;
         apply_host_header(&url, &mut headers)?;
         let response = match version {
-            None if self.config.auto_http3.is_some() && url.scheme() == "https" => {
+            None if (self.config.auto_http3.is_some() || self.config.auto_http3_discovery)
+                && url.scheme() == "https" =>
+            {
                 self.send_auto_http3(method, url.clone(), headers, body, body_deadline)
                     .await
             }
@@ -561,6 +569,9 @@ impl Client {
     }
 
     async fn race_auto_http3_connection(&self, url: Url) -> Result<AutoRaceWinner, Error> {
+        if self.config.auto_http3_discovery {
+            return self.race_dynamic_auto_http3_connection(url).await;
+        }
         let connect_timeout = TimeoutBudget::new(self.config.connect_timeout);
         race_primary_fallback(
             {
@@ -591,22 +602,89 @@ impl Client {
         .await
     }
 
+    async fn race_dynamic_auto_http3_connection(&self, url: Url) -> Result<AutoRaceWinner, Error> {
+        let connect_timeout = TimeoutBudget::new(self.config.connect_timeout);
+        let h3 = {
+            let client = self.clone();
+            let url = url.clone();
+            async move {
+                client
+                    .connect_dynamic_auto_http3_client(&url, connect_timeout)
+                    .await
+                    .map(AutoRaceWinner::Http3)
+            }
+        };
+        let tcp = {
+            let client = self.clone();
+            async move {
+                client
+                    .connect_auto_tcp_tls(&url, connect_timeout)
+                    .await
+                    .map(AutoRaceWinner::Tcp)
+            }
+        };
+        race_started_auto_connections(h3, tcp).await
+    }
+
+    async fn connect_dynamic_auto_http3_client(
+        &self,
+        url: &Url,
+        timeout: TimeoutBudget,
+    ) -> Result<Http3ConnectResult, Error> {
+        let origin = http3_origin(url)?;
+        if let Some(client) = self.h3_pool.lock().await.get(&origin).cloned() {
+            return Ok(Http3ConnectResult {
+                client,
+                timing: TransportTiming::default(),
+            });
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| Error::request("URL host is required"))?;
+        let discovery_start = std::time::Instant::now();
+        let origin_addrs_task = spawn_auto_http3_origin_addrs(
+            self.config.dns_server.clone(),
+            host.to_string(),
+            timeout,
+        );
+        let records =
+            lookup_auto_http3_https_records(self.config.dns_server.as_deref(), host, timeout).await;
+        if records.is_empty() {
+            return Err(Error::connect("no HTTP/3 candidates discovered"));
+        }
+        let origin_addrs = take_finished_auto_http3_origin_addrs(origin_addrs_task).await;
+        let addrs = auto_http3_addrs_for_records(
+            self.config.dns_server.as_deref(),
+            url,
+            &records,
+            &origin_addrs,
+            timeout,
+        )
+        .await;
+        if addrs.is_empty() {
+            return Err(Error::connect("no HTTP/3 candidates discovered"));
+        }
+        record_dns_addrs_trace(&self.config, url, &addrs, discovery_start.elapsed());
+        self.connect_http3_client_with_addrs(url, origin, addrs, timeout)
+            .await
+    }
+
     async fn connect_auto_tcp_tls(
         &self,
         url: &Url,
         timeout: TimeoutBudget,
     ) -> Result<AutoTcpConnection, Error> {
-        let tcp_start = std::time::Instant::now();
-        let stream = connect_direct_tcp_config(&self.config, url, timeout)
+        let trace = connect_direct_tcp_config(&self.config, url, timeout)
             .await
             .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
-        let remote_addr = stream.peer_addr().ok();
-        let tcp = tcp_start.elapsed();
+        record_dns_trace(&self.config, url, &trace);
+        let remote_addr = trace.stream.peer_addr().ok();
+        let tcp = trace.tcp_duration;
         let tls_start = std::time::Instant::now();
         let (stream, negotiated_h2) = tls_stream_for_config(
             &self.config,
             url,
-            Box::pin(stream) as crate::net::DialStream,
+            Box::pin(trace.stream) as crate::net::DialStream,
             &alpn_for_config(&self.config),
             timeout,
         )
@@ -721,6 +799,217 @@ where
             }
         }
     }
+}
+
+async fn race_started_auto_connections<H3Future, TcpFuture>(
+    h3: H3Future,
+    tcp: TcpFuture,
+) -> Result<AutoRaceWinner, Error>
+where
+    H3Future: Future<Output = Result<AutoRaceWinner, Error>>,
+    TcpFuture: Future<Output = Result<AutoRaceWinner, Error>>,
+{
+    let mut h3 = Box::pin(h3);
+    let mut tcp = Box::pin(tcp);
+    let mut h3_err = None;
+    let mut tcp_err = None;
+
+    loop {
+        if h3_err.is_some() && tcp_err.is_some() {
+            return Err(tcp_err
+                .take()
+                .or(h3_err)
+                .expect("at least one race error exists"));
+        }
+
+        match (h3_err.is_some(), tcp_err.is_some()) {
+            (false, false) => {
+                tokio::select! {
+                    result = h3.as_mut() => match result {
+                        Ok(winner) => return Ok(winner),
+                        Err(err) => h3_err = Some(err),
+                    },
+                    result = tcp.as_mut() => match result {
+                        Ok(winner) => return Ok(winner),
+                        Err(err) => tcp_err = Some(err),
+                    },
+                }
+            }
+            (true, false) => match tcp.as_mut().await {
+                Ok(winner) => return Ok(winner),
+                Err(err) => tcp_err = Some(err),
+            },
+            (false, true) => match h3.as_mut().await {
+                Ok(winner) => return Ok(winner),
+                Err(err) => h3_err = Some(err),
+            },
+            (true, true) => unreachable!("handled at top of loop"),
+        }
+    }
+}
+
+fn spawn_auto_http3_origin_addrs(
+    dns_server: Option<String>,
+    host: String,
+    timeout: TimeoutBudget,
+) -> JoinHandle<Vec<SocketAddr>> {
+    tokio::spawn(async move {
+        crate::net::resolve_host(&host, dns_server.as_deref(), timeout)
+            .await
+            .unwrap_or_default()
+    })
+}
+
+async fn take_finished_auto_http3_origin_addrs(
+    handle: JoinHandle<Vec<SocketAddr>>,
+) -> Vec<SocketAddr> {
+    if !handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    if handle.is_finished() {
+        handle.await.unwrap_or_default()
+    } else {
+        handle.abort();
+        Vec::new()
+    }
+}
+
+async fn lookup_auto_http3_https_records(
+    dns_server: Option<&str>,
+    host: &str,
+    timeout: TimeoutBudget,
+) -> Vec<SvcbRecord> {
+    let Some(timeout) = auto_http3_lookup_timeout(timeout) else {
+        return Vec::new();
+    };
+    let resolver = dns_server
+        .map(HttpsRecordResolver::Custom)
+        .unwrap_or(HttpsRecordResolver::System);
+    tokio::time::timeout(
+        timeout,
+        crate::dns::svcb::lookup_https_records(resolver, host, Some(timeout)),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default()
+}
+
+fn auto_http3_lookup_timeout(timeout: TimeoutBudget) -> Option<Duration> {
+    let max_lookup = crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY;
+    match timeout.remaining().ok()? {
+        None => Some(max_lookup),
+        Some(remaining) if remaining <= max_lookup => None,
+        Some(remaining) => Some((remaining - max_lookup).min(max_lookup)),
+    }
+}
+
+async fn auto_http3_addrs_for_records(
+    dns_server: Option<&str>,
+    url: &Url,
+    records: &[SvcbRecord],
+    origin_addrs: &[SocketAddr],
+    timeout: TimeoutBudget,
+) -> Vec<SocketAddr> {
+    let Some(origin_host) = url.host_str() else {
+        return Vec::new();
+    };
+    let Some(origin_port) = url.port_or_known_default() else {
+        return Vec::new();
+    };
+    let mut sorted = records.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|record| record.priority);
+
+    let mut addrs = Vec::new();
+    for record in sorted {
+        if record.is_alias_mode() || !record.is_usable() || !record.advertises_alpn("h3") {
+            continue;
+        }
+        let port = record.port.unwrap_or(origin_port);
+        let mut record_addrs = auto_http3_hint_addrs(record, origin_addrs, port);
+        if record_addrs.is_empty() {
+            let target = auto_http3_target_host(origin_host, &record.target);
+            if target.eq_ignore_ascii_case(origin_host) && !origin_addrs.is_empty() {
+                record_addrs = origin_addrs
+                    .iter()
+                    .map(|addr| SocketAddr::new(addr.ip(), port))
+                    .collect();
+            } else if target.eq_ignore_ascii_case(origin_host) {
+                record_addrs = crate::net::resolve_host(origin_host, dns_server, timeout)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|addr| SocketAddr::new(addr.ip(), port))
+                    .collect();
+            } else if let Ok(ip) = target.parse::<IpAddr>() {
+                record_addrs.push(SocketAddr::new(ip, port));
+            }
+        }
+        append_unique_socket_addrs(&mut addrs, record_addrs);
+    }
+    addrs
+}
+
+fn auto_http3_hint_addrs(
+    record: &SvcbRecord,
+    origin_addrs: &[SocketAddr],
+    port: u16,
+) -> Vec<SocketAddr> {
+    let ipv4 = record
+        .ipv4_hint
+        .iter()
+        .copied()
+        .map(|addr| SocketAddr::new(IpAddr::V4(addr), port))
+        .collect::<Vec<_>>();
+    let ipv6 = record
+        .ipv6_hint
+        .iter()
+        .copied()
+        .map(|addr| SocketAddr::new(IpAddr::V6(addr), port))
+        .collect::<Vec<_>>();
+
+    match origin_addrs.first().map(|addr| addr.ip()) {
+        Some(IpAddr::V4(_)) => crate::net::interleave_socket_addr_families(&ipv4, &ipv6),
+        Some(IpAddr::V6(_)) | None => crate::net::interleave_socket_addr_families(&ipv6, &ipv4),
+    }
+}
+
+fn auto_http3_target_host(origin_host: &str, target: &str) -> String {
+    if target == "." {
+        origin_host.to_string()
+    } else {
+        target.trim_end_matches('.').to_string()
+    }
+}
+
+fn append_unique_socket_addrs(target: &mut Vec<SocketAddr>, addrs: Vec<SocketAddr>) {
+    for addr in addrs {
+        if !target.contains(&addr) {
+            target.push(addr);
+        }
+    }
+}
+
+fn record_dns_addrs_trace(
+    config: &ClientConfig,
+    url: &Url,
+    addrs: &[SocketAddr],
+    duration: Duration,
+) {
+    let Some(resolution) = &config.dns_resolution else {
+        return;
+    };
+    let Some(host) = url.host_str() else {
+        return;
+    };
+    resolution.set(crate::http::client::DnsResolution {
+        socket_addrs: addrs.to_vec(),
+        timing: Some(DnsTiming {
+            host: host.to_string(),
+            addrs: dns_timing_addrs(addrs.iter().map(|addr| addr.ip())),
+            duration,
+        }),
+    });
 }
 
 impl Client {
@@ -856,14 +1145,15 @@ impl Client {
             .port_or_known_default()
             .ok_or_else(|| Error::request("URL port is required"))?;
         let timeout = TimeoutBudget::new(self.config.connect_timeout);
-        let addrs = if let Some(addrs) = self.config.dns_overrides.get(host) {
+        let (addrs, dns_duration) = if let Some(addrs) = self.config.dns_overrides.get(host) {
             let mut addrs = addrs.clone();
             for addr in &mut addrs {
                 addr.set_port(port);
             }
-            addrs
+            (addrs, None)
         } else {
-            crate::net::resolve_host(host, None, timeout)
+            let dns_start = std::time::Instant::now();
+            let addrs = crate::net::resolve_host(host, self.config.dns_server.as_deref(), timeout)
                 .await
                 .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?
                 .into_iter()
@@ -871,8 +1161,12 @@ impl Client {
                     addr.set_port(port);
                     addr
                 })
-                .collect()
+                .collect();
+            (addrs, Some(dns_start.elapsed()))
         };
+        if let Some(duration) = dns_duration {
+            record_dns_addrs_trace(&self.config, url, &addrs, duration);
+        }
         self.connect_http3_client_with_addrs(url, origin, addrs, timeout)
             .await
     }
@@ -994,6 +1288,24 @@ impl ClientBuilder {
         self
     }
 
+    pub(crate) fn auto_http3_discovery(mut self) -> Self {
+        self.config.auto_http3_discovery = true;
+        self
+    }
+
+    pub(crate) fn dns_server(mut self, server: String) -> Self {
+        self.config.dns_server = Some(server);
+        self
+    }
+
+    pub(crate) fn dns_resolution(
+        mut self,
+        resolution: crate::http::client::DnsResolutionHandle,
+    ) -> Self {
+        self.config.dns_resolution = Some(resolution);
+        self
+    }
+
     pub(crate) fn resolve_to_addrs(mut self, host: &str, addrs: &[SocketAddr]) -> Self {
         self.config
             .dns_overrides
@@ -1076,10 +1388,10 @@ async fn connect_pooled(
     let proxy = proxy_for_config(&config, &url);
     let timeout = TimeoutBudget::new(config.connect_timeout);
     let tcp_start = std::time::Instant::now();
-    let (mut stream, proxied, uses_tcp, remote_addr) =
+    let (mut stream, proxied, uses_tcp, remote_addr, tcp_duration) =
         dial_stream_for_config(&config, &url, proxy.as_ref(), timeout).await?;
     let mut timing = TransportTiming {
-        tcp: uses_tcp.then(|| tcp_start.elapsed()),
+        tcp: uses_tcp.then_some(tcp_duration.unwrap_or_else(|| tcp_start.elapsed())),
         tls: None,
         quic: None,
     };
@@ -1112,7 +1424,16 @@ async fn dial_stream_for_config(
     url: &Url,
     proxy: Option<&Proxy>,
     timeout: TimeoutBudget,
-) -> Result<(crate::net::DialStream, bool, bool, Option<SocketAddr>), Error> {
+) -> Result<
+    (
+        crate::net::DialStream,
+        bool,
+        bool,
+        Option<SocketAddr>,
+        Option<Duration>,
+    ),
+    Error,
+> {
     match proxy {
         Some(proxy) if proxy.is_http_proxy() && url.scheme() == "http" => {
             let proxy_url = crate::net::parse_proxy_url(&proxy.url)
@@ -1121,7 +1442,7 @@ async fn dial_stream_for_config(
                 crate::net::dial_http_proxy_stream_with_tls(&proxy.url, &proxy_url, timeout, None)
                     .await
                     .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
-            Ok((stream, true, true, None))
+            Ok((stream, true, true, None, None))
         }
         Some(proxy) if proxy.is_http_proxy() => {
             let proxy_url = crate::net::parse_proxy_url(&proxy.url)
@@ -1139,7 +1460,7 @@ async fn dial_stream_for_config(
             )
             .await
             .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
-            Ok((stream, false, true, None))
+            Ok((stream, false, true, None, None))
         }
         Some(proxy)
             if proxy.scheme().is_ok_and(|scheme| scheme == "socks5")
@@ -1150,12 +1471,12 @@ async fn dial_stream_for_config(
             let addrs = target_override_addrs(config, url).expect("checked above");
             dial_socks5_proxy_to_addrs(&proxy_url, addrs, timeout)
                 .await
-                .map(|stream| (stream, false, true, None))
+                .map(|stream| (stream, false, true, None, None))
                 .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))
         }
         Some(proxy) => crate::net::dial_proxy(&proxy.url, url, None, timeout)
             .await
-            .map(|stream| (stream, false, true, None))
+            .map(|stream| (stream, false, true, None, None))
             .map_err(|err| Error::from_fetch(ErrorKind::Connect, err)),
         None if config.unix_socket.is_some() => {
             #[cfg(unix)]
@@ -1169,6 +1490,7 @@ async fn dial_stream_for_config(
                             false,
                             false,
                             None,
+                            None,
                         )
                     })
                     .map_err(|err| Error::with_source(ErrorKind::Connect, err.to_string(), err))
@@ -1179,15 +1501,18 @@ async fn dial_stream_for_config(
             }
         }
         None => {
-            let stream = connect_direct_tcp_config(config, url, timeout)
+            let trace = connect_direct_tcp_config(config, url, timeout)
                 .await
                 .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
-            let remote_addr = stream.peer_addr().ok();
+            record_dns_trace(config, url, &trace);
+            let remote_addr = trace.stream.peer_addr().ok();
+            let tcp_duration = trace.tcp_duration;
             Ok((
-                Box::pin(stream) as crate::net::DialStream,
+                Box::pin(trace.stream) as crate::net::DialStream,
                 false,
                 true,
                 remote_addr,
+                Some(tcp_duration),
             ))
         }
     }
@@ -1197,7 +1522,7 @@ async fn connect_direct_tcp_config(
     config: &ClientConfig,
     url: &Url,
     timeout: TimeoutBudget,
-) -> Result<TcpStream, FetchError> {
+) -> Result<crate::net::TcpConnectTrace, FetchError> {
     let host = url
         .host_str()
         .ok_or_else(|| FetchError::Message("URL host is required".to_string()))?;
@@ -1209,9 +1534,35 @@ async fn connect_direct_tcp_config(
         for addr in &mut addrs {
             addr.set_port(port);
         }
-        return timeout.run(crate::net::connect_first(addrs, timeout)).await;
+        let tcp_start = std::time::Instant::now();
+        let stream = timeout
+            .run(crate::net::connect_first(addrs.clone(), timeout))
+            .await?;
+        return Ok(crate::net::TcpConnectTrace {
+            stream,
+            resolved_addrs: addrs,
+            dns_duration: None,
+            tcp_duration: tcp_start.elapsed(),
+        });
     }
-    crate::net::connect_tcp(url, None, timeout).await
+    crate::net::connect_tcp_traced(url, config.dns_server.as_deref(), timeout).await
+}
+
+fn record_dns_trace(config: &ClientConfig, url: &Url, trace: &crate::net::TcpConnectTrace) {
+    let Some(duration) = trace.dns_duration else {
+        return;
+    };
+    record_dns_addrs_trace(config, url, &trace.resolved_addrs, duration);
+}
+
+fn dns_timing_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<IpAddr> {
+    let mut unique = Vec::new();
+    for addr in addrs {
+        if !unique.contains(&addr) {
+            unique.push(addr);
+        }
+    }
+    unique
 }
 
 fn proxy_for_config(config: &ClientConfig, url: &Url) -> Option<Proxy> {
@@ -2223,6 +2574,90 @@ mod tests {
 
         let explicit = http3_endpoint_local_addr(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         assert_eq!(explicit.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    fn https_record(priority: u16, target: &str, alpn: &[&str], port: Option<u16>) -> SvcbRecord {
+        SvcbRecord {
+            priority,
+            target: target.to_string(),
+            alpn: alpn.iter().map(|value| value.to_string()).collect(),
+            no_default_alpn: false,
+            port,
+            ipv4_hint: Vec::new(),
+            ipv6_hint: Vec::new(),
+            mandatory: Vec::new(),
+            unsupported_mandatory: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dynamic_auto_http3_hints_follow_origin_family_preference_and_interleave() {
+        let mut record = https_record(1, ".", &["h3"], None);
+        record.ipv4_hint = vec!["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
+        record.ipv6_hint = vec![
+            "2001:db8::1".parse().unwrap(),
+            "2001:db8::2".parse().unwrap(),
+        ];
+
+        let ipv4_first = auto_http3_hint_addrs(
+            &record,
+            &[SocketAddr::new("198.51.100.1".parse().unwrap(), 443)],
+            443,
+        );
+        assert_eq!(
+            ipv4_first,
+            [
+                SocketAddr::new("192.0.2.1".parse().unwrap(), 443),
+                SocketAddr::new("2001:db8::1".parse().unwrap(), 443),
+                SocketAddr::new("192.0.2.2".parse().unwrap(), 443),
+                SocketAddr::new("2001:db8::2".parse().unwrap(), 443),
+            ]
+        );
+
+        let ipv6_first = auto_http3_hint_addrs(
+            &record,
+            &[SocketAddr::new("2001:db8::10".parse().unwrap(), 443)],
+            443,
+        );
+        assert_eq!(
+            ipv6_first,
+            [
+                SocketAddr::new("2001:db8::1".parse().unwrap(), 443),
+                SocketAddr::new("192.0.2.1".parse().unwrap(), 443),
+                SocketAddr::new("2001:db8::2".parse().unwrap(), 443),
+                SocketAddr::new("192.0.2.2".parse().unwrap(), 443),
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_auto_http3_hints_default_to_ipv6_preference_without_origin_addrs() {
+        let mut record = https_record(1, ".", &["h3"], None);
+        record.ipv4_hint = vec!["192.0.2.1".parse().unwrap()];
+        record.ipv6_hint = vec!["2001:db8::1".parse().unwrap()];
+
+        let got = auto_http3_hint_addrs(&record, &[], 443);
+
+        assert_eq!(
+            got,
+            [
+                SocketAddr::new("2001:db8::1".parse().unwrap(), 443),
+                SocketAddr::new("192.0.2.1".parse().unwrap(), 443),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_auto_http3_origin_preference_lookup_allows_custom_dns() {
+        let handle = spawn_auto_http3_origin_addrs(
+            Some("https://dns.example/dns-query".to_string()),
+            "192.0.2.1".to_string(),
+            TimeoutBudget::new(None),
+        );
+
+        let got = take_finished_auto_http3_origin_addrs(handle).await;
+
+        assert_eq!(got, [SocketAddr::new("192.0.2.1".parse().unwrap(), 0)]);
     }
 
     #[tokio::test]

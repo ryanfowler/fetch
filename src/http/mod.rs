@@ -251,16 +251,6 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                     http_version,
                 )?;
             }
-            if cli.verbose >= 3
-                && !cli.silent
-                && let Some(dns) = request_client
-                    .dns_resolution
-                    .as_ref()
-                    .and_then(|resolution| resolution.timing.as_ref())
-            {
-                print_dns_debug(cli, dns);
-            }
-
             let req = build_request(
                 &request_client.client,
                 request_method.clone(),
@@ -275,16 +265,11 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 },
             )?;
             let req = apply_request_timeout(req, request_timeout, request_start)?;
-            timing.set_dns(
-                request_client
-                    .dns_resolution
-                    .as_ref()
-                    .and_then(|resolution| resolution.timing.as_ref())
-                    .map(|dns| dns.duration),
-            );
+            request_client.clear_runtime_dns_resolution();
             connect_timing.clear();
             match req.send().await {
                 Ok(response) => {
+                    record_request_dns_timing(cli, &request_client, &mut timing);
                     if let Some(redirect) = redirect_target(cli, &response, redirect_count)? {
                         timing.mark_response_headers();
                         timing.set_transport(connect_timing.timing());
@@ -321,6 +306,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         protocol_nack_retries += 1;
                         continue;
                     }
+                    record_request_dns_timing(cli, &request_client, &mut timing);
                     break Err(err);
                 }
             }
@@ -330,11 +316,9 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                 timing.mark_response_headers();
                 timing.set_transport(connect_timing.timing());
                 if cli.verbose >= 3 && !cli.silent {
-                    let connect_target = connect_debug_target(
-                        &response,
-                        &request_url,
-                        request_client.dns_resolution.as_ref(),
-                    );
+                    let dns_resolution = request_client.current_dns_resolution();
+                    let connect_target =
+                        connect_debug_target(&response, &request_url, dns_resolution.as_ref());
                     timing::print_debug_lines(&timing, &connect_target, cli.color.as_deref());
                 }
                 let response = apply_digest_challenge(
@@ -445,4 +429,26 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     };
     save_session(cli, session.as_ref());
     result
+}
+
+fn record_request_dns_timing(
+    cli: &Cli,
+    request_client: &client::UrlClient,
+    timing: &mut AttemptTiming,
+) {
+    let dns_resolution = request_client.current_dns_resolution();
+    if cli.verbose >= 3
+        && !cli.silent
+        && let Some(dns) = dns_resolution
+            .as_ref()
+            .and_then(|resolution| resolution.timing.as_ref())
+    {
+        print_dns_debug(cli, dns);
+    }
+    timing.set_dns(
+        dns_resolution
+            .as_ref()
+            .and_then(|resolution| resolution.timing.as_ref())
+            .map(|dns| dns.duration),
+    );
 }

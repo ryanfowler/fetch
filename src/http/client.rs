@@ -40,6 +40,22 @@ pub(crate) struct DnsResolution {
 pub(crate) struct UrlClient {
     pub(crate) client: Client,
     pub(crate) dns_resolution: Option<DnsResolution>,
+    pub(crate) runtime_dns_resolution: Option<DnsResolutionHandle>,
+}
+
+impl UrlClient {
+    pub(crate) fn clear_runtime_dns_resolution(&self) {
+        if let Some(resolution) = &self.runtime_dns_resolution {
+            resolution.clear();
+        }
+    }
+
+    pub(crate) fn current_dns_resolution(&self) -> Option<DnsResolution> {
+        self.runtime_dns_resolution
+            .as_ref()
+            .and_then(DnsResolutionHandle::resolution)
+            .or_else(|| self.dns_resolution.clone())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,7 +81,10 @@ pub(crate) struct ClientBuildContext<'a> {
 #[derive(Clone, Debug)]
 struct ClientDnsDiscovery {
     dns_resolution: Option<DnsResolution>,
+    runtime_dns_resolution: Option<DnsResolutionHandle>,
+    dns_server: Option<String>,
     auto_http3: Option<AutoHttp3Config>,
+    auto_http3_discovery: bool,
 }
 
 pub(crate) async fn build_client_for_url(
@@ -83,9 +102,20 @@ pub(crate) async fn build_client_for_url(
     .timeout();
     let effective_proxy = effective_proxy_for_url(cli.proxy.as_deref(), http_version, url)?;
     let auto_http3 = auto_http3_allowed(context.mode, url, cli.unix.as_deref(), effective_proxy);
-    let discovery =
-        resolve_dns_for_client(cli, url, dns_timeout, effective_proxy, auto_http3).await?;
+    let discovery = if dynamic_dns_for_client(cli, url, effective_proxy) {
+        let debug_dns = cli.timing || (cli.verbose >= 3 && !cli.silent);
+        ClientDnsDiscovery {
+            dns_resolution: None,
+            runtime_dns_resolution: debug_dns.then(DnsResolutionHandle::default),
+            dns_server: cli.dns_server.clone(),
+            auto_http3: None,
+            auto_http3_discovery: auto_http3,
+        }
+    } else {
+        resolve_dns_for_client(cli, url, dns_timeout, effective_proxy, auto_http3).await?
+    };
     let dns_resolution = discovery.dns_resolution;
+    let runtime_dns_resolution = discovery.runtime_dns_resolution;
     let mut builder = Client::builder()
         .use_rustls_tls()
         .no_brotli()
@@ -96,6 +126,15 @@ pub(crate) async fn build_client_for_url(
     builder = configure_http3_local_address(builder, http_version, url);
     if let Some(auto_http3) = discovery.auto_http3 {
         builder = builder.auto_http3(auto_http3);
+    }
+    if discovery.auto_http3_discovery {
+        builder = builder.auto_http3_discovery();
+    }
+    if let Some(dns_server) = discovery.dns_server {
+        builder = builder.dns_server(dns_server);
+    }
+    if let Some(resolution) = &runtime_dns_resolution {
+        builder = builder.dns_resolution(resolution.clone());
     }
     builder = configure_dns_resolution(builder, url.host_str(), dns_resolution.as_ref());
     if let Some(connect_timing) = context.connect_timing
@@ -126,6 +165,7 @@ pub(crate) async fn build_client_for_url(
     Ok(UrlClient {
         client: builder.build()?,
         dns_resolution,
+        runtime_dns_resolution,
     })
 }
 
@@ -178,7 +218,10 @@ async fn resolve_dns_for_client_inner(
     let Some(host) = url.host_str() else {
         return Ok(ClientDnsDiscovery {
             dns_resolution: None,
+            runtime_dns_resolution: None,
+            dns_server: None,
             auto_http3: None,
+            auto_http3_discovery: false,
         });
     };
     if host.parse::<IpAddr>().is_ok()
@@ -187,7 +230,10 @@ async fn resolve_dns_for_client_inner(
     {
         return Ok(ClientDnsDiscovery {
             dns_resolution: None,
+            runtime_dns_resolution: None,
+            dns_server: None,
             auto_http3: None,
+            auto_http3_discovery: false,
         });
     }
 
@@ -233,14 +279,20 @@ async fn resolve_dns_for_client_inner(
                     duration: start.elapsed(),
                 }),
             }),
+            runtime_dns_resolution: None,
+            dns_server: None,
             auto_http3,
+            auto_http3_discovery: false,
         });
     }
 
     if !debug_dns && !auto_http3 {
         return Ok(ClientDnsDiscovery {
             dns_resolution: None,
+            runtime_dns_resolution: None,
+            dns_server: None,
             auto_http3: None,
+            auto_http3_discovery: false,
         });
     }
 
@@ -291,8 +343,18 @@ async fn resolve_dns_for_client_inner(
                 duration: start.elapsed(),
             }),
         }),
+        runtime_dns_resolution: None,
+        dns_server: None,
         auto_http3,
+        auto_http3_discovery: false,
     })
+}
+
+fn dynamic_dns_for_client(cli: &Cli, url: &Url, effective_proxy: Option<EffectiveProxy>) -> bool {
+    url.host_str()
+        .is_some_and(|host| host.parse::<IpAddr>().is_err())
+        && cli.unix.is_none()
+        && effective_proxy.is_none()
 }
 
 async fn lookup_auto_http3_https_records(
@@ -507,8 +569,8 @@ fn auto_http3_hint_addrs(
         .collect::<Vec<_>>();
 
     match origin_addrs.first().map(|addr| addr.ip()) {
-        Some(IpAddr::V6(_)) => ipv6.into_iter().chain(ipv4).collect(),
-        _ => ipv4.into_iter().chain(ipv6).collect(),
+        Some(IpAddr::V4(_)) => crate::net::interleave_socket_addr_families(&ipv4, &ipv6),
+        Some(IpAddr::V6(_)) | None => crate::net::interleave_socket_addr_families(&ipv6, &ipv4),
     }
 }
 
@@ -842,6 +904,32 @@ impl ConnectionTiming {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DnsResolutionHandle {
+    resolution: Arc<Mutex<Option<DnsResolution>>>,
+}
+
+impl DnsResolutionHandle {
+    pub(crate) fn clear(&self) {
+        if let Ok(mut resolution) = self.resolution.lock() {
+            *resolution = None;
+        }
+    }
+
+    pub(crate) fn set(&self, value: DnsResolution) {
+        if let Ok(mut resolution) = self.resolution.lock() {
+            *resolution = Some(value);
+        }
+    }
+
+    pub(crate) fn resolution(&self) -> Option<DnsResolution> {
+        self.resolution
+            .lock()
+            .ok()
+            .and_then(|resolution| resolution.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1018,8 +1106,8 @@ mod tests {
             ipv4_first.addrs,
             [
                 SocketAddr::new("192.0.2.1".parse().unwrap(), 443),
-                SocketAddr::new("192.0.2.2".parse().unwrap(), 443),
                 SocketAddr::new("2001:db8::1".parse().unwrap(), 443),
+                SocketAddr::new("192.0.2.2".parse().unwrap(), 443),
                 SocketAddr::new("2001:db8::2".parse().unwrap(), 443),
             ]
         );
@@ -1042,8 +1130,8 @@ mod tests {
             ipv6_first.addrs,
             [
                 SocketAddr::new("2001:db8::1".parse().unwrap(), 443),
-                SocketAddr::new("2001:db8::2".parse().unwrap(), 443),
                 SocketAddr::new("192.0.2.1".parse().unwrap(), 443),
+                SocketAddr::new("2001:db8::2".parse().unwrap(), 443),
                 SocketAddr::new("192.0.2.2".parse().unwrap(), 443),
             ]
         );
