@@ -157,12 +157,13 @@ for `--http 1`, `--http 2`, and `--http 3`.
 When `--http` is unset, direct HTTPS requests use DNS HTTPS/SVCB records to
 discover `h3`. With `--dns-server`, HTTPS-record discovery uses that custom UDP
 or DoH resolver. Without `--dns-server`, it uses the platform resolver,
-matching normal address lookup. If a usable record is present, `fetch` races
-QUIC connection setup against the normal TCP/TLS path and sends the request
-once on the winning transport. If the HTTPS-record lookup fails, times out, is
-unsupported by the OS resolver, or returns no usable `h3` record, HTTPS uses
-the normal ALPN path and offers `h2` then `http/1.1`. Proxy and Unix socket
-requests also use the normal ALPN path.
+matching normal address lookup. Discovery runs in parallel with the normal
+address lookup and does not delay it; if a usable record is ready by then,
+`fetch` races QUIC connection setup against the normal TCP/TLS path and sends
+the request once on the winning transport. If the HTTPS-record lookup is still
+pending, fails, is unsupported by the OS resolver, or returns no usable `h3`
+record, HTTPS uses the normal ALPN path and offers `h2` then `http/1.1`. Proxy
+and Unix socket requests also use the normal ALPN path.
 
 Setting `--http 1`, `--http 2`, or `--http 3` forces that protocol; it does not
 set a version cap. Use `--http 1` or `--http 2` to opt out of automatic HTTP/3.
