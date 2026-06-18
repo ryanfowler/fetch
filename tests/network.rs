@@ -29,6 +29,28 @@ use support::tls::{start_h2_tls_server, start_mtls_server, start_tls_server};
 use tempfile::TempDir;
 use url::Url;
 
+fn dns_debug_duration(stderr: &str, host: &str) -> Duration {
+    let needle = format!("DNS: {host} (");
+    stderr
+        .lines()
+        .find_map(|line| {
+            let start = line.find(&needle)? + needle.len();
+            let end = line[start..].find(')')? + start;
+            parse_timing_duration(&line[start..end])
+        })
+        .unwrap_or_else(|| panic!("missing DNS debug timing for {host}\nstderr:\n{stderr}"))
+}
+
+fn parse_timing_duration(value: &str) -> Option<Duration> {
+    let mut parts = value.split_whitespace();
+    let amount = parts.next()?.parse::<f64>().ok()?;
+    match parts.next()? {
+        "ms" => Some(Duration::from_secs_f64(amount / 1000.0)),
+        "s" => Some(Duration::from_secs_f64(amount)),
+        _ => None,
+    }
+}
+
 #[test]
 fn proxy_config_environment_and_curl_http1_cases() {
     let proxy = TestServer::start(|req| {
@@ -581,6 +603,7 @@ fn default_https_auto_http3_does_not_wait_for_dropped_https_dns_record() {
         &dns_addr,
         "--ca-cert",
         tls.ca_cert_path.to_str().unwrap(),
+        "-vvv",
         &format!("https://localhost:{tls_port}/auto-h3-dropped-https-record"),
     ]);
     let elapsed = start.elapsed();
@@ -590,6 +613,12 @@ fn default_https_auto_http3_does_not_wait_for_dropped_https_dns_record() {
     assert!(
         elapsed < Duration::from_secs(4),
         "request waited too long for dropped HTTPS RR: {elapsed:?}\nstderr:\n{}",
+        res.stderr
+    );
+    let dns_duration = dns_debug_duration(&res.stderr, "localhost");
+    assert!(
+        dns_duration < Duration::from_millis(250),
+        "dropped auto-H3 HTTPS RR should not be charged to DNS timing: {dns_duration:?}\nstderr:\n{}",
         res.stderr
     );
 }
@@ -630,10 +659,10 @@ fn default_https_auto_http3_does_not_wait_for_dropped_svcb_target_dns_record() {
 }
 
 #[test]
-fn default_https_auto_http3_uses_one_budget_for_dropped_svcb_target_dns_records() {
+fn default_https_auto_http3_skips_svcb_target_dns_resolution_by_default() {
     let tls = start_tls_server(|req| {
         if req.path == "/auto-h3-multiple-dropped-svcb-targets" {
-            return TestResponse::ok("tcp after shared discovery budget");
+            return TestResponse::ok("tcp without target lookup");
         }
         TestResponse::status(404, "Not Found", "")
     });
@@ -660,11 +689,11 @@ fn default_https_auto_http3_uses_one_budget_for_dropped_svcb_target_dns_records(
     ]);
 
     assert_exit(&res, 0);
-    assert_eq!(res.stdout, "tcp after shared discovery budget");
+    assert_eq!(res.stdout, "tcp without target lookup");
     assert_eq!(
         target_queries.load(Ordering::SeqCst),
-        1,
-        "auto-H3 target resolution should spend one shared discovery budget\nstderr:\n{}",
+        0,
+        "auto-H3 target-name resolution should not delay default TCP requests\nstderr:\n{}",
         res.stderr
     );
 }

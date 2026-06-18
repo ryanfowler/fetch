@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ipnet::IpNet;
+use tokio::task::JoinHandle;
 use url::Url;
 
 use super::transport::{AutoHttp3Config, Client, ClientBuilder, NoProxy, Proxy, redirect};
@@ -198,10 +199,13 @@ async fn resolve_dns_for_client_inner(
     if let Some(dns_server) = cli.dns_server.as_deref() {
         let start = Instant::now();
         let (addrs, https_records) = if auto_http3 {
-            let addrs = custom::lookup_ips(dns_server, host, timeout.timeout());
-            let https =
-                lookup_auto_http3_https_records(Some(dns_server), host, auto_http3_discovery);
-            let (addrs, https_records) = tokio::join!(addrs, https);
+            let https = spawn_auto_http3_https_records(
+                Some(dns_server.to_string()),
+                host.to_string(),
+                auto_http3_discovery,
+            );
+            let addrs = custom::lookup_ips(dns_server, host, timeout.timeout()).await;
+            let https_records = take_finished_auto_http3_https_records(https).await;
             (addrs?, https_records)
         } else {
             (
@@ -217,6 +221,7 @@ async fn resolve_dns_for_client_inner(
             &https_records,
             &socket_addrs,
             auto_http3_discovery,
+            false,
         )
         .await;
         return Ok(ClientDnsDiscovery {
@@ -249,8 +254,9 @@ async fn resolve_dns_for_client_inner(
     let start = Instant::now();
     let lookup = tokio::net::lookup_host((host, port));
     let (socket_addrs, https_records) = if auto_http3 {
-        let https = lookup_auto_http3_https_records(None, host, auto_http3_discovery);
-        let (socket_addrs, https_records) = tokio::join!(lookup, https);
+        let https = spawn_auto_http3_https_records(None, host.to_string(), auto_http3_discovery);
+        let socket_addrs = lookup.await;
+        let https_records = take_finished_auto_http3_https_records(https).await;
         (
             socket_addrs
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
@@ -273,6 +279,7 @@ async fn resolve_dns_for_client_inner(
         &https_records,
         &socket_addrs,
         auto_http3_discovery,
+        false,
     )
     .await;
     Ok(ClientDnsDiscovery {
@@ -307,6 +314,30 @@ async fn lookup_auto_http3_https_records(
     .ok()
     .and_then(Result::ok)
     .unwrap_or_default()
+}
+
+fn spawn_auto_http3_https_records(
+    dns_server: Option<String>,
+    host: String,
+    discovery_budget: Option<AutoHttp3DiscoveryBudget>,
+) -> JoinHandle<Vec<SvcbRecord>> {
+    tokio::spawn(async move {
+        lookup_auto_http3_https_records(dns_server.as_deref(), &host, discovery_budget).await
+    })
+}
+
+async fn take_finished_auto_http3_https_records(
+    handle: JoinHandle<Vec<SvcbRecord>>,
+) -> Vec<SvcbRecord> {
+    if !handle.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    if handle.is_finished() {
+        handle.await.unwrap_or_default()
+    } else {
+        handle.abort();
+        Vec::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -385,6 +416,7 @@ async fn auto_http3_config_for_records(
     records: &[SvcbRecord],
     origin_addrs: &[SocketAddr],
     discovery_budget: Option<AutoHttp3DiscoveryBudget>,
+    allow_target_dns_lookup: bool,
 ) -> Option<AutoHttp3Config> {
     let origin_host = url.host_str()?;
     let origin_port = url.port_or_known_default()?;
@@ -404,6 +436,7 @@ async fn auto_http3_config_for_records(
             origin_addrs,
             port,
             discovery_budget,
+            allow_target_dns_lookup,
         )
         .await;
         append_unique_socket_addrs(&mut addrs, record_addrs);
@@ -419,6 +452,7 @@ async fn auto_http3_record_addrs(
     origin_addrs: &[SocketAddr],
     port: u16,
     discovery_budget: Option<AutoHttp3DiscoveryBudget>,
+    allow_target_dns_lookup: bool,
 ) -> Vec<SocketAddr> {
     let hinted = auto_http3_hint_addrs(record, origin_addrs, port);
     if !hinted.is_empty() {
@@ -434,6 +468,9 @@ async fn auto_http3_record_addrs(
     }
     if let Ok(ip) = target.parse::<IpAddr>() {
         return vec![SocketAddr::new(ip, port)];
+    }
+    if !allow_target_dns_lookup {
+        return Vec::new();
     }
     let Some(timeout) = discovery_budget.and_then(AutoHttp3DiscoveryBudget::remaining) else {
         return Vec::new();
@@ -942,6 +979,7 @@ mod tests {
             &records,
             &origin_addrs,
             auto_http3_test_discovery_budget(),
+            false,
         )
         .await
         .unwrap();
@@ -971,6 +1009,7 @@ mod tests {
                 SocketAddr::new("2001:db8::10".parse().unwrap(), 443),
             ],
             auto_http3_test_discovery_budget(),
+            false,
         )
         .await
         .unwrap();
@@ -994,6 +1033,7 @@ mod tests {
                 SocketAddr::new("198.51.100.1".parse().unwrap(), 443),
             ],
             auto_http3_test_discovery_budget(),
+            false,
         )
         .await
         .unwrap();
@@ -1020,6 +1060,7 @@ mod tests {
                 &[],
                 &origin_addrs,
                 auto_http3_test_discovery_budget(),
+                false,
             )
             .await
             .is_none()
@@ -1031,6 +1072,7 @@ mod tests {
                 &[https_record(1, ".", &["h2"], None)],
                 &origin_addrs,
                 auto_http3_test_discovery_budget(),
+                false,
             )
             .await
             .is_none()
@@ -1044,6 +1086,26 @@ mod tests {
                 &[unsupported],
                 &origin_addrs,
                 auto_http3_test_discovery_budget(),
+                false,
+            )
+            .await
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_http3_candidate_builder_skips_target_dns_when_not_allowed() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let origin_addrs = [SocketAddr::new("127.0.0.1".parse().unwrap(), 443)];
+
+        assert!(
+            auto_http3_config_for_records(
+                None,
+                &url,
+                &[https_record(1, "h3.example.com.", &["h3"], None)],
+                &origin_addrs,
+                auto_http3_test_discovery_budget(),
+                false,
             )
             .await
             .is_none()
