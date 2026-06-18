@@ -385,13 +385,13 @@ Force a specific HTTP protocol version.
 When unset, direct HTTPS requests use DNS HTTPS/SVCB records to discover `h3`
 endpoints. With `dns-server`, HTTPS-record discovery uses that custom UDP or
 DoH resolver. Without `dns-server`, it uses the platform resolver, matching
-normal address lookup. Discovery runs in parallel with the normal address
-lookup and does not delay it; if a usable `h3` record is ready by then, `fetch`
-races QUIC setup against the normal TCP/TLS path and sends the request once on
-the winning transport. If the HTTPS-record lookup is still pending, fails, is
-unsupported by the OS resolver, or returns no usable `h3` record, HTTPS offers
-`h2` then `http/1.1` through ALPN. Proxy and Unix socket requests also use the
-normal ALPN path.
+normal address lookup. Discovery runs in parallel with normal A/AAAA lookup and
+TCP/TLS setup. `fetch` starts TCP/TLS as soon as normal DNS produces a usable
+address, while a usable `h3` record discovered before TCP/TLS wins races QUIC
+setup against it. The request is sent once on the winning transport. If
+HTTPS-record discovery is too slow, fails, is unsupported by the OS resolver,
+or returns no usable `h3` record, HTTPS offers `h2` then `http/1.1` through
+ALPN. Proxy and Unix socket requests also use the normal ALPN path.
 
 Setting this option to `1`, `2`, or `3` forces that protocol; it does not set a
 version cap. Set `http = 1` or `http = 2` to opt out of automatic HTTP/3.

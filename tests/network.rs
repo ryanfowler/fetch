@@ -12,8 +12,8 @@ use support::common::{
 };
 use support::dns::{
     parse_dns_question, start_udp_dns_server, start_udp_dns_server_dropping_https,
-    start_udp_dns_server_with_hosts, start_udp_dns_server_with_https,
-    start_udp_dns_server_with_https_target_dropping_target,
+    start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_hosts,
+    start_udp_dns_server_with_https, start_udp_dns_server_with_https_target_dropping_target,
     start_udp_dns_server_with_https_targets_dropping_targets, start_unresponsive_udp_dns_server,
 };
 use support::grpc::{
@@ -49,6 +49,41 @@ fn parse_timing_duration(value: &str) -> Option<Duration> {
         "s" => Some(Duration::from_secs_f64(amount)),
         _ => None,
     }
+}
+
+#[test]
+fn custom_dns_connects_after_fast_a_without_waiting_for_slow_aaaa() {
+    let server = TestServer::start(|req| {
+        if req.path == "/happy-eyeballs-a-first" {
+            return TestResponse::ok("a first ok");
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let port = Url::parse(&server.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server_with_delayed_aaaa(
+        "fetch-happy-a-first.test.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        Duration::from_secs(4),
+    );
+
+    let start = std::time::Instant::now();
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "-vvv",
+        &format!("http://fetch-happy-a-first.test:{port}/happy-eyeballs-a-first"),
+    ]);
+    let elapsed = start.elapsed();
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "a first ok");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "request waited for delayed AAAA lookup: {elapsed:?}\nstderr:\n{}",
+        res.stderr
+    );
+    assert!(res.stderr.contains("* DNS: fetch-happy-a-first.test"));
+    assert!(res.stderr.contains("* TCP: 127.0.0.1:"));
 }
 
 #[test]
