@@ -100,7 +100,7 @@ fetch --inspect-tls https://example.com
 # Inspect the HTTP/3 QUIC/TLS path
 fetch --inspect-tls --http 3 https://cloudflare.com
 
-# Show a request timing waterfall for DNS, TCP, TLS, TTFB, and body transfer
+# Show a request timing waterfall for DNS, TCP/TLS or QUIC, TTFB, and body transfer
 fetch --timing https://example.com
 ```
 

@@ -21,7 +21,7 @@ impl<T> AsyncIo for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
 
 pub(crate) type DialStream = Pin<Box<dyn AsyncIo>>;
 
-const HAPPY_EYEBALLS_FALLBACK_DELAY: Duration = Duration::from_millis(300);
+pub(crate) const HAPPY_EYEBALLS_FALLBACK_DELAY: Duration = Duration::from_millis(300);
 const TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(15);
 const TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const TCP_KEEPALIVE_RETRIES: u32 = 3;

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::fmt;
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use bytes::{Buf, Bytes};
-use futures_util::{Stream, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt, stream::FuturesUnordered};
 use http::header::{
     AUTHORIZATION, CONTENT_LENGTH, COOKIE, HOST, HeaderMap, HeaderValue, PROXY_AUTHORIZATION,
     SET_COOKIE,
@@ -244,11 +245,33 @@ pub struct Client {
 
 type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AutoHttp3Config {
+    pub(crate) addrs: Vec<SocketAddr>,
+}
+
 #[derive(Clone)]
 struct H3PooledClient {
     origin: String,
     sender: H3SendRequest,
     remote_addr: SocketAddr,
+}
+
+struct Http3ConnectResult {
+    client: H3PooledClient,
+    timing: TransportTiming,
+}
+
+struct AutoTcpConnection {
+    stream: PooledStream,
+    negotiated_h2: bool,
+    remote_addr: Option<SocketAddr>,
+    timing: TransportTiming,
+}
+
+enum AutoRaceWinner {
+    Http3(Http3ConnectResult),
+    Tcp(AutoTcpConnection),
 }
 
 #[derive(Clone)]
@@ -264,6 +287,7 @@ struct ClientConfig {
     session: Option<Arc<crate::session::PersistentCookieStore>>,
     connection_timing: Option<crate::http::client::ConnectionTiming>,
     local_address: Option<IpAddr>,
+    auto_http3: Option<AutoHttp3Config>,
 }
 
 pub(crate) struct ClientBuilder {
@@ -291,6 +315,7 @@ impl Client {
                 session: None,
                 connection_timing: None,
                 local_address: None,
+                auto_http3: None,
             },
         }
     }
@@ -358,6 +383,10 @@ impl Client {
         self.apply_proxy_authorization(&url, &mut headers)?;
         apply_host_header(&url, &mut headers)?;
         let response = match version {
+            None if self.config.auto_http3.is_some() && url.scheme() == "https" => {
+                self.send_auto_http3(method, url.clone(), headers, body, body_deadline)
+                    .await
+            }
             None | Some(Version::HTTP_11 | Version::HTTP_10 | Version::HTTP_2) => {
                 self.send_pooled(method, url.clone(), headers, body, version, body_deadline)
                     .await
@@ -442,6 +471,259 @@ impl Client {
         Ok(Response::from_hyper(url, response, body_deadline))
     }
 
+    async fn send_auto_http3(
+        &self,
+        method: Method,
+        url: Url,
+        headers: HeaderMap,
+        body: Option<Body>,
+        body_deadline: Option<BodyDeadline>,
+    ) -> Result<Response, Error> {
+        match self.race_auto_http3_connection(url.clone()).await? {
+            AutoRaceWinner::Http3(result) => {
+                if let Some(timing) = &self.config.connection_timing {
+                    timing.set(result.timing);
+                }
+                self.store_http3_client(result.client.clone()).await;
+                let (req, body) = build_h3_request(method, &url, headers, body)?;
+                self.send_http3_request(url, req, body, body_deadline, result.client)
+                    .await
+            }
+            AutoRaceWinner::Tcp(connection) => {
+                if let Some(timing) = &self.config.connection_timing {
+                    timing.set(connection.timing);
+                }
+                self.send_tcp_one_shot(method, url, headers, body, body_deadline, connection)
+                    .await
+            }
+        }
+    }
+
+    async fn send_tcp_one_shot(
+        &self,
+        method: Method,
+        url: Url,
+        headers: HeaderMap,
+        body: Option<Body>,
+        body_deadline: Option<BodyDeadline>,
+        connection: AutoTcpConnection,
+    ) -> Result<Response, Error> {
+        let body = body.unwrap_or_else(|| Body::from(Bytes::new()));
+        let version = if connection.negotiated_h2 {
+            Version::HTTP_2
+        } else {
+            Version::HTTP_11
+        };
+        let uri = if connection.negotiated_h2 {
+            absolute_uri(&url)?
+        } else {
+            origin_form_uri(&url)?
+        };
+        let remote_addr = connection.remote_addr;
+        let request = build_request(method, uri, version, headers, body).map_err(Error::request)?;
+        let io = TokioIo::new(connection.stream);
+        let response = if connection.negotiated_h2 {
+            let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .timer(TokioTimer::new())
+                .handshake(io)
+                .await
+                .map_err(|err| {
+                    Error::with_source(ErrorKind::Connect, format!("http2 handshake: {err}"), err)
+                })?;
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            sender
+                .send_request(request)
+                .await
+                .map_err(|err| Error::with_source(ErrorKind::Request, err.to_string(), err))?
+        } else {
+            let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+                .handshake(io)
+                .await
+                .map_err(|err| {
+                    Error::with_source(ErrorKind::Connect, format!("http1 handshake: {err}"), err)
+                })?;
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            sender
+                .send_request(request)
+                .await
+                .map_err(|err| Error::with_source(ErrorKind::Request, err.to_string(), err))?
+        };
+        Ok(Response::from_hyper_with_remote(
+            url,
+            response,
+            body_deadline,
+            remote_addr,
+        ))
+    }
+
+    async fn race_auto_http3_connection(&self, url: Url) -> Result<AutoRaceWinner, Error> {
+        let connect_timeout = TimeoutBudget::new(self.config.connect_timeout);
+        race_primary_fallback(
+            {
+                let client = self.clone();
+                let url = url.clone();
+                move || async move {
+                    client
+                        .connect_auto_http3_client(&url, connect_timeout)
+                        .await
+                        .map(AutoRaceWinner::Http3)
+                }
+            },
+            {
+                let client = self.clone();
+                move || {
+                    let client = client.clone();
+                    let url = url.clone();
+                    async move {
+                        client
+                            .connect_auto_tcp_tls(&url, connect_timeout)
+                            .await
+                            .map(AutoRaceWinner::Tcp)
+                    }
+                }
+            },
+            crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY,
+        )
+        .await
+    }
+
+    async fn connect_auto_tcp_tls(
+        &self,
+        url: &Url,
+        timeout: TimeoutBudget,
+    ) -> Result<AutoTcpConnection, Error> {
+        let tcp_start = std::time::Instant::now();
+        let stream = connect_direct_tcp_config(&self.config, url, timeout)
+            .await
+            .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
+        let remote_addr = stream.peer_addr().ok();
+        let tcp = tcp_start.elapsed();
+        let tls_start = std::time::Instant::now();
+        let (stream, negotiated_h2) = tls_stream_for_config(
+            &self.config,
+            url,
+            Box::pin(stream) as crate::net::DialStream,
+            &alpn_for_config(&self.config),
+            timeout,
+        )
+        .await?;
+        Ok(AutoTcpConnection {
+            stream: PooledStream {
+                inner: stream,
+                negotiated_h2,
+                proxied: false,
+                remote_addr,
+            },
+            negotiated_h2,
+            remote_addr,
+            timing: TransportTiming {
+                tcp: Some(tcp),
+                tls: Some(tls_start.elapsed()),
+                quic: None,
+            },
+        })
+    }
+}
+
+async fn race_primary_fallback<T, StartPrimary, StartFallback, PrimaryFuture, FallbackFuture>(
+    start_primary: StartPrimary,
+    start_fallback: StartFallback,
+    fallback_delay: Duration,
+) -> Result<T, Error>
+where
+    StartPrimary: FnOnce() -> PrimaryFuture,
+    StartFallback: FnOnce() -> FallbackFuture,
+    PrimaryFuture: Future<Output = Result<T, Error>>,
+    FallbackFuture: Future<Output = Result<T, Error>>,
+{
+    let mut primary = Box::pin(start_primary());
+    let mut start_fallback = Some(start_fallback);
+    let mut fallback_task: Option<Pin<Box<FallbackFuture>>> = None;
+    let mut primary_err = None;
+    let mut fallback_err = None;
+    let delay = tokio::time::sleep(fallback_delay);
+    tokio::pin!(delay);
+
+    loop {
+        if primary_err.is_some() && fallback_err.is_some() {
+            return Err(fallback_err
+                .take()
+                .or(primary_err)
+                .expect("at least one race error exists"));
+        }
+
+        if primary_err.is_some() {
+            if fallback_task.is_none() && fallback_err.is_none() {
+                fallback_task = Some(Box::pin(start_fallback
+                    .take()
+                    .expect("fallback has not started yet")(
+                )));
+            }
+            if let Some(task) = fallback_task.as_mut() {
+                match task.as_mut().await {
+                    Ok(winner) => return Ok(winner),
+                    Err(err) => {
+                        fallback_err = Some(err);
+                        fallback_task = None;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if fallback_err.is_some() {
+            match primary.as_mut().await {
+                Ok(winner) => return Ok(winner),
+                Err(err) => primary_err = Some(err),
+            }
+            continue;
+        }
+
+        if fallback_task.is_none() {
+            tokio::select! {
+                result = &mut primary => match result {
+                    Ok(winner) => return Ok(winner),
+                    Err(err) => {
+                        primary_err = Some(err);
+                        fallback_task = Some(Box::pin(
+                            start_fallback
+                                .take()
+                                .expect("fallback has not started yet")(),
+                        ));
+                    }
+                },
+                _ = &mut delay => {
+                    fallback_task = Some(Box::pin(
+                        start_fallback
+                            .take()
+                            .expect("fallback has not started yet")(),
+                    ));
+                }
+            }
+        } else {
+            let fallback = fallback_task.as_mut().expect("fallback task exists");
+            tokio::select! {
+                result = &mut primary => match result {
+                    Ok(winner) => return Ok(winner),
+                    Err(err) => primary_err = Some(err),
+                },
+                result = fallback.as_mut() => match result {
+                    Ok(winner) => return Ok(winner),
+                    Err(err) => {
+                        fallback_err = Some(err);
+                        fallback_task = None;
+                    }
+                },
+            }
+        }
+    }
+}
+
+impl Client {
     async fn send_http3(
         &self,
         method: Method,
@@ -456,28 +738,20 @@ impl Client {
                 url.scheme()
             )));
         }
-        let (req, body) = match body {
-            Some(body) => {
-                let request =
-                    build_request(method, absolute_uri(&url)?, Version::HTTP_3, headers, body)
-                        .map_err(Error::request)?;
-                let (parts, body) = request.into_parts();
-                (Request::from_parts(parts, ()), Some(body))
-            }
-            None => {
-                let request = build_request(
-                    method,
-                    absolute_uri(&url)?,
-                    Version::HTTP_3,
-                    headers,
-                    empty_request_body(),
-                )
-                .map_err(Error::request)?;
-                let (parts, _) = request.into_parts();
-                (Request::from_parts(parts, ()), None)
-            }
-        };
+        let (req, body) = build_h3_request(method, &url, headers, body)?;
         let pooled = self.http3_client(&url).await?;
+        self.send_http3_request(url, req, body, body_deadline, pooled)
+            .await
+    }
+
+    async fn send_http3_request(
+        &self,
+        url: Url,
+        req: Request<()>,
+        body: Option<Body>,
+        body_deadline: Option<BodyDeadline>,
+        pooled: H3PooledClient,
+    ) -> Result<Response, Error> {
         let mut sender = pooled.sender.clone();
         let stream = match sender.send_request(req).await {
             Ok(stream) => stream,
@@ -527,20 +801,54 @@ impl Client {
             return Ok(client);
         }
 
-        let client = self.connect_http3_client(url, origin.clone()).await?;
+        let result = self.connect_http3_client(url, origin.clone()).await?;
+        if let Some(timing) = &self.config.connection_timing {
+            timing.set(result.timing);
+        }
+        let client = result.client;
         let mut pool = self.h3_pool.lock().await;
         Ok(pool.entry(origin).or_insert_with(|| client.clone()).clone())
+    }
+
+    async fn store_http3_client(&self, client: H3PooledClient) {
+        self.h3_pool
+            .lock()
+            .await
+            .insert(client.origin.clone(), client);
     }
 
     async fn remove_http3_client(&self, origin: &str) {
         self.h3_pool.lock().await.remove(origin);
     }
 
+    async fn connect_auto_http3_client(
+        &self,
+        url: &Url,
+        timeout: TimeoutBudget,
+    ) -> Result<Http3ConnectResult, Error> {
+        let origin = http3_origin(url)?;
+        if let Some(client) = self.h3_pool.lock().await.get(&origin).cloned() {
+            return Ok(Http3ConnectResult {
+                client,
+                timing: TransportTiming::default(),
+            });
+        }
+        let addrs = self
+            .config
+            .auto_http3
+            .as_ref()
+            .map(|config| config.addrs.clone())
+            .filter(|addrs| !addrs.is_empty())
+            .ok_or_else(|| Error::connect("no HTTP/3 candidates discovered"))?;
+        self.connect_http3_client_with_addrs(url, origin, addrs, timeout)
+            .await
+    }
+
     async fn connect_http3_client(
         &self,
         url: &Url,
         origin: String,
-    ) -> Result<H3PooledClient, Error> {
+    ) -> Result<Http3ConnectResult, Error> {
         let host = url
             .host_str()
             .ok_or_else(|| Error::request("URL host is required"))?;
@@ -548,7 +856,7 @@ impl Client {
             .port_or_known_default()
             .ok_or_else(|| Error::request("URL port is required"))?;
         let timeout = TimeoutBudget::new(self.config.connect_timeout);
-        let mut addrs = if let Some(addrs) = self.config.dns_overrides.get(host) {
+        let addrs = if let Some(addrs) = self.config.dns_overrides.get(host) {
             let mut addrs = addrs.clone();
             for addr in &mut addrs {
                 addr.set_port(port);
@@ -565,6 +873,20 @@ impl Client {
                 })
                 .collect()
         };
+        self.connect_http3_client_with_addrs(url, origin, addrs, timeout)
+            .await
+    }
+
+    async fn connect_http3_client_with_addrs(
+        &self,
+        url: &Url,
+        origin: String,
+        mut addrs: Vec<SocketAddr>,
+        timeout: TimeoutBudget,
+    ) -> Result<Http3ConnectResult, Error> {
+        let host = url
+            .host_str()
+            .ok_or_else(|| Error::request("URL host is required"))?;
         let (mut endpoint, family_filter) = http3_client_endpoint(self.config.local_address)?;
         if let Some(local_ip) = family_filter {
             addrs.retain(|addr| addr.ip().is_ipv4() == local_ip.is_ipv4());
@@ -584,13 +906,11 @@ impl Client {
             .await
             .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
         let remote_addr = connection.remote_address();
-        if let Some(timing) = &self.config.connection_timing {
-            timing.set(TransportTiming {
-                tcp: None,
-                tls: None,
-                quic: Some(start.elapsed()),
-            });
-        }
+        let timing = TransportTiming {
+            tcp: None,
+            tls: None,
+            quic: Some(start.elapsed()),
+        };
         let h3_connection = h3_quinn::Connection::new(connection);
         let (mut driver, sender) = h3::client::new(h3_connection)
             .await
@@ -598,10 +918,13 @@ impl Client {
         tokio::spawn(async move {
             let _ = future::poll_fn(|cx| driver.poll_close(cx)).await;
         });
-        Ok(H3PooledClient {
-            origin,
-            sender,
-            remote_addr,
+        Ok(Http3ConnectResult {
+            client: H3PooledClient {
+                origin,
+                sender,
+                remote_addr,
+            },
+            timing,
         })
     }
 }
@@ -663,6 +986,11 @@ impl ClientBuilder {
 
     pub(crate) fn local_address(mut self, addr: IpAddr) -> Self {
         self.config.local_address = Some(addr);
+        self
+    }
+
+    pub(crate) fn auto_http3(mut self, config: AutoHttp3Config) -> Self {
+        self.config.auto_http3 = Some(config);
         self
     }
 
@@ -1264,8 +1592,21 @@ impl Response {
         response: http::Response<Incoming>,
         body_deadline: Option<BodyDeadline>,
     ) -> Self {
+        Self::from_hyper_with_remote(url, response, body_deadline, None)
+    }
+
+    fn from_hyper_with_remote(
+        url: Url,
+        response: http::Response<Incoming>,
+        body_deadline: Option<BodyDeadline>,
+        fallback_remote_addr: Option<SocketAddr>,
+    ) -> Self {
         let (parts, body) = response.into_parts();
-        let remote_addr = parts.extensions.get::<PeerAddr>().map(|addr| addr.0);
+        let remote_addr = parts
+            .extensions
+            .get::<PeerAddr>()
+            .map(|addr| addr.0)
+            .or(fallback_remote_addr);
         Self {
             url,
             status: parts.status,
@@ -1613,45 +1954,127 @@ async fn connect_http3(
     host: String,
     timeout: TimeoutBudget,
 ) -> Result<quinn::Connection, FetchError> {
-    let (preferred, fallback) = crate::net::split_addrs_by_first_family(addrs)?;
-    if fallback.is_empty() {
-        connect_http3_sequence(endpoint, preferred, host, timeout).await
-    } else {
-        crate::net::race_preferred_fallback(preferred, fallback, move |addrs| {
-            connect_http3_sequence(endpoint.clone(), addrs, host.clone(), timeout)
-        })
-        .await
+    if addrs.is_empty() {
+        return Err(FetchError::Runtime(
+            "lookup returned no addresses".to_string(),
+        ));
     }
+    connect_http3_staggered(endpoint, addrs, host, timeout).await
 }
 
-async fn connect_http3_sequence(
+async fn connect_http3_staggered(
     endpoint: quinn::Endpoint,
     addrs: Vec<SocketAddr>,
     host: String,
     timeout: TimeoutBudget,
 ) -> Result<quinn::Connection, FetchError> {
+    let mut pending = VecDeque::from(addrs);
+    let mut active = FuturesUnordered::new();
     let mut last_err = None;
-    for addr in addrs {
-        let connecting = match endpoint.connect(addr, &host) {
-            Ok(connecting) => connecting,
-            Err(err) => {
-                last_err = Some(FetchError::Runtime(format!("http3 connect {addr}: {err}")));
-                continue;
+    start_next_http3_connect(&endpoint, &host, timeout, &mut pending, &mut active);
+    let delay = tokio::time::sleep(crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY);
+    tokio::pin!(delay);
+
+    loop {
+        if active.is_empty() {
+            return Err(last_err.unwrap_or_else(|| {
+                FetchError::Runtime("lookup returned no addresses".to_string())
+            }));
+        }
+        if pending.is_empty() {
+            match active.next().await {
+                Some(Ok(connection)) => return Ok(connection),
+                Some(Err(err)) => last_err = Some(err),
+                None => {}
             }
-        };
-        match timeout
-            .run(async {
-                connecting
-                    .await
-                    .map_err(|err| FetchError::Runtime(format!("http3 connect {addr}: {err}")))
-            })
-            .await
-        {
-            Ok(connection) => return Ok(connection),
-            Err(err) => last_err = Some(err),
+            continue;
+        }
+
+        tokio::select! {
+            result = active.next() => match result {
+                Some(Ok(connection)) => return Ok(connection),
+                Some(Err(err)) => {
+                    last_err = Some(err);
+                    start_next_http3_connect(&endpoint, &host, timeout, &mut pending, &mut active);
+                    delay.as_mut().reset(tokio::time::Instant::now() + crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY);
+                }
+                None => {}
+            },
+            _ = &mut delay => {
+                start_next_http3_connect(&endpoint, &host, timeout, &mut pending, &mut active);
+                delay.as_mut().reset(tokio::time::Instant::now() + crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY);
+            }
         }
     }
-    Err(last_err.unwrap_or_else(|| FetchError::Runtime("lookup returned no addresses".to_string())))
+}
+
+fn start_next_http3_connect(
+    endpoint: &quinn::Endpoint,
+    host: &str,
+    timeout: TimeoutBudget,
+    pending: &mut VecDeque<SocketAddr>,
+    active: &mut FuturesUnordered<Http3ConnectTask>,
+) {
+    if let Some(addr) = pending.pop_front() {
+        active.push(Http3ConnectTask::new(connect_http3_addr(
+            endpoint.clone(),
+            addr,
+            host.to_string(),
+            timeout,
+        )));
+    }
+}
+
+async fn connect_http3_addr(
+    endpoint: quinn::Endpoint,
+    addr: SocketAddr,
+    host: String,
+    timeout: TimeoutBudget,
+) -> Result<quinn::Connection, FetchError> {
+    let connecting = endpoint
+        .connect(addr, &host)
+        .map_err(|err| FetchError::Runtime(format!("http3 connect {addr}: {err}")))?;
+    timeout
+        .run(async {
+            connecting
+                .await
+                .map_err(|err| FetchError::Runtime(format!("http3 connect {addr}: {err}")))
+        })
+        .await
+}
+
+struct Http3ConnectTask {
+    handle: JoinHandle<Result<quinn::Connection, FetchError>>,
+}
+
+impl Http3ConnectTask {
+    fn new(
+        future: impl Future<Output = Result<quinn::Connection, FetchError>> + Send + 'static,
+    ) -> Self {
+        Self {
+            handle: tokio::spawn(future),
+        }
+    }
+}
+
+impl Future for Http3ConnectTask {
+    type Output = Result<quinn::Connection, FetchError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.handle).poll(cx).map(|result| {
+            result.unwrap_or_else(|err| {
+                Err(FetchError::Runtime(format!(
+                    "http3 connect task failed: {err}"
+                )))
+            })
+        })
+    }
+}
+
+impl Drop for Http3ConnectTask {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
 }
 
 fn build_request<B>(
@@ -1668,6 +2091,34 @@ fn build_request<B>(
     builder.body(body).map_err(|err| err.to_string())
 }
 
+fn build_h3_request(
+    method: Method,
+    url: &Url,
+    headers: HeaderMap,
+    body: Option<Body>,
+) -> Result<(Request<()>, Option<Body>), Error> {
+    match body {
+        Some(body) => {
+            let request = build_request(method, absolute_uri(url)?, Version::HTTP_3, headers, body)
+                .map_err(Error::request)?;
+            let (parts, body) = request.into_parts();
+            Ok((Request::from_parts(parts, ()), Some(body)))
+        }
+        None => {
+            let request = build_request(
+                method,
+                absolute_uri(url)?,
+                Version::HTTP_3,
+                headers,
+                empty_request_body(),
+            )
+            .map_err(Error::request)?;
+            let (parts, _) = request.into_parts();
+            Ok((Request::from_parts(parts, ()), None))
+        }
+    }
+}
+
 fn empty_request_body() -> impl http_body::Body<Data = Bytes, Error = Error> + Send + 'static {
     Empty::<Bytes>::new().map_err(|err: Infallible| match err {})
 }
@@ -1679,6 +2130,21 @@ fn default_tls_config() -> rustls::ClientConfig {
 fn absolute_uri(url: &Url) -> Result<Uri, Error> {
     url.as_str()
         .parse::<Uri>()
+        .map_err(|err| Error::request(format!("invalid request URI: {err}")))
+}
+
+fn origin_form_uri(url: &Url) -> Result<Uri, Error> {
+    let path = if url.path().is_empty() {
+        "/"
+    } else {
+        url.path()
+    };
+    let mut out = path.to_string();
+    if let Some(query) = url.query() {
+        out.push('?');
+        out.push_str(query);
+    }
+    out.parse::<Uri>()
         .map_err(|err| Error::request(format!("invalid request URI: {err}")))
 }
 
@@ -1873,6 +2339,104 @@ mod tests {
         .unwrap();
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn auto_protocol_race_uses_primary_when_it_wins() {
+        let fallback_started = Arc::new(AtomicUsize::new(0));
+        let fallback_started_for_task = fallback_started.clone();
+
+        let result = race_primary_fallback(
+            || async { Ok("h3") },
+            move || {
+                fallback_started_for_task.fetch_add(1, Ordering::SeqCst);
+                async { Ok("tcp") }
+            },
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "h3");
+        assert_eq!(fallback_started.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn auto_protocol_race_uses_fallback_after_delay() {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            race_primary_fallback(
+                || async { std::future::pending::<Result<&'static str, Error>>().await },
+                || async { Ok("tcp") },
+                std::time::Duration::from_millis(10),
+            ),
+        )
+        .await
+        .expect("fallback should start after delay")
+        .unwrap();
+
+        assert_eq!(result, "tcp");
+    }
+
+    #[tokio::test]
+    async fn auto_protocol_race_starts_fallback_after_primary_failure() {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            race_primary_fallback(
+                || async { Err(Error::connect("h3 failed")) },
+                || async { Ok("tcp") },
+                std::time::Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("fallback should start immediately after primary failure")
+        .unwrap();
+
+        assert_eq!(result, "tcp");
+    }
+
+    #[tokio::test]
+    async fn auto_protocol_race_reports_fallback_error_when_both_fail() {
+        let err = race_primary_fallback(
+            || async { Err::<&'static str, _>(Error::connect("h3 failed")) },
+            || async { Err::<&'static str, _>(Error::connect("tcp failed")) },
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "tcp failed");
+    }
+
+    #[tokio::test]
+    async fn auto_protocol_race_drops_losing_primary() {
+        struct NotifyOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for NotifyOnDrop {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let result = race_primary_fallback(
+            || async move {
+                let _notify = NotifyOnDrop(Some(dropped_tx));
+                std::future::pending::<Result<&'static str, Error>>().await
+            },
+            || async { Ok("tcp") },
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "tcp");
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

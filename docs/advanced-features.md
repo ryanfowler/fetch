@@ -154,10 +154,18 @@ fetch --unix ~/myapp.sock http://localhost/health
 Force a specific HTTP version. `--http1`, `--http2`, and `--http3` are aliases
 for `--http 1`, `--http 2`, and `--http 3`.
 
-When `--http` is unset, HTTPS requests offer `h2` and then `http/1.1` through
-ALPN, using HTTP/2 when the server negotiates it and falling back to HTTP/1.1
-otherwise. Setting `--http 1`, `--http 2`, or `--http 3` forces that protocol;
-it does not set a version cap.
+When `--http` is unset, direct HTTPS requests use DNS HTTPS/SVCB records to
+discover `h3`. With `--dns-server`, HTTPS-record discovery uses that custom UDP
+or DoH resolver. Without `--dns-server`, it uses the platform resolver,
+matching normal address lookup. If a usable record is present, `fetch` races
+QUIC connection setup against the normal TCP/TLS path and sends the request
+once on the winning transport. If the HTTPS-record lookup fails, times out, is
+unsupported by the OS resolver, or returns no usable `h3` record, HTTPS uses
+the normal ALPN path and offers `h2` then `http/1.1`. Proxy and Unix socket
+requests also use the normal ALPN path.
+
+Setting `--http 1`, `--http 2`, or `--http 3` forces that protocol; it does not
+set a version cap. Use `--http 1` or `--http 2` to opt out of automatic HTTP/3.
 
 ### HTTP/1.1
 
@@ -191,17 +199,19 @@ fetch --http2 example.com
 fetch --http 3 example.com
 ```
 
-- Uses QUIC transport (UDP-based)
-- Reduced latency
-- Better handling of packet loss
+- Forces QUIC transport (UDP-based)
+- Does not fall back to TCP when QUIC fails
 - Not all servers support HTTP/3
 
 ### Version Detection
 
 By default, `fetch` negotiates the best available version:
 
-1. Attempts HTTP/2 via ALPN
-2. Falls back to HTTP/1.1 if needed
+1. Uses DNS HTTPS/SVCB records from the platform resolver, or from
+   `--dns-server` when set, to discover `h3` candidates for direct HTTPS
+2. Races QUIC setup against TCP/TLS when a usable `h3` candidate exists
+3. Otherwise offers HTTP/2 via ALPN
+4. Falls back to HTTP/1.1 if needed
 
 ## TLS Configuration
 

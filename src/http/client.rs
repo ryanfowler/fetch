@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use ipnet::IpNet;
 use url::Url;
 
-use super::transport::{Client, ClientBuilder, NoProxy, Proxy, redirect};
+use super::transport::{AutoHttp3Config, Client, ClientBuilder, NoProxy, Proxy, redirect};
 use crate::cli::{Cli, HttpVersion};
 use crate::dns::custom;
+use crate::dns::svcb::{HttpsRecordResolver, SvcbRecord};
 use crate::duration::{TimeoutBudget, request_timeout_message};
 use crate::error::FetchError;
 use crate::timing::{DnsTiming, TransportTiming};
@@ -60,6 +61,12 @@ pub(crate) struct ClientBuildContext<'a> {
     pub(crate) connect_timing: Option<&'a ConnectionTiming>,
 }
 
+#[derive(Clone, Debug)]
+struct ClientDnsDiscovery {
+    dns_resolution: Option<DnsResolution>,
+    auto_http3: Option<AutoHttp3Config>,
+}
+
 pub(crate) async fn build_client_for_url(
     cli: &Cli,
     url: &Url,
@@ -74,7 +81,10 @@ pub(crate) async fn build_client_for_url(
     )?
     .timeout();
     let effective_proxy = effective_proxy_for_url(cli.proxy.as_deref(), http_version, url)?;
-    let dns_resolution = resolve_dns_for_client(cli, url, dns_timeout, effective_proxy).await?;
+    let auto_http3 = auto_http3_allowed(context.mode, url, cli.unix.as_deref(), effective_proxy);
+    let discovery =
+        resolve_dns_for_client(cli, url, dns_timeout, effective_proxy, auto_http3).await?;
+    let dns_resolution = discovery.dns_resolution;
     let mut builder = Client::builder()
         .use_rustls_tls()
         .no_brotli()
@@ -83,6 +93,9 @@ pub(crate) async fn build_client_for_url(
     builder = configure_http_version(builder, context.mode);
     builder = configure_unix_socket(builder, cli.unix.as_deref())?;
     builder = configure_http3_local_address(builder, http_version, url);
+    if let Some(auto_http3) = discovery.auto_http3 {
+        builder = builder.auto_http3(auto_http3);
+    }
     builder = configure_dns_resolution(builder, url.host_str(), dns_resolution.as_ref());
     if let Some(connect_timing) = context.connect_timing
         && (cli.timing || (cli.verbose >= 3 && !cli.silent))
@@ -147,45 +160,83 @@ async fn resolve_dns_for_client(
     url: &Url,
     timeout: Option<Duration>,
     effective_proxy: Option<EffectiveProxy>,
-) -> Result<Option<DnsResolution>, FetchError> {
-    let resolve = resolve_dns_for_client_inner(cli, url, timeout, effective_proxy);
-    TimeoutBudget::new(timeout).run(resolve).await
+    auto_http3: bool,
+) -> Result<ClientDnsDiscovery, FetchError> {
+    let timeout = TimeoutBudget::new(timeout);
+    let resolve = resolve_dns_for_client_inner(cli, url, timeout, effective_proxy, auto_http3);
+    timeout.run(resolve).await
 }
 
 async fn resolve_dns_for_client_inner(
     cli: &Cli,
     url: &Url,
-    timeout: Option<Duration>,
+    timeout: TimeoutBudget,
     effective_proxy: Option<EffectiveProxy>,
-) -> Result<Option<DnsResolution>, FetchError> {
+    auto_http3: bool,
+) -> Result<ClientDnsDiscovery, FetchError> {
     let Some(host) = url.host_str() else {
-        return Ok(None);
+        return Ok(ClientDnsDiscovery {
+            dns_resolution: None,
+            auto_http3: None,
+        });
     };
     if host.parse::<IpAddr>().is_ok()
         || cli.unix.is_some()
         || effective_proxy.is_some_and(|proxy| !proxy.uses_local_target_dns())
     {
-        return Ok(None);
+        return Ok(ClientDnsDiscovery {
+            dns_resolution: None,
+            auto_http3: None,
+        });
     }
 
     let debug_dns = cli.timing || (cli.verbose >= 3 && !cli.silent);
+    let auto_http3_discovery = auto_http3
+        .then(|| AutoHttp3DiscoveryBudget::new(timeout))
+        .flatten();
 
     if let Some(dns_server) = cli.dns_server.as_deref() {
         let start = Instant::now();
-        let addrs = custom::lookup_ips(dns_server, host, timeout).await?;
+        let (addrs, https_records) = if auto_http3 {
+            let addrs = custom::lookup_ips(dns_server, host, timeout.timeout());
+            let https =
+                lookup_auto_http3_https_records(Some(dns_server), host, auto_http3_discovery);
+            let (addrs, https_records) = tokio::join!(addrs, https);
+            (addrs?, https_records)
+        } else {
+            (
+                custom::lookup_ips(dns_server, host, timeout.timeout()).await?,
+                Vec::new(),
+            )
+        };
         let timing_addrs = dns_timing_addrs(addrs.iter().copied());
-        return Ok(Some(DnsResolution {
-            socket_addrs: custom::socket_addrs_for_override(&addrs),
-            timing: debug_dns.then(|| DnsTiming {
-                host: host.to_string(),
-                addrs: timing_addrs,
-                duration: start.elapsed(),
+        let socket_addrs = custom::socket_addrs_for_override(&addrs);
+        let auto_http3 = auto_http3_config_for_records(
+            Some(dns_server),
+            url,
+            &https_records,
+            &socket_addrs,
+            auto_http3_discovery,
+        )
+        .await;
+        return Ok(ClientDnsDiscovery {
+            dns_resolution: Some(DnsResolution {
+                socket_addrs,
+                timing: debug_dns.then(|| DnsTiming {
+                    host: host.to_string(),
+                    addrs: timing_addrs,
+                    duration: start.elapsed(),
+                }),
             }),
-        }));
+            auto_http3,
+        });
     }
 
-    if !debug_dns {
-        return Ok(None);
+    if !debug_dns && !auto_http3 {
+        return Ok(ClientDnsDiscovery {
+            dns_resolution: None,
+            auto_http3: None,
+        });
     }
 
     let port = url.port_or_known_default().unwrap_or_else(|| {
@@ -196,19 +247,98 @@ async fn resolve_dns_for_client_inner(
         }
     });
     let start = Instant::now();
-    let socket_addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
-        .collect::<Vec<_>>();
+    let lookup = tokio::net::lookup_host((host, port));
+    let (socket_addrs, https_records) = if auto_http3 {
+        let https = lookup_auto_http3_https_records(None, host, auto_http3_discovery);
+        let (socket_addrs, https_records) = tokio::join!(lookup, https);
+        (
+            socket_addrs
+                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
+                .collect::<Vec<_>>(),
+            https_records,
+        )
+    } else {
+        (
+            lookup
+                .await
+                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
+                .collect::<Vec<_>>(),
+            Vec::new(),
+        )
+    };
     let addrs = dns_timing_addrs(socket_addrs.iter().map(|addr| addr.ip()));
-    Ok(Some(DnsResolution {
-        socket_addrs,
-        timing: Some(DnsTiming {
-            host: host.to_string(),
-            addrs,
-            duration: start.elapsed(),
+    let auto_http3 = auto_http3_config_for_records(
+        None,
+        url,
+        &https_records,
+        &socket_addrs,
+        auto_http3_discovery,
+    )
+    .await;
+    Ok(ClientDnsDiscovery {
+        dns_resolution: Some(DnsResolution {
+            socket_addrs,
+            timing: debug_dns.then(|| DnsTiming {
+                host: host.to_string(),
+                addrs,
+                duration: start.elapsed(),
+            }),
         }),
-    }))
+        auto_http3,
+    })
+}
+
+async fn lookup_auto_http3_https_records(
+    dns_server: Option<&str>,
+    host: &str,
+    discovery_budget: Option<AutoHttp3DiscoveryBudget>,
+) -> Vec<SvcbRecord> {
+    let Some(timeout) = discovery_budget.and_then(AutoHttp3DiscoveryBudget::remaining) else {
+        return Vec::new();
+    };
+    let resolver = dns_server
+        .map(HttpsRecordResolver::Custom)
+        .unwrap_or(HttpsRecordResolver::System);
+    tokio::time::timeout(
+        timeout,
+        crate::dns::svcb::lookup_https_records(resolver, host, Some(timeout)),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AutoHttp3DiscoveryBudget {
+    timeout: TimeoutBudget,
+}
+
+impl AutoHttp3DiscoveryBudget {
+    fn new(timeout: TimeoutBudget) -> Option<Self> {
+        auto_http3_optional_lookup_timeout(timeout).map(|timeout| Self {
+            timeout: TimeoutBudget::new(Some(timeout)),
+        })
+    }
+
+    fn remaining(self) -> Option<Duration> {
+        self.timeout.remaining().ok().flatten()
+    }
+}
+
+fn auto_http3_optional_lookup_timeout(timeout: TimeoutBudget) -> Option<Duration> {
+    auto_http3_optional_lookup_timeout_for_remaining(timeout.remaining().ok()?)
+}
+
+fn auto_http3_optional_lookup_timeout_for_remaining(
+    remaining: Option<Duration>,
+) -> Option<Duration> {
+    let max_lookup = crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY;
+    match remaining {
+        None => Some(max_lookup),
+        Some(timeout) if timeout <= max_lookup => None,
+        Some(timeout) => Some((timeout - max_lookup).min(max_lookup)),
+    }
 }
 
 fn dns_timing_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<IpAddr> {
@@ -231,6 +361,133 @@ fn configure_dns_resolution(
             builder.resolve_to_addrs(host, &resolution.socket_addrs)
         }
         _ => builder,
+    }
+}
+
+fn auto_http3_allowed(
+    mode: ClientMode,
+    url: &Url,
+    unix_socket: Option<&str>,
+    effective_proxy: Option<EffectiveProxy>,
+) -> bool {
+    matches!(mode, ClientMode::Request(None))
+        && url.scheme() == "https"
+        && unix_socket.is_none()
+        && effective_proxy.is_none()
+        && url
+            .host_str()
+            .is_some_and(|host| host.parse::<IpAddr>().is_err())
+}
+
+async fn auto_http3_config_for_records(
+    dns_server: Option<&str>,
+    url: &Url,
+    records: &[SvcbRecord],
+    origin_addrs: &[SocketAddr],
+    discovery_budget: Option<AutoHttp3DiscoveryBudget>,
+) -> Option<AutoHttp3Config> {
+    let origin_host = url.host_str()?;
+    let origin_port = url.port_or_known_default()?;
+    let mut sorted = records.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|record| record.priority);
+
+    let mut addrs = Vec::new();
+    for record in sorted {
+        if record.is_alias_mode() || !record.is_usable() || !record.advertises_alpn("h3") {
+            continue;
+        }
+        let port = record.port.unwrap_or(origin_port);
+        let record_addrs = auto_http3_record_addrs(
+            dns_server,
+            origin_host,
+            record,
+            origin_addrs,
+            port,
+            discovery_budget,
+        )
+        .await;
+        append_unique_socket_addrs(&mut addrs, record_addrs);
+    }
+
+    (!addrs.is_empty()).then_some(AutoHttp3Config { addrs })
+}
+
+async fn auto_http3_record_addrs(
+    dns_server: Option<&str>,
+    origin_host: &str,
+    record: &SvcbRecord,
+    origin_addrs: &[SocketAddr],
+    port: u16,
+    discovery_budget: Option<AutoHttp3DiscoveryBudget>,
+) -> Vec<SocketAddr> {
+    let hinted = auto_http3_hint_addrs(record, origin_addrs, port);
+    if !hinted.is_empty() {
+        return hinted;
+    }
+
+    let target = auto_http3_target_host(origin_host, &record.target);
+    if target.eq_ignore_ascii_case(origin_host) && !origin_addrs.is_empty() {
+        return origin_addrs
+            .iter()
+            .map(|addr| SocketAddr::new(addr.ip(), port))
+            .collect();
+    }
+    if let Ok(ip) = target.parse::<IpAddr>() {
+        return vec![SocketAddr::new(ip, port)];
+    }
+    let Some(timeout) = discovery_budget.and_then(AutoHttp3DiscoveryBudget::remaining) else {
+        return Vec::new();
+    };
+    let timeout = TimeoutBudget::new(Some(timeout));
+    let Ok(mut addrs) = timeout
+        .run(crate::net::resolve_host(&target, dns_server, timeout))
+        .await
+    else {
+        return Vec::new();
+    };
+    for addr in &mut addrs {
+        addr.set_port(port);
+    }
+    addrs
+}
+
+fn auto_http3_hint_addrs(
+    record: &SvcbRecord,
+    origin_addrs: &[SocketAddr],
+    port: u16,
+) -> Vec<SocketAddr> {
+    let ipv4 = record
+        .ipv4_hint
+        .iter()
+        .copied()
+        .map(|addr| SocketAddr::new(IpAddr::V4(addr), port))
+        .collect::<Vec<_>>();
+    let ipv6 = record
+        .ipv6_hint
+        .iter()
+        .copied()
+        .map(|addr| SocketAddr::new(IpAddr::V6(addr), port))
+        .collect::<Vec<_>>();
+
+    match origin_addrs.first().map(|addr| addr.ip()) {
+        Some(IpAddr::V6(_)) => ipv6.into_iter().chain(ipv4).collect(),
+        _ => ipv4.into_iter().chain(ipv6).collect(),
+    }
+}
+
+fn auto_http3_target_host(origin_host: &str, target: &str) -> String {
+    if target == "." {
+        origin_host.to_string()
+    } else {
+        target.trim_end_matches('.').to_string()
+    }
+}
+
+fn append_unique_socket_addrs(target: &mut Vec<SocketAddr>, addrs: Vec<SocketAddr>) {
+    for addr in addrs {
+        if !target.contains(&addr) {
+            target.push(addr);
+        }
     }
 }
 
@@ -574,6 +831,222 @@ mod tests {
                 "::1".parse().unwrap(),
                 "127.0.0.1".parse::<IpAddr>().unwrap(),
             ]
+        );
+    }
+
+    #[test]
+    fn auto_http3_optional_lookup_timeout_is_short_cap() {
+        assert_eq!(
+            auto_http3_optional_lookup_timeout_for_remaining(None),
+            Some(crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY)
+        );
+        assert_eq!(
+            auto_http3_optional_lookup_timeout_for_remaining(Some(Duration::from_millis(50))),
+            None
+        );
+        assert_eq!(
+            auto_http3_optional_lookup_timeout_for_remaining(Some(Duration::from_millis(500))),
+            Some(Duration::from_millis(200))
+        );
+        assert_eq!(
+            auto_http3_optional_lookup_timeout_for_remaining(Some(Duration::from_secs(5))),
+            Some(crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY)
+        );
+    }
+
+    fn https_record(priority: u16, target: &str, alpn: &[&str], port: Option<u16>) -> SvcbRecord {
+        SvcbRecord {
+            priority,
+            target: target.to_string(),
+            alpn: alpn.iter().map(|value| value.to_string()).collect(),
+            no_default_alpn: false,
+            port,
+            ipv4_hint: Vec::new(),
+            ipv6_hint: Vec::new(),
+            mandatory: Vec::new(),
+            unsupported_mandatory: Vec::new(),
+        }
+    }
+
+    fn auto_http3_test_discovery_budget() -> Option<AutoHttp3DiscoveryBudget> {
+        AutoHttp3DiscoveryBudget::new(TimeoutBudget::new(None))
+    }
+
+    #[test]
+    fn auto_http3_allowed_only_for_default_direct_https() {
+        let url = Url::parse("https://example.com/").unwrap();
+        assert!(auto_http3_allowed(
+            ClientMode::Request(None),
+            &url,
+            None,
+            None
+        ));
+        assert!(!auto_http3_allowed(
+            ClientMode::Request(Some(HttpVersion::Http2)),
+            &url,
+            None,
+            None
+        ));
+        assert!(!auto_http3_allowed(
+            ClientMode::Request(Some(HttpVersion::Http3)),
+            &url,
+            None,
+            None
+        ));
+        assert!(!auto_http3_allowed(
+            ClientMode::GrpcReflection,
+            &url,
+            None,
+            None
+        ));
+        assert!(!auto_http3_allowed(
+            ClientMode::Request(None),
+            &Url::parse("http://example.com/").unwrap(),
+            None,
+            None
+        ));
+        assert!(!auto_http3_allowed(
+            ClientMode::Request(None),
+            &url,
+            Some("/tmp/fetch.sock"),
+            None
+        ));
+        assert!(!auto_http3_allowed(
+            ClientMode::Request(None),
+            &url,
+            None,
+            Some(EffectiveProxy {
+                uses_local_target_dns: false,
+            })
+        ));
+        assert!(!auto_http3_allowed(
+            ClientMode::Request(None),
+            &Url::parse("https://127.0.0.1/").unwrap(),
+            None,
+            None
+        ));
+    }
+
+    #[tokio::test]
+    async fn auto_http3_candidate_builder_uses_h3_records_and_port_overrides() {
+        let url = Url::parse("https://example.com:8443/").unwrap();
+        let origin_addrs = [SocketAddr::new("127.0.0.1".parse().unwrap(), 8443)];
+        let records = [
+            https_record(5, ".", &["h2"], Some(9443)),
+            https_record(1, ".", &["h3", "h2"], Some(9443)),
+        ];
+
+        let got = auto_http3_config_for_records(
+            None,
+            &url,
+            &records,
+            &origin_addrs,
+            auto_http3_test_discovery_budget(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            got.addrs,
+            [SocketAddr::new("127.0.0.1".parse().unwrap(), 9443)]
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_http3_candidate_builder_orders_hints_by_resolver_family_preference() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let mut record = https_record(1, ".", &["h3"], None);
+        record.ipv4_hint = vec!["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
+        record.ipv6_hint = vec![
+            "2001:db8::1".parse().unwrap(),
+            "2001:db8::2".parse().unwrap(),
+        ];
+
+        let ipv4_first = auto_http3_config_for_records(
+            None,
+            &url,
+            &[record.clone()],
+            &[
+                SocketAddr::new("198.51.100.1".parse().unwrap(), 443),
+                SocketAddr::new("2001:db8::10".parse().unwrap(), 443),
+            ],
+            auto_http3_test_discovery_budget(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            ipv4_first.addrs,
+            [
+                SocketAddr::new("192.0.2.1".parse().unwrap(), 443),
+                SocketAddr::new("192.0.2.2".parse().unwrap(), 443),
+                SocketAddr::new("2001:db8::1".parse().unwrap(), 443),
+                SocketAddr::new("2001:db8::2".parse().unwrap(), 443),
+            ]
+        );
+
+        let ipv6_first = auto_http3_config_for_records(
+            None,
+            &url,
+            &[record],
+            &[
+                SocketAddr::new("2001:db8::10".parse().unwrap(), 443),
+                SocketAddr::new("198.51.100.1".parse().unwrap(), 443),
+            ],
+            auto_http3_test_discovery_budget(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            ipv6_first.addrs,
+            [
+                SocketAddr::new("2001:db8::1".parse().unwrap(), 443),
+                SocketAddr::new("2001:db8::2".parse().unwrap(), 443),
+                SocketAddr::new("192.0.2.1".parse().unwrap(), 443),
+                SocketAddr::new("192.0.2.2".parse().unwrap(), 443),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_http3_candidate_builder_ignores_missing_or_unusable_h3() {
+        let url = Url::parse("https://example.com/").unwrap();
+        let origin_addrs = [SocketAddr::new("127.0.0.1".parse().unwrap(), 443)];
+        assert!(
+            auto_http3_config_for_records(
+                None,
+                &url,
+                &[],
+                &origin_addrs,
+                auto_http3_test_discovery_budget(),
+            )
+            .await
+            .is_none()
+        );
+        assert!(
+            auto_http3_config_for_records(
+                None,
+                &url,
+                &[https_record(1, ".", &["h2"], None)],
+                &origin_addrs,
+                auto_http3_test_discovery_budget(),
+            )
+            .await
+            .is_none()
+        );
+        let mut unsupported = https_record(1, ".", &["h3"], None);
+        unsupported.unsupported_mandatory = vec![9];
+        assert!(
+            auto_http3_config_for_records(
+                None,
+                &url,
+                &[unsupported],
+                &origin_addrs,
+                auto_http3_test_discovery_budget(),
+            )
+            .await
+            .is_none()
         );
     }
 

@@ -1,8 +1,129 @@
 use std::net::{Ipv4Addr, UdpSocket};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::thread;
+
+const TYPE_A: u16 = 1;
+const TYPE_HTTPS: u16 = 65;
 
 pub(crate) fn start_udp_dns_server(host: &'static str, ip: Ipv4Addr) -> String {
     start_udp_dns_server_with_hosts(vec![(host, ip)])
+}
+
+pub(crate) fn start_udp_dns_server_with_https(
+    host: &'static str,
+    ip: Ipv4Addr,
+    https_port: u16,
+) -> String {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            let answer = if name == host && qtype == TYPE_A {
+                Some((TYPE_A, ip.octets().to_vec()))
+            } else if name == host && qtype == TYPE_HTTPS {
+                Some((TYPE_HTTPS, https_rdata(https_port, ip)))
+            } else {
+                None
+            };
+            let response = dns_response(&buf[..n], question_end, answer);
+            let _ = socket.send_to(&response, peer);
+        }
+    });
+    addr
+}
+
+pub(crate) fn start_udp_dns_server_with_https_target_dropping_target(
+    host: &'static str,
+    ip: Ipv4Addr,
+    https_target: &'static str,
+    https_port: u16,
+) -> String {
+    let (addr, _) = start_udp_dns_server_with_https_targets_dropping_targets(
+        host,
+        ip,
+        vec![https_target],
+        https_port,
+    );
+    addr
+}
+
+pub(crate) fn start_udp_dns_server_with_https_targets_dropping_targets(
+    host: &'static str,
+    ip: Ipv4Addr,
+    https_targets: Vec<&'static str>,
+    https_port: u16,
+) -> (String, Arc<AtomicUsize>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    let dropped_target_a_queries = Arc::new(AtomicUsize::new(0));
+    let query_count = dropped_target_a_queries.clone();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            if https_targets
+                .iter()
+                .any(|target| name.eq_ignore_ascii_case(target))
+                && qtype == TYPE_A
+            {
+                query_count.fetch_add(1, Ordering::SeqCst);
+                continue;
+            }
+            let response = if name == host && qtype == TYPE_A {
+                dns_response(
+                    &buf[..n],
+                    question_end,
+                    Some((TYPE_A, ip.octets().to_vec())),
+                )
+            } else if name == host && qtype == TYPE_HTTPS {
+                dns_response_many(
+                    &buf[..n],
+                    question_end,
+                    https_targets
+                        .iter()
+                        .map(|target| (TYPE_HTTPS, https_target_rdata(https_port, target)))
+                        .collect(),
+                )
+            } else {
+                dns_response(&buf[..n], question_end, None)
+            };
+            let _ = socket.send_to(&response, peer);
+        }
+    });
+    (addr, dropped_target_a_queries)
+}
+
+pub(crate) fn start_udp_dns_server_dropping_https(host: &'static str, ip: Ipv4Addr) -> String {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            if name == host && qtype == TYPE_HTTPS {
+                continue;
+            }
+            let answer = if name == host && qtype == TYPE_A {
+                Some((TYPE_A, ip.octets().to_vec()))
+            } else {
+                None
+            };
+            let resp = dns_response(&buf[..n], question_end, answer);
+            let _ = socket.send_to(&resp, peer);
+        }
+    });
+    addr
 }
 
 pub(crate) fn start_udp_dns_server_with_hosts(records: Vec<(&'static str, Ipv4Addr)>) -> String {
@@ -14,25 +135,11 @@ pub(crate) fn start_udp_dns_server_with_hosts(records: Vec<(&'static str, Ipv4Ad
             let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
                 continue;
             };
-            let mut resp = Vec::new();
-            resp.extend_from_slice(&buf[..2]);
-            resp.extend_from_slice(&[0x81, 0x80]);
-            resp.extend_from_slice(&1_u16.to_be_bytes());
             let answer = records
                 .iter()
-                .find_map(|(host, ip)| (name == *host && qtype == 1).then_some(*ip));
-            resp.extend_from_slice(&(if answer.is_some() { 1_u16 } else { 0_u16 }).to_be_bytes());
-            resp.extend_from_slice(&0_u16.to_be_bytes());
-            resp.extend_from_slice(&0_u16.to_be_bytes());
-            resp.extend_from_slice(&buf[12..question_end]);
-            if let Some(ip) = answer {
-                resp.extend_from_slice(&[0xc0, 0x0c]);
-                resp.extend_from_slice(&1_u16.to_be_bytes());
-                resp.extend_from_slice(&1_u16.to_be_bytes());
-                resp.extend_from_slice(&30_u32.to_be_bytes());
-                resp.extend_from_slice(&4_u16.to_be_bytes());
-                resp.extend_from_slice(&ip.octets());
-            }
+                .find_map(|(host, ip)| (name == *host && qtype == TYPE_A).then_some(*ip))
+                .map(|ip| (TYPE_A, ip.octets().to_vec()));
+            let resp = dns_response(&buf[..n], question_end, answer);
             let _ = socket.send_to(&resp, peer);
         }
     });
@@ -77,4 +184,66 @@ pub(crate) fn parse_dns_question(raw: &[u8]) -> Option<(String, u16, usize)> {
     };
     let qtype = u16::from_be_bytes([raw[off], raw[off + 1]]);
     Some((name, qtype, off + 4))
+}
+
+fn dns_response(query: &[u8], question_end: usize, answer: Option<(u16, Vec<u8>)>) -> Vec<u8> {
+    dns_response_many(query, question_end, answer.into_iter().collect())
+}
+
+fn dns_response_many(query: &[u8], question_end: usize, answers: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
+    let mut resp = Vec::new();
+    resp.extend_from_slice(&query[..2]);
+    resp.extend_from_slice(&[0x81, 0x80]);
+    resp.extend_from_slice(&1_u16.to_be_bytes());
+    resp.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+    resp.extend_from_slice(&0_u16.to_be_bytes());
+    resp.extend_from_slice(&0_u16.to_be_bytes());
+    resp.extend_from_slice(&query[12..question_end]);
+    for (typ, data) in answers {
+        resp.extend_from_slice(&[0xc0, 0x0c]);
+        resp.extend_from_slice(&typ.to_be_bytes());
+        resp.extend_from_slice(&1_u16.to_be_bytes());
+        resp.extend_from_slice(&30_u32.to_be_bytes());
+        resp.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        resp.extend_from_slice(&data);
+    }
+    resp
+}
+
+fn https_rdata(port: u16, ipv4_hint: Ipv4Addr) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&1_u16.to_be_bytes());
+    write_dns_name(&mut out, ".");
+    write_svc_param(&mut out, 1, &[2, b'h', b'3']);
+    write_svc_param(&mut out, 3, &port.to_be_bytes());
+    write_svc_param(&mut out, 4, &ipv4_hint.octets());
+    out
+}
+
+fn https_target_rdata(port: u16, target: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&1_u16.to_be_bytes());
+    write_dns_name(&mut out, target);
+    write_svc_param(&mut out, 1, &[2, b'h', b'3']);
+    write_svc_param(&mut out, 3, &port.to_be_bytes());
+    out
+}
+
+fn write_dns_name(out: &mut Vec<u8>, name: &str) {
+    let name = name.trim_end_matches('.');
+    if name.is_empty() {
+        out.push(0);
+        return;
+    }
+    for label in name.split('.') {
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+}
+
+fn write_svc_param(out: &mut Vec<u8>, key: u16, value: &[u8]) {
+    out.extend_from_slice(&key.to_be_bytes());
+    out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    out.extend_from_slice(value);
 }
