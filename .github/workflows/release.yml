@@ -67,7 +67,7 @@ jobs:
             rustflags: "-C target-feature=+crt-static"
             artifact: zip
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -175,7 +175,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Mark release as latest
         env:
