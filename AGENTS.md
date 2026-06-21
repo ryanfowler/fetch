@@ -117,6 +117,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - Rustls is built with `aws-lc-rs` and `prefer-post-quantum`; keep post-quantum key exchange preference enabled unless there is a concrete compatibility or provider reason to disable it.
 - TLS inspection keeps its custom verifier for certificate display and OCSP capture, but Rustls protocol-version selection and PEM/client-auth material parsing should stay centralized in `src/tls/mod.rs`.
 - Direct HTTPS requests discover HTTP/3 via DNS HTTPS/SVCB records advertising `h3`, race QUIC setup against the normal TCP/TLS `h2`/`http/1.1` ALPN path, and send the request once on the winning transport. With `--dns-server`, HTTPS-record discovery uses that custom UDP or DoH resolver; without it, discovery uses the platform resolver, matching normal A/AAAA lookup behavior. Proxy, Unix socket, explicit HTTP version, and gRPC/WebSocket paths bypass auto-H3. Explicit `--http 1`, `--http 2`, and `--http 3` remain forced protocol selections, not version caps. Auto-H3 HTTPS/SVCB discovery is opportunistic and must not delay normal connection setup: start it in parallel with normal A/AAAA lookup and TCP/TLS setup, race QUIC only when a usable `h3` candidate is discovered before TCP/TLS wins, and skip SVCB target-name resolution that would require an extra DNS wait unless address hints, an origin target, or an IP target are already available. The auto-H3 QUIC/TCP race shares one started `--connect-timeout` budget across both branches; do not create fresh branch-local connect budgets after the fallback delay.
+- Automatic HTTP/3 stores learned alternatives in a bounded sharded JSON cache under the user cache directory (`http3/<prefix>/<hash>.json`). Cache entries are scoped by normalized origin and resolver key, store alternative authorities instead of IP addresses, expire by HTTPS/SVCB TTL or `Alt-Svc` `ma` with a hard retention cap, and should not be used for proxy, Unix socket, IP-literal, non-HTTPS, explicit `--http`, or gRPC/WebSocket paths. Fresh HTTPS/SVCB candidates take precedence when available promptly, but cached alternatives race while slower HTTPS/SVCB discovery continues so learned `Alt-Svc` entries are not hidden behind unsupported or slow HTTPS-record lookups. `Alt-Svc` learning is disabled for `--insecure` responses.
 - The custom transport should preserve reqwest's safe default retries for HTTP/2/3 protocol NACKs such as remote `REFUSED_STREAM`, remote `GOAWAY(NO_ERROR)`, and HTTP/3 connection timeout signals, but only when the request body can be replayed.
 - WebSocket terminal sessions use the interactive prompt by default and can be controlled with `--ws-interactive auto|on|off`; output-file/clipboard/retry flags are rejected because the WebSocket path streams through the message loop instead of the normal response pipeline.
 - WebSocket requests require HTTP/1.1 for the upgrade handshake; reject explicit `--http 2` and `--http 3` instead of silently performing an HTTP/1.1 upgrade.
@@ -207,6 +208,10 @@ Rust request uploads use a replayable body descriptor instead of a universal `Ve
   harness code split by domain under `tests/support/` (HTTP, TLS, HTTP/3,
   gRPC, DNS, WebSocket, proxy, PTY, terminal, update, and auth helpers), and
   run the compiled Rust binary via Cargo.
+- The shared integration `run_fetch` harness isolates automatic HTTP/3 cache
+  state with a per-process temp `FETCH_INTERNAL_HTTP3_CACHE_DIR` by default;
+  cache-specific tests should pass an explicit shared temp dir through
+  `FetchOpts.env`.
 - CI runs Rust checks once on Ubuntu and runs the Rust integration harness once on each supported GitHub Actions runner: Ubuntu, macOS, and Windows.
 
 ## Docs

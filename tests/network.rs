@@ -14,7 +14,8 @@ use support::dns::{
     parse_dns_question, start_udp_dns_server, start_udp_dns_server_dropping_https,
     start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_hosts,
     start_udp_dns_server_with_https, start_udp_dns_server_with_https_target_dropping_target,
-    start_udp_dns_server_with_https_targets_dropping_targets, start_unresponsive_udp_dns_server,
+    start_udp_dns_server_with_https_targets_dropping_targets,
+    start_udp_dns_server_with_toggleable_https, start_unresponsive_udp_dns_server,
 };
 use support::grpc::{
     grpc_frame, grpc_frame_with_flag, gzip_bytes, proto_field_string, proto_field_varint,
@@ -25,7 +26,9 @@ use support::proxy::{
     assert_socks_seen, start_http_connect_proxy, start_https_proxy, start_socks5_proxy,
     start_stalling_proxy,
 };
-use support::tls::{start_h2_tls_server, start_mtls_server, start_tls_server};
+use support::tls::{
+    start_h2_tls_server, start_h2_tls_server_with_accept_delay, start_mtls_server, start_tls_server,
+};
 use tempfile::TempDir;
 use url::Url;
 
@@ -584,6 +587,275 @@ fn default_https_uses_http3_from_https_dns_record() {
     assert!(res.stderr.contains("QUIC"), "{}", res.stderr);
     let requests = wait_for_h3_requests(&h3, 1);
     assert_eq!(requests[0].path, "/auto-h3");
+}
+
+#[test]
+fn default_https_uses_cached_http3_from_https_dns_record() {
+    let cache_dir = TempDir::new().unwrap();
+    let h3 = start_http3_server(|req| match req.path.as_str() {
+        "/learn-h3-cache" => H3Response::ok("learned h3 cache"),
+        "/use-h3-cache" => H3Response::ok("used h3 cache"),
+        _ => H3Response::status(404, "not found"),
+    });
+    let h3_port = Url::parse(&h3.url).unwrap().port().unwrap();
+    let (dns_addr, advertise_https) = start_udp_dns_server_with_toggleable_https(
+        "localhost.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        h3_port,
+    );
+    let env = vec![(
+        "FETCH_INTERNAL_HTTP3_CACHE_DIR".to_string(),
+        cache_dir.path().display().to_string(),
+    )];
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: env.clone(),
+            ..Default::default()
+        },
+        &[
+            "--dns-server",
+            &dns_addr,
+            "--ca-cert",
+            h3.ca_cert_path.to_str().unwrap(),
+            &format!("https://localhost:{h3_port}/learn-h3-cache"),
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "learned h3 cache");
+    assert!(res.stderr.contains("HTTP/3.0 200 OK"), "{}", res.stderr);
+
+    advertise_https.store(false, Ordering::SeqCst);
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env,
+            ..Default::default()
+        },
+        &[
+            "--dns-server",
+            &dns_addr,
+            "--ca-cert",
+            h3.ca_cert_path.to_str().unwrap(),
+            &format!("https://localhost:{h3_port}/use-h3-cache"),
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "used h3 cache");
+    assert!(res.stderr.contains("HTTP/3.0 200 OK"), "{}", res.stderr);
+    let requests = wait_for_h3_requests(&h3, 2);
+    assert_eq!(requests[0].path, "/learn-h3-cache");
+    assert_eq!(requests[1].path, "/use-h3-cache");
+}
+
+#[test]
+fn default_https_uses_cached_http3_from_alt_svc_header() {
+    let cache_dir = TempDir::new().unwrap();
+    let h3 = start_http3_server(|req| {
+        if req.path == "/alt-svc-cache" {
+            return H3Response::ok("alt-svc h3 cache");
+        }
+        H3Response::status(404, "not found")
+    });
+    let h3_port = Url::parse(&h3.url).unwrap().port().unwrap();
+    let h2 = start_h2_tls_server(move |req| {
+        if req.path == "/alt-svc-cache" {
+            return TestResponse::ok("learned alt-svc")
+                .header("Alt-Svc", &format!("h3=\":{h3_port}\"; ma=60"));
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let h2_url = format!("{}/alt-svc-cache", h2.url);
+    let h2_ca = h2.ca_cert_path.clone();
+    let h3_ca = h3.ca_cert_path.clone();
+    let env = vec![(
+        "FETCH_INTERNAL_HTTP3_CACHE_DIR".to_string(),
+        cache_dir.path().display().to_string(),
+    )];
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: env.clone(),
+            ..Default::default()
+        },
+        &[
+            "--ca-cert",
+            h2_ca.to_str().unwrap(),
+            "--ca-cert",
+            h3_ca.to_str().unwrap(),
+            &h2_url,
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "learned alt-svc");
+    assert!(res.stderr.contains("HTTP/2.0 200 OK"), "{}", res.stderr);
+    drop(h2);
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env,
+            ..Default::default()
+        },
+        &[
+            "--ca-cert",
+            h2_ca.to_str().unwrap(),
+            "--ca-cert",
+            h3_ca.to_str().unwrap(),
+            &h2_url,
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "alt-svc h3 cache");
+    assert!(res.stderr.contains("HTTP/3.0 200 OK"), "{}", res.stderr);
+    let requests = wait_for_h3_requests(&h3, 1);
+    assert_eq!(requests[0].path, "/alt-svc-cache");
+}
+
+#[test]
+fn default_https_races_cached_alt_svc_without_waiting_for_slow_https_record_lookup() {
+    let cache_dir = TempDir::new().unwrap();
+    let h3 = start_http3_server(|req| {
+        if req.path == "/cached-alt-svc-race" {
+            return H3Response::ok("cached alt-svc wins");
+        }
+        H3Response::status(404, "not found")
+    });
+    let h3_port = Url::parse(&h3.url).unwrap().port().unwrap();
+    let h2 = start_h2_tls_server_with_accept_delay(
+        move |req| {
+            if req.path == "/cached-alt-svc-race" {
+                return TestResponse::ok("learned alt-svc")
+                    .header("Alt-Svc", &format!("h3=\":{h3_port}\"; ma=60"));
+            }
+            TestResponse::status(404, "Not Found", "")
+        },
+        Duration::from_millis(250),
+    );
+    let h2_url = format!("{}/cached-alt-svc-race", h2.url);
+    let dns_addr = start_udp_dns_server_dropping_https("localhost.", Ipv4Addr::new(127, 0, 0, 1));
+    let h2_ca = h2.ca_cert_path.clone();
+    let h3_ca = h3.ca_cert_path.clone();
+    let env = vec![(
+        "FETCH_INTERNAL_HTTP3_CACHE_DIR".to_string(),
+        cache_dir.path().display().to_string(),
+    )];
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: env.clone(),
+            ..Default::default()
+        },
+        &[
+            "--dns-server",
+            &dns_addr,
+            "--ca-cert",
+            h2_ca.to_str().unwrap(),
+            "--ca-cert",
+            h3_ca.to_str().unwrap(),
+            &h2_url,
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "learned alt-svc");
+    assert!(res.stderr.contains("HTTP/2.0 200 OK"), "{}", res.stderr);
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env,
+            ..Default::default()
+        },
+        &[
+            "--dns-server",
+            &dns_addr,
+            "--ca-cert",
+            h2_ca.to_str().unwrap(),
+            "--ca-cert",
+            h3_ca.to_str().unwrap(),
+            &h2_url,
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "cached alt-svc wins");
+    assert!(res.stderr.contains("HTTP/3.0 200 OK"), "{}", res.stderr);
+    let requests = wait_for_h3_requests(&h3, 1);
+    assert_eq!(requests[0].path, "/cached-alt-svc-race");
+}
+
+#[test]
+fn default_https_prefers_fresh_https_record_over_stale_http3_cache() {
+    let cache_dir = TempDir::new().unwrap();
+    let h3 = start_http3_server(|req| {
+        if req.path == "/fresh-h3-after-stale-cache" {
+            return H3Response::ok("fresh h3 wins");
+        }
+        H3Response::status(404, "not found")
+    });
+    let h3_port = Url::parse(&h3.url).unwrap().port().unwrap();
+    let quic_blackhole = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let stale_h3_port = quic_blackhole.local_addr().unwrap().port();
+    let h2 = start_h2_tls_server(move |req| {
+        if req.path == "/learn-stale-h3-cache" {
+            return TestResponse::ok("learned stale h3 cache")
+                .header("Alt-Svc", &format!("h3=\":{stale_h3_port}\"; ma=60"));
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let h2_url = h2.url.clone();
+    let h2_ca = h2.ca_cert_path.clone();
+    let h3_ca = h3.ca_cert_path.clone();
+    let (dns_addr, advertise_https) = start_udp_dns_server_with_toggleable_https(
+        "localhost.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        h3_port,
+    );
+    advertise_https.store(false, Ordering::SeqCst);
+    let env = vec![(
+        "FETCH_INTERNAL_HTTP3_CACHE_DIR".to_string(),
+        cache_dir.path().display().to_string(),
+    )];
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: env.clone(),
+            ..Default::default()
+        },
+        &[
+            "--dns-server",
+            &dns_addr,
+            "--ca-cert",
+            h2_ca.to_str().unwrap(),
+            &format!("{h2_url}/learn-stale-h3-cache"),
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "learned stale h3 cache");
+    assert!(res.stderr.contains("HTTP/2.0 200 OK"), "{}", res.stderr);
+
+    advertise_https.store(true, Ordering::SeqCst);
+    drop(h2);
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env,
+            ..Default::default()
+        },
+        &[
+            "--dns-server",
+            &dns_addr,
+            "--ca-cert",
+            h2_ca.to_str().unwrap(),
+            "--ca-cert",
+            h3_ca.to_str().unwrap(),
+            "--connect-timeout",
+            "1",
+            &format!("{h2_url}/fresh-h3-after-stale-cache"),
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "fresh h3 wins");
+    assert!(res.stderr.contains("HTTP/3.0 200 OK"), "{}", res.stderr);
+    let requests = wait_for_h3_requests(&h3, 1);
+    assert_eq!(requests[0].path, "/fresh-h3-after-stale-cache");
 }
 
 #[test]

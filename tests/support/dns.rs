@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::thread;
 use std::time::Duration;
@@ -39,6 +39,38 @@ pub(crate) fn start_udp_dns_server_with_https(
         }
     });
     addr
+}
+
+pub(crate) fn start_udp_dns_server_with_toggleable_https(
+    host: &'static str,
+    ip: Ipv4Addr,
+    https_port: u16,
+) -> (String, Arc<AtomicBool>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    let advertise_https = Arc::new(AtomicBool::new(true));
+    let advertise_for_thread = advertise_https.clone();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            let answer = if name == host && qtype == TYPE_A {
+                Some((TYPE_A, ip.octets().to_vec()))
+            } else if name == host
+                && qtype == TYPE_HTTPS
+                && advertise_for_thread.load(Ordering::SeqCst)
+            {
+                Some((TYPE_HTTPS, https_rdata(https_port, ip)))
+            } else {
+                None
+            };
+            let response = dns_response(&buf[..n], question_end, answer);
+            let _ = socket.send_to(&response, peer);
+        }
+    });
+    (addr, advertise_https)
 }
 
 pub(crate) fn start_udp_dns_server_with_https_target_dropping_target(

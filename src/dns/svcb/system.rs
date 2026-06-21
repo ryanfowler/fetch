@@ -100,7 +100,7 @@ fn lookup_https_records_blocking(
         rrclass: u16,
         rdlen: u16,
         rdata: *const c_void,
-        _ttl: u32,
+        ttl: u32,
         context: *mut c_void,
     ) {
         if context.is_null() {
@@ -114,7 +114,8 @@ fn lookup_https_records_blocking(
         }
         if rrtype == wire::TYPE_HTTPS && rrclass == wire::CLASS_IN && !rdata.is_null() {
             let raw = unsafe { std::slice::from_raw_parts(rdata.cast::<u8>(), usize::from(rdlen)) };
-            if let Some(record) = parse_rdata(raw) {
+            if let Some(mut record) = parse_rdata(raw) {
+                record.ttl = Some(ttl);
                 state.records.push(record);
             }
         }
@@ -277,15 +278,16 @@ fn lookup_https_records_blocking(
     let mut parsed = Vec::new();
     let mut current = records;
     while !current.is_null() {
-        let record = unsafe { &*current };
-        if record.wType == DNS_TYPE_HTTPS {
-            if let Some(raw) = windows_svcb_rdata(record) {
-                if let Some(record) = parse_rdata(&raw) {
-                    parsed.push(record);
+        let dns_record = unsafe { &*current };
+        if dns_record.wType == DNS_TYPE_HTTPS {
+            if let Some(raw) = windows_svcb_rdata(dns_record) {
+                if let Some(mut parsed_record) = parse_rdata(&raw) {
+                    parsed_record.ttl = Some(dns_record.dwTtl);
+                    parsed.push(parsed_record);
                 }
             }
         }
-        current = record.pNext;
+        current = dns_record.pNext;
     }
     Ok(parsed)
 }
@@ -414,7 +416,12 @@ fn records_from_wire_response(raw: &[u8]) -> Result<Vec<SvcbRecord>, FetchError>
     Ok(records
         .into_iter()
         .filter(|record| record.class == wire::CLASS_IN && record.typ == wire::TYPE_HTTPS)
-        .filter_map(|record| parse_rdata(record.data))
+        .filter_map(|record| {
+            parse_rdata(record.data).map(|mut parsed| {
+                parsed.ttl = Some(record.ttl);
+                parsed
+            })
+        })
         .collect())
 }
 

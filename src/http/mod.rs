@@ -60,6 +60,7 @@ use crate::timing::{self, AttemptTiming, DnsTiming, ResponseTiming};
 pub(crate) mod client;
 mod edit;
 mod encoding;
+mod http3_cache;
 mod metadata;
 pub mod multipart;
 mod request;
