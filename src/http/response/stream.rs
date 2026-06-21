@@ -371,99 +371,123 @@ async fn copy_async_reader_to_stdout_target(
 pub(super) async fn copy_async_reader_to_writer<W>(
     reader: &mut AsyncReadBox,
     writer: &mut W,
-    mut capture: Option<&mut clipboard::Capture>,
+    capture: Option<&mut clipboard::Capture>,
 ) -> std::io::Result<i64>
 where
     W: AsyncWrite + Unpin,
 {
-    let mut buf = vec![0; 64 * 1024];
-    let mut written = 0i64;
-    loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            writer.flush().await?;
-            return Ok(written);
-        }
-        if let Some(capture) = capture.as_mut() {
-            capture.push(&buf[..n]);
-        }
-        writer.write_all(&buf[..n]).await?;
-        written = written.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
-    }
-}
-
-async fn copy_async_reader_to_stdout<W>(
-    reader: &mut AsyncReadBox,
-    writer: &mut W,
-    mut capture: Option<&mut clipboard::Capture>,
-) -> std::io::Result<i64>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut buf = vec![0; 64 * 1024];
-    let mut written = 0i64;
-    loop {
-        let n = reader.read(&mut buf).await?;
-        if n == 0 {
-            return match core::stdout_write_status(writer.flush().await)? {
-                core::StdoutWriteStatus::Open => Ok(written),
-                core::StdoutWriteStatus::Closed => Ok(written),
-            };
-        }
-        match core::stdout_write_status(writer.write_all(&buf[..n]).await)? {
-            core::StdoutWriteStatus::Open => {
-                if let Some(capture) = capture.as_mut() {
-                    capture.push(&buf[..n]);
-                }
-                written = written.saturating_add(i64::try_from(n).unwrap_or(i64::MAX));
-            }
-            core::StdoutWriteStatus::Closed => return Ok(written),
-        }
-    }
-}
-
-pub(super) async fn copy_async_reader_to_writer_with_prefix<W>(
-    reader: &mut AsyncReadBox,
-    writer: &mut W,
-    prefix: &[u8],
-    mut capture: Option<&mut clipboard::Capture>,
-) -> std::io::Result<i64>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut written = 0i64;
-    if !prefix.is_empty() {
-        if let Some(capture) = capture.as_mut() {
-            capture.push(prefix);
-        }
-        writer.write_all(prefix).await?;
-        written = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
-    }
-    Ok(written.saturating_add(copy_async_reader_to_writer(reader, writer, capture).await?))
+    copy_async_reader_to_sink(
+        reader,
+        writer,
+        &[],
+        capture,
+        SinkBrokenPipePolicy::Propagate,
+    )
+    .await
 }
 
 async fn copy_async_reader_to_stdout_with_prefix<W>(
     reader: &mut AsyncReadBox,
     writer: &mut W,
     prefix: &[u8],
+    capture: Option<&mut clipboard::Capture>,
+) -> std::io::Result<i64>
+where
+    W: AsyncWrite + Unpin,
+{
+    copy_async_reader_to_sink(
+        reader,
+        writer,
+        prefix,
+        capture,
+        SinkBrokenPipePolicy::TreatAsClosed,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum SinkBrokenPipePolicy {
+    Propagate,
+    TreatAsClosed,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SinkWriteStatus {
+    Open,
+    Closed,
+}
+
+async fn copy_async_reader_to_sink<W>(
+    reader: &mut AsyncReadBox,
+    writer: &mut W,
+    prefix: &[u8],
     mut capture: Option<&mut clipboard::Capture>,
+    broken_pipe: SinkBrokenPipePolicy,
 ) -> std::io::Result<i64>
 where
     W: AsyncWrite + Unpin,
 {
     let mut written = 0i64;
-    if !prefix.is_empty() {
-        match core::stdout_write_status(writer.write_all(prefix).await)? {
-            core::StdoutWriteStatus::Open => {
-                if let Some(capture) = capture.as_mut() {
-                    capture.push(prefix);
-                }
-                written = i64::try_from(prefix.len()).unwrap_or(i64::MAX);
-            }
-            core::StdoutWriteStatus::Closed => return Ok(0),
+    if write_stream_chunk(writer, prefix, &mut capture, &mut written, broken_pipe).await?
+        == SinkWriteStatus::Closed
+    {
+        return Ok(written);
+    }
+
+    let mut buf = vec![0; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            let _ = stream_sink_status(writer.flush().await, broken_pipe)?;
+            return Ok(written);
+        }
+        if write_stream_chunk(writer, &buf[..n], &mut capture, &mut written, broken_pipe).await?
+            == SinkWriteStatus::Closed
+        {
+            return Ok(written);
         }
     }
-    Ok(written.saturating_add(copy_async_reader_to_stdout(reader, writer, capture).await?))
+}
+
+async fn write_stream_chunk<W>(
+    writer: &mut W,
+    bytes: &[u8],
+    capture: &mut Option<&mut clipboard::Capture>,
+    written: &mut i64,
+    broken_pipe: SinkBrokenPipePolicy,
+) -> std::io::Result<SinkWriteStatus>
+where
+    W: AsyncWrite + Unpin,
+{
+    if bytes.is_empty() {
+        return Ok(SinkWriteStatus::Open);
+    }
+    match stream_sink_status(writer.write_all(bytes).await, broken_pipe)? {
+        SinkWriteStatus::Open => {
+            if let Some(capture) = capture.as_deref_mut() {
+                capture.push(bytes);
+            }
+            *written = (*written).saturating_add(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
+            Ok(SinkWriteStatus::Open)
+        }
+        SinkWriteStatus::Closed => Ok(SinkWriteStatus::Closed),
+    }
+}
+
+fn stream_sink_status(
+    result: std::io::Result<()>,
+    broken_pipe: SinkBrokenPipePolicy,
+) -> std::io::Result<SinkWriteStatus> {
+    match result {
+        Ok(()) => Ok(SinkWriteStatus::Open),
+        Err(err)
+            if matches!(broken_pipe, SinkBrokenPipePolicy::TreatAsClosed)
+                && core::is_broken_pipe(&err) =>
+        {
+            Ok(SinkWriteStatus::Closed)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 async fn stream_async_reader_to_pager(
@@ -495,11 +519,14 @@ async fn stream_async_reader_to_pager(
 
     let mut bytes_written = 0;
     if let Some(mut stdin) = child.stdin.take() {
-        match copy_async_reader_to_writer_with_prefix(reader, &mut stdin, prefix, capture).await {
-            Ok(n) => bytes_written = n,
-            Err(err) if err.kind() == ErrorKind::BrokenPipe => {}
-            Err(err) => return Err(err.into()),
-        }
+        bytes_written = copy_async_reader_to_sink(
+            reader,
+            &mut stdin,
+            prefix,
+            capture,
+            SinkBrokenPipePolicy::TreatAsClosed,
+        )
+        .await?;
     }
 
     let status = child.wait().await?;
@@ -543,6 +570,36 @@ mod tests {
         }
     }
 
+    struct BrokenPipeAfterFirstWrite {
+        bytes: Vec<u8>,
+    }
+
+    impl AsyncWrite for BrokenPipeAfterFirstWrite {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.bytes.is_empty() {
+                self.bytes.extend_from_slice(buf);
+                Poll::Ready(Ok(buf.len()))
+            } else {
+                Poll::Ready(Err(std::io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    "sink closed",
+                )))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[tokio::test]
     async fn async_copy_flushes_once_after_streaming_body() {
         let input = vec![b'a'; (64 * 1024) + 17];
@@ -565,15 +622,40 @@ mod tests {
         let mut reader: AsyncReadBox = Box::pin(std::io::Cursor::new(body.clone()));
         let mut writer = RecordingAsyncWriter::default();
 
-        let written =
-            copy_async_reader_to_writer_with_prefix(&mut reader, &mut writer, prefix, None)
-                .await
-                .unwrap();
+        let written = copy_async_reader_to_sink(
+            &mut reader,
+            &mut writer,
+            prefix,
+            None,
+            SinkBrokenPipePolicy::Propagate,
+        )
+        .await
+        .unwrap();
 
         let mut expected = prefix.to_vec();
         expected.extend_from_slice(&body);
         assert_eq!(written, i64::try_from(expected.len()).unwrap());
         assert_eq!(writer.bytes, expected);
         assert_eq!(writer.flushes, 1);
+    }
+
+    #[tokio::test]
+    async fn async_copy_treats_broken_pipe_as_closed_when_requested() {
+        let input = vec![b'a'; (64 * 1024) + 17];
+        let mut reader: AsyncReadBox = Box::pin(std::io::Cursor::new(input));
+        let mut writer = BrokenPipeAfterFirstWrite { bytes: Vec::new() };
+
+        let written = copy_async_reader_to_sink(
+            &mut reader,
+            &mut writer,
+            &[],
+            None,
+            SinkBrokenPipePolicy::TreatAsClosed,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(written, 64 * 1024);
+        assert_eq!(writer.bytes, vec![b'a'; 64 * 1024]);
     }
 }
