@@ -131,10 +131,11 @@ Automatic update scheduling and update locking use the user cache directory:
 
 Files in this directory include:
 
-| File            | Purpose                                                                   |
-| --------------- | ------------------------------------------------------------------------- |
-| `metadata.json` | Stores the last update attempt timestamp for auto-update interval checks. |
-| `.update-lock`  | Advisory lock that prevents concurrent update attempts.                   |
+| File or directory | Purpose                                                                   |
+| ----------------- | ------------------------------------------------------------------------- |
+| `metadata.json`   | Stores the last update attempt timestamp for auto-update interval checks. |
+| `.update-lock`    | Advisory lock that prevents concurrent update attempts.                   |
+| `http3/`          | Bounded per-origin cache for learned HTTP/3 alternatives.                 |
 
 Manual and automatic update attempts both refresh `metadata.json`, including
 `fetch --update --dry-run`.

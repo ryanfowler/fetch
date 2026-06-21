@@ -117,6 +117,13 @@ pub(crate) fn start_tls_server(
 pub(crate) fn start_h2_tls_server(
     handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static,
 ) -> TlsTestServer {
+    start_h2_tls_server_with_accept_delay(handler, Duration::ZERO)
+}
+
+pub(crate) fn start_h2_tls_server_with_accept_delay(
+    handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static,
+    accept_delay: Duration,
+) -> TlsTestServer {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let certified =
         rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()])
@@ -158,6 +165,9 @@ pub(crate) fn start_h2_tls_server(
                         let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
                             return;
                         };
+                        if !accept_delay.is_zero() {
+                            tokio::time::sleep(accept_delay).await;
+                        }
                         let Ok(tls) = acceptor.accept(stream).await else {
                             return;
                         };

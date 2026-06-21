@@ -40,6 +40,7 @@ use crate::cli::HttpVersion;
 use crate::dns::svcb::{HttpsRecordResolver, SvcbRecord};
 use crate::duration::{TimeoutBudget, request_timeout_message};
 use crate::error::FetchError;
+use crate::http::http3_cache::{Http3Cache, Http3CacheCandidate};
 use crate::timing::{DnsTiming, TransportTiming};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,6 +292,8 @@ struct ClientConfig {
     local_address: Option<IpAddr>,
     auto_http3: Option<AutoHttp3Config>,
     auto_http3_discovery: bool,
+    http3_cache: Option<Arc<Http3Cache>>,
+    learn_alt_svc: bool,
 }
 
 pub(crate) struct ClientBuilder {
@@ -322,6 +325,8 @@ impl Client {
                 local_address: None,
                 auto_http3: None,
                 auto_http3_discovery: false,
+                http3_cache: None,
+                learn_alt_svc: false,
             },
         }
     }
@@ -389,7 +394,9 @@ impl Client {
         self.apply_proxy_authorization(&url, &mut headers)?;
         apply_host_header(&url, &mut headers)?;
         let response = match version {
-            None if (self.config.auto_http3.is_some() || self.config.auto_http3_discovery)
+            None if (self.config.auto_http3.is_some()
+                || self.config.auto_http3_discovery
+                || self.config.http3_cache.is_some())
                 && url.scheme() == "https" =>
             {
                 self.send_auto_http3(method, url.clone(), headers, body, body_deadline)
@@ -408,6 +415,7 @@ impl Client {
             ))),
         };
         if let Ok(response) = &response {
+            self.store_http3_alt_svc(&url, response.headers());
             self.store_response_cookies(&url, response.headers());
         }
         Ok(response)
@@ -430,6 +438,16 @@ impl Client {
             return;
         };
         session.set_cookies(&mut headers.get_all(SET_COOKIE).iter(), url);
+    }
+
+    fn store_http3_alt_svc(&self, url: &Url, headers: &HeaderMap) {
+        if !self.config.learn_alt_svc {
+            return;
+        }
+        let Some(cache) = &self.config.http3_cache else {
+            return;
+        };
+        cache.store_alt_svc(url, self.config.dns_server.as_deref(), headers);
     }
 
     fn apply_proxy_authorization(
@@ -569,7 +587,9 @@ impl Client {
     }
 
     async fn race_auto_http3_connection(&self, url: Url) -> Result<AutoRaceWinner, Error> {
-        if self.config.auto_http3_discovery {
+        if self.config.auto_http3_discovery
+            || (self.config.auto_http3.is_none() && self.config.http3_cache.is_some())
+        {
             return self.race_dynamic_auto_http3_connection(url).await;
         }
         let connect_timeout = TimeoutBudget::new(self.config.connect_timeout);
@@ -642,15 +662,43 @@ impl Client {
             .host_str()
             .ok_or_else(|| Error::request("URL host is required"))?;
         let discovery_start = std::time::Instant::now();
-        let origin_addrs_task = spawn_auto_http3_origin_addrs(
-            self.config.dns_server.clone(),
+        let cached_candidates = self
+            .config
+            .http3_cache
+            .as_ref()
+            .map(|cache| cache.candidates(url, self.config.dns_server.as_deref()))
+            .unwrap_or_default();
+        let fresh = self.connect_fresh_dynamic_auto_http3_client(
+            url,
+            origin.clone(),
             host.to_string(),
+            discovery_start,
             timeout,
         );
+        let cached =
+            self.connect_cached_dynamic_auto_http3_client(url, origin, cached_candidates, timeout);
+        race_dynamic_auto_http3_candidates(fresh, cached).await
+    }
+
+    async fn connect_fresh_dynamic_auto_http3_client(
+        &self,
+        url: &Url,
+        origin: String,
+        host: String,
+        discovery_start: std::time::Instant,
+        timeout: TimeoutBudget,
+    ) -> DynamicHttp3ConnectOutcome {
+        let origin_addrs_task =
+            spawn_auto_http3_origin_addrs(self.config.dns_server.clone(), host.clone(), timeout);
         let records =
-            lookup_auto_http3_https_records(self.config.dns_server.as_deref(), host, timeout).await;
+            lookup_auto_http3_https_records(self.config.dns_server.as_deref(), &host, timeout)
+                .await;
+        if let Some(cache) = &self.config.http3_cache {
+            cache.store_https_records(url, self.config.dns_server.as_deref(), &records);
+        }
         if records.is_empty() {
-            return Err(Error::connect("no HTTP/3 candidates discovered"));
+            origin_addrs_task.abort();
+            return DynamicHttp3ConnectOutcome::NoCandidates;
         }
         let origin_addrs = take_finished_auto_http3_origin_addrs(origin_addrs_task).await;
         let addrs = auto_http3_addrs_for_records(
@@ -662,11 +710,33 @@ impl Client {
         )
         .await;
         if addrs.is_empty() {
-            return Err(Error::connect("no HTTP/3 candidates discovered"));
+            return DynamicHttp3ConnectOutcome::NoCandidates;
         }
         record_dns_addrs_trace(&self.config, url, &addrs, discovery_start.elapsed());
-        self.connect_http3_client_with_addrs(url, origin, addrs, timeout)
+        match self
+            .connect_http3_client_with_addrs(url, origin, addrs, timeout)
             .await
+        {
+            Ok(result) => DynamicHttp3ConnectOutcome::Connected(result),
+            Err(err) => DynamicHttp3ConnectOutcome::Failed(err),
+        }
+    }
+
+    async fn connect_cached_dynamic_auto_http3_client(
+        &self,
+        url: &Url,
+        origin: String,
+        candidates: Vec<Http3CacheCandidate>,
+        timeout: TimeoutBudget,
+    ) -> DynamicHttp3ConnectOutcome {
+        match self
+            .connect_cached_auto_http3_client_with_candidates(url, origin, candidates, timeout)
+            .await
+        {
+            Some(Ok(result)) => DynamicHttp3ConnectOutcome::Connected(result),
+            Some(Err(err)) => DynamicHttp3ConnectOutcome::Failed(err),
+            None => DynamicHttp3ConnectOutcome::NoCandidates,
+        }
     }
 
     async fn connect_auto_tcp_tls(
@@ -848,6 +918,98 @@ where
     }
 }
 
+enum DynamicHttp3ConnectOutcome {
+    Connected(Http3ConnectResult),
+    Failed(Error),
+    NoCandidates,
+}
+
+async fn race_dynamic_auto_http3_candidates<FreshFuture, CachedFuture>(
+    fresh: FreshFuture,
+    cached: CachedFuture,
+) -> Result<Http3ConnectResult, Error>
+where
+    FreshFuture: Future<Output = DynamicHttp3ConnectOutcome>,
+    CachedFuture: Future<Output = DynamicHttp3ConnectOutcome>,
+{
+    let mut fresh = Box::pin(fresh);
+    let prompt_fresh = tokio::task::yield_now();
+    tokio::pin!(prompt_fresh);
+
+    let mut fresh_done = false;
+    let mut cached_done = false;
+    let mut fresh_err = None;
+    let mut cached_err = None;
+
+    tokio::select! {
+        result = fresh.as_mut() => {
+            fresh_done = true;
+            if let Some(result) = record_dynamic_http3_outcome(result, &mut fresh_err) {
+                return Ok(result);
+            }
+        }
+        _ = &mut prompt_fresh => {}
+    }
+
+    let mut cached = Box::pin(cached);
+
+    loop {
+        if fresh_done && cached_done {
+            return Err(fresh_err
+                .or(cached_err)
+                .unwrap_or_else(|| Error::connect("no HTTP/3 candidates discovered")));
+        }
+
+        match (fresh_done, cached_done) {
+            (false, false) => {
+                tokio::select! {
+                    result = fresh.as_mut() => {
+                        fresh_done = true;
+                        if let Some(result) = record_dynamic_http3_outcome(result, &mut fresh_err) {
+                            return Ok(result);
+                        }
+                    }
+                    result = cached.as_mut() => {
+                        cached_done = true;
+                        if let Some(result) = record_dynamic_http3_outcome(result, &mut cached_err) {
+                            return Ok(result);
+                        }
+                    }
+                }
+            }
+            (false, true) => {
+                let result = fresh.as_mut().await;
+                fresh_done = true;
+                if let Some(result) = record_dynamic_http3_outcome(result, &mut fresh_err) {
+                    return Ok(result);
+                }
+            }
+            (true, false) => {
+                let result = cached.as_mut().await;
+                cached_done = true;
+                if let Some(result) = record_dynamic_http3_outcome(result, &mut cached_err) {
+                    return Ok(result);
+                }
+            }
+            (true, true) => unreachable!("handled at top of loop"),
+        }
+    }
+}
+
+fn record_dynamic_http3_outcome(
+    outcome: DynamicHttp3ConnectOutcome,
+    error: &mut Option<Error>,
+) -> Option<Http3ConnectResult> {
+    match outcome {
+        DynamicHttp3ConnectOutcome::Connected(result) => Some(result),
+        DynamicHttp3ConnectOutcome::Failed(err) => {
+            *error = Some(err);
+            None
+        }
+        DynamicHttp3ConnectOutcome::NoCandidates => None,
+    }
+}
+
 fn spawn_auto_http3_origin_addrs(
     dns_server: Option<String>,
     host: String,
@@ -945,6 +1107,30 @@ async fn auto_http3_addrs_for_records(
                 record_addrs.push(SocketAddr::new(ip, port));
             }
         }
+        append_unique_socket_addrs(&mut addrs, record_addrs);
+    }
+    addrs
+}
+
+async fn auto_http3_addrs_for_cached_candidates(
+    dns_server: Option<&str>,
+    candidates: &[Http3CacheCandidate],
+    timeout: TimeoutBudget,
+) -> Vec<SocketAddr> {
+    let mut sorted = candidates.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|candidate| candidate.priority.unwrap_or(u16::MAX));
+    let mut addrs = Vec::new();
+    for candidate in sorted {
+        let record_addrs = if let Ok(ip) = candidate.alt_host.parse::<IpAddr>() {
+            vec![SocketAddr::new(ip, candidate.alt_port)]
+        } else {
+            crate::net::resolve_host(&candidate.alt_host, dns_server, timeout)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|addr| SocketAddr::new(addr.ip(), candidate.alt_port))
+                .collect()
+        };
         append_unique_socket_addrs(&mut addrs, record_addrs);
     }
     addrs
@@ -1122,15 +1308,71 @@ impl Client {
                 timing: TransportTiming::default(),
             });
         }
-        let addrs = self
+        let mut fresh_error = None;
+        if let Some(addrs) = self
             .config
             .auto_http3
             .as_ref()
             .map(|config| config.addrs.clone())
             .filter(|addrs| !addrs.is_empty())
-            .ok_or_else(|| Error::connect("no HTTP/3 candidates discovered"))?;
-        self.connect_http3_client_with_addrs(url, origin, addrs, timeout)
+        {
+            match self
+                .connect_http3_client_with_addrs(url, origin.clone(), addrs, timeout)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => fresh_error = Some(err),
+            }
+        }
+        let cached_error = match self
+            .connect_cached_auto_http3_client(url, origin, timeout)
             .await
+        {
+            Some(Ok(result)) => return Ok(result),
+            Some(Err(err)) => Some(err),
+            None => None,
+        };
+        Err(fresh_error
+            .or(cached_error)
+            .unwrap_or_else(|| Error::connect("no HTTP/3 candidates discovered")))
+    }
+
+    async fn connect_cached_auto_http3_client(
+        &self,
+        url: &Url,
+        origin: String,
+        timeout: TimeoutBudget,
+    ) -> Option<Result<Http3ConnectResult, Error>> {
+        let cache = self.config.http3_cache.as_ref()?;
+        let candidates = cache.candidates(url, self.config.dns_server.as_deref());
+        self.connect_cached_auto_http3_client_with_candidates(url, origin, candidates, timeout)
+            .await
+    }
+
+    async fn connect_cached_auto_http3_client_with_candidates(
+        &self,
+        url: &Url,
+        origin: String,
+        candidates: Vec<Http3CacheCandidate>,
+        timeout: TimeoutBudget,
+    ) -> Option<Result<Http3ConnectResult, Error>> {
+        let cache = self.config.http3_cache.as_ref()?;
+        let addrs = auto_http3_addrs_for_cached_candidates(
+            self.config.dns_server.as_deref(),
+            &candidates,
+            timeout,
+        )
+        .await;
+        if addrs.is_empty() {
+            return None;
+        }
+        let result = self
+            .connect_http3_client_with_addrs(url, origin, addrs, timeout)
+            .await;
+        if result.is_err() {
+            cache.remove_candidates(url, self.config.dns_server.as_deref(), &candidates);
+        }
+        Some(result)
     }
 
     async fn connect_http3_client(
@@ -1290,6 +1532,12 @@ impl ClientBuilder {
 
     pub(crate) fn auto_http3_discovery(mut self) -> Self {
         self.config.auto_http3_discovery = true;
+        self
+    }
+
+    pub(crate) fn http3_cache(mut self, cache: Arc<Http3Cache>, learn_alt_svc: bool) -> Self {
+        self.config.http3_cache = Some(cache);
+        self.config.learn_alt_svc = learn_alt_svc;
         self
     }
 
@@ -2587,6 +2835,7 @@ mod tests {
             ipv6_hint: Vec::new(),
             mandatory: Vec::new(),
             unsupported_mandatory: Vec::new(),
+            ttl: Some(60),
         }
     }
 

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use tempfile::TempDir;
 use url::Url;
 
 #[cfg(unix)]
@@ -37,6 +38,12 @@ pub(crate) struct ReadCapture {
 
 pub(crate) fn fetch_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fetch"))
+}
+
+fn isolate_http3_cache(cmd: &mut Command) -> TempDir {
+    let cache_dir = TempDir::new().expect("create isolated HTTP/3 cache dir");
+    cmd.env("FETCH_INTERNAL_HTTP3_CACHE_DIR", cache_dir.path());
+    cache_dir
 }
 
 pub(crate) fn run_fetch(args: &[&str]) -> FetchOutput {
@@ -88,6 +95,7 @@ pub(crate) fn run_fetch_once(opts: FetchOpts, args: &[&str]) -> FetchOutput {
     cmd.env("HTTPS_PROXY", "");
     cmd.env("ALL_PROXY", "");
     cmd.env("NO_PROXY", "*");
+    let _http3_cache_dir = isolate_http3_cache(&mut cmd);
     for (key, value) in opts.env {
         cmd.env(key, value);
     }
@@ -147,6 +155,7 @@ pub(crate) fn run_fetch_with_closed_stdout(args: &[&str]) -> FetchOutput {
     cmd.env("HTTPS_PROXY", "");
     cmd.env("ALL_PROXY", "");
     cmd.env("NO_PROXY", "*");
+    let _http3_cache_dir = isolate_http3_cache(&mut cmd);
 
     let out = cmd.output().expect("run fetch with closed stdout");
     FetchOutput {

@@ -166,6 +166,14 @@ OS resolver, or returns no usable `h3` record, HTTPS uses the normal ALPN path
 and offers `h2` then `http/1.1`. Proxy and Unix socket requests also use the
 normal ALPN path.
 
+`fetch` also remembers recent HTTP/3 alternatives learned from HTTPS/SVCB
+records and `Alt-Svc: h3=...` response headers in a bounded per-origin cache
+under the user cache directory. Cached alternatives are scoped to the resolver
+that learned them, expire with DNS TTL or `Alt-Svc` `ma`, and are only used for
+the same automatic direct HTTPS path. Prompt fresh HTTPS/SVCB results are tried
+before cached entries, while cached entries can race slower HTTPS-record
+discovery so a learned `Alt-Svc` alternative can be used on later requests.
+
 Setting `--http 1`, `--http 2`, or `--http 3` forces that protocol; it does not
 set a version cap. Use `--http 1` or `--http 2` to opt out of automatic HTTP/3.
 
@@ -211,12 +219,14 @@ By default, `fetch` negotiates the best available version:
 
 1. Uses DNS HTTPS/SVCB records from the platform resolver, or from
    `--dns-server` when set, to discover `h3` candidates for direct HTTPS
-2. Resolves A and AAAA in parallel and starts TCP/TLS as soon as an address is
+2. Reuses fresh cached HTTP/3 alternatives learned from prior HTTPS/SVCB or
+   `Alt-Svc` responses
+3. Resolves A and AAAA in parallel and starts TCP/TLS as soon as an address is
    usable
-3. Races QUIC setup against TCP/TLS when a usable `h3` candidate is discovered
+4. Races QUIC setup against TCP/TLS when a usable `h3` candidate is discovered
    before TCP/TLS wins
-4. Otherwise offers HTTP/2 via ALPN
-5. Falls back to HTTP/1.1 if needed
+5. Otherwise offers HTTP/2 via ALPN
+6. Falls back to HTTP/1.1 if needed
 
 ## TLS Configuration
 

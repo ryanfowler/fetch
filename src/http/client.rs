@@ -7,6 +7,7 @@ use ipnet::IpNet;
 use tokio::task::JoinHandle;
 use url::Url;
 
+use super::http3_cache::Http3Cache;
 use super::transport::{AutoHttp3Config, Client, ClientBuilder, NoProxy, Proxy, redirect};
 use crate::cli::{Cli, HttpVersion};
 use crate::dns::custom;
@@ -129,6 +130,12 @@ pub(crate) async fn build_client_for_url(
     }
     if discovery.auto_http3_discovery {
         builder = builder.auto_http3_discovery();
+    }
+    if auto_http3 {
+        let cache = Http3Cache::new();
+        if cache.is_enabled() {
+            builder = builder.http3_cache(Arc::new(cache), !cli.insecure);
+        }
     }
     if let Some(dns_server) = discovery.dns_server {
         builder = builder.dns_server(dns_server);
@@ -261,7 +268,7 @@ async fn resolve_dns_for_client_inner(
         };
         let timing_addrs = dns_timing_addrs(addrs.iter().copied());
         let socket_addrs = custom::socket_addrs_for_override(&addrs);
-        let auto_http3 = auto_http3_config_for_records(
+        let auto_http3_config = auto_http3_config_for_records(
             Some(dns_server),
             url,
             &https_records,
@@ -270,6 +277,9 @@ async fn resolve_dns_for_client_inner(
             false,
         )
         .await;
+        if auto_http3 {
+            Http3Cache::new().store_https_records(url, Some(dns_server), &https_records);
+        }
         return Ok(ClientDnsDiscovery {
             dns_resolution: Some(DnsResolution {
                 socket_addrs,
@@ -281,7 +291,7 @@ async fn resolve_dns_for_client_inner(
             }),
             runtime_dns_resolution: None,
             dns_server: None,
-            auto_http3,
+            auto_http3: auto_http3_config,
             auto_http3_discovery: false,
         });
     }
@@ -325,7 +335,7 @@ async fn resolve_dns_for_client_inner(
         )
     };
     let addrs = dns_timing_addrs(socket_addrs.iter().map(|addr| addr.ip()));
-    let auto_http3 = auto_http3_config_for_records(
+    let auto_http3_config = auto_http3_config_for_records(
         None,
         url,
         &https_records,
@@ -334,6 +344,9 @@ async fn resolve_dns_for_client_inner(
         false,
     )
     .await;
+    if auto_http3 {
+        Http3Cache::new().store_https_records(url, None, &https_records);
+    }
     Ok(ClientDnsDiscovery {
         dns_resolution: Some(DnsResolution {
             socket_addrs,
@@ -345,7 +358,7 @@ async fn resolve_dns_for_client_inner(
         }),
         runtime_dns_resolution: None,
         dns_server: None,
-        auto_http3,
+        auto_http3: auto_http3_config,
         auto_http3_discovery: false,
     })
 }
@@ -990,6 +1003,7 @@ mod tests {
             ipv6_hint: Vec::new(),
             mandatory: Vec::new(),
             unsupported_mandatory: Vec::new(),
+            ttl: Some(60),
         }
     }
 

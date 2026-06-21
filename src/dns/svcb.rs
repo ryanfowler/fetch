@@ -40,6 +40,7 @@ pub(crate) struct SvcbRecord {
     pub(crate) ipv6_hint: Vec<Ipv6Addr>,
     pub(crate) mandatory: Vec<u16>,
     pub(crate) unsupported_mandatory: Vec<u16>,
+    pub(crate) ttl: Option<u32>,
 }
 
 impl SvcbRecord {
@@ -105,6 +106,7 @@ fn record_from_params(priority: u16, target: String, params: &[SvcParam]) -> Opt
         ipv6_hint: Vec::new(),
         mandatory: Vec::new(),
         unsupported_mandatory: Vec::new(),
+        ttl: None,
     };
 
     for param in params {
@@ -268,8 +270,14 @@ async fn lookup_doh_https_records(
     Ok(answers
         .into_iter()
         .filter(|answer| answer.answer_type == DNS_TYPE_HTTPS)
-        .filter_map(|answer| parse_generic_rdata(&answer.data))
-        .filter_map(|raw| parse_rdata(&raw))
+        .filter_map(|answer| {
+            parse_generic_rdata(&answer.data).and_then(|raw| {
+                parse_rdata(&raw).map(|mut record| {
+                    record.ttl = answer.ttl;
+                    record
+                })
+            })
+        })
         .collect())
 }
 
@@ -300,7 +308,12 @@ async fn lookup_udp_https_records(
     Ok(raw_records
         .into_iter()
         .filter(|record| record.class == DNS_CLASS_IN && record.typ == DNS_TYPE_HTTPS)
-        .filter_map(|record| parse_rdata(record.data))
+        .filter_map(|record| {
+            parse_rdata(record.data).map(|mut parsed| {
+                parsed.ttl = Some(record.ttl);
+                parsed
+            })
+        })
         .collect())
 }
 
