@@ -6,11 +6,24 @@ use futures_util::future::join_all;
 use url::Url;
 
 use crate::cli::Cli;
-use crate::core::{self, Printer, Sequence};
+use crate::core;
+#[cfg(test)]
+use crate::core::Printer;
 use crate::dns::util::{dns_query_id, udp_dns_timeout};
 use crate::dns::wire;
 use crate::duration::{TimeoutBudget, duration_from_seconds};
 use crate::error::{FetchError, write_error_with_color, write_warning_with_separator_with_color};
+
+mod rdata;
+mod render;
+
+use rdata::{normalize_doh_value, records_from_ip_addrs, resource_value, type_label};
+use render::render_inspection_output_to;
+
+#[cfg(test)]
+use rdata::format_caa;
+#[cfg(test)]
+use render::{format_ttl, render, render_with_color};
 
 const DNS_TYPE_A: u16 = wire::TYPE_A;
 const DNS_TYPE_NS: u16 = wire::TYPE_NS;
@@ -378,21 +391,6 @@ async fn lookup_default_resolver_records(host: &str) -> Result<Vec<Record>, Fetc
     Ok(records_from_ip_addrs(addrs.map(|addr| addr.ip())))
 }
 
-fn records_from_ip_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<Record> {
-    addrs
-        .into_iter()
-        .map(|ip| {
-            let typ = if ip.is_ipv4() { "A" } else { "AAAA" };
-            Record {
-                typ: typ.to_string(),
-                value: ip.to_string(),
-                ttl: 0,
-                has_ttl: false,
-            }
-        })
-        .collect()
-}
-
 async fn lookup_doh_records(
     client: &crate::dns::doh::DohClient,
     server_url: &Url,
@@ -464,94 +462,6 @@ async fn lookup_udp_records(
     Ok(records)
 }
 
-fn resource_value(
-    packet: &[u8],
-    typ: u16,
-    offset: usize,
-    len: usize,
-) -> Result<Option<String>, FetchError> {
-    let rdata = &packet[offset..offset + len];
-    let value = match typ {
-        DNS_TYPE_A if len == 4 => {
-            IpAddr::from([rdata[0], rdata[1], rdata[2], rdata[3]]).to_string()
-        }
-        DNS_TYPE_AAAA if len == 16 => {
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(rdata);
-            IpAddr::from(octets).to_string()
-        }
-        DNS_TYPE_CNAME | DNS_TYPE_NS => {
-            wire::read_name(packet, offset)
-                .map_err(|err| FetchError::Message(err.to_string()))?
-                .0
-        }
-        DNS_TYPE_TXT => parse_txt_rdata(rdata),
-        DNS_TYPE_MX if len >= 3 => {
-            let pref = wire::read_u16(packet, offset)
-                .map_err(|err| FetchError::Message(err.to_string()))?;
-            let name = wire::read_name(packet, offset + 2)
-                .map_err(|err| FetchError::Message(err.to_string()))?
-                .0;
-            format!("{pref} {name}")
-        }
-        DNS_TYPE_SOA => parse_soa_rdata(packet, offset)?,
-        DNS_TYPE_SRV if len >= 7 => {
-            let priority = wire::read_u16(packet, offset)
-                .map_err(|err| FetchError::Message(err.to_string()))?;
-            let weight = wire::read_u16(packet, offset + 2)
-                .map_err(|err| FetchError::Message(err.to_string()))?;
-            let port = wire::read_u16(packet, offset + 4)
-                .map_err(|err| FetchError::Message(err.to_string()))?;
-            let target = wire::read_name(packet, offset + 6)
-                .map_err(|err| FetchError::Message(err.to_string()))?
-                .0;
-            format!("{priority} {weight} {port} {target}")
-        }
-        DNS_TYPE_SVCB | DNS_TYPE_HTTPS => crate::dns::svcb::format_rdata(rdata)
-            .unwrap_or_else(|| format!("0x{}", hex_encode(rdata))),
-        DNS_TYPE_CAA => format_caa(rdata),
-        _ => return Ok(None),
-    };
-    Ok(Some(value))
-}
-
-fn parse_txt_rdata(raw: &[u8]) -> String {
-    let mut parts = Vec::new();
-    let mut offset = 0;
-    while offset < raw.len() {
-        let len = usize::from(raw[offset]);
-        offset += 1;
-        if offset + len > raw.len() {
-            parts.push(String::from_utf8_lossy(&raw[offset - 1..]).into_owned());
-            break;
-        }
-        parts.push(String::from_utf8_lossy(&raw[offset..offset + len]).into_owned());
-        offset += len;
-    }
-    parts.join(" ")
-}
-
-fn parse_soa_rdata(packet: &[u8], offset: usize) -> Result<String, FetchError> {
-    let (ns, mut next) =
-        wire::read_name(packet, offset).map_err(|err| FetchError::Message(err.to_string()))?;
-    let (mbox, next_after_mbox) =
-        wire::read_name(packet, next).map_err(|err| FetchError::Message(err.to_string()))?;
-    next = next_after_mbox;
-    let serial =
-        wire::read_u32(packet, next).map_err(|err| FetchError::Message(err.to_string()))?;
-    let refresh =
-        wire::read_u32(packet, next + 4).map_err(|err| FetchError::Message(err.to_string()))?;
-    let retry =
-        wire::read_u32(packet, next + 8).map_err(|err| FetchError::Message(err.to_string()))?;
-    let expire =
-        wire::read_u32(packet, next + 12).map_err(|err| FetchError::Message(err.to_string()))?;
-    let min_ttl =
-        wire::read_u32(packet, next + 16).map_err(|err| FetchError::Message(err.to_string()))?;
-    Ok(format!(
-        "{ns} {mbox} serial={serial} refresh={refresh} retry={retry} expire={expire} minttl={min_ttl}"
-    ))
-}
-
 fn resolver_target(dns_server: Option<&str>) -> Result<ResolverTarget, FetchError> {
     match dns_server {
         None => Ok(resolver_target_from_resolv_conf(
@@ -617,147 +527,6 @@ fn resolver_target_from_resolv_conf(
     }
 }
 
-fn render_ip_literal_to(
-    out: &mut Printer,
-    host: &str,
-    ip: IpAddr,
-    resolver: &str,
-    duration: Duration,
-) {
-    write_dns_title(out, host, resolver);
-    out.write_info_prefix();
-    out.push_str("IP literal: ");
-    out.write_styled(&ip.to_string(), &[Sequence::Green]);
-    out.push_str(" (no DNS query needed)\n");
-    out.write_info_prefix();
-    out.push_str("Duration: ");
-    out.write_styled(&format_duration(duration), &[Sequence::Dim]);
-    out.push_str("\n");
-}
-
-fn render_inspection_output_to(result: &InspectionOutput, out: &mut Printer) {
-    match result {
-        InspectionOutput::IpLiteral {
-            host,
-            ip,
-            resolver,
-            duration,
-        } => render_ip_literal_to(out, host, *ip, resolver, *duration),
-        InspectionOutput::Lookup(result) => render_to(result, out),
-    }
-}
-
-#[cfg(test)]
-fn render(result: &Inspection) -> String {
-    render_with_color(result, false)
-}
-
-#[cfg(test)]
-fn render_with_color(result: &Inspection, use_color: bool) -> String {
-    let mut out = Printer::new(use_color);
-    render_to(result, &mut out);
-    out.into_string().expect("DNS inspection output is UTF-8")
-}
-
-fn render_to(result: &Inspection, out: &mut Printer) {
-    write_dns_title(out, &result.host, &result.resolver);
-
-    for query_type in INSPECT_TYPES {
-        render_section(out, query_type.label, result.records.get(query_type.label));
-    }
-    render_other_sections(out, &result.records);
-
-    out.write_info_prefix();
-    out.push_str("Addresses: ");
-    let address_count = result.records.get("A").map_or(0, Vec::len)
-        + result.records.get("AAAA").map_or(0, Vec::len);
-    out.write_styled(&address_count.to_string(), &[Sequence::Bold]);
-    out.push_str("\n");
-    out.write_info_prefix();
-    out.push_str("Records: ");
-    out.write_styled(&record_count(result).to_string(), &[Sequence::Bold]);
-    out.push_str("\n");
-    out.write_info_prefix();
-    out.push_str("Duration: ");
-    out.write_styled(&format_duration(result.duration), &[Sequence::Dim]);
-    out.push_str("\n");
-    render_warnings(out, &result.warnings);
-}
-
-fn render_warnings(out: &mut Printer, warnings: &[String]) {
-    if !warnings.is_empty() {
-        out.push('\n');
-    }
-    for warning in warnings {
-        core::write_warning_msg_no_flush(out, warning);
-    }
-}
-
-fn write_dns_title(out: &mut Printer, host: &str, resolver: &str) {
-    out.write_info_prefix();
-    out.write_styled("DNS lookup", &[Sequence::Bold, Sequence::Cyan]);
-    out.push_str(": ");
-    out.write_styled(host, &[Sequence::Bold]);
-    out.push_str("\n");
-    out.write_info_prefix();
-    out.push_str("Resolver: ");
-    out.write_styled(resolver, &[Sequence::Italic]);
-    out.push_str("\n");
-    out.write_info_prefix();
-    out.push_str("\n");
-}
-
-fn render_other_sections(out: &mut Printer, records: &HashMap<String, Vec<Record>>) {
-    let mut types: Vec<_> = records
-        .keys()
-        .filter(|key| {
-            !INSPECT_TYPES
-                .iter()
-                .any(|query_type| query_type.label == *key)
-        })
-        .cloned()
-        .collect();
-    types.sort();
-    for typ in types {
-        render_section(out, &typ, records.get(&typ));
-    }
-}
-
-fn render_section(out: &mut Printer, name: &str, records: Option<&Vec<Record>>) {
-    let Some(records) = records else {
-        return;
-    };
-    if records.is_empty() {
-        return;
-    }
-    let mut records = records.clone();
-    records.sort_by(|a, b| a.value.cmp(&b.value).then(a.ttl.cmp(&b.ttl)));
-
-    out.write_info_prefix();
-    out.write_styled(name, &[Sequence::Bold]);
-    out.push_str("\n");
-    for (idx, record) in records.iter().enumerate() {
-        let marker = if idx == records.len() - 1 {
-            "└─"
-        } else {
-            "├─"
-        };
-        out.write_info_prefix();
-        out.push_str(&format!("{marker} "));
-        out.write_styled(&record.value, &[Sequence::Green]);
-        if record.has_ttl {
-            out.push_str(" ");
-            out.write_styled(
-                &format!("(TTL {})", format_ttl(record.ttl)),
-                &[Sequence::Dim],
-            );
-        }
-        out.push('\n');
-    }
-    out.write_info_prefix();
-    out.push('\n');
-}
-
 fn record_count(result: &Inspection) -> usize {
     result.records.values().map(Vec::len).sum()
 }
@@ -773,118 +542,6 @@ fn truncated_warning(types: &[&'static str]) -> String {
         "DNS responses for {} were truncated over UDP after EDNS(0), and TCP fallback failed; results are incomplete",
         types.join(", ")
     )
-}
-
-fn format_duration(duration: Duration) -> String {
-    let nanos = duration.as_nanos();
-    let rounded = if nanos < 1_000_000 {
-        ((nanos + 500) / 1_000) * 1_000
-    } else {
-        ((nanos + 50_000) / 100_000) * 100_000
-    };
-    format_go_duration_nanos(rounded)
-}
-
-fn format_go_duration_nanos(nanos: u128) -> String {
-    if nanos < 1_000 {
-        return format!("{nanos}ns");
-    }
-    if nanos < 1_000_000 {
-        return format_duration_unit(nanos, 1_000, "us");
-    }
-    if nanos < 1_000_000_000 {
-        return format_duration_unit(nanos, 1_000_000, "ms");
-    }
-    format_duration_unit(nanos, 1_000_000_000, "s")
-}
-
-fn format_duration_unit(nanos: u128, unit_nanos: u128, suffix: &str) -> String {
-    let whole = nanos / unit_nanos;
-    let remainder = nanos % unit_nanos;
-    if remainder == 0 {
-        return format!("{whole}{suffix}");
-    }
-    let mut fraction = format!("{:09}", remainder * 1_000_000_000 / unit_nanos);
-    while fraction.ends_with('0') {
-        fraction.pop();
-    }
-    format!("{whole}.{fraction}{suffix}")
-}
-
-fn format_ttl(ttl: u32) -> String {
-    if ttl == 1 {
-        return "1s".to_string();
-    }
-    if ttl < 60 {
-        return format!("{ttl}s");
-    }
-    let hours = ttl / 3600;
-    let minutes = (ttl % 3600) / 60;
-    let seconds = ttl % 60;
-    let mut out = String::new();
-    if hours > 0 {
-        out.push_str(&format!("{hours}h"));
-    }
-    if minutes > 0 {
-        out.push_str(&format!("{minutes}m"));
-    }
-    if seconds > 0 {
-        out.push_str(&format!("{seconds}s"));
-    }
-    out
-}
-
-fn type_label(typ: u16) -> String {
-    match typ {
-        DNS_TYPE_A => "A".to_string(),
-        DNS_TYPE_AAAA => "AAAA".to_string(),
-        DNS_TYPE_CNAME => "CNAME".to_string(),
-        DNS_TYPE_TXT => "TXT".to_string(),
-        DNS_TYPE_MX => "MX".to_string(),
-        DNS_TYPE_NS => "NS".to_string(),
-        DNS_TYPE_SOA => "SOA".to_string(),
-        DNS_TYPE_SRV => "SRV".to_string(),
-        DNS_TYPE_CAA => "CAA".to_string(),
-        DNS_TYPE_SVCB => "SVCB".to_string(),
-        DNS_TYPE_HTTPS => "HTTPS".to_string(),
-        _ => format!("TYPE{typ}"),
-    }
-}
-
-fn normalize_doh_value(typ: u16, value: &str) -> String {
-    let Some(raw) = crate::dns::svcb::parse_generic_rdata(value) else {
-        return value.to_string();
-    };
-    match typ {
-        DNS_TYPE_SVCB | DNS_TYPE_HTTPS => crate::dns::svcb::format_rdata(&raw)
-            .unwrap_or_else(|| format!("0x{}", hex_encode(&raw))),
-        DNS_TYPE_CAA => format_caa(&raw),
-        _ => format!("0x{}", hex_encode(&raw)),
-    }
-}
-
-fn format_caa(raw: &[u8]) -> String {
-    if raw.len() < 2 {
-        return format!("0x{}", hex_encode(raw));
-    }
-    let tag_len = usize::from(raw[1]);
-    if raw.len() < 2 + tag_len {
-        return format!("0x{}", hex_encode(raw));
-    }
-    let flags = raw[0];
-    let tag = String::from_utf8_lossy(&raw[2..2 + tag_len]);
-    let value = String::from_utf8_lossy(&raw[2 + tag_len..]);
-    format!("{flags} {tag} {value:?}")
-}
-
-fn hex_encode(raw: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(raw.len() * 2);
-    for byte in raw {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
