@@ -49,7 +49,7 @@ prost-types = "=0.14.4"
 psl = "=2.1.213"
 rand = "=0.10.1"
 quick-xml = "=0.40.1"
-quinn = { version = "=0.11.9", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rustls = { version = "=0.23.40", default-features = false, features = ["std", "aws-lc-rs", "prefer-post-quantum", "tls12"] }
 rustls-native-certs = "=0.8.4"
 rustls-platform-verifier = "=0.7.0"
