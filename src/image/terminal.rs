@@ -56,6 +56,17 @@ pub(crate) struct RenderOptions {
     pub(crate) true_color: bool,
 }
 
+impl From<crate::core::TerminalSize> for TerminalSize {
+    fn from(size: crate::core::TerminalSize) -> Self {
+        Self {
+            cols: terminal_size_field(size.cols),
+            rows: terminal_size_field(size.rows),
+            width_px: terminal_size_field(size.width_px),
+            height_px: terminal_size_field(size.height_px),
+        }
+    }
+}
+
 pub(crate) fn detect_protocol() -> Protocol {
     detect_emulator().protocol()
 }
@@ -134,44 +145,14 @@ fn detect_custom_var(get: impl Fn(&str) -> Option<String>) -> Option<Emulator> {
     }
 }
 
-#[cfg(unix)]
 pub(crate) fn terminal_size() -> std::io::Result<TerminalSize> {
-    let mut ws = std::mem::MaybeUninit::<libc::winsize>::zeroed();
-    let rc = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, ws.as_mut_ptr()) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let ws = unsafe { ws.assume_init() };
-    Ok(TerminalSize {
-        cols: u32::from(ws.ws_col),
-        rows: u32::from(ws.ws_row),
-        width_px: u32::from(ws.ws_xpixel),
-        height_px: u32::from(ws.ws_ypixel),
-    })
+    crate::core::terminal_size()
+        .map(Into::into)
+        .ok_or_else(|| std::io::Error::other("terminal size unavailable"))
 }
 
-#[cfg(not(unix))]
-pub(crate) fn terminal_size() -> std::io::Result<TerminalSize> {
-    let cols = env::var("COLUMNS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    let rows = env::var("LINES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    if cols == 0 || rows == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "terminal size unavailable",
-        ));
-    }
-    Ok(TerminalSize {
-        cols,
-        rows,
-        width_px: 0,
-        height_px: 0,
-    })
+fn terminal_size_field(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -233,5 +214,25 @@ mod tests {
         assert_eq!(Emulator::Kitty.protocol(), Protocol::Kitty);
         assert_eq!(Emulator::Ghostty.protocol(), Protocol::Kitty);
         assert_eq!(Emulator::Apple.protocol(), Protocol::Block);
+    }
+
+    #[test]
+    fn terminal_size_conversion_saturates_core_dimensions() {
+        let size = TerminalSize::from(crate::core::TerminalSize {
+            cols: usize::MAX,
+            rows: 24,
+            width_px: usize::MAX,
+            height_px: 768,
+        });
+
+        assert_eq!(
+            size,
+            TerminalSize {
+                cols: u32::MAX,
+                rows: 24,
+                width_px: u32::MAX,
+                height_px: 768,
+            }
+        );
     }
 }
