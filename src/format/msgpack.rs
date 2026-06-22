@@ -199,15 +199,15 @@ impl<'a> MsgPackParser<'a> {
         match marker {
             0x00..=0x7f => write_json_map_key_number(out, marker),
             0xa0..=0xbf => self.write_map_key_bytes(out, usize::from(marker & 0x1f))?,
-            0xc4 => {
+            0xc4 | 0xd9 => {
                 let len = usize::from(self.read_u8()?);
                 self.write_map_key_bytes(out, len)?;
             }
-            0xc5 => {
+            0xc5 | 0xda => {
                 let len = usize::from(self.read_u16()?);
                 self.write_map_key_bytes(out, len)?;
             }
-            0xc6 => {
+            0xc6 | 0xdb => {
                 let len = self.read_len_u32()?;
                 self.write_map_key_bytes(out, len)?;
             }
@@ -219,18 +219,6 @@ impl<'a> MsgPackParser<'a> {
             0xd1 => write_json_map_key_number(out, self.read_u16()? as i16),
             0xd2 => write_json_map_key_number(out, self.read_u32()? as i32),
             0xd3 => write_json_map_key_number(out, self.read_u64()? as i64),
-            0xd9 => {
-                let len = usize::from(self.read_u8()?);
-                self.write_map_key_bytes(out, len)?;
-            }
-            0xda => {
-                let len = usize::from(self.read_u16()?);
-                self.write_map_key_bytes(out, len)?;
-            }
-            0xdb => {
-                let len = self.read_len_u32()?;
-                self.write_map_key_bytes(out, len)?;
-            }
             0xe0..=0xff => write_json_map_key_number(out, marker as i8),
             _ => return Err(MsgPackError::new("unsupported MessagePack map key type")),
         }
@@ -420,6 +408,20 @@ mod tests {
         let input = [0xc4, 0x01, 0xe0];
         let got = String::from_utf8(format_msgpack(&input, false).unwrap()).unwrap();
         assert_eq!(got, "\"4A==\"\n");
+    }
+
+    #[test]
+    fn binary_map_keys_are_utf8_json_strings() {
+        let input = [0x81, 0xc4, 0x03, b'b', b'i', b'n', 0x01];
+        let got = String::from_utf8(format_msgpack(&input, false).unwrap()).unwrap();
+        assert_eq!(got, "{\n  \"bin\": 1\n}\n");
+
+        let input = [0x81, 0xc4, 0x01, 0xe0, 0x01];
+        let err = format_msgpack(&input, false).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid UTF-8 in MessagePack str"),
+            "{err}"
+        );
     }
 
     #[test]
