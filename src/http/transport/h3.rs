@@ -1,13 +1,10 @@
-use std::collections::VecDeque;
 use std::future::{self, Future};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures_util::{StreamExt, stream::FuturesUnordered};
 use http::header::HeaderMap;
 use http::{Method, Request, Version};
 use quinn::crypto::rustls::QuicClientConfig;
@@ -949,75 +946,14 @@ async fn connect_http3(
     host: String,
     timeout: TimeoutBudget,
 ) -> Result<quinn::Connection, FetchError> {
-    if addrs.is_empty() {
-        return Err(FetchError::Runtime(
-            "lookup returned no addresses".to_string(),
-        ));
-    }
-    connect_http3_staggered(endpoint, addrs, host, timeout).await
-}
-
-async fn connect_http3_staggered(
-    endpoint: quinn::Endpoint,
-    addrs: Vec<SocketAddr>,
-    host: String,
-    timeout: TimeoutBudget,
-) -> Result<quinn::Connection, FetchError> {
-    let mut pending = VecDeque::from(addrs);
-    let mut active = FuturesUnordered::new();
-    let mut last_err = None;
-    start_next_http3_connect(&endpoint, &host, timeout, &mut pending, &mut active);
-    let delay = tokio::time::sleep(crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY);
-    tokio::pin!(delay);
-
-    loop {
-        if active.is_empty() {
-            return Err(last_err.unwrap_or_else(|| {
-                FetchError::Runtime("lookup returned no addresses".to_string())
-            }));
-        }
-        if pending.is_empty() {
-            match active.next().await {
-                Some(Ok(connection)) => return Ok(connection),
-                Some(Err(err)) => last_err = Some(err),
-                None => {}
-            }
-            continue;
-        }
-
-        tokio::select! {
-            result = active.next() => match result {
-                Some(Ok(connection)) => return Ok(connection),
-                Some(Err(err)) => {
-                    last_err = Some(err);
-                    start_next_http3_connect(&endpoint, &host, timeout, &mut pending, &mut active);
-                    delay.as_mut().reset(tokio::time::Instant::now() + crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY);
-                }
-                None => {}
-            },
-            _ = &mut delay => {
-                start_next_http3_connect(&endpoint, &host, timeout, &mut pending, &mut active);
-                delay.as_mut().reset(tokio::time::Instant::now() + crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY);
-            }
-        }
-    }
-}
-
-fn start_next_http3_connect(
-    endpoint: &quinn::Endpoint,
-    host: &str,
-    timeout: TimeoutBudget,
-    pending: &mut VecDeque<SocketAddr>,
-    active: &mut FuturesUnordered<Http3ConnectTask>,
-) {
-    if let Some(addr) = pending.pop_front() {
-        active.push(Http3ConnectTask::new(connect_http3_addr(
-            endpoint.clone(),
-            addr,
-            host.to_string(),
-            timeout,
-        )));
-    }
+    crate::net::race_staggered(
+        addrs,
+        crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY,
+        "lookup returned no addresses",
+        "http3 connect",
+        move |addr| connect_http3_addr(endpoint.clone(), addr, host.clone(), timeout),
+    )
+    .await
 }
 
 async fn connect_http3_addr(
@@ -1036,40 +972,6 @@ async fn connect_http3_addr(
                 .map_err(|err| FetchError::Runtime(format!("http3 connect {addr}: {err}")))
         })
         .await
-}
-
-struct Http3ConnectTask {
-    handle: JoinHandle<Result<quinn::Connection, FetchError>>,
-}
-
-impl Http3ConnectTask {
-    fn new(
-        future: impl Future<Output = Result<quinn::Connection, FetchError>> + Send + 'static,
-    ) -> Self {
-        Self {
-            handle: tokio::spawn(future),
-        }
-    }
-}
-
-impl Future for Http3ConnectTask {
-    type Output = Result<quinn::Connection, FetchError>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.handle).poll(cx).map(|result| {
-            result.unwrap_or_else(|err| {
-                Err(FetchError::Runtime(format!(
-                    "http3 connect task failed: {err}"
-                )))
-            })
-        })
-    }
-}
-
-impl Drop for Http3ConnectTask {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
 }
 
 fn build_h3_request(
