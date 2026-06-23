@@ -834,7 +834,7 @@ pub fn validate(cli: &Cli) -> Result<(), FetchError> {
 
 fn get_config_file(path: Option<&str>) -> Result<Option<(PathBuf, String)>, FetchError> {
     if let Some(path) = path {
-        let path = absolute_path(expand_home(path))?;
+        let path = absolute_path(crate::fileutil::expand_home(path))?;
         let contents = std::fs::read_to_string(&path)?;
         return Ok(Some((path, contents)));
     }
@@ -1416,15 +1416,6 @@ fn file_error(path: &Path, line_num: usize, message: &str) -> String {
         "config file '{}': line {line_num}: {message}",
         path.display()
     )
-}
-
-fn expand_home(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    PathBuf::from(path)
 }
 
 fn absolute_path(path: PathBuf) -> Result<PathBuf, FetchError> {
@@ -2281,24 +2272,6 @@ mod tests {
                 PathBuf::from("C:/AppData/Roaming/fetch/config"),
             ]
         );
-    }
-
-    #[test]
-    fn explicit_config_path_is_absolute_and_expands_home() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        let path = expand_home_with_home("~/fetch.conf", Some(&home));
-        assert_eq!(path, home.join("fetch.conf"));
-    }
-
-    fn expand_home_with_home(path: &str, home: Option<&Path>) -> PathBuf {
-        if let Some(rest) = path.strip_prefix("~/")
-            && let Some(home) = home
-        {
-            return home.join(rest);
-        }
-        PathBuf::from(path)
     }
 
     fn write_temp_config_pem(contents: &[u8]) -> (tempfile::NamedTempFile, String) {

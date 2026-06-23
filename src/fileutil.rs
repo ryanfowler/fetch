@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,20 @@ pub fn atomic_write_new_file(
     target_path: impl AsRef<Path>,
 ) -> io::Result<()> {
     atomic_write_new_file_impl(temp_path.as_ref(), target_path.as_ref())
+}
+
+pub fn expand_home(path: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    expand_home_with(path, home.as_deref())
+}
+
+fn expand_home_with(path: &str, home: Option<&Path>) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = home
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(path)
 }
 
 #[derive(Debug)]
@@ -255,6 +269,35 @@ fn unlock_file(_file: &std::fs::File) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_home_expands_leading_home_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+
+        assert_eq!(
+            expand_home_with("~/fetch.conf", Some(&home)),
+            home.join("fetch.conf")
+        );
+    }
+
+    #[test]
+    fn expand_home_leaves_other_paths_unchanged() {
+        let home = Path::new("/home/me");
+
+        assert_eq!(
+            expand_home_with("~fetch.conf", Some(home)),
+            PathBuf::from("~fetch.conf")
+        );
+        assert_eq!(
+            expand_home_with("fetch.conf", Some(home)),
+            PathBuf::from("fetch.conf")
+        );
+        assert_eq!(
+            expand_home_with("~/fetch.conf", None),
+            PathBuf::from("~/fetch.conf")
+        );
+    }
 
     #[cfg(any(unix, windows))]
     #[test]

@@ -61,8 +61,8 @@ impl Multipart {
             let name = name.trim().to_string();
             validate_multipart_disposition_value("field name", &name)?;
             let field = if let Some(path) = value.strip_prefix('@') {
-                let path = expand_home(path);
-                file_field(&name, PathBuf::from(path))?
+                let path = crate::fileutil::expand_home(path);
+                file_field(&name, path)?
             } else {
                 text_field(&name, value)
             };
@@ -229,15 +229,6 @@ fn validate_file_path(path: &Path) -> Result<std::fs::Metadata, MultipartError> 
         return Err(MultipartError::FileIsDirectory(path.display().to_string()));
     }
     Ok(metadata)
-}
-
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return format!("{}/{}", home.to_string_lossy(), rest);
-    }
-    path.to_string()
 }
 
 fn escape_multipart_string(value: &str) -> String {

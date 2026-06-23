@@ -885,7 +885,7 @@ fn append_body_value(value: &str, out: &mut Vec<u8>) -> Result<(), FetchError> {
         return append_materialized_curl_reader(stdin.lock(), out);
     }
     if let Some(path) = value.strip_prefix('@') {
-        let file = std::fs::File::open(expand_home(path))?;
+        let file = std::fs::File::open(crate::fileutil::expand_home(path))?;
         return append_materialized_curl_reader(file, out);
     }
     append_materialized_curl_bytes(out, value.as_bytes())
@@ -908,7 +908,7 @@ fn append_url_encode_from_value(value: &str, out: &mut Vec<u8>) -> Result<(), Fe
 }
 
 fn append_url_encoded_file(path: &str, out: &mut Vec<u8>) -> Result<(), FetchError> {
-    let file = std::fs::File::open(expand_home(path))?;
+    let file = std::fs::File::open(crate::fileutil::expand_home(path))?;
     append_query_escaped_reader(file, out)
 }
 
@@ -960,15 +960,6 @@ fn materialized_curl_data_limit_error() -> FetchError {
     FetchError::Message(format!(
         "--from-curl data requires materializing more than {MAX_MATERIALIZED_CURL_DATA_BYTES} bytes; use a single -d @file/-d @- body for streaming input"
     ))
-}
-
-fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return format!("{}/{}", home.to_string_lossy(), rest);
-    }
-    path.to_string()
 }
 
 fn append_raw_query(url: &mut String, query: &str) {
