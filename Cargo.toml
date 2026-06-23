@@ -50,7 +50,7 @@ psl = "=2.1.213"
 rand = "=0.10.1"
 quick-xml = "=0.40.1"
 quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
-rustls = { version = "=0.23.40", default-features = false, features = ["std", "aws-lc-rs", "prefer-post-quantum", "tls12"] }
+rustls = { version = "=0.23.41", default-features = false, features = ["std", "aws-lc-rs", "prefer-post-quantum", "tls12"] }
 rustls-native-certs = "=0.8.4"
 rustls-platform-verifier = "=0.7.0"
 serde = { version = "=1.0.228", features = ["derive"] }
