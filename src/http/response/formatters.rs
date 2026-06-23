@@ -238,8 +238,6 @@ struct FormattedGrpcStream {
     grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
     use_color: bool,
     frame_index: usize,
-    descriptor_wrote_any: bool,
-    descriptor_output_ends_with_newline: bool,
 }
 
 impl FormattedGrpcStream {
@@ -254,27 +252,20 @@ impl FormattedGrpcStream {
             grpc_response_desc,
             use_color,
             frame_index: 0,
-            descriptor_wrote_any: false,
-            descriptor_output_ends_with_newline: true,
         }
     }
 
     fn format_frame(&mut self, frame: &crate::grpc::framing::Frame) -> Result<Vec<u8>, FetchError> {
         if let Some(desc) = self.grpc_response_desc.as_ref() {
-            let formatted = format_grpc_frame_with_descriptor_json(
+            let mut output = core::Printer::new(self.use_color);
+            grpc_format::format_grpc_frame_with_descriptor_to(
                 frame,
                 desc,
                 &self.grpc_message_encoding,
-                self.use_color,
-            )?;
-            let mut output = Vec::new();
-            if self.descriptor_wrote_any && !self.descriptor_output_ends_with_newline {
-                output.push(b'\n');
-            }
-            self.descriptor_output_ends_with_newline = formatted.ends_with(b"\n");
-            output.extend_from_slice(&formatted);
-            self.descriptor_wrote_any = true;
-            return Ok(output);
+                &mut output,
+            )
+            .map_err(|err| FetchError::Message(err.to_string()))?;
+            return Ok(output.into_bytes());
         }
 
         let formatted = grpc_format::format_grpc_frame(frame, &self.grpc_message_encoding)
@@ -287,44 +278,6 @@ impl FormattedGrpcStream {
         self.frame_index += 1;
         Ok(output)
     }
-}
-
-fn format_grpc_frame_with_descriptor_json(
-    frame: &crate::grpc::framing::Frame,
-    desc: &prost_reflect::MessageDescriptor,
-    message_encoding: &grpc_encoding::MessageEncoding,
-    use_color: bool,
-) -> Result<Vec<u8>, FetchError> {
-    let formatted = proto::format_grpc_frame_with_descriptor(frame, desc, message_encoding)
-        .map_err(|err| FetchError::Message(err.to_string()))?;
-    Ok(format_printer_bytes(use_color, |out| {
-        json::format_json_to(formatted.as_bytes(), out)
-    })
-    .unwrap_or_else(|_| formatted.into_bytes()))
-}
-
-fn format_grpc_stream_with_descriptor_json(
-    bytes: &[u8],
-    desc: &prost_reflect::MessageDescriptor,
-    message_encoding: &grpc_encoding::MessageEncoding,
-    use_color: bool,
-) -> Result<Vec<u8>, FetchError> {
-    let frames = crate::grpc::framing::read_frames(bytes)
-        .map_err(|err| FetchError::Message(format!("failed to read gRPC stream: {err}")))?;
-    let mut out = Vec::new();
-    let mut wrote_any = false;
-    let mut output_ends_with_newline = true;
-    for frame in &frames {
-        let formatted =
-            format_grpc_frame_with_descriptor_json(frame, desc, message_encoding, use_color)?;
-        if wrote_any && !output_ends_with_newline {
-            out.push(b'\n');
-        }
-        output_ends_with_newline = formatted.ends_with(b"\n");
-        out.extend_from_slice(&formatted);
-        wrote_any = true;
-    }
-    Ok(out)
 }
 
 impl StdoutStreamFormatter for FormattedGrpcStream {
@@ -532,12 +485,15 @@ pub(super) fn format_stdout_bytes_with_terminal(
         ContentType::Grpc => {
             let grpc_message_encoding = grpc_encoding::MessageEncoding::from_headers(headers);
             if let Some(desc) = grpc_response_desc {
-                format_grpc_stream_with_descriptor_json(
+                let mut out = core::Printer::new(use_color);
+                grpc_format::format_grpc_stream_with_descriptor_to(
                     &bytes,
                     &desc,
                     &grpc_message_encoding,
-                    use_color,
+                    &mut out,
                 )
+                .map(|()| out.into_bytes())
+                .map_err(|err| FetchError::Message(err.to_string()))
             } else {
                 grpc_format::format_grpc_stream(&bytes, &grpc_message_encoding)
                     .map(|formatted| formatted.into_bytes())

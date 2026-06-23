@@ -27,9 +27,13 @@ pub(crate) fn format_ndjson(bytes: &[u8], color: bool) -> Result<Vec<u8>, serde_
 
 pub fn format_json_to(bytes: &[u8], out: &mut Printer) -> Result<(), serde_json::Error> {
     let value: Value = serde_json::from_slice(bytes)?;
-    write_value(out, &value, 0);
-    out.push('\n');
+    format_json_value_to(&value, out);
     Ok(())
+}
+
+pub(crate) fn format_json_value_to(value: &Value, out: &mut Printer) {
+    write_value(out, value, 0);
+    out.push('\n');
 }
 
 pub fn format_json_line_to(bytes: &[u8], out: &mut Printer) -> Result<(), serde_json::Error> {
