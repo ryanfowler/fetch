@@ -1,5 +1,6 @@
 use prost::Message;
 use prost_reflect::{DynamicMessage, MessageDescriptor, MethodDescriptor, SerializeOptions};
+use serde::de::IntoDeserializer;
 
 use crate::error::FetchError;
 use crate::grpc::encoding::{self, MessageEncoding};
@@ -104,21 +105,16 @@ pub(crate) fn json_value_to_grpc_frame(
     value: serde_json::Value,
     desc: &MessageDescriptor,
 ) -> Result<Vec<u8>, ProtoError> {
-    let value_text = value.to_string();
-    let mut deserializer = serde_json::Deserializer::from_str(&value_text);
+    let deserializer = value.into_deserializer();
     let options = prost_reflect::DeserializeOptions::new().deny_unknown_fields(false);
-    let msg =
-        match DynamicMessage::deserialize_with_options(desc.clone(), &mut deserializer, &options) {
-            Ok(msg) => msg,
-            Err(err) => {
-                return Err(ProtoError::Message(format!(
-                    "failed to convert JSON to protobuf: {err}"
-                )));
-            }
-        };
-    deserializer
-        .end()
-        .map_err(|err| ProtoError::Message(format!("failed to decode JSON message: {err}")))?;
+    let msg = match DynamicMessage::deserialize_with_options(desc.clone(), deserializer, &options) {
+        Ok(msg) => msg,
+        Err(err) => {
+            return Err(ProtoError::Message(format!(
+                "failed to convert JSON to protobuf: {err}"
+            )));
+        }
+    };
     framing::frame(&msg.encode_to_vec(), false).map_err(|err| ProtoError::Message(err.to_string()))
 }
 
