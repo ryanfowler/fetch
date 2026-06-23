@@ -894,7 +894,7 @@ pub(super) fn body_value_source(
         ));
     }
     if let Some(path) = value.strip_prefix('@') {
-        let expanded = expand_home(path);
+        let expanded = crate::fileutil::expand_home(path);
         let metadata = std::fs::metadata(&expanded).map_err(|err| {
             if err.kind() == std::io::ErrorKind::NotFound {
                 FetchError::Message(format!("file '{path}' does not exist"))
@@ -912,7 +912,7 @@ pub(super) fn body_value_source(
         };
         return Ok((
             RequestBodySource::File {
-                path: expanded,
+                path: expanded.to_string_lossy().into_owned(),
                 len: metadata.len(),
             },
             content_type,
@@ -924,23 +924,17 @@ pub(super) fn body_value_source(
     ))
 }
 
-pub(super) fn expand_home(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return format!("{}/{}", home.to_string_lossy(), rest);
-    }
-    path.to_string()
-}
-
-pub(super) fn detect_body_file_content_type(path: &str) -> Result<String, FetchError> {
-    if let Some(content_type) = content_type::request_content_type_for_path(Path::new(path)) {
+pub(super) fn detect_body_file_content_type(path: &Path) -> Result<String, FetchError> {
+    if let Some(content_type) = content_type::request_content_type_for_path(path) {
         return Ok(content_type.to_string());
     }
     Ok(sniff_content_type_like_go(&read_file_prefix(path, 512)?))
 }
 
-pub(super) fn read_file_prefix(path: &str, limit: usize) -> Result<Vec<u8>, FetchError> {
+pub(super) fn read_file_prefix(
+    path: impl AsRef<Path>,
+    limit: usize,
+) -> Result<Vec<u8>, FetchError> {
     let mut file = std::fs::File::open(path)?;
     let mut out = vec![0_u8; limit];
     let len = file.read(&mut out)?;

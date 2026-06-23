@@ -71,7 +71,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - **src/cli** - Command-line argument parsing, shell completion, and `--from-curl` support.
 - **src/config** - INI-format config file parsing with host-specific overrides.
 - **src/core.rs** - Shared printer, color, format, and terminal utilities.
-- **src/fileutil.rs** - Atomic file replacement and shared cross-platform advisory file locks.
+- **src/fileutil.rs** - Atomic file replacement, home-directory path expansion, and shared cross-platform advisory file locks.
 - **src/dns** - DNS-over-HTTPS, UDP DNS, system resolver fallback, and `--inspect-dns`.
 - **src/format** - Response body formatters for JSON, XML, YAML, HTML, CSS, CSV, Markdown, msgpack, protobuf, SSE, NDJSON, gRPC, and images.
 - **src/grpc** - gRPC framing, reflection, status handling, and protobuf request/response support.
@@ -166,6 +166,7 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - Named session saves take a per-session advisory lock, reload the latest JSON, and merge only local cookie creates/updates/deletes before atomic replacement so concurrent `--session` invocations preserve distinct cookie changes. Session saves use a short bounded lock wait and report a warning instead of hanging indefinitely when another process keeps the session lock.
 - Explicit self-updates use a bounded update-lock wait capped by the request timeout or the fixed update-lock timeout; background auto-update checks keep using nonblocking lock acquisition.
 - Session and update lock acquisition should go through `fileutil::FileLock` so cross-platform open/retry/flock/LockFileEx/unlock behavior stays centralized while call sites own their timeout diagnostics.
+- User-supplied paths that support `~/` expansion should use `fileutil::expand_home`; keep the raw input string separately when diagnostics must preserve exactly what the user typed.
 - Self-update release metadata, artifact, checksum, and redirect-target URLs require HTTPS by default; only internal update/test overrides such as an `http://` `FETCH_INTERNAL_UPDATE_URL` may use HTTP for local fixtures.
 - `install.sh` verifies release archives against their `.sha256` sidecars before extraction and must not auto-edit shell startup files for completions during default installs. Completion installation is opt-in via `--completions` or `FETCH_INSTALL_COMPLETIONS=1`; otherwise print manual commands.
 - Output-file downloads keep `*.download` temp files behind a drop guard so cancellation paths such as Ctrl-C clean up partial files; Unix atomic installs also sync the parent directory after rename/link updates for stronger crash durability.
