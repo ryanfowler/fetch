@@ -3,7 +3,6 @@ use prost_reflect::{DynamicMessage, MessageDescriptor, MethodDescriptor, Seriali
 use serde::de::IntoDeserializer;
 
 use crate::error::FetchError;
-use crate::grpc::encoding::{self, MessageEncoding};
 use crate::grpc::framing;
 use crate::proto::ProtoError;
 
@@ -41,40 +40,6 @@ pub(crate) fn grpc_request_body(
         framing::frame(&raw, false).map_err(|err| FetchError::Message(err.to_string()))?,
         Some(grpc_content_type()),
     )))
-}
-
-pub fn format_grpc_stream_with_descriptor(
-    bytes: &[u8],
-    desc: &MessageDescriptor,
-    message_encoding: &MessageEncoding,
-) -> Result<String, ProtoError> {
-    let frames = framing::read_frames(bytes)
-        .map_err(|err| ProtoError::Message(format!("failed to read gRPC stream: {err}")))?;
-    let mut out = String::new();
-    let mut wrote_any = false;
-    for frame in &frames {
-        let formatted = format_grpc_frame_with_descriptor(frame, desc, message_encoding)?;
-        if wrote_any && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&formatted);
-        wrote_any = true;
-    }
-    Ok(out)
-}
-
-pub fn format_grpc_frame_with_descriptor(
-    frame: &framing::Frame,
-    desc: &MessageDescriptor,
-    message_encoding: &MessageEncoding,
-) -> Result<String, ProtoError> {
-    let data = encoding::decompress_frame(frame, message_encoding)
-        .map_err(|err| ProtoError::Message(err.to_string()))?;
-    let msg = decode_dynamic_message(data.as_slice(), desc)?;
-    let mut formatted = String::from_utf8(serialize_dynamic_message_json(&msg, true)?)
-        .map_err(|err| ProtoError::Message(format!("failed to format protobuf JSON: {err}")))?;
-    formatted.push('\n');
-    Ok(formatted)
 }
 
 pub fn json_to_protobuf(json: &[u8], desc: &MessageDescriptor) -> Result<Vec<u8>, ProtoError> {

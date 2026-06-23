@@ -5,10 +5,7 @@ mod json_stream;
 mod schema;
 
 pub(crate) use convert::grpc_request_body;
-pub use convert::{
-    format_grpc_frame_with_descriptor, format_grpc_stream_with_descriptor, json_to_protobuf,
-    protobuf_to_json, protobuf_to_json_compact,
-};
+pub use convert::{json_to_protobuf, protobuf_to_json, protobuf_to_json_compact};
 pub use discovery::{describe_symbol, execute_local_discovery};
 #[cfg(test)]
 pub(crate) use json_stream::json_reader_to_grpc_frame_stream_with_limit;
@@ -34,10 +31,7 @@ pub enum ProtoError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grpc::encoding::MessageEncoding;
     use crate::grpc::framing;
-    use flate2::Compression;
-    use flate2::write::GzEncoder;
     use futures_util::TryStreamExt;
     use prost::Message;
     use prost_reflect::MessageDescriptor;
@@ -47,7 +41,6 @@ mod tests {
         OneofDescriptorProto, ServiceDescriptorProto,
         field_descriptor_proto::{Label, Type},
     };
-    use std::io::Write;
     use std::path::Path;
 
     fn stream_descriptor_set() -> Vec<u8> {
@@ -535,54 +528,6 @@ mod tests {
             json_to_protobuf(br#"{"value":"one","unknown":true}"#, &method.input()).unwrap();
 
         assert_eq!(encoded, b"\x0a\x03one");
-    }
-
-    #[test]
-    fn format_grpc_stream_with_descriptor_outputs_proto_json() {
-        let schema = Schema::from_descriptor_set(&stream_descriptor_set()).unwrap();
-        let method = schema
-            .find_method("streampkg.StreamService/ClientStream")
-            .unwrap();
-        let body = framing::frame(b"\x08\x03", false).unwrap();
-
-        let out =
-            format_grpc_stream_with_descriptor(&body, &method.output(), &MessageEncoding::Identity)
-                .unwrap();
-
-        assert!(out.contains("\"count\": \"3\""));
-    }
-
-    #[test]
-    fn format_grpc_stream_with_descriptor_decodes_gzip_messages() {
-        let schema = Schema::from_descriptor_set(&stream_descriptor_set()).unwrap();
-        let method = schema
-            .find_method("streampkg.StreamService/ClientStream")
-            .unwrap();
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(b"\x08\x03").unwrap();
-        let body = framing::frame(&encoder.finish().unwrap(), true).unwrap();
-
-        let out =
-            format_grpc_stream_with_descriptor(&body, &method.output(), &MessageEncoding::Gzip)
-                .unwrap();
-
-        assert!(out.contains("\"count\": \"3\""));
-    }
-
-    #[test]
-    fn format_grpc_stream_with_descriptor_preserves_empty_messages() {
-        let schema = Schema::from_descriptor_set(&stream_descriptor_set()).unwrap();
-        let method = schema
-            .find_method("streampkg.StreamService/ClientStream")
-            .unwrap();
-        let mut body = framing::frame(&[], false).unwrap();
-        body.extend_from_slice(&framing::frame(b"\x08\x03", false).unwrap());
-
-        let out =
-            format_grpc_stream_with_descriptor(&body, &method.output(), &MessageEncoding::Identity)
-                .unwrap();
-
-        assert_eq!(out, "{}\n{\n  \"count\": \"3\"\n}\n");
     }
 
     #[test]
