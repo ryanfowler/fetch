@@ -314,7 +314,7 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "OPTION",
-        help = "Image rendering [auto,external,off]"
+        help = "Image rendering [auto, external, off]"
     )]
     pub image: Option<String>,
 
@@ -675,6 +675,7 @@ mod tests {
                 "--format <OPTION>             Enable/disable formatting [auto, off, on]"
             )
         );
+        assert!(help.contains("Image rendering [auto, external, off]"));
         assert!(help.contains("--pager <MODE>                Control pager use [auto, on, off]"));
         assert!(help.contains("--sort-headers                Sort displayed headers by name"));
         assert!(help.contains(
