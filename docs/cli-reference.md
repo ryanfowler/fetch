@@ -786,9 +786,21 @@ fetch --update --dry-run
 | `LESS`                  | Options for `less`; disables fetch's default `less` flags |
 | `NO_PAGER`              | Disable the default `auto` pager when set                 |
 | `VISUAL` / `EDITOR`     | Editor for `--edit` option                                |
-| `HTTPS_PROXY`           | HTTPS proxy URL                                           |
 | `HTTP_PROXY`            | HTTP proxy URL                                            |
+| `HTTPS_PROXY`           | HTTPS proxy URL                                           |
+| `ALL_PROXY`             | Fallback proxy URL for any request scheme                 |
 | `NO_PROXY`              | Hosts, domains, IPs, or CIDR ranges to bypass proxy       |
+
+Proxy variables also support lowercase forms: `http_proxy`, `https_proxy`,
+`all_proxy`, and `no_proxy`. Uppercase names are checked before lowercase names
+for each variable, except uppercase `HTTP_PROXY` is ignored when
+`REQUEST_METHOD` is set.
+
+Proxy precedence is: an explicit `--proxy` or configured `proxy = ...` value,
+then scheme-specific environment variables (`HTTP_PROXY` for HTTP requests and
+`HTTPS_PROXY` for HTTPS requests), then `ALL_PROXY`, then the system proxy
+configuration. `NO_PROXY`/`no_proxy` applies to environment proxies and may use
+hosts, domains, IP addresses, CIDR ranges, ports, or `*`.
 
 ## File References
 
