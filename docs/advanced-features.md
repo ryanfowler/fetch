@@ -107,12 +107,22 @@ fetch --proxy http://user:password@proxy.example.com:8080 example.com
 ```sh
 export HTTP_PROXY="http://proxy.example.com:8080"
 export HTTPS_PROXY="http://proxy.example.com:8080"
+export ALL_PROXY="socks5://proxy.example.com:1080"
 export NO_PROXY="localhost,127.0.0.1,192.168.0.0/16,.internal.com"
 
 fetch example.com  # Uses proxy from environment
 ```
 
-`NO_PROXY` entries may be hosts, domains, IP addresses, CIDR ranges, or `*`.
+Proxy variables also support lowercase forms: `http_proxy`, `https_proxy`,
+`all_proxy`, and `no_proxy`. Uppercase names are checked before lowercase names
+for each variable, except uppercase `HTTP_PROXY` is ignored when
+`REQUEST_METHOD` is set.
+
+Proxy precedence is: an explicit `--proxy` or configured `proxy = ...` value,
+then scheme-specific environment variables (`HTTP_PROXY` for HTTP requests and
+`HTTPS_PROXY` for HTTPS requests), then `ALL_PROXY`, then the system proxy
+configuration. `NO_PROXY`/`no_proxy` entries may be hosts, domains, IP
+addresses, CIDR ranges, ports, or `*`.
 
 ### Configuration File
 
