@@ -16,7 +16,7 @@ opt-level = 3
 strip = true
 
 [dependencies]
-anyhow = "=1.0.102"
+anyhow = "=1.0.103"
 async-compression = { version = "=0.4.42", features = ["brotli", "gzip", "tokio", "zstd"] }
 base64 = "=0.22.1"
 brotli = "=8.0.4"
