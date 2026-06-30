@@ -10,9 +10,11 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use futures_util::{Sink, SinkExt, StreamExt};
 use http::header::{ACCEPT, AUTHORIZATION, COOKIE, HeaderMap, HeaderValue, SET_COOKIE, USER_AGENT};
+use rustls::client::EchMode;
 #[cfg(test)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::CapacityError;
 use tokio_tungstenite::tungstenite::http::{
@@ -75,8 +77,8 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let interactive = should_use_interactive(cli)?;
 
     let request = build_handshake_request(cli, &url, session.as_ref())?;
-    let connector = websocket_connector(cli, &url)?;
     if cli.dry_run {
+        let _connector = websocket_connector(cli, &url, None)?;
         print_request_metadata(cli, method, &url, Some(request.headers()));
         return Ok(0);
     }
@@ -89,6 +91,11 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let request_timeout = websocket_request_timeout(cli)?;
     let request_budget = TimeoutBudget::started_at(request_timeout, request_start);
     let connect_timeout = websocket_connect_timeout(cli, request_timeout, request_start)?;
+
+    let ech_mode =
+        crate::http::client::resolve_websocket_ech_mode(cli, &url, connect_timeout).await?;
+    let ech_hard_fail = matches!(cli.ech.as_deref(), Some("on"));
+    let connector = websocket_connector(cli, &url, ech_mode)?;
     let connect = Box::pin(connect_websocket(
         cli,
         &url,
@@ -97,6 +104,9 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         connect_timeout,
     ));
     let (stream, response) = request_budget.run(connect).await?;
+    if ech_hard_fail {
+        check_websocket_ech_status(&stream)?;
+    }
     store_handshake_cookies(session.as_ref(), &url, response.headers());
     crate::http::save_session(cli, session.as_ref());
 
@@ -149,7 +159,11 @@ fn effective_method(_cli: &Cli) -> &'static str {
     "GET"
 }
 
-fn websocket_connector(cli: &Cli, url: &Url) -> Result<Option<Connector>, FetchError> {
+fn websocket_connector(
+    cli: &Cli,
+    url: &Url,
+    ech_mode: Option<EchMode>,
+) -> Result<Option<Connector>, FetchError> {
     if url.scheme() != "wss" {
         return Ok(None);
     }
@@ -169,6 +183,7 @@ fn websocket_connector(cli: &Cli, url: &Url) -> Result<Option<Connector>, FetchE
         cli.insecure,
         min_tls,
         cli.max_tls.as_deref(),
+        ech_mode,
     )?;
     Ok(Some(Connector::Rustls(Arc::new(config))))
 }
@@ -847,6 +862,26 @@ fn websocket_certificate_validation_error(err: &WsError, message: &str) -> bool 
     }
 
     false
+}
+
+fn check_websocket_ech_status(
+    stream: &tokio_tungstenite::WebSocketStream<MaybeTlsStream<DialStream>>,
+) -> Result<(), FetchError> {
+    match stream.get_ref() {
+        MaybeTlsStream::Rustls(tls_stream) => {
+            let (_, conn) = tls_stream.get_ref();
+            let status = conn.ech_status();
+            if !matches!(status, rustls::client::EchStatus::Accepted) {
+                return Err(FetchError::Message(format!(
+                    "ECH was not accepted by the server (status: {status:?})"
+                )));
+            }
+            Ok(())
+        }
+        _ => Err(FetchError::Message(
+            "ECH was not accepted by the server (no TLS connection)".into(),
+        )),
+    }
 }
 
 #[cfg(test)]

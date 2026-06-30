@@ -36,6 +36,8 @@ pub(super) fn render_to(inspection: &Inspection, out: &mut Printer) {
         out.push('\n');
     }
 
+    render_ech_status(out, inspection.ech_status);
+
     if !inspection.chain.is_empty() {
         out.write_info_prefix();
         out.push_str("\n");
@@ -43,6 +45,19 @@ pub(super) fn render_to(inspection: &Inspection, out: &mut Printer) {
         render_sans(out, &inspection.chain[0]);
     }
     render_ocsp_status(out, &inspection.ocsp_response);
+}
+
+fn render_ech_status(out: &mut Printer, status: rustls::client::EchStatus) {
+    let label = match status {
+        rustls::client::EchStatus::NotOffered => return,
+        rustls::client::EchStatus::Grease => "ECH: GREASE (anti-ossification)",
+        rustls::client::EchStatus::Offered => "ECH: Offered (pending)",
+        rustls::client::EchStatus::Accepted => "ECH: Accepted",
+        rustls::client::EchStatus::Rejected => "ECH: Rejected",
+    };
+    out.write_info_prefix();
+    out.push_str(label);
+    out.push('\n');
 }
 
 fn render_cert_chain(out: &mut Printer, chain: &[ParsedCert]) {

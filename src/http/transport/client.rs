@@ -68,6 +68,7 @@ pub(super) struct ClientConfig {
     pub(super) auto_http3_discovery: bool,
     pub(super) http3_cache: Option<Arc<Http3Cache>>,
     pub(super) learn_alt_svc: bool,
+    pub(super) ech_hard_fail: bool,
 }
 
 pub(crate) struct ClientBuilder {
@@ -101,6 +102,7 @@ impl Client {
                 auto_http3_discovery: false,
                 http3_cache: None,
                 learn_alt_svc: false,
+                ech_hard_fail: false,
             },
         }
     }
@@ -507,6 +509,11 @@ impl ClientBuilder {
         self
     }
 
+    pub(crate) fn ech_hard_fail(mut self, hard_fail: bool) -> Self {
+        self.config.ech_hard_fail = hard_fail;
+        self
+    }
+
     pub(crate) fn redirect(self, _policy: redirect::Policy) -> Self {
         self
     }
@@ -668,6 +675,7 @@ pub(super) async fn tls_stream_for_config(
         .map_err(|_| Error::request(format!("invalid server name '{host}'")))?;
     let mut tls_config = config.tls_config.clone().unwrap_or_else(default_tls_config);
     tls_config.alpn_protocols = alpn.to_vec();
+    let ech_hard_fail = config.ech_hard_fail;
     let stream = timeout
         .run(async {
             TlsConnector::from(Arc::new(tls_config))
@@ -679,6 +687,14 @@ pub(super) async fn tls_stream_for_config(
         .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?;
     let negotiated_h2 = {
         let (_, conn) = stream.get_ref();
+        if ech_hard_fail {
+            let ech_status = conn.ech_status();
+            if !matches!(ech_status, rustls::client::EchStatus::Accepted) {
+                return Err(Error::request(format!(
+                    "ECH was not accepted by the server (status: {ech_status:?})"
+                )));
+            }
+        }
         matches!(conn.alpn_protocol(), Some(b"h2"))
     };
     Ok((Box::pin(stream), negotiated_h2))

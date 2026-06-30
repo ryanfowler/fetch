@@ -487,6 +487,21 @@ config_options! {
             },
         },
     },
+    Ech {
+        field: ech,
+        ty: Option<String>,
+        keys: ["ech"],
+        documented_keys: ["ech"],
+        cli_flags: ["ech"],
+        trim: ConfigValueTrim::Both,
+        scalar {
+            cli_field: ech,
+            parse: |path, line_num, _config, _key, value| {
+                validate_choice(path, line_num, "ech", value, &["auto", "on", "off"])?;
+                Ok(value.to_string())
+            },
+        },
+    },
     Format {
         field: format,
         ty: Option<String>,
@@ -902,6 +917,9 @@ pub fn validate(cli: &Cli) -> Result<(), FetchError> {
     }
     if let Some(value) = cli.image.as_deref() {
         validate_cli_choice("image", value, &["auto", "external", "off"])?;
+    }
+    if let Some(value) = cli.ech.as_deref() {
+        validate_cli_choice("ech", value, &["auto", "on", "off"])?;
     }
     if let Some(value) = cli.compress.as_deref() {
         validate_cli_choice("compress", value, crate::cli::CompressionMode::VALUES)?;

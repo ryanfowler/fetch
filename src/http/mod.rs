@@ -70,7 +70,7 @@ pub(crate) mod transport;
 
 pub(crate) use metadata::{
     apply_headers, apply_query, has_authority_scheme, load_session, normalize_url, request_target,
-    save_session,
+    save_session, validate_ech_for_url,
 };
 pub(crate) use request::{
     RequestBody, RequestBodyPayload, apply_aws_sigv4, apply_builder_authorization_headers,
@@ -98,6 +98,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     apply_query(&mut url, &cli.query);
     client::validate_proxy_for_http_version(cli.proxy.as_deref(), http_version)?;
     validate_http_version_options(http_version, &url, cli.grpc, cli.unix.as_deref())?;
+    validate_ech_for_url(cli, &url)?;
     let grpc_schema = if cli.grpc {
         proto::load_local_schema(cli)?
     } else {

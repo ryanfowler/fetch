@@ -1140,3 +1140,67 @@ fn websocket_interactive_pty_go_case() {
     drop(master);
     capture.close();
 }
+
+#[test]
+fn ech_rejected_for_plain_ws() {
+    // --ech auto on ws:// should be rejected
+    let res = run_fetch(&["--ech", "auto", "ws://example.com/socket"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("'ws://' scheme and '--ech' flag cannot be used together"),
+        "expected WS ECH conflict error, got:\n{}",
+        res.stderr
+    );
+
+    // --ech on on ws:// should be rejected
+    let res = run_fetch(&["--ech", "on", "ws://example.com/socket"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("'ws://' scheme and '--ech' flag cannot be used together"),
+        "expected WS ECH conflict error, got:\n{}",
+        res.stderr
+    );
+
+    // --ech off on ws:// should also be rejected (consistent with other TLS options)
+    let res = run_fetch(&["--ech", "off", "ws://example.com/socket"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr
+            .contains("'ws://' scheme and '--ech' flag cannot be used together"),
+        "expected WS ECH conflict error, got:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn ech_allowed_for_wss() {
+    // --ech auto on wss:// should be allowed (not produce a scheme conflict error)
+    let (wss, _seen) = start_wss_echo_server(|_| Ok(()));
+    let res = run_fetch(&[
+        &wss.url,
+        "--ca-cert",
+        wss.ca_cert_path.to_str().unwrap(),
+        "--ech",
+        "auto",
+        "-d",
+        "ech test",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&res, 0);
+    assert!(
+        !res.stderr
+            .contains("'ws://' scheme and '--ech' flag cannot be used together"),
+        "--ech auto on wss:// should not produce scheme conflict, got:\n{}",
+        res.stderr
+    );
+    assert!(
+        res.stdout.contains("echo: ech test"),
+        "expected echo response, got:\n{}",
+        res.stdout
+    );
+}

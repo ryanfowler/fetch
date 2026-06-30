@@ -1,12 +1,14 @@
 use std::io::Cursor;
 use std::sync::Arc;
 
+use rustls::client::EchMode;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme, SupportedProtocolVersion};
 
 use crate::error::FetchError;
 
+pub(crate) mod ech;
 pub mod inspect;
 
 #[allow(non_camel_case_types)]
@@ -112,7 +114,7 @@ pub fn rustls_protocol_versions(
 }
 
 pub fn rustls_platform_client_config() -> Result<rustls::ClientConfig, FetchError> {
-    rustls_platform_client_config_with_options(&[], None, None, false, None, None)
+    rustls_platform_client_config_with_options(&[], None, None, false, None, None, None)
 }
 
 pub fn rustls_platform_client_config_with_options(
@@ -122,16 +124,30 @@ pub fn rustls_platform_client_config_with_options(
     insecure: bool,
     min_tls: Option<(&str, &str)>,
     max_tls: Option<&str>,
+    ech_mode: Option<EchMode>,
 ) -> Result<rustls::ClientConfig, FetchError> {
     install_default_crypto_provider();
 
-    let versions = rustls_protocol_versions(min_tls, max_tls)?;
     let provider = rustls::crypto::CryptoProvider::get_default()
         .cloned()
         .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
-    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_protocol_versions(&versions)
-        .map_err(|_| FetchError::Message("invalid TLS versions".to_string()))?;
+    let versions_builder = rustls::ClientConfig::builder_with_provider(provider.clone());
+    let versions = rustls_protocol_versions(min_tls, max_tls)?;
+    let builder = if let Some(ech_mode) = ech_mode {
+        if !versions
+            .iter()
+            .any(|v| v.version == rustls::ProtocolVersion::TLSv1_3)
+        {
+            return Err(ech_tls_version_error(min_tls, max_tls));
+        }
+        versions_builder
+            .with_ech(ech_mode)
+            .map_err(|err| FetchError::Message(format!("invalid ECH configuration: {err}")))?
+    } else {
+        versions_builder
+            .with_protocol_versions(&versions)
+            .map_err(|_| FetchError::Message("invalid TLS versions".to_string()))?
+    };
     let builder = if insecure {
         builder
             .dangerous()
@@ -177,6 +193,28 @@ pub(crate) fn tls_order_label(order: u8) -> &'static str {
         13 => "1.3",
         _ => "unknown",
     }
+}
+
+/// Returns a diagnostic error when ECH is enabled but the resolved TLS version
+/// constraints exclude TLS 1.3.
+pub(crate) fn ech_tls_version_error(
+    min_tls: Option<(&str, &str)>,
+    max_tls: Option<&str>,
+) -> FetchError {
+    if let Some((option, value)) = min_tls
+        && tls_order(option, value).is_ok_and(|o| o < 13)
+    {
+        return format!("--ech requires TLS 1.3 or higher; use --{option} 1.3 or remove --ech")
+            .into();
+    }
+    if let Some(max_tls) = max_tls
+        && tls_order("max-tls", max_tls).is_ok_and(|o| o < 13)
+    {
+        return FetchError::Message(
+            "--ech requires TLS 1.3 or higher; remove --max-tls or use --max-tls 1.3".to_string(),
+        );
+    }
+    "--ech requires TLS 1.3 or higher".into()
 }
 
 pub(crate) fn unsupported_legacy_tls_versions(

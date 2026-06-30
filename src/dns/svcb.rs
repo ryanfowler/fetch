@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
+use base64::Engine;
 use url::Url;
 
 use crate::dns::util::{dns_query_id, udp_dns_timeout};
@@ -18,6 +19,7 @@ const KEY_ALPN: u16 = 1;
 const KEY_NO_DEFAULT_ALPN: u16 = 2;
 const KEY_PORT: u16 = 3;
 const KEY_IPV4HINT: u16 = 4;
+const KEY_ECH: u16 = 5;
 const KEY_IPV6HINT: u16 = 6;
 const KEY_DOH_PATH: u16 = 7;
 
@@ -26,6 +28,7 @@ const SUPPORTED_MANDATORY_KEYS: &[u16] = &[
     KEY_NO_DEFAULT_ALPN,
     KEY_PORT,
     KEY_IPV4HINT,
+    KEY_ECH,
     KEY_IPV6HINT,
 ];
 
@@ -38,6 +41,7 @@ pub(crate) struct SvcbRecord {
     pub(crate) port: Option<u16>,
     pub(crate) ipv4_hint: Vec<Ipv4Addr>,
     pub(crate) ipv6_hint: Vec<Ipv6Addr>,
+    pub(crate) ech: Option<Vec<u8>>,
     pub(crate) mandatory: Vec<u16>,
     pub(crate) unsupported_mandatory: Vec<u16>,
     pub(crate) ttl: Option<u32>,
@@ -103,6 +107,7 @@ fn record_from_params(priority: u16, target: String, params: &[SvcParam]) -> Opt
         no_default_alpn: false,
         port: None,
         ipv4_hint: Vec::new(),
+        ech: None,
         ipv6_hint: Vec::new(),
         mandatory: Vec::new(),
         unsupported_mandatory: Vec::new(),
@@ -138,6 +143,9 @@ fn record_from_params(priority: u16, target: String, params: &[SvcParam]) -> Opt
                     .chunks_exact(4)
                     .map(|chunk| Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]))
                     .collect();
+            }
+            KEY_ECH => {
+                record.ech = Some(param.value.clone());
             }
             KEY_IPV6HINT => {
                 if !param.value.len().is_multiple_of(16) {
@@ -382,6 +390,10 @@ fn format_svc_param(key: u16, value: &[u8]) -> String {
             format!("IPv6Hint={}", ips.join(","))
         }
         KEY_IPV6HINT => format!("IPv6Hint=0x{}", hex_encode(value)),
+        KEY_ECH => format!(
+            "ECH={}",
+            base64::engine::general_purpose::STANDARD.encode(value)
+        ),
         KEY_DOH_PATH => format!("DOHPath={:?}", String::from_utf8_lossy(value)),
         _ => format!("key{key}=0x{}", hex_encode(value)),
     }

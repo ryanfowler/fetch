@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use quinn::crypto::rustls::{HandshakeData, QuicClientConfig};
+use rustls::client::EchMode;
+use rustls::client::EchStatus;
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -18,6 +20,7 @@ use crate::cli::{Cli, HttpVersion};
 use crate::core;
 #[cfg(test)]
 use crate::core::Printer;
+use crate::dns::svcb::HttpsRecordResolver;
 use crate::duration::{TimeoutBudget, duration_from_seconds};
 use crate::error::{FetchError, write_warning_with_separator_with_color};
 
@@ -130,11 +133,20 @@ async fn inspect_tcp(
     let host = tls_host(url)?;
     let port = url.port_or_known_default().unwrap_or(443);
 
+    // Resolve ECH configuration from DNS.
+    let ech_mode = resolve_inspect_ech_mode(cli, &host, timeout).await?;
+
     let ca_certs = load_ca_certs(&cli.ca_cert)?;
     let native_roots = load_native_root_certs();
     let trusted_roots = trusted_root_certs(&ca_certs, &native_roots);
     let ocsp_capture = OcspCapture::default();
-    let mut config = build_client_config(cli, &ca_certs, &native_roots, ocsp_capture.clone())?;
+    let mut config = build_client_config(
+        cli,
+        &ca_certs,
+        &native_roots,
+        ocsp_capture.clone(),
+        ech_mode,
+    )?;
     config.alpn_protocols = alpn_protocols(http_version)
         .iter()
         .map(|protocol| protocol.as_bytes().to_vec())
@@ -153,6 +165,14 @@ async fn inspect_tcp(
         })
         .await?;
     let (_, conn) = stream.get_ref();
+    let ech_status = conn.ech_status();
+
+    // Enforce --ech on: handshake must accept ECH.
+    if matches!(cli.ech.as_deref(), Some("on")) && !matches!(ech_status, EchStatus::Accepted) {
+        return Err(FetchError::Message(format!(
+            "ECH was not accepted by the server (status: {ech_status:?})"
+        )));
+    }
 
     let mut peer_chain = Vec::new();
     if let Some(certs) = conn.peer_certificates() {
@@ -170,9 +190,69 @@ async fn inspect_tcp(
         alpn: conn
             .alpn_protocol()
             .map(|protocol| String::from_utf8_lossy(protocol).into_owned()),
+        ech_status,
         chain,
         ocsp_response: ocsp_capture.get(),
     })
+}
+
+/// Resolve the ECH mode for inspection by fetching HTTPS/SVCB records from DNS
+/// and extracting the `ech` SvcParam.
+async fn resolve_inspect_ech_mode(
+    cli: &Cli,
+    host: &str,
+    timeout: TimeoutBudget,
+) -> Result<Option<EchMode>, FetchError> {
+    if !super::ech::is_ech_active(cli) {
+        return Ok(None);
+    }
+
+    // Skip DNS lookup for IP literals.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return super::ech::resolve_ech_mode(cli, &[]);
+    }
+
+    let candidates = lookup_inspect_ech_candidates(cli, host, timeout).await;
+    let candidate_refs: Vec<&[u8]> = candidates.iter().map(|b| b.as_slice()).collect();
+    super::ech::resolve_ech_mode(cli, &candidate_refs)
+}
+
+/// Fetch HTTPS/SVCB records for a host and return ECH candidate byte slices
+/// from usable records ordered by SvcPriority.
+async fn lookup_inspect_ech_candidates(
+    cli: &Cli,
+    host: &str,
+    timeout: TimeoutBudget,
+) -> Vec<Vec<u8>> {
+    let resolver = cli
+        .dns_server
+        .as_deref()
+        .map(HttpsRecordResolver::Custom)
+        .unwrap_or(HttpsRecordResolver::System);
+
+    let ech_timeout = timeout
+        .remaining()
+        .ok()
+        .flatten()
+        .unwrap_or(std::time::Duration::from_secs(5));
+    let records = tokio::time::timeout(
+        ech_timeout,
+        crate::dns::svcb::lookup_https_records(resolver, host, Some(ech_timeout)),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
+
+    let mut usable: Vec<&crate::dns::svcb::SvcbRecord> = records
+        .iter()
+        .filter(|r| !r.is_alias_mode() && r.is_usable())
+        .collect();
+    usable.sort_by_key(|r| r.priority);
+    usable
+        .iter()
+        .filter_map(|r| r.ech.as_ref().filter(|b| !b.is_empty()).cloned())
+        .collect()
 }
 
 async fn connect_tcp_host(
@@ -240,6 +320,10 @@ async fn inspect_quic(
     url: &Url,
     timeout: TimeoutBudget,
 ) -> Result<Inspection, FetchError> {
+    if super::ech::is_ech_active(cli) {
+        return Err("--ech with --http 3 is not yet supported for TLS inspection".into());
+    }
+
     let host = tls_host(url)?;
     ensure_quic_protocol_versions(cli)?;
     let port = url.port_or_known_default().unwrap_or(443);
@@ -249,7 +333,8 @@ async fn inspect_quic(
     let native_roots = load_native_root_certs();
     let trusted_roots = trusted_root_certs(&ca_certs, &native_roots);
     let ocsp_capture = OcspCapture::default();
-    let mut config = build_client_config(cli, &ca_certs, &native_roots, ocsp_capture.clone())?;
+    let mut config =
+        build_client_config(cli, &ca_certs, &native_roots, ocsp_capture.clone(), None)?;
     config.alpn_protocols = alpn_protocols(Some(HttpVersion::Http3))
         .iter()
         .map(|protocol| protocol.as_bytes().to_vec())
@@ -330,6 +415,7 @@ async fn inspect_quic_addr(
         version: Some(ProtocolVersion::TLSv1_3),
         cipher_suite: None,
         alpn,
+        ech_status: EchStatus::NotOffered,
         chain,
         ocsp_response: ocsp_capture.get(),
     })
@@ -378,11 +464,43 @@ fn build_client_config(
     ca_certs: &[ParsedCert],
     native_roots: &[ParsedCert],
     ocsp_capture: OcspCapture,
+    ech_mode: Option<EchMode>,
 ) -> Result<rustls::ClientConfig, FetchError> {
     super::install_default_crypto_provider();
 
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    let versions_builder = rustls::ClientConfig::builder_with_provider(provider);
     let versions = inspection_protocol_versions(cli)?;
-    let builder = rustls::ClientConfig::builder_with_protocol_versions(&versions);
+    let builder = if let Some(ech_mode) = ech_mode {
+        if !versions
+            .iter()
+            .any(|v| v.version == rustls::ProtocolVersion::TLSv1_3)
+        {
+            let min_tls = cli.min_tls.as_deref().or(cli.tls.as_deref()).map(|value| {
+                (
+                    if cli.min_tls.is_some() {
+                        "min-tls"
+                    } else {
+                        "tls"
+                    },
+                    value,
+                )
+            });
+            return Err(super::ech_tls_version_error(
+                min_tls,
+                cli.max_tls.as_deref(),
+            ));
+        }
+        versions_builder
+            .with_ech(ech_mode)
+            .map_err(|err| FetchError::Message(format!("invalid ECH configuration: {err}")))?
+    } else {
+        versions_builder
+            .with_protocol_versions(&versions)
+            .map_err(|_| FetchError::Message("invalid TLS versions".to_string()))?
+    };
     let builder = if cli.insecure {
         builder
             .dangerous()
@@ -476,6 +594,7 @@ struct Inspection {
     version: Option<ProtocolVersion>,
     cipher_suite: Option<SupportedCipherSuite>,
     alpn: Option<String>,
+    ech_status: EchStatus,
     chain: Vec<ParsedCert>,
     ocsp_response: Vec<u8>,
 }
@@ -1004,6 +1123,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             version: Some(ProtocolVersion::TLSv1_3),
             cipher_suite: None,
             alpn: Some("h2".to_string()),
+            ech_status: EchStatus::NotOffered,
             chain: vec![ParsedCert {
                 raw: vec![1],
                 common_name: Some("example.com".to_string()),
@@ -1035,6 +1155,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             version: Some(ProtocolVersion::TLSv1_3),
             cipher_suite: None,
             alpn: Some("h2".to_string()),
+            ech_status: EchStatus::NotOffered,
             chain: vec![ParsedCert {
                 raw: vec![1],
                 common_name: Some("example.com".to_string()),

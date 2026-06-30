@@ -458,6 +458,25 @@ min-tls = 1.2
 max-tls = 1.2
 ```
 
+#### `ech`
+
+**Type**: String
+**Values**: `auto`, `on`, `off`
+**Default**: `off`
+
+Enable Encrypted Client Hello (ECH). When set to `auto`, ECH is used if the
+server advertises it in DNS. When set to `on`, ECH is required.
+
+See [Encrypted Client Hello](ech.md) for details.
+
+```ini
+# Auto-detect ECH
+ech = auto
+
+# Require ECH
+ech = on
+```
+
 #### `insecure`
 
 **Type**: Boolean
