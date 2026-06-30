@@ -7,8 +7,8 @@ mod schedule;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use archive::{
-    download_and_unpack_artifact, download_checksum, fetch_filename, goarch, goos,
-    release_artifact, verify_artifact_checksum,
+    download_artifact, download_checksum, fetch_filename, goarch, goos, release_artifact,
+    unpack_artifact_from_file, verify_artifact_checksum,
 };
 use client::{UpdateClient, latest_release};
 use install::{can_replace_file, create_update_temp_dir, current_exe, self_replace};
@@ -95,18 +95,21 @@ async fn update_inner(
     let checksum = download_checksum(client, release_artifact.checksum_url).await?;
 
     let temp_dir = create_update_temp_dir()?;
+    let archive_path = temp_dir.path().join("artifact");
+    let actual_checksum =
+        download_artifact(client, release_artifact.archive_url, &archive_path, silent).await?;
+    verify_artifact_checksum(release_artifact.archive_name, &actual_checksum, &checksum)?;
+
     let unpack_dir = temp_dir.path().join("unpacked");
     std::fs::create_dir(&unpack_dir)?;
-    let actual_checksum = download_and_unpack_artifact(
-        client,
-        release_artifact.archive_name,
-        release_artifact.archive_url,
-        &unpack_dir,
-        temp_dir.path(),
-        silent,
-    )
-    .await?;
-    verify_artifact_checksum(release_artifact.archive_name, &actual_checksum, &checksum)?;
+    let archive_name = release_artifact.archive_name.to_string();
+    let archive_path_owned = archive_path.clone();
+    let unpack_dir_owned = unpack_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        unpack_artifact_from_file(&archive_name, &archive_path_owned, &unpack_dir_owned)
+    })
+    .await
+    .map_err(|e| FetchError::Runtime(format!("extraction task failed: {e}")))??;
 
     let src = unpack_dir.join(fetch_filename());
     let replace_result = self_replace(&exe_path, &src);
