@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::env;
-use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use crate::cli::Cli;
@@ -1278,41 +1277,9 @@ fn parse_query(value: &str) -> String {
 }
 
 fn validate_dns_server(path: &Path, line_num: usize, value: &str) -> Result<(), String> {
-    if value.starts_with("https://") || value.starts_with("http://") {
-        url::Url::parse(value).map_err(|_| {
-            value_error(
-                path,
-                line_num,
-                "dns-server",
-                value,
-                "unable to parse DoH URL",
-            )
-        })?;
-        return Ok(());
-    }
-
-    let has_bracketed_port = value.matches(':').count() > 1 && value.starts_with('[');
-    if value.matches(':').count() == 1 || has_bracketed_port {
-        if value.parse::<SocketAddr>().is_ok() {
-            return Ok(());
-        }
-        return Err(dns_server_value_error(path, line_num, value));
-    }
-
-    value
-        .parse::<IpAddr>()
-        .map(|_| ())
-        .map_err(|_| dns_server_value_error(path, line_num, value))
-}
-
-fn dns_server_value_error(path: &Path, line_num: usize, value: &str) -> String {
-    value_error(
-        path,
-        line_num,
-        "dns-server",
-        value,
-        "must be in the format <IP[:PORT]>",
-    )
+    crate::dns::custom::parse_dns_server(value)
+        .map_err(|err| value_error(path, line_num, "dns-server", value, &err.to_string()))?;
+    Ok(())
 }
 
 fn validate_proxy(path: &Path, line_num: usize, value: &str) -> Result<(), String> {

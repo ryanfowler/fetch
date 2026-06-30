@@ -257,7 +257,8 @@ ca-cert = partner-root.pem
 
 #### `dns-server`
 
-**Type**: IP address with optional port, or HTTPS URL
+**Type**: `IP[:PORT]`, `udp://IP[:PORT]`, `tcp://IP[:PORT]`, `tls://HOST[:PORT]`,
+`dot://HOST[:PORT]`, `quic://HOST[:PORT]`, `doq://HOST[:PORT]`, or HTTPS URL
 **Default**: System default
 
 Use a custom DNS server for hostname resolution.
@@ -274,6 +275,15 @@ dns-server = 1.1.1.1:53
 
 # Use IPv6 DNS server
 dns-server = [2001:4860:4860::8888]:53
+
+# DNS over TCP
+dns-server = tcp://1.1.1.1
+
+# DNS over TLS
+dns-server = tls://dns.google
+
+# DNS over QUIC
+dns-server = doq://dns.adguard-dns.com
 
 # Use DNS-over-HTTPS
 dns-server = https://1.1.1.1/dns-query

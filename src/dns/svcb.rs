@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use url::Url;
@@ -248,7 +248,10 @@ pub(crate) async fn lookup_https_records(
         HttpsRecordResolver::Custom(server) => {
             let server_addr = crate::dns::resolver::normalize_udp_dns_server(server)
                 .map_err(|err| FetchError::Message(err.to_string()))?;
-            lookup_udp_https_records(&server_addr, host, TimeoutBudget::new(timeout)).await
+            let server_addr = server_addr.parse::<SocketAddr>().map_err(|err| {
+                FetchError::Message(format!("invalid dns-server '{server}': {err}"))
+            })?;
+            lookup_udp_https_records(server_addr, host, TimeoutBudget::new(timeout)).await
         }
         HttpsRecordResolver::System => {
             system::lookup_https_records(host, TimeoutBudget::new(timeout)).await
@@ -282,7 +285,7 @@ async fn lookup_doh_https_records(
 }
 
 async fn lookup_udp_https_records(
-    server_addr: &str,
+    server_addr: SocketAddr,
     host: &str,
     timeout: TimeoutBudget,
 ) -> Result<Vec<SvcbRecord>, FetchError> {
@@ -296,8 +299,7 @@ async fn lookup_udp_https_records(
     let raw_records = match wire::parse_response(&response, id) {
         Ok(records) => records,
         Err(err) if err.is_truncated() => {
-            let tcp_timeout = udp_dns_timeout(timeout.remaining()?);
-            response = crate::dns::transport::query_tcp(server_addr, &raw, tcp_timeout)
+            response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
                 .await
                 .map_err(|err| FetchError::Runtime(err.to_string()))?;
             wire::parse_response(&response, id)

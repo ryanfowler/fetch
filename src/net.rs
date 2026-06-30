@@ -169,18 +169,68 @@ async fn resolve_custom_host_family(
         AddressFamily::Ipv4 => ("A", crate::dns::wire::TYPE_A),
         AddressFamily::Ipv6 => ("AAAA", crate::dns::wire::TYPE_AAAA),
     };
-    if dns_server.starts_with("http://") || dns_server.starts_with("https://") {
-        return resolve_doh_host_family(host, dns_server, shared_doh, label, answer_type, timeout)
-            .await;
+    match crate::dns::custom::parse_dns_server(dns_server)? {
+        crate::dns::custom::ParsedDnsServer::Doh(_) => {
+            resolve_doh_host_family(host, dns_server, shared_doh, label, answer_type, timeout).await
+        }
+        crate::dns::custom::ParsedDnsServer::Udp(addr) => {
+            let server_addr = addr.to_string();
+            let timeout = crate::dns::util::udp_dns_timeout(timeout.remaining()?);
+            crate::dns::resolver::lookup_udp_type(&server_addr, host, answer_type, timeout)
+                .await
+                .map(|records| records.into_iter().map(|record| record.ip).collect())
+                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
+        }
+        crate::dns::custom::ParsedDnsServer::Tcp(addr) => {
+            let timeout = crate::dns::util::udp_dns_timeout(timeout.remaining()?);
+            crate::dns::resolver::lookup_tcp_type(&addr, host, answer_type, timeout)
+                .await
+                .map(|records| records.into_iter().map(|record| record.ip).collect())
+                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
+        }
+        crate::dns::custom::ParsedDnsServer::Tls {
+            server_name,
+            host: server_host,
+            port,
+        } => {
+            let addrs =
+                crate::dns::custom::resolve_server_host(&server_host, port, timeout.remaining()?)
+                    .await?;
+            let timeout = crate::dns::util::udp_dns_timeout(timeout.remaining()?);
+            crate::dns::resolver::lookup_tls_type(
+                &server_name,
+                &addrs,
+                host,
+                answer_type,
+                timeout,
+                false,
+            )
+            .await
+            .map(|records| records.into_iter().map(|record| record.ip).collect())
+            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
+        }
+        crate::dns::custom::ParsedDnsServer::Quic {
+            server_name,
+            host: server_host,
+            port,
+        } => {
+            let addrs =
+                crate::dns::custom::resolve_server_host(&server_host, port, timeout.remaining()?)
+                    .await?;
+            let timeout = crate::dns::util::udp_dns_timeout(timeout.remaining()?);
+            crate::dns::resolver::lookup_quic_type(
+                &server_name,
+                &addrs,
+                host,
+                answer_type,
+                timeout,
+                false,
+            )
+            .await
+            .map(|records| records.into_iter().map(|record| record.ip).collect())
+            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
+        }
     }
-
-    let server_addr = crate::dns::resolver::normalize_udp_dns_server(dns_server)
-        .map_err(|err| FetchError::Message(err.to_string()))?;
-    let timeout = crate::dns::util::udp_dns_timeout(timeout.remaining()?);
-    crate::dns::resolver::lookup_udp_type(&server_addr, host, answer_type, timeout)
-        .await
-        .map(|records| records.into_iter().map(|record| record.ip).collect())
-        .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
 }
 
 fn shared_doh_resolver(

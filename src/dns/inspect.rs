@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
+use rustls::pki_types::ServerName;
 use url::Url;
 
 use crate::cli::Cli;
@@ -159,9 +160,31 @@ impl InspectionOutput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ResolverTarget {
-    Default { label: String },
-    Udp { label: String, addr: String },
-    Doh { label: String, url: Url },
+    Default {
+        label: String,
+    },
+    Udp {
+        label: String,
+        addr: SocketAddr,
+    },
+    Tcp {
+        label: String,
+        addr: SocketAddr,
+    },
+    Tls {
+        label: String,
+        server_name: ServerName<'static>,
+        addrs: Vec<SocketAddr>,
+    },
+    Quic {
+        label: String,
+        server_name: ServerName<'static>,
+        addrs: Vec<SocketAddr>,
+    },
+    Doh {
+        label: String,
+        url: Url,
+    },
 }
 
 pub async fn execute(cli: &Cli, ignored_flags: &[&'static str]) -> Result<i32, FetchError> {
@@ -261,7 +284,7 @@ async fn inspect_result(
         .host_str()
         .filter(|host| !host.is_empty())
         .ok_or_else(|| FetchError::Message("--inspect-dns requires a hostname".to_string()))?;
-    let target = resolver_target(dns_server)?;
+    let target = resolver_target(dns_server).await?;
     let start = Instant::now();
 
     if let Ok(ip) = host.parse::<IpAddr>() {
@@ -314,17 +337,37 @@ async fn lookup(
         ),
         _ => None,
     };
+    // Each record type query opens its own TCP/TLS/QUIC connection,
+    // unlike the resolver module's `lookup_tcp_addr`/`lookup_tls`/
+    // `lookup_quic` which batch A+AAAA over one shared connection.
+    // Keeping per-type queries independent here trades some connection
+    // overhead for simpler per-type error handling and record merging.
     let futures = INSPECT_TYPES.iter().copied().map(|query_type| {
         let client = doh_client.as_ref();
-        let target = &target;
+        let target = target.clone();
         async move {
             let result = match (target, client) {
                 (ResolverTarget::Doh { url, .. }, Some(client)) => {
-                    lookup_doh_records(client, url, host, query_type).await
+                    lookup_doh_records(client, &url, host, query_type).await
                 }
                 (ResolverTarget::Udp { addr, .. }, _) => {
                     lookup_udp_records(addr, host, query_type, timeout).await
                 }
+                (ResolverTarget::Tcp { addr, .. }, _) => {
+                    lookup_tcp_records(addr, host, query_type, timeout).await
+                }
+                (
+                    ResolverTarget::Tls {
+                        server_name, addrs, ..
+                    },
+                    _,
+                ) => lookup_tls_records(&server_name, &addrs, host, query_type, timeout).await,
+                (
+                    ResolverTarget::Quic {
+                        server_name, addrs, ..
+                    },
+                    _,
+                ) => lookup_quic_records(&server_name, &addrs, host, query_type, timeout).await,
                 (ResolverTarget::Default { .. }, _) => {
                     unreachable!("default resolver handled earlier")
                 }
@@ -416,7 +459,7 @@ async fn lookup_doh_records(
 }
 
 async fn lookup_udp_records(
-    server_addr: &str,
+    server_addr: SocketAddr,
     host: &str,
     query_type: QueryType,
     timeout: TimeoutBudget,
@@ -430,21 +473,137 @@ async fn lookup_udp_records(
     let raw_records = match wire::parse_response(&response, id) {
         Ok(records) => records,
         Err(err) if err.is_truncated() => {
-            let tcp_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
-            response = crate::dns::transport::query_tcp(server_addr, &raw, tcp_timeout)
+            response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
                 .await
                 .map_err(QueryError::truncated)?;
             wire::parse_response(&response, id).map_err(QueryError::truncated)?
         }
         Err(err) => return Err(QueryError::other(err)),
     };
+    records_from_wire_response(&response, raw_records)
+}
+
+/// Query a single record type over a fresh TCP connection.
+///
+/// Each call opens a new connection so that per-type error handling and
+/// record merging stay independent. The resolver module's `lookup_tcp_addr`
+/// batches A+AAAA over one connection, but the inspection path avoids that
+/// complexity because it queries 11 distinct record types concurrently.
+async fn lookup_tcp_records(
+    addr: SocketAddr,
+    host: &str,
+    query_type: QueryType,
+    timeout: TimeoutBudget,
+) -> Result<Vec<Record>, QueryError> {
+    let id = dns_query_id();
+    let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
+    let connect_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
+    let mut stream = crate::dns::transport::tcp_connection(&addr, connect_timeout)
+        .await
+        .map_err(QueryError::other)?;
+    let query_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
+    let response = tokio::time::timeout(query_timeout, async {
+        crate::dns::transport::write_framed_query(&mut stream, &raw)
+            .await
+            .map_err(QueryError::other)?;
+        crate::dns::transport::read_framed_response(&mut stream)
+            .await
+            .map_err(QueryError::other)
+    })
+    .await
+    .map_err(|_| QueryError::other("DNS lookup timed out"))??;
+    inspect_records_from_response(&response, id)
+}
+
+/// Query a single record type over a fresh TCP+TLS connection.
+///
+/// Each call opens a new connection so that per-type error handling and
+/// record merging stay independent. The resolver module's `lookup_tls` batches
+/// A+AAAA over one connection, but the inspection path avoids that complexity
+/// because it queries 11 distinct record types concurrently.
+async fn lookup_tls_records(
+    server_name: &ServerName<'static>,
+    addrs: &[SocketAddr],
+    host: &str,
+    query_type: QueryType,
+    timeout: TimeoutBudget,
+) -> Result<Vec<Record>, QueryError> {
+    let id = dns_query_id();
+    let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
+    let connect_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
+    let mut stream =
+        crate::dns::transport::tls_connection(server_name, addrs, connect_timeout, false)
+            .await
+            .map_err(QueryError::other)?;
+    let query_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
+    let response = tokio::time::timeout(query_timeout, async {
+        crate::dns::transport::write_framed_query(&mut stream, &raw)
+            .await
+            .map_err(QueryError::other)?;
+        crate::dns::transport::read_framed_response(&mut stream)
+            .await
+            .map_err(QueryError::other)
+    })
+    .await
+    .map_err(|_| QueryError::other("DNS lookup timed out"))??;
+    inspect_records_from_response(&response, id)
+}
+
+/// Query a single record type over a fresh QUIC connection.
+///
+/// Each call opens a new connection so that per-type error handling and
+/// record merging stay independent. The resolver module's `lookup_quic` batches
+/// A+AAAA over one connection, but the inspection path avoids that complexity
+/// because it queries 11 distinct record types concurrently.
+async fn lookup_quic_records(
+    server_name: &ServerName<'static>,
+    addrs: &[SocketAddr],
+    host: &str,
+    query_type: QueryType,
+    timeout: TimeoutBudget,
+) -> Result<Vec<Record>, QueryError> {
+    // RFC 9250 requires DNS message ID 0 for DoQ.
+    let raw = wire::build_query(
+        crate::dns::resolver::DOQ_MESSAGE_ID,
+        host,
+        query_type.dns_type,
+    )
+    .map_err(QueryError::other)?;
+    let connect_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
+    let connection =
+        crate::dns::transport::quic_connection(server_name, addrs, connect_timeout, false)
+            .await
+            .map_err(QueryError::other)?;
+    let query_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
+    let response = tokio::time::timeout(
+        query_timeout,
+        crate::dns::transport::quic_query(&connection, &raw),
+    )
+    .await
+    .map_err(|_| QueryError::other("DNS lookup timed out"))?
+    .map_err(QueryError::other)?;
+    inspect_records_from_response(&response, crate::dns::resolver::DOQ_MESSAGE_ID)
+}
+
+fn inspect_records_from_response(
+    response: &[u8],
+    expected_id: u16,
+) -> Result<Vec<Record>, QueryError> {
+    let raw_records = wire::parse_response(response, expected_id).map_err(QueryError::other)?;
+    records_from_wire_response(response, raw_records)
+}
+
+fn records_from_wire_response(
+    response: &[u8],
+    raw_records: Vec<wire::ResourceRecord<'_>>,
+) -> Result<Vec<Record>, QueryError> {
     let mut records = Vec::new();
     for raw_record in raw_records {
         if raw_record.class != DNS_CLASS_IN {
             continue;
         }
         if let Some(value) = resource_value(
-            &response,
+            response,
             raw_record.typ,
             raw_record.data_offset,
             raw_record.data.len(),
@@ -462,31 +621,50 @@ async fn lookup_udp_records(
     Ok(records)
 }
 
-fn resolver_target(dns_server: Option<&str>) -> Result<ResolverTarget, FetchError> {
+async fn resolver_target(dns_server: Option<&str>) -> Result<ResolverTarget, FetchError> {
     match dns_server {
         None => Ok(resolver_target_from_resolv_conf(
             None,
             std::fs::read_to_string("/etc/resolv.conf").ok().as_deref(),
         )),
-        Some(server) if server.starts_with("http://") || server.starts_with("https://") => {
-            let url = Url::parse(server).map_err(|_| {
-                FetchError::Message(format!(
-                    "invalid value '{server}' for option '--dns-server': unable to parse DoH URL"
-                ))
-            })?;
-            Ok(ResolverTarget::Doh {
-                label: url.to_string(),
-                url,
-            })
-        }
-        Some(server) => {
-            let addr = crate::dns::resolver::normalize_udp_dns_server(server)
-                .map_err(|err| FetchError::Message(err.to_string()))?;
-            Ok(ResolverTarget::Udp {
+        Some(server) => match crate::dns::custom::parse_dns_server(server)? {
+            crate::dns::custom::ParsedDnsServer::Udp(addr) => Ok(ResolverTarget::Udp {
                 label: format!("udp {addr}"),
                 addr,
-            })
-        }
+            }),
+            crate::dns::custom::ParsedDnsServer::Tcp(addr) => Ok(ResolverTarget::Tcp {
+                label: format!("tcp {addr}"),
+                addr,
+            }),
+            crate::dns::custom::ParsedDnsServer::Tls {
+                server_name,
+                host,
+                port,
+            } => {
+                let addrs = crate::dns::custom::resolve_server_host(&host, port, None).await?;
+                Ok(ResolverTarget::Tls {
+                    label: format!("tls {host}:{port}"),
+                    server_name,
+                    addrs,
+                })
+            }
+            crate::dns::custom::ParsedDnsServer::Quic {
+                server_name,
+                host,
+                port,
+            } => {
+                let addrs = crate::dns::custom::resolve_server_host(&host, port, None).await?;
+                Ok(ResolverTarget::Quic {
+                    label: format!("quic {host}:{port}"),
+                    server_name,
+                    addrs,
+                })
+            }
+            crate::dns::custom::ParsedDnsServer::Doh(url) => Ok(ResolverTarget::Doh {
+                label: url.to_string(),
+                url,
+            }),
+        },
     }
 }
 
@@ -495,9 +673,13 @@ fn resolver_target_from_resolv_conf(
     resolv_conf: Option<&str>,
 ) -> ResolverTarget {
     if let Some(server) = explicit {
+        // Only reachable via `parse_dns_server`, which already guarantees a valid address.
+        let addr = server
+            .parse()
+            .expect("valid SocketAddr from parse_dns_server");
         return ResolverTarget::Udp {
             label: format!("udp {server}"),
-            addr: server.to_string(),
+            addr,
         };
     }
 
@@ -509,13 +691,14 @@ fn resolver_target_from_resolv_conf(
             }
             let fields: Vec<_> = line.split_whitespace().collect();
             if fields.len() >= 2 && fields[0] == "nameserver" {
-                let addr = if fields[1].contains(':') && !fields[1].starts_with('[') {
+                let addr_str = if fields[1].contains(':') && !fields[1].starts_with('[') {
                     format!("[{}]:53", fields[1])
                 } else {
                     format!("{}:53", fields[1])
                 };
+                let addr = addr_str.parse().expect("valid SocketAddr from resolv.conf");
                 return ResolverTarget::Udp {
-                    label: format!("system ({addr})"),
+                    label: format!("system ({addr_str})"),
                     addr,
                 };
             }
@@ -584,7 +767,12 @@ pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
 impl ResolverTarget {
     fn label(&self) -> &str {
         match self {
-            Self::Default { label } | Self::Udp { label, .. } | Self::Doh { label, .. } => label,
+            Self::Default { label }
+            | Self::Udp { label, .. }
+            | Self::Tcp { label, .. }
+            | Self::Tls { label, .. }
+            | Self::Quic { label, .. }
+            | Self::Doh { label, .. } => label,
         }
     }
 }
@@ -799,10 +987,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_lookup_udp_records_returns_ttl() {
-        let (addr, stop) = start_udp_server();
+        let (addr_str, stop) = start_udp_server();
+        let addr: SocketAddr = addr_str.parse().unwrap();
 
         let records = lookup_udp_records(
-            &addr,
+            addr,
             "example.com",
             QueryType {
                 label: "A",

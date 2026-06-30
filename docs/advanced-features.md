@@ -10,7 +10,7 @@ Use a custom DNS server instead of the system resolver.
 
 ### UDP DNS
 
-Specify an IP address with optional port:
+Specify an IP address with optional port, or use the explicit `udp://` scheme:
 
 ```sh
 # Google DNS
@@ -18,12 +18,45 @@ fetch --dns-server 8.8.8.8 example.com
 
 # Cloudflare DNS with custom port
 fetch --dns-server 1.1.1.1:53 example.com
+fetch --dns-server udp://1.1.1.1:53 example.com
 
 # IPv6 DNS server
 fetch --dns-server "[2001:4860:4860::8888]:53" example.com
 ```
 
 UDP DNS queries advertise EDNS(0) and retry truncated responses over TCP.
+
+### DNS over TCP
+
+Use the `tcp://` scheme for plain DNS over TCP. This avoids UDP truncation
+entirely because responses are streamed with a 2-byte length prefix.
+
+```sh
+fetch --dns-server tcp://1.1.1.1 example.com
+fetch --dns-server tcp://1.1.1.1:53 example.com
+```
+
+### DNS over TLS (DoT)
+
+Use the `tls://` or `dot://` scheme for DNS over TLS. The default port is 853.
+Both IP addresses and hostnames are accepted; hostnames are resolved with the
+system resolver and used for TLS server name verification.
+
+```sh
+fetch --dns-server tls://1.1.1.1 example.com
+fetch --dns-server dot://dns.google example.com
+fetch --dns-server tls://dns.google:853 example.com
+```
+
+### DNS over QUIC (DoQ)
+
+Use the `quic://` or `doq://` scheme for DNS over QUIC. The default port is
+853. Both IP addresses and hostnames are accepted.
+
+```sh
+fetch --dns-server quic://1.1.1.1 example.com
+fetch --dns-server doq://dns.adguard-dns.com example.com
+```
 
 ### DNS-over-HTTPS (DoH)
 

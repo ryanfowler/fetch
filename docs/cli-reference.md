@@ -378,24 +378,33 @@ fetch --retry 3 --retry-delay 0.5 example.com
 
 ### `--dns-server IP[:PORT]|URL`
 
-Use custom DNS server. Supports UDP DNS and DNS-over-HTTPS for requests and
-DNS/TLS inspection. UDP DNS queries advertise EDNS(0) and retry truncated
-responses over TCP. DoH URLs are queried with RFC 8484 wire-format requests,
-with Google-style JSON DoH retained as a compatibility fallback.
+Use a custom DNS server. Supports UDP DNS, DNS over TCP, DNS over TLS (DoT),
+DNS over QUIC (DoQ), and DNS-over-HTTPS (DoH) for requests and DNS/TLS
+inspection. Bare `IP[:PORT]` values use UDP DNS, which advertises EDNS(0) and
+retries truncated responses over TCP. DoH URLs are queried with RFC 8484
+wire-format requests, with Google-style JSON DoH retained as a compatibility
+fallback.
 
 ```sh
 fetch --dns-server 8.8.8.8 example.com
 fetch --dns-server 1.1.1.1:53 example.com
+fetch --dns-server udp://1.1.1.1:53 example.com
+fetch --dns-server tcp://1.1.1.1 example.com
+fetch --dns-server tls://dns.google example.com
+fetch --dns-server dot://dns.google:853 example.com
+fetch --dns-server quic://dns.adguard-dns.com example.com
+fetch --dns-server doq://dns.adguard-dns.com example.com
 fetch --dns-server https://1.1.1.1/dns-query example.com
 ```
 
 ### `--inspect-dns`
 
-Inspect DNS resolution for the URL hostname only (no HTTP request is made). Displays the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, along with per-record TTLs, address count, record count, and lookup duration. UDP DNS inspection advertises EDNS(0) and retries truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, `fetch` warns that the results are incomplete and exits with a non-zero status. Request-only CLI flags warn that no HTTP request will be sent and those flags have no effect; config-file defaults do not trigger this warning.
+Inspect DNS resolution for the URL hostname only (no HTTP request is made). Displays the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, along with per-record TTLs, address count, record count, and lookup duration. Supports all `--dns-server` transports. UDP DNS inspection advertises EDNS(0) and retries truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, `fetch` warns that the results are incomplete and exits with a non-zero status. Request-only CLI flags warn that no HTTP request will be sent and those flags have no effect; config-file defaults do not trigger this warning.
 
 ```sh
 fetch --inspect-dns example.com
 fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
+fetch --inspect-dns --dns-server tls://dns.google example.com
 ```
 
 ### `--proxy PROXY`
