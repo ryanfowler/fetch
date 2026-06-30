@@ -6,6 +6,8 @@ use http_body_util::BodyExt;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use clap::Parser;
+
 use crate::cli::Cli;
 use crate::core;
 use crate::duration::{TimeoutBudget, duration_from_seconds};
@@ -27,8 +29,8 @@ pub(super) struct Asset {
     pub(super) browser_download_url: String,
 }
 
-pub(super) struct UpdateClient<'a> {
-    cli: Option<&'a Cli>,
+pub(super) struct UpdateClient {
+    cli: Option<Cli>,
     pub(super) timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
     allow_insecure_http: bool,
@@ -41,7 +43,7 @@ struct UpdateCachedClient {
     client: client::UrlClient,
 }
 
-pub(super) async fn latest_release(client: &UpdateClient<'_>) -> Result<Release, FetchError> {
+pub(super) async fn latest_release(client: &UpdateClient) -> Result<Release, FetchError> {
     let url = format!(
         "{}/repos/ryanfowler/fetch/releases/latest",
         update_url().trim_end_matches('/')
@@ -49,10 +51,7 @@ pub(super) async fn latest_release(client: &UpdateClient<'_>) -> Result<Release,
     latest_release_from_url(client, &url).await
 }
 
-async fn latest_release_from_url(
-    client: &UpdateClient<'_>,
-    url: &str,
-) -> Result<Release, FetchError> {
+async fn latest_release_from_url(client: &UpdateClient, url: &str) -> Result<Release, FetchError> {
     let response = update_get_stream(client, url).await?;
     if !response.status().is_success() {
         return Err(format!(
@@ -86,14 +85,14 @@ async fn latest_release_from_url(
 }
 
 pub(super) async fn update_get_stream(
-    client: &UpdateClient<'_>,
+    client: &UpdateClient,
     url: &str,
 ) -> Result<UpdateStreamingResponse, FetchError> {
     client.get_stream(url).await
 }
 
-impl<'a> UpdateClient<'a> {
-    pub(super) fn new(cli: &'a Cli) -> Result<Self, FetchError> {
+impl UpdateClient {
+    pub(super) fn new(cli: &Cli) -> Result<Self, FetchError> {
         let timeout = cli
             .timeout
             .map(|seconds| duration_from_seconds("timeout", seconds))
@@ -103,7 +102,7 @@ impl<'a> UpdateClient<'a> {
             .map(|seconds| duration_from_seconds("connect-timeout", seconds))
             .transpose()?;
         Ok(Self {
-            cli: Some(cli),
+            cli: Some(sanitized_update_cli(cli)),
             timeout,
             connect_timeout,
             allow_insecure_http: internal_update_url_override_allows_insecure_http(),
@@ -134,12 +133,9 @@ impl<'a> UpdateClient<'a> {
     }
 
     #[cfg(test)]
-    pub(super) fn test_with_cli_allow_insecure_http(
-        cli: &'a Cli,
-        timeout: Option<Duration>,
-    ) -> Self {
+    pub(super) fn test_with_cli_allow_insecure_http(cli: &Cli, timeout: Option<Duration>) -> Self {
         Self {
-            cli: Some(cli),
+            cli: Some(sanitized_update_cli(cli)),
             timeout,
             connect_timeout: None,
             allow_insecure_http: true,
@@ -212,7 +208,7 @@ impl<'a> UpdateClient<'a> {
     }
 
     async fn build_client_for_url(&self, url: &url::Url) -> Result<client::UrlClient, FetchError> {
-        let Some(cli) = self.cli else {
+        let Some(cli) = self.cli.as_ref() else {
             let mut builder = transport::Client::builder()
                 .use_rustls_tls()
                 .no_brotli()
@@ -238,6 +234,21 @@ impl<'a> UpdateClient<'a> {
         };
         client::build_client_for_url(cli, url, &context).await
     }
+}
+
+fn sanitized_update_cli(cli: &Cli) -> Cli {
+    let mut sanitized = Cli::parse_from(["fetch"]);
+    sanitized.ca_cert.clone_from(&cli.ca_cert);
+    sanitized.color.clone_from(&cli.color);
+    sanitized.connect_timeout = cli.connect_timeout;
+    sanitized.dns_server.clone_from(&cli.dns_server);
+    sanitized.proxy.clone_from(&cli.proxy);
+    sanitized.silent = cli.silent;
+    sanitized.timeout = cli.timeout;
+    sanitized.timing = cli.timing;
+    sanitized.update = true;
+    sanitized.verbose = cli.verbose;
+    sanitized
 }
 
 fn validate_update_url(url: &url::Url, allow_insecure_http: bool) -> Result<(), FetchError> {
@@ -413,6 +424,69 @@ mod tests {
     }
 
     #[test]
+    fn sanitized_update_cli_preserves_operational_options_and_removes_origin_tls_overrides() {
+        let mut cli = <Cli as clap::Parser>::try_parse_from([
+            "fetch",
+            "--update",
+            "--proxy",
+            "http://proxy.example:8080",
+            "--dns-server",
+            "1.1.1.1",
+            "--ca-cert",
+            "/tmp/enterprise-ca.pem",
+            "--connect-timeout",
+            "2",
+            "--timeout",
+            "5",
+            "--silent",
+            "--timing",
+            "-vv",
+            "--insecure",
+            "--cert",
+            "/tmp/client.pem",
+            "--key",
+            "/tmp/client.key",
+            "--min-tls",
+            "1.2",
+            "--max-tls",
+            "1.3",
+            "--http",
+            "3",
+            "--unix",
+            "/tmp/fetch.sock",
+        ])
+        .unwrap();
+        cli.tls = Some("1.2".to_string());
+
+        let sanitized = sanitized_update_cli(&cli);
+
+        assert_eq!(
+            sanitized.proxy.as_deref(),
+            Some("http://proxy.example:8080")
+        );
+        assert_eq!(sanitized.dns_server.as_deref(), Some("1.1.1.1"));
+        assert_eq!(sanitized.ca_cert, ["/tmp/enterprise-ca.pem"]);
+        assert_eq!(sanitized.connect_timeout, Some(2.0));
+        assert_eq!(sanitized.timeout, Some(5.0));
+        assert!(sanitized.silent);
+        assert!(sanitized.timing);
+        assert_eq!(sanitized.verbose, 2);
+        assert!(sanitized.update);
+
+        assert!(!sanitized.insecure);
+        assert!(sanitized.cert.is_none());
+        assert!(sanitized.key.is_none());
+        assert!(sanitized.min_tls.is_none());
+        assert!(sanitized.max_tls.is_none());
+        assert!(sanitized.tls.is_none());
+        assert!(sanitized.http.is_none());
+        assert!(!sanitized.http1);
+        assert!(!sanitized.http2);
+        assert!(!sanitized.http3);
+        assert!(sanitized.unix.is_none());
+    }
+
+    #[test]
     fn update_client_origin_keys_default_ports_and_ipv6_hosts() {
         let url = url::Url::parse("https://example.com/releases/latest").unwrap();
         assert_eq!(
@@ -439,7 +513,7 @@ mod tests {
     }
 
     async fn test_update_get_buffered(
-        client: &UpdateClient<'_>,
+        client: &UpdateClient,
         url: &str,
     ) -> Result<(StatusCode, UpdateResponse), FetchError> {
         let response = update_get_stream(client, url).await?;

@@ -26,7 +26,7 @@ pub(super) struct ReleaseArtifact<'a> {
 }
 
 pub(super) async fn download_and_unpack_artifact(
-    client: &UpdateClient<'_>,
+    client: &UpdateClient,
     archive_name: &str,
     artifact_url: &str,
     unpack_dir: &Path,
@@ -46,7 +46,7 @@ pub(super) async fn download_and_unpack_artifact(
 }
 
 async fn download_and_unpack_artifact_with_limit(
-    client: &UpdateClient<'_>,
+    client: &UpdateClient,
     archive_name: &str,
     artifact_url: &str,
     unpack_dir: &Path,
@@ -81,7 +81,7 @@ async fn download_and_unpack_artifact_with_limit(
 }
 
 async fn download_artifact_to_file_with_limit(
-    client: &UpdateClient<'_>,
+    client: &UpdateClient,
     artifact_url: &str,
     archive_path: &Path,
     silent: bool,
@@ -98,7 +98,7 @@ async fn download_artifact_to_file_with_limit(
 }
 
 async fn download_and_unpack_tar_gz_artifact_with_limit(
-    client: &UpdateClient<'_>,
+    client: &UpdateClient,
     artifact_url: &str,
     unpack_dir: &Path,
     silent: bool,
@@ -265,7 +265,7 @@ async fn finish_unpack_task(
 }
 
 pub(super) async fn download_checksum(
-    client: &UpdateClient<'_>,
+    client: &UpdateClient,
     checksum_url: &str,
 ) -> Result<String, FetchError> {
     let response = update_get_stream(client, checksum_url).await?;
