@@ -220,7 +220,7 @@ pub struct Cli {
     #[arg(
         long = "dns-server",
         value_name = "IP[:PORT]|URL",
-        help = "DNS server IP or DoH URL"
+        help = "Custom DNS resolver endpoint"
     )]
     pub dns_server: Option<String>,
 
