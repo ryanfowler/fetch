@@ -43,7 +43,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 }
 
 async fn update_inner(
-    client: &UpdateClient<'_>,
+    client: &UpdateClient,
     silent: bool,
     color: Option<&str>,
     dry_run: bool,

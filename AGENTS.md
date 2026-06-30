@@ -169,6 +169,10 @@ metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
 - Session and update lock acquisition should go through `fileutil::FileLock` so cross-platform open/retry/flock/LockFileEx/unlock behavior stays centralized while call sites own their timeout diagnostics.
 - User-supplied paths that support `~/` expansion should use `fileutil::expand_home`; keep the raw input string separately when diagnostics must preserve exactly what the user typed.
 - Self-update release metadata, artifact, checksum, and redirect-target URLs require HTTPS by default; only internal update/test overrides such as an `http://` `FETCH_INTERNAL_UPDATE_URL` may use HTTP for local fixtures.
+- Self-update networking must not inherit origin-specific TLS overrides such as
+  `--insecure`, client `--cert`/`--key`, TLS version pins, forced HTTP version,
+  or Unix sockets from config or request CLI state. It may preserve operational
+  settings such as proxy, DNS server, timeouts, verbosity, and custom CA roots.
 - `install.sh` verifies release archives against their `.sha256` sidecars before extraction and must not auto-edit shell startup files for completions during default installs. Completion installation is opt-in via `--completions` or `FETCH_INSTALL_COMPLETIONS=1`; otherwise print manual commands.
 - Output-file downloads keep `*.download` temp files behind a drop guard so cancellation paths such as Ctrl-C clean up partial files; Unix atomic installs also sync the parent directory after rename/link updates for stronger crash durability.
 - Top-level Ctrl-C/SIGINT handling exits 130 for interrupted requests, including streaming modes such as WebSocket; keep return-code docs aligned if this changes.
