@@ -68,6 +68,7 @@ mod response;
 mod retry;
 pub(crate) mod transport;
 
+pub(crate) use core::color_for_status;
 pub(crate) use metadata::{
     apply_headers, apply_query, has_authority_scheme, load_session, normalize_url, request_target,
     save_session, validate_ech_for_url,

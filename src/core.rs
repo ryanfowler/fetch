@@ -259,6 +259,14 @@ impl Sequence {
     }
 }
 
+pub fn color_for_status(code: u16) -> Sequence {
+    match code {
+        200..=299 => Sequence::Green,
+        300..=399 => Sequence::Yellow,
+        _ => Sequence::Red,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Printer {
     buf: Vec<u8>,
