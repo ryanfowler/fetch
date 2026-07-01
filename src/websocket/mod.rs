@@ -655,7 +655,7 @@ fn print_response_metadata(
     }
     printer.write_styled(ws_version_label(response.version()), &[core::Sequence::Dim]);
     printer.push_str(" ");
-    let status_color = color_for_status(status.as_u16());
+    let status_color = core::color_for_status(status.as_u16());
     printer.write_styled(
         &status.as_u16().to_string(),
         &[status_color, core::Sequence::Bold],
@@ -715,14 +715,6 @@ fn ws_version_label(version: WsVersion) -> &'static str {
         WsVersion::HTTP_2 => "HTTP/2.0",
         WsVersion::HTTP_3 => "HTTP/3.0",
         _ => "HTTP/?",
-    }
-}
-
-fn color_for_status(code: u16) -> core::Sequence {
-    match code {
-        200..=299 => core::Sequence::Green,
-        300..=399 => core::Sequence::Yellow,
-        _ => core::Sequence::Red,
     }
 }
 

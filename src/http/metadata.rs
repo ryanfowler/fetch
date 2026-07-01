@@ -239,14 +239,6 @@ pub(super) fn flush_stderr(mut printer: core::Printer) {
     let _ = printer.flush_to(&mut stderr);
 }
 
-pub(super) fn color_for_status(code: u16) -> core::Sequence {
-    match code {
-        200..=299 => core::Sequence::Green,
-        300..=399 => core::Sequence::Yellow,
-        _ => core::Sequence::Red,
-    }
-}
-
 pub(crate) fn request_target(url: &Url) -> String {
     let mut target = if url.path().is_empty() {
         "/".to_string()
