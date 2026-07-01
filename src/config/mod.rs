@@ -39,795 +39,749 @@ struct ConfigOption {
     apply: ApplyConfigValue,
 }
 
-macro_rules! config_option_descriptor {
-    (
-        @base
-        variant: $variant:ident,
-        field: $field:ident,
-        keys: [$($key:literal),+ $(,)?],
-        documented_keys: [$($documented_key:literal),* $(,)?],
-        cli_flags: [$($cli_flag:literal),* $(,)?],
-        trim: $trim:expr,
-        cli_source: $cli_source:expr,
-        parse: $parse:expr,
-        overlay: $overlay:expr,
-        apply: $apply:expr $(,)?
-    ) => {
-        ConfigOption {
-            field: ConfigField::$variant,
-            keys: &[$($key),+],
-            #[cfg(test)]
-            documented_keys: &[$($documented_key),*],
-            #[cfg(test)]
-            cli_flags: &[$($cli_flag),*],
-            trim: $trim,
-            cli_source: $cli_source,
-            parse: $parse,
-            overlay: $overlay,
-            apply: $apply,
-        }
-    };
-    (
-        variant: $variant:ident,
-        field: $field:ident,
-        keys: [$($key:literal),+ $(,)?],
-        documented_keys: [$($documented_key:literal),* $(,)?],
-        cli_flags: [$($cli_flag:literal),* $(,)?],
-        trim: $trim:expr,
-        scalar {
-            cli_field: $cli_field:ident,
-            parse: $parse:expr $(,)?
-        } $(,)?
-    ) => {
-        config_option_descriptor! {
-            @base
-            variant: $variant,
-            field: $field,
-            keys: [$($key),+],
-            documented_keys: [$($documented_key),*],
-            cli_flags: [$($cli_flag),*],
-            trim: $trim,
-            cli_source: |cli| cli.$cli_field.is_some(),
-            parse: |path, line_num, config, key, value| {
-                let parsed: Result<_, String> =
-                    ($parse)(path, line_num, &mut *config, key, value);
-                config.$field = Some(parsed?);
-                Ok(())
-            },
-            overlay: |target, higher| choose(&mut target.$field, &higher.$field),
-            apply: |cli, values, _sources| {
-                if cli.$cli_field.is_none() {
-                    cli.$cli_field = values.$field.clone();
-                }
-            },
-        }
-    };
-    (
-        variant: $variant:ident,
-        field: $field:ident,
-        keys: [$($key:literal),+ $(,)?],
-        documented_keys: [$($documented_key:literal),* $(,)?],
-        cli_flags: [$($cli_flag:literal),* $(,)?],
-        trim: $trim:expr,
-        scalar {
-            cli_field: $cli_field:ident,
-            cli_source: $cli_source:expr,
-            apply: source,
-            parse: $parse:expr $(,)?
-        } $(,)?
-    ) => {
-        config_option_descriptor! {
-            @base
-            variant: $variant,
-            field: $field,
-            keys: [$($key),+],
-            documented_keys: [$($documented_key),*],
-            cli_flags: [$($cli_flag),*],
-            trim: $trim,
-            cli_source: $cli_source,
-            parse: |path, line_num, config, key, value| {
-                let parsed: Result<_, String> =
-                    ($parse)(path, line_num, &mut *config, key, value);
-                config.$field = Some(parsed?);
-                Ok(())
-            },
-            overlay: |target, higher| choose(&mut target.$field, &higher.$field),
-            apply: |cli, values, sources| {
-                if !sources.contains(ConfigField::$variant) {
-                    cli.$cli_field = values.$field.clone();
-                }
-            },
-        }
-    };
-    (
-        variant: $variant:ident,
-        field: $field:ident,
-        keys: [$($key:literal),+ $(,)?],
-        documented_keys: [$($documented_key:literal),* $(,)?],
-        cli_flags: [$($cli_flag:literal),* $(,)?],
-        trim: $trim:expr,
-        scalar {
-            cli_field: $cli_field:ident,
-            cli_source: $cli_source:expr,
-            apply_if: $apply_if:expr,
-            parse: $parse:expr $(,)?
-        } $(,)?
-    ) => {
-        config_option_descriptor! {
-            @base
-            variant: $variant,
-            field: $field,
-            keys: [$($key),+],
-            documented_keys: [$($documented_key),*],
-            cli_flags: [$($cli_flag),*],
-            trim: $trim,
-            cli_source: $cli_source,
-            parse: |path, line_num, config, key, value| {
-                let parsed: Result<_, String> =
-                    ($parse)(path, line_num, &mut *config, key, value);
-                config.$field = Some(parsed?);
-                Ok(())
-            },
-            overlay: |target, higher| choose(&mut target.$field, &higher.$field),
-            apply: |cli, values, sources| {
-                if ($apply_if)(cli, sources) {
-                    cli.$cli_field = values.$field.clone();
-                }
-            },
-        }
-    };
-    (
-        variant: $variant:ident,
-        field: $field:ident,
-        keys: [$($key:literal),+ $(,)?],
-        documented_keys: [$($documented_key:literal),* $(,)?],
-        cli_flags: [$($cli_flag:literal),* $(,)?],
-        trim: $trim:expr,
-        boolean {
-            cli_field: $cli_field:ident $(,)?
-        } $(,)?
-    ) => {
-        config_option_descriptor! {
-            @base
-            variant: $variant,
-            field: $field,
-            keys: [$($key),+],
-            documented_keys: [$($documented_key),*],
-            cli_flags: [$($cli_flag),*],
-            trim: $trim,
-            cli_source: |cli| cli.$cli_field,
-            parse: |path, line_num, config, key, value| {
-                config.$field = Some(parse_bool_value(path, line_num, key, value)?);
-                Ok(())
-            },
-            overlay: |target, higher| choose(&mut target.$field, &higher.$field),
-            apply: |cli, values, sources| {
-                if !sources.contains(ConfigField::$variant) {
-                    cli.$cli_field = values.$field.unwrap_or(false);
-                }
-            },
-        }
-    };
-    (
-        variant: $variant:ident,
-        field: $field:ident,
-        keys: [$($key:literal),+ $(,)?],
-        documented_keys: [$($documented_key:literal),* $(,)?],
-        cli_flags: [$($cli_flag:literal),* $(,)?],
-        trim: $trim:expr,
-        vec_prepend {
-            cli_field: $cli_field:ident,
-            parse: $parse:expr $(,)?
-        } $(,)?
-    ) => {
-        config_option_descriptor! {
-            @base
-            variant: $variant,
-            field: $field,
-            keys: [$($key),+],
-            documented_keys: [$($documented_key),*],
-            cli_flags: [$($cli_flag),*],
-            trim: $trim,
-            cli_source: |cli| !cli.$cli_field.is_empty(),
-            parse: |path, line_num, config, key, value| {
-                let parsed: Result<_, String> = ($parse)(path, line_num, key, value);
-                config.$field.push(parsed?);
-                Ok(())
-            },
-            overlay: |target, higher| target.$field.extend(higher.$field.iter().cloned()),
-            apply: |cli, values, _sources| prepend_vec(&mut cli.$cli_field, values.$field.clone()),
-        }
-    };
-    (
-        variant: $variant:ident,
-        field: $field:ident,
-        keys: [$($key:literal),+ $(,)?],
-        documented_keys: [$($documented_key:literal),* $(,)?],
-        cli_flags: [$($cli_flag:literal),* $(,)?],
-        trim: $trim:expr,
-        alias_mapping {
-            cli_field: $cli_field:ident,
-            cli_source: $cli_source:expr,
-            primary: $primary_key:literal,
-            choices: $choices:expr,
-            aliases: {
-                $($alias_key:literal => $alias_mapper:expr),+ $(,)?
-            } $(,)?
-        } $(,)?
-    ) => {
-        config_option_descriptor! {
-            @base
-            variant: $variant,
-            field: $field,
-            keys: [$($key),+],
-            documented_keys: [$($documented_key),*],
-            cli_flags: [$($cli_flag),*],
-            trim: $trim,
-            cli_source: $cli_source,
-            parse: |path, line_num, config, key, value| {
-                match key {
-                    $primary_key => {
-                        validate_choice(path, line_num, $primary_key, value, $choices)?;
-                        config.$field = Some(value.to_string());
-                    }
-                    $(
-                        $alias_key => {
-                            let enabled = parse_bool_value(path, line_num, $alias_key, value)?;
-                            config.$field = Some(($alias_mapper)(enabled).to_string());
-                        }
-                    )+
-                    _ => unreachable!("config key was matched before parsing"),
-                }
-                Ok(())
-            },
-            overlay: |target, higher| choose(&mut target.$field, &higher.$field),
-            apply: |cli, values, sources| {
-                if !sources.contains(ConfigField::$variant) {
-                    cli.$cli_field = values.$field.clone();
-                }
-            },
-        }
-    };
-    (
-        variant: $variant:ident,
-        field: $field:ident,
-        keys: [$($key:literal),+ $(,)?],
-        documented_keys: [$($documented_key:literal),* $(,)?],
-        cli_flags: [$($cli_flag:literal),* $(,)?],
-        trim: $trim:expr,
-        cli_source: $cli_source:expr,
-        parse: $parse:expr,
-        overlay: $overlay:expr,
-        apply: $apply:expr $(,)?
-    ) => {
-        config_option_descriptor! {
-            @base
-            variant: $variant,
-            field: $field,
-            keys: [$($key),+],
-            documented_keys: [$($documented_key),*],
-            cli_flags: [$($cli_flag),*],
-            trim: $trim,
-            cli_source: $cli_source,
-            parse: $parse,
-            overlay: $overlay,
-            apply: $apply,
-        }
-    };
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ConfigValues {
+    auto_update: Option<String>,
+    ca_cert: Vec<String>,
+    cert: Option<String>,
+    color: Option<String>,
+    compress: Option<String>,
+    connect_timeout: Option<f64>,
+    copy: Option<bool>,
+    dns_server: Option<String>,
+    ech: Option<String>,
+    format: Option<String>,
+    headers: Vec<String>,
+    http: Option<String>,
+    ignore_status: Option<bool>,
+    image: Option<String>,
+    insecure: Option<bool>,
+    key: Option<String>,
+    max_tls: Option<String>,
+    min_tls: Option<String>,
+    pager: Option<String>,
+    proxy: Option<String>,
+    query: Vec<String>,
+    redirects: Option<usize>,
+    retry: Option<usize>,
+    retry_delay: Option<f64>,
+    session: Option<String>,
+    silent: Option<bool>,
+    sort_headers: Option<bool>,
+    timeout: Option<f64>,
+    timing: Option<bool>,
+    verbosity: Option<u8>,
 }
 
-macro_rules! config_options {
-    (
-        $(
-            $variant:ident {
-                field: $field:ident,
-                ty: $ty:ty,
-                keys: [$($key:literal),+ $(,)?],
-                documented_keys: [$($documented_key:literal),* $(,)?],
-                cli_flags: [$($cli_flag:literal),* $(,)?],
-                trim: $trim:expr,
-                $($descriptor:tt)*
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+enum ConfigField {
+    AutoUpdate,
+    CaCert,
+    Cert,
+    Color,
+    Compress,
+    ConnectTimeout,
+    Copy,
+    DnsServer,
+    Ech,
+    Format,
+    Headers,
+    Http,
+    IgnoreStatus,
+    Image,
+    Insecure,
+    Key,
+    MaxTls,
+    MinTls,
+    Pager,
+    Proxy,
+    Query,
+    Redirects,
+    Retry,
+    RetryDelay,
+    Session,
+    Silent,
+    SortHeaders,
+    Timeout,
+    Timing,
+    Verbosity,
+}
+
+static CONFIG_OPTIONS: &[ConfigOption] = &[
+    ConfigOption {
+        field: ConfigField::AutoUpdate,
+        keys: &["auto-update"],
+        #[cfg(test)]
+        documented_keys: &["auto-update"],
+        #[cfg(test)]
+        cli_flags: &["auto-update"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.auto_update.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            config.auto_update = Some(validate_auto_update(path, line_num, value)?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.auto_update, &higher.auto_update),
+        apply: |cli, values, _sources| {
+            if cli.auto_update.is_none() {
+                cli.auto_update = values.auto_update.clone();
             }
-        ),+ $(,)?
-    ) => {
-        #[derive(Clone, Debug, Default, PartialEq)]
-        struct ConfigValues {
-            $(
-                $field: $ty,
-            )+
-        }
-
-        #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-        enum ConfigField {
-            $(
-                $variant,
-            )+
-        }
-
-        static CONFIG_OPTIONS: &[ConfigOption] = &[
-            $(
-                config_option_descriptor! {
-                    variant: $variant,
-                    field: $field,
-                    keys: [$($key),+],
-                    documented_keys: [$($documented_key),*],
-                    cli_flags: [$($cli_flag),*],
-                    trim: $trim,
-                    $($descriptor)*
-                },
-            )+
-        ];
-    };
-}
-
-config_options! {
-    AutoUpdate {
-        field: auto_update,
-        ty: Option<String>,
-        keys: ["auto-update"],
-        documented_keys: ["auto-update"],
-        cli_flags: ["auto-update"],
-        trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: auto_update,
-            parse: |path, line_num, _config, _key, value| {
-                validate_auto_update(path, line_num, value)
-            },
         },
     },
-    CaCert {
-        field: ca_cert,
-        ty: Vec<String>,
-        keys: ["ca-cert"],
-        documented_keys: ["ca-cert"],
-        cli_flags: ["ca-cert"],
+    ConfigOption {
+        field: ConfigField::CaCert,
+        keys: &["ca-cert"],
+        #[cfg(test)]
+        documented_keys: &["ca-cert"],
+        #[cfg(test)]
+        cli_flags: &["ca-cert"],
         trim: ConfigValueTrim::Both,
-        vec_prepend {
-            cli_field: ca_cert,
-            parse: |path, line_num, _key, value| {
-                validate_file_option(path, line_num, || {
-                    crate::tls::validate_ca_certificate_file(value)
-                })?;
-                Ok(value.to_string())
-            },
+        cli_source: |cli| !cli.ca_cert.is_empty(),
+        parse: |path, line_num, config, _key, value| {
+            validate_file_option(path, line_num, || {
+                crate::tls::validate_ca_certificate_file(value)
+            })?;
+            config.ca_cert.push(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| target.ca_cert.extend(higher.ca_cert.iter().cloned()),
+        apply: |cli, values, _sources| prepend_vec(&mut cli.ca_cert, values.ca_cert.clone()),
+    },
+    ConfigOption {
+        field: ConfigField::Cert,
+        keys: &["cert"],
+        #[cfg(test)]
+        documented_keys: &["cert"],
+        #[cfg(test)]
+        cli_flags: &["cert"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.cert.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            validate_file_option(path, line_num, || {
+                crate::tls::validate_client_certificate_file(value)
+            })?;
+            config.cert = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.cert, &higher.cert),
+        apply: |cli, values, _sources| {
+            if cli.cert.is_none() {
+                cli.cert = values.cert.clone();
+            }
         },
     },
-    Cert {
-        field: cert,
-        ty: Option<String>,
-        keys: ["cert"],
-        documented_keys: ["cert"],
-        cli_flags: ["cert"],
+    ConfigOption {
+        field: ConfigField::Color,
+        keys: &["color", "colour"],
+        #[cfg(test)]
+        documented_keys: &["color", "colour"],
+        #[cfg(test)]
+        cli_flags: &["color", "colour"],
         trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: cert,
-            parse: |path, line_num, _config, _key, value| {
-                validate_file_option(path, line_num, || {
-                    crate::tls::validate_client_certificate_file(value)
-                })?;
-                Ok(value.to_string())
-            },
+        cli_source: |cli| cli.color.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            validate_choice(path, line_num, "color", value, &["auto", "off", "on"])?;
+            config.color = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.color, &higher.color),
+        apply: |cli, values, _sources| {
+            if cli.color.is_none() {
+                cli.color = values.color.clone();
+            }
         },
     },
-    Color {
-        field: color,
-        ty: Option<String>,
-        keys: ["color", "colour"],
-        documented_keys: ["color", "colour"],
-        cli_flags: ["color", "colour"],
+    ConfigOption {
+        field: ConfigField::Compress,
+        keys: &["compress", "no-encode"],
+        #[cfg(test)]
+        documented_keys: &["compress"],
+        #[cfg(test)]
+        cli_flags: &["compress", "no-encode"],
         trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: color,
-            parse: |path, line_num, _config, _key, value| {
-                validate_choice(path, line_num, "color", value, &["auto", "off", "on"])?;
-                Ok(value.to_string())
-            },
+        cli_source: |cli| cli.compress.is_some() || cli.no_encode,
+        parse: |path, line_num, config, key, value| {
+            match key {
+                "compress" => {
+                    validate_choice(
+                        path,
+                        line_num,
+                        "compress",
+                        value,
+                        crate::cli::CompressionMode::VALUES,
+                    )?;
+                    config.compress = Some(value.to_string());
+                }
+                "no-encode" => {
+                    let enabled = parse_bool_value(path, line_num, "no-encode", value)?;
+                    config.compress = Some(if enabled { "off" } else { "auto" }.to_string());
+                }
+                _ => unreachable!("config key was matched before parsing"),
+            }
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.compress, &higher.compress),
+        apply: |cli, values, sources| {
+            if !sources.contains(ConfigField::Compress) {
+                cli.compress = values.compress.clone();
+            }
         },
     },
-    Compress {
-        field: compress,
-        ty: Option<String>,
-        keys: ["compress", "no-encode"],
-        documented_keys: ["compress"],
-        cli_flags: ["compress", "no-encode"],
+    ConfigOption {
+        field: ConfigField::ConnectTimeout,
+        keys: &["connect-timeout"],
+        #[cfg(test)]
+        documented_keys: &["connect-timeout"],
+        #[cfg(test)]
+        cli_flags: &["connect-timeout"],
         trim: ConfigValueTrim::Both,
-        alias_mapping {
-            cli_field: compress,
-            cli_source: |cli| cli.compress.is_some() || cli.no_encode,
-            primary: "compress",
-            choices: crate::cli::CompressionMode::VALUES,
-            aliases: {
-                "no-encode" => |no_encode| if no_encode { "off" } else { "auto" },
-            },
+        cli_source: |cli| cli.connect_timeout.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            config.connect_timeout = Some(parse_duration_seconds(
+                path,
+                line_num,
+                "connect-timeout",
+                value,
+                "must be a non-negative number",
+            )?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.connect_timeout, &higher.connect_timeout),
+        apply: |cli, values, _sources| {
+            if cli.connect_timeout.is_none() {
+                cli.connect_timeout = values.connect_timeout;
+            }
         },
     },
-    ConnectTimeout {
-        field: connect_timeout,
-        ty: Option<f64>,
-        keys: ["connect-timeout"],
-        documented_keys: ["connect-timeout"],
-        cli_flags: ["connect-timeout"],
+    ConfigOption {
+        field: ConfigField::Copy,
+        keys: &["copy"],
+        #[cfg(test)]
+        documented_keys: &["copy"],
+        #[cfg(test)]
+        cli_flags: &["copy"],
         trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: connect_timeout,
-            parse: |path, line_num, _config, _key, value| {
-                parse_duration_seconds(
+        cli_source: |cli| cli.copy,
+        parse: |path, line_num, config, key, value| {
+            config.copy = Some(parse_bool_value(path, line_num, key, value)?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.copy, &higher.copy),
+        apply: |cli, values, sources| {
+            if !sources.contains(ConfigField::Copy) {
+                cli.copy = values.copy.unwrap_or(false);
+            }
+        },
+    },
+    ConfigOption {
+        field: ConfigField::DnsServer,
+        keys: &["dns-server"],
+        #[cfg(test)]
+        documented_keys: &["dns-server"],
+        #[cfg(test)]
+        cli_flags: &["dns-server"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.dns_server.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            validate_dns_server(path, line_num, value)?;
+            config.dns_server = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.dns_server, &higher.dns_server),
+        apply: |cli, values, _sources| {
+            if cli.dns_server.is_none() {
+                cli.dns_server = values.dns_server.clone();
+            }
+        },
+    },
+    ConfigOption {
+        field: ConfigField::Ech,
+        keys: &["ech"],
+        #[cfg(test)]
+        documented_keys: &["ech"],
+        #[cfg(test)]
+        cli_flags: &["ech"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.ech.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            validate_choice(path, line_num, "ech", value, &["auto", "on", "off"])?;
+            config.ech = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.ech, &higher.ech),
+        apply: |cli, values, _sources| {
+            if cli.ech.is_none() {
+                cli.ech = values.ech.clone();
+            }
+        },
+    },
+    ConfigOption {
+        field: ConfigField::Format,
+        keys: &["format"],
+        #[cfg(test)]
+        documented_keys: &["format"],
+        #[cfg(test)]
+        cli_flags: &["format"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.format.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            validate_choice(path, line_num, "format", value, &["auto", "off", "on"])?;
+            config.format = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.format, &higher.format),
+        apply: |cli, values, _sources| {
+            if cli.format.is_none() {
+                cli.format = values.format.clone();
+            }
+        },
+    },
+    ConfigOption {
+        field: ConfigField::Headers,
+        keys: &["header"],
+        #[cfg(test)]
+        documented_keys: &["header"],
+        #[cfg(test)]
+        cli_flags: &["header"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| !cli.headers.is_empty(),
+        parse: |path, line_num, config, _key, value| {
+            config.headers.push(parse_header(path, line_num, value)?);
+            Ok(())
+        },
+        overlay: |target, higher| target.headers.extend(higher.headers.iter().cloned()),
+        apply: |cli, values, _sources| prepend_vec(&mut cli.headers, values.headers.clone()),
+    },
+    ConfigOption {
+        field: ConfigField::Http,
+        keys: &["http"],
+        #[cfg(test)]
+        documented_keys: &["http"],
+        #[cfg(test)]
+        cli_flags: &["http"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| crate::cli::has_http_version_flag(cli),
+        parse: |path, line_num, config, _key, value| {
+            validate_choice(path, line_num, "http", value, &["1", "2", "3"])?;
+            config.http = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.http, &higher.http),
+        apply: |cli, values, _sources| {
+            if !crate::cli::has_http_version_flag(cli) {
+                cli.http = values.http.clone();
+            }
+        },
+    },
+    ConfigOption {
+        field: ConfigField::IgnoreStatus,
+        keys: &["ignore-status"],
+        #[cfg(test)]
+        documented_keys: &["ignore-status"],
+        #[cfg(test)]
+        cli_flags: &["ignore-status"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.ignore_status,
+        parse: |path, line_num, config, key, value| {
+            config.ignore_status = Some(parse_bool_value(path, line_num, key, value)?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.ignore_status, &higher.ignore_status),
+        apply: |cli, values, sources| {
+            if !sources.contains(ConfigField::IgnoreStatus) {
+                cli.ignore_status = values.ignore_status.unwrap_or(false);
+            }
+        },
+    },
+    ConfigOption {
+        field: ConfigField::Image,
+        keys: &["image"],
+        #[cfg(test)]
+        documented_keys: &["image"],
+        #[cfg(test)]
+        cli_flags: &["image"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.image.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            validate_choice(path, line_num, "image", value, &["auto", "external", "off"])?;
+            config.image = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.image, &higher.image),
+        apply: |cli, values, _sources| {
+            if cli.image.is_none() {
+                cli.image = values.image.clone();
+            }
+        },
+    },
+    ConfigOption {
+        field: ConfigField::Insecure,
+        keys: &["insecure"],
+        #[cfg(test)]
+        documented_keys: &["insecure"],
+        #[cfg(test)]
+        cli_flags: &["insecure"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.insecure,
+        parse: |path, line_num, config, key, value| {
+            config.insecure = Some(parse_bool_value(path, line_num, key, value)?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.insecure, &higher.insecure),
+        apply: |cli, values, sources| {
+            if !sources.contains(ConfigField::Insecure) {
+                cli.insecure = values.insecure.unwrap_or(false);
+            }
+        },
+    },
+    ConfigOption {
+        field: ConfigField::Key,
+        keys: &["key"],
+        #[cfg(test)]
+        documented_keys: &["key"],
+        #[cfg(test)]
+        cli_flags: &["key"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.key.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            validate_file_option(path, line_num, || {
+                crate::tls::validate_client_key_file(value)
+            })?;
+            config.key = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.key, &higher.key),
+        apply: |cli, values, _sources| {
+            if cli.key.is_none() {
+                cli.key = values.key.clone();
+            }
+        },
+    },
+    ConfigOption {
+        field: ConfigField::MaxTls,
+        keys: &["max-tls"],
+        #[cfg(test)]
+        documented_keys: &["max-tls"],
+        #[cfg(test)]
+        cli_flags: &["max-tls"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.max_tls.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            validate_tls_value(path, line_num, "max-tls", value)?;
+            if let Some(min_tls) = config.min_tls.as_deref()
+                && tls_order(value) < tls_order(min_tls)
+            {
+                return Err(value_error(
                     path,
                     line_num,
-                    "connect-timeout",
+                    "max-tls",
                     value,
-                    "must be a non-negative number",
-                )
-            },
+                    "must be greater than or equal to min-tls",
+                ));
+            }
+            config.max_tls = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.max_tls, &higher.max_tls),
+        apply: |cli, values, _sources| {
+            if cli.max_tls.is_none() {
+                cli.max_tls = values.max_tls.clone();
+            }
         },
     },
-    Copy {
-        field: copy,
-        ty: Option<bool>,
-        keys: ["copy"],
-        documented_keys: ["copy"],
-        cli_flags: ["copy"],
+    ConfigOption {
+        field: ConfigField::MinTls,
+        keys: &["min-tls", "tls"],
+        #[cfg(test)]
+        documented_keys: &["min-tls", "tls"],
+        #[cfg(test)]
+        cli_flags: &["min-tls", "tls"],
         trim: ConfigValueTrim::Both,
-        boolean {
-            cli_field: copy,
+        cli_source: |cli| cli.min_tls.is_some() || cli.tls.is_some(),
+        parse: |path, line_num, config, key, value| {
+            validate_tls_value(path, line_num, key, value)?;
+            if let Some(max_tls) = config.max_tls.as_deref()
+                && tls_order(value) > tls_order(max_tls)
+            {
+                return Err(value_error(
+                    path,
+                    line_num,
+                    key,
+                    value,
+                    "must be less than or equal to max-tls",
+                ));
+            }
+            config.min_tls = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.min_tls, &higher.min_tls),
+        apply: |cli, values, sources| {
+            if !sources.contains(ConfigField::MinTls) {
+                cli.min_tls = values.min_tls.clone();
+            }
         },
     },
-    DnsServer {
-        field: dns_server,
-        ty: Option<String>,
-        keys: ["dns-server"],
-        documented_keys: ["dns-server"],
-        cli_flags: ["dns-server"],
+    ConfigOption {
+        field: ConfigField::Pager,
+        keys: &["pager", "no-pager"],
+        #[cfg(test)]
+        documented_keys: &["pager"],
+        #[cfg(test)]
+        cli_flags: &["pager"],
         trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: dns_server,
-            parse: |path, line_num, _config, _key, value| {
-                validate_dns_server(path, line_num, value)?;
-                Ok(value.to_string())
-            },
-        },
-    },
-    Ech {
-        field: ech,
-        ty: Option<String>,
-        keys: ["ech"],
-        documented_keys: ["ech"],
-        cli_flags: ["ech"],
-        trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: ech,
-            parse: |path, line_num, _config, _key, value| {
-                validate_choice(path, line_num, "ech", value, &["auto", "on", "off"])?;
-                Ok(value.to_string())
-            },
-        },
-    },
-    Format {
-        field: format,
-        ty: Option<String>,
-        keys: ["format"],
-        documented_keys: ["format"],
-        cli_flags: ["format"],
-        trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: format,
-            parse: |path, line_num, _config, _key, value| {
-                validate_choice(path, line_num, "format", value, &["auto", "off", "on"])?;
-                Ok(value.to_string())
-            },
-        },
-    },
-    Headers {
-        field: headers,
-        ty: Vec<String>,
-        keys: ["header"],
-        documented_keys: ["header"],
-        cli_flags: ["header"],
-        trim: ConfigValueTrim::Both,
-        vec_prepend {
-            cli_field: headers,
-            parse: |path, line_num, _key, value| parse_header(path, line_num, value),
-        },
-    },
-    Http {
-        field: http,
-        ty: Option<String>,
-        keys: ["http"],
-        documented_keys: ["http"],
-        cli_flags: ["http"],
-        trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: http,
-            cli_source: |cli| crate::cli::has_http_version_flag(cli),
-            apply_if: |cli, _sources| !crate::cli::has_http_version_flag(cli),
-            parse: |path, line_num, _config, _key, value| {
-                validate_choice(path, line_num, "http", value, &["1", "2", "3"])?;
-                Ok(value.to_string())
-            },
-        },
-    },
-    IgnoreStatus {
-        field: ignore_status,
-        ty: Option<bool>,
-        keys: ["ignore-status"],
-        documented_keys: ["ignore-status"],
-        cli_flags: ["ignore-status"],
-        trim: ConfigValueTrim::Both,
-        boolean {
-            cli_field: ignore_status,
-        },
-    },
-    Image {
-        field: image,
-        ty: Option<String>,
-        keys: ["image"],
-        documented_keys: ["image"],
-        cli_flags: ["image"],
-        trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: image,
-            parse: |path, line_num, _config, _key, value| {
-                validate_choice(path, line_num, "image", value, &["auto", "external", "off"])?;
-                Ok(value.to_string())
-            },
-        },
-    },
-    Insecure {
-        field: insecure,
-        ty: Option<bool>,
-        keys: ["insecure"],
-        documented_keys: ["insecure"],
-        cli_flags: ["insecure"],
-        trim: ConfigValueTrim::Both,
-        boolean {
-            cli_field: insecure,
-        },
-    },
-    Key {
-        field: key,
-        ty: Option<String>,
-        keys: ["key"],
-        documented_keys: ["key"],
-        cli_flags: ["key"],
-        trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: key,
-            parse: |path, line_num, _config, _key, value| {
-                validate_file_option(path, line_num, || {
-                    crate::tls::validate_client_key_file(value)
-                })?;
-                Ok(value.to_string())
-            },
-        },
-    },
-    MaxTls {
-        field: max_tls,
-        ty: Option<String>,
-        keys: ["max-tls"],
-        documented_keys: ["max-tls"],
-        cli_flags: ["max-tls"],
-        trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: max_tls,
-            parse: |path, line_num, config: &mut ConfigValues, _key, value| {
-                validate_tls_value(path, line_num, "max-tls", value)?;
-                if let Some(min_tls) = config.min_tls.as_deref()
-                    && tls_order(value) < tls_order(min_tls)
-                {
-                    return Err(value_error(
+        cli_source: |cli| cli.pager.is_some(),
+        parse: |path, line_num, config, key, value| {
+            match key {
+                "pager" => {
+                    validate_choice(
                         path,
                         line_num,
-                        "max-tls",
+                        "pager",
                         value,
-                        "must be greater than or equal to min-tls",
-                    ));
+                        crate::cli::PagerMode::VALUES,
+                    )?;
+                    config.pager = Some(value.to_string());
                 }
-                Ok(value.to_string())
-            },
-        },
-    },
-    MinTls {
-        field: min_tls,
-        ty: Option<String>,
-        keys: ["min-tls", "tls"],
-        documented_keys: ["min-tls", "tls"],
-        cli_flags: ["min-tls", "tls"],
-        trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: min_tls,
-            cli_source: |cli| cli.min_tls.is_some() || cli.tls.is_some(),
-            apply: source,
-            parse: |path, line_num, config: &mut ConfigValues, key, value| {
-                validate_tls_value(path, line_num, key, value)?;
-                if let Some(max_tls) = config.max_tls.as_deref()
-                    && tls_order(value) > tls_order(max_tls)
-                {
-                    return Err(value_error(
-                        path,
-                        line_num,
-                        key,
-                        value,
-                        "must be less than or equal to max-tls",
-                    ));
+                "no-pager" => {
+                    let enabled = parse_bool_value(path, line_num, "no-pager", value)?;
+                    config.pager = Some(if enabled { "off" } else { "auto" }.to_string());
                 }
-                Ok(value.to_string())
-            },
+                _ => unreachable!("config key was matched before parsing"),
+            }
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.pager, &higher.pager),
+        apply: |cli, values, sources| {
+            if !sources.contains(ConfigField::Pager) {
+                cli.pager = values.pager.clone();
+            }
         },
     },
-    Pager {
-        field: pager,
-        ty: Option<String>,
-        keys: ["pager", "no-pager"],
-        documented_keys: ["pager"],
-        cli_flags: ["pager"],
+    ConfigOption {
+        field: ConfigField::Proxy,
+        keys: &["proxy"],
+        #[cfg(test)]
+        documented_keys: &["proxy"],
+        #[cfg(test)]
+        cli_flags: &["proxy"],
         trim: ConfigValueTrim::Both,
-        alias_mapping {
-            cli_field: pager,
-            cli_source: |cli| cli.pager.is_some(),
-            primary: "pager",
-            choices: crate::cli::PagerMode::VALUES,
-            aliases: {
-                "no-pager" => |no_pager| if no_pager { "off" } else { "auto" },
-            },
+        cli_source: |cli| cli.proxy.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            validate_proxy(path, line_num, value)?;
+            config.proxy = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.proxy, &higher.proxy),
+        apply: |cli, values, _sources| {
+            if cli.proxy.is_none() {
+                cli.proxy = values.proxy.clone();
+            }
         },
     },
-    Proxy {
-        field: proxy,
-        ty: Option<String>,
-        keys: ["proxy"],
-        documented_keys: ["proxy"],
-        cli_flags: ["proxy"],
-        trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: proxy,
-            parse: |path, line_num, _config, _key, value| {
-                validate_proxy(path, line_num, value)?;
-                Ok(value.to_string())
-            },
-        },
-    },
-    Query {
-        field: query,
-        ty: Vec<String>,
-        keys: ["query"],
-        documented_keys: ["query"],
-        cli_flags: ["query"],
+    ConfigOption {
+        field: ConfigField::Query,
+        keys: &["query"],
+        #[cfg(test)]
+        documented_keys: &["query"],
+        #[cfg(test)]
+        cli_flags: &["query"],
         trim: ConfigValueTrim::Left,
-        vec_prepend {
-            cli_field: query,
-            parse: |_path, _line_num, _key, value| Ok::<_, String>(parse_query(value)),
+        cli_source: |cli| !cli.query.is_empty(),
+        parse: |_path, _line_num, config, _key, value| {
+            config.query.push(parse_query(value));
+            Ok(())
+        },
+        overlay: |target, higher| target.query.extend(higher.query.iter().cloned()),
+        apply: |cli, values, _sources| prepend_vec(&mut cli.query, values.query.clone()),
+    },
+    ConfigOption {
+        field: ConfigField::Redirects,
+        keys: &["redirects"],
+        #[cfg(test)]
+        documented_keys: &["redirects"],
+        #[cfg(test)]
+        cli_flags: &["redirects"],
+        trim: ConfigValueTrim::Both,
+        cli_source: |cli| cli.redirects.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            config.redirects = Some(parse_nonnegative_usize(path, line_num, "redirects", value)?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.redirects, &higher.redirects),
+        apply: |cli, values, _sources| {
+            if cli.redirects.is_none() {
+                cli.redirects = values.redirects;
+            }
         },
     },
-    Redirects {
-        field: redirects,
-        ty: Option<usize>,
-        keys: ["redirects"],
-        documented_keys: ["redirects"],
-        cli_flags: ["redirects"],
+    ConfigOption {
+        field: ConfigField::Retry,
+        keys: &["retry"],
+        #[cfg(test)]
+        documented_keys: &["retry"],
+        #[cfg(test)]
+        cli_flags: &["retry"],
         trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: redirects,
-            parse: |path, line_num, _config, _key, value| {
-                parse_nonnegative_usize(path, line_num, "redirects", value)
-            },
+        cli_source: |cli| cli.retry.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            config.retry = Some(parse_nonnegative_usize(path, line_num, "retry", value)?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.retry, &higher.retry),
+        apply: |cli, values, _sources| {
+            if cli.retry.is_none() {
+                cli.retry = values.retry;
+            }
         },
     },
-    Retry {
-        field: retry,
-        ty: Option<usize>,
-        keys: ["retry"],
-        documented_keys: ["retry"],
-        cli_flags: ["retry"],
+    ConfigOption {
+        field: ConfigField::RetryDelay,
+        keys: &["retry-delay"],
+        #[cfg(test)]
+        documented_keys: &["retry-delay"],
+        #[cfg(test)]
+        cli_flags: &["retry-delay"],
         trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: retry,
-            parse: |path, line_num, _config, _key, value| {
-                parse_nonnegative_usize(path, line_num, "retry", value)
-            },
+        cli_source: |cli| cli.retry_delay.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            config.retry_delay = Some(parse_duration_seconds(
+                path,
+                line_num,
+                "retry-delay",
+                value,
+                "must be a non-negative number",
+            )?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.retry_delay, &higher.retry_delay),
+        apply: |cli, values, _sources| {
+            if cli.retry_delay.is_none() {
+                cli.retry_delay = values.retry_delay;
+            }
         },
     },
-    RetryDelay {
-        field: retry_delay,
-        ty: Option<f64>,
-        keys: ["retry-delay"],
-        documented_keys: ["retry-delay"],
-        cli_flags: ["retry-delay"],
+    ConfigOption {
+        field: ConfigField::Session,
+        keys: &["session"],
+        #[cfg(test)]
+        documented_keys: &["session"],
+        #[cfg(test)]
+        cli_flags: &["session"],
         trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: retry_delay,
-            parse: |path, line_num, _config, _key, value| {
-                parse_duration_seconds(
+        cli_source: |cli| cli.session.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            if !crate::session::is_valid_name(value) {
+                return Err(value_error(
                     path,
                     line_num,
-                    "retry-delay",
+                    "session",
                     value,
-                    "must be a non-negative number",
-                )
-            },
+                    "must contain only alphanumeric characters, hyphens, and underscores",
+                ));
+            }
+            config.session = Some(value.to_string());
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.session, &higher.session),
+        apply: |cli, values, _sources| {
+            if cli.session.is_none() {
+                cli.session = values.session.clone();
+            }
         },
     },
-    Session {
-        field: session,
-        ty: Option<String>,
-        keys: ["session"],
-        documented_keys: ["session"],
-        cli_flags: ["session"],
+    ConfigOption {
+        field: ConfigField::Silent,
+        keys: &["silent"],
+        #[cfg(test)]
+        documented_keys: &["silent"],
+        #[cfg(test)]
+        cli_flags: &["silent"],
         trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: session,
-            parse: |path, line_num, _config, _key, value| {
-                if !crate::session::is_valid_name(value) {
-                    return Err(value_error(
-                        path,
-                        line_num,
-                        "session",
-                        value,
-                        "must contain only alphanumeric characters, hyphens, and underscores",
-                    ));
-                }
-                Ok(value.to_string())
-            },
+        cli_source: |cli| cli.silent,
+        parse: |path, line_num, config, key, value| {
+            config.silent = Some(parse_bool_value(path, line_num, key, value)?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.silent, &higher.silent),
+        apply: |cli, values, sources| {
+            if !sources.contains(ConfigField::Silent) {
+                cli.silent = values.silent.unwrap_or(false);
+            }
         },
     },
-    Silent {
-        field: silent,
-        ty: Option<bool>,
-        keys: ["silent"],
-        documented_keys: ["silent"],
-        cli_flags: ["silent"],
+    ConfigOption {
+        field: ConfigField::SortHeaders,
+        keys: &["sort-headers"],
+        #[cfg(test)]
+        documented_keys: &["sort-headers"],
+        #[cfg(test)]
+        cli_flags: &["sort-headers"],
         trim: ConfigValueTrim::Both,
-        boolean {
-            cli_field: silent,
+        cli_source: |cli| cli.sort_headers,
+        parse: |path, line_num, config, key, value| {
+            config.sort_headers = Some(parse_bool_value(path, line_num, key, value)?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.sort_headers, &higher.sort_headers),
+        apply: |cli, values, sources| {
+            if !sources.contains(ConfigField::SortHeaders) {
+                cli.sort_headers = values.sort_headers.unwrap_or(false);
+            }
         },
     },
-    SortHeaders {
-        field: sort_headers,
-        ty: Option<bool>,
-        keys: ["sort-headers"],
-        documented_keys: ["sort-headers"],
-        cli_flags: ["sort-headers"],
+    ConfigOption {
+        field: ConfigField::Timeout,
+        keys: &["timeout"],
+        #[cfg(test)]
+        documented_keys: &["timeout"],
+        #[cfg(test)]
+        cli_flags: &["timeout"],
         trim: ConfigValueTrim::Both,
-        boolean {
-            cli_field: sort_headers,
+        cli_source: |cli| cli.timeout.is_some(),
+        parse: |path, line_num, config, _key, value| {
+            config.timeout = Some(parse_duration_seconds(
+                path,
+                line_num,
+                "timeout",
+                value,
+                "must be a non-negative number",
+            )?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.timeout, &higher.timeout),
+        apply: |cli, values, _sources| {
+            if cli.timeout.is_none() {
+                cli.timeout = values.timeout;
+            }
         },
     },
-    Timeout {
-        field: timeout,
-        ty: Option<f64>,
-        keys: ["timeout"],
-        documented_keys: ["timeout"],
-        cli_flags: ["timeout"],
+    ConfigOption {
+        field: ConfigField::Timing,
+        keys: &["timing"],
+        #[cfg(test)]
+        documented_keys: &["timing"],
+        #[cfg(test)]
+        cli_flags: &["timing"],
         trim: ConfigValueTrim::Both,
-        scalar {
-            cli_field: timeout,
-            parse: |path, line_num, _config, _key, value| {
-                parse_duration_seconds(
-                    path,
-                    line_num,
-                    "timeout",
-                    value,
-                    "must be a non-negative number",
-                )
-            },
+        cli_source: |cli| cli.timing,
+        parse: |path, line_num, config, key, value| {
+            config.timing = Some(parse_bool_value(path, line_num, key, value)?);
+            Ok(())
+        },
+        overlay: |target, higher| choose(&mut target.timing, &higher.timing),
+        apply: |cli, values, sources| {
+            if !sources.contains(ConfigField::Timing) {
+                cli.timing = values.timing.unwrap_or(false);
+            }
         },
     },
-    Timing {
-        field: timing,
-        ty: Option<bool>,
-        keys: ["timing"],
-        documented_keys: ["timing"],
-        cli_flags: ["timing"],
-        trim: ConfigValueTrim::Both,
-        boolean {
-            cli_field: timing,
-        },
-    },
-    Verbosity {
-        field: verbosity,
-        ty: Option<u8>,
-        keys: ["verbosity"],
-        documented_keys: ["verbosity"],
-        cli_flags: ["verbose"],
+    ConfigOption {
+        field: ConfigField::Verbosity,
+        keys: &["verbosity"],
+        #[cfg(test)]
+        documented_keys: &["verbosity"],
+        #[cfg(test)]
+        cli_flags: &["verbose"],
         trim: ConfigValueTrim::Both,
         cli_source: |cli| cli.verbose > 0,
         parse: |path, line_num, config, _key, value| {
@@ -848,7 +802,7 @@ config_options! {
             }
         },
     },
-}
+];
 
 #[derive(Debug, Default, PartialEq)]
 struct ConfigFile {
