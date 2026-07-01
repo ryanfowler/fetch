@@ -1297,8 +1297,8 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
         res.stderr
             .contains("No HTTP request will be sent; these flags have no effect")
     );
-    assert!(res.stderr.contains("--data/--json/--xml"));
-    assert!(res.stderr.contains("--compress/--no-encode"));
+    assert!(res.stderr.contains("--data"));
+    assert!(res.stderr.contains("--compress"));
     assert!(!res.stderr.contains("--inspect-dns ignores"));
 
     let dir = TempDir::new().unwrap();
@@ -1739,7 +1739,7 @@ fn tls_certificate_validation_inspection_and_bounds_cases() {
         res.stderr
             .contains("No HTTP request will be sent; these flags have no effect")
     );
-    assert!(res.stderr.contains("--data/--json/--xml"));
+    assert!(res.stderr.contains("--data"));
     assert!(res.stderr.contains("--bearer"));
     assert!(res.stderr.contains("--format"));
     assert!(!res.stderr.contains("--insecure"));

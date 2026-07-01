@@ -641,89 +641,15 @@ fn streaming_curl_data_value(values: &[from_curl::DataValue]) -> Option<&str> {
     value.value.starts_with('@').then_some(value.value.as_str())
 }
 
-enum ConflictRule<T> {
-    Flag {
-        flag: &'static str,
-        is_present: fn(&T) -> bool,
-    },
-    DynamicFlag {
-        flag_name: fn(&T) -> Option<&'static str>,
-    },
-}
-
-impl<T> ConflictRule<T> {
-    const fn flag(flag: &'static str, is_present: fn(&T) -> bool) -> Self {
-        Self::Flag { flag, is_present }
-    }
-
-    const fn dynamic_flag(flag_name: fn(&T) -> Option<&'static str>) -> Self {
-        Self::DynamicFlag { flag_name }
-    }
-}
-
-fn first_conflict<T>(target: &T, conflicts: &[ConflictRule<T>]) -> Option<&'static str> {
-    conflicts.iter().find_map(|conflict| match conflict {
-        ConflictRule::Flag { flag, is_present } => is_present(target).then_some(*flag),
-        ConflictRule::DynamicFlag { flag_name } => flag_name(target),
-    })
-}
-
 fn validate_from_curl_exclusives(cli: &Cli) -> Result<(), FetchError> {
     if cli.url.is_some() {
         return Err("'--from-curl' and a URL argument cannot be used together".into());
     }
 
-    let conflicting_flag = first_conflict(
-        cli,
-        &[
-            ConflictRule::flag("method", |cli: &Cli| cli.method.is_some()),
-            ConflictRule::flag("header", |cli: &Cli| !cli.headers.is_empty()),
-            ConflictRule::flag("data", |cli: &Cli| cli.data.is_some()),
-            ConflictRule::flag("json", |cli: &Cli| cli.json.is_some()),
-            ConflictRule::flag("xml", |cli: &Cli| cli.xml.is_some()),
-            ConflictRule::flag("form", |cli: &Cli| !cli.form.is_empty()),
-            ConflictRule::flag("multipart", |cli: &Cli| !cli.multipart.is_empty()),
-            ConflictRule::flag("basic", |cli: &Cli| cli.basic.is_some()),
-            ConflictRule::flag("bearer", |cli: &Cli| cli.bearer.is_some()),
-            ConflictRule::flag("digest", |cli: &Cli| cli.digest.is_some()),
-            ConflictRule::flag("aws-sigv4", |cli: &Cli| cli.aws_sigv4.is_some()),
-            ConflictRule::flag("output", |cli: &Cli| cli.output.is_some()),
-            ConflictRule::flag("remote-name", |cli: &Cli| cli.remote_name),
-            ConflictRule::flag("remote-header-name", |cli: &Cli| cli.remote_header_name),
-            ConflictRule::flag("range", |cli: &Cli| !cli.ranges.is_empty()),
-            ConflictRule::flag("unix", |cli: &Cli| cli.unix.is_some()),
-            ConflictRule::flag("timeout", |cli: &Cli| cli.timeout.is_some()),
-            ConflictRule::flag("connect-timeout", |cli: &Cli| cli.connect_timeout.is_some()),
-            ConflictRule::flag("redirects", |cli: &Cli| cli.redirects.is_some()),
-            ConflictRule::flag("proxy", |cli: &Cli| cli.proxy.is_some()),
-            ConflictRule::flag("insecure", |cli: &Cli| cli.insecure),
-            ConflictRule::flag("max-tls", |cli: &Cli| cli.max_tls.is_some()),
-            ConflictRule::flag("min-tls", |cli: &Cli| cli.min_tls.is_some()),
-            ConflictRule::flag("tls", |cli: &Cli| cli.tls.is_some()),
-            ConflictRule::dynamic_flag(crate::cli::http_version_flag_name),
-            ConflictRule::flag("cert", |cli: &Cli| cli.cert.is_some()),
-            ConflictRule::flag("key", |cli: &Cli| cli.key.is_some()),
-            ConflictRule::flag("ca-cert", |cli: &Cli| !cli.ca_cert.is_empty()),
-            ConflictRule::flag("dns-server", |cli: &Cli| cli.dns_server.is_some()),
-            ConflictRule::flag("retry", |cli: &Cli| cli.retry.is_some()),
-            ConflictRule::flag("retry-delay", |cli: &Cli| cli.retry_delay.is_some()),
-            ConflictRule::flag("grpc", |cli: &Cli| cli.grpc),
-            ConflictRule::flag("grpc-describe", |cli: &Cli| cli.grpc_describe.is_some()),
-            ConflictRule::flag("grpc-list", |cli: &Cli| cli.grpc_list),
-            ConflictRule::flag("query", |cli: &Cli| !cli.query.is_empty()),
-            ConflictRule::flag("ech", |cli: &Cli| cli.ech.is_some()),
-        ],
-    );
-
-    if let Some(flag) = conflicting_flag {
+    if let Some(flag) = crate::flag_registry::first_from_curl_conflicting_flag(cli) {
         return Err(format!("'--from-curl' and '--{flag}' cannot be used together").into());
     }
     Ok(())
-}
-
-struct WebSocketConflictContext<'a> {
-    cli: &'a Cli,
-    plain_ws: bool,
 }
 
 fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
@@ -747,84 +673,18 @@ fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
     {
         return Err(format!("WebSocket requires GET; method {method} is not supported").into());
     }
-    let context = WebSocketConflictContext {
-        cli,
-        plain_ws: scheme == "ws",
-    };
-    let conflicting_flag = first_conflict(
-        &context,
-        &[
-            ConflictRule::flag("clobber", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.clobber
-            }),
-            ConflictRule::flag("copy", |ctx: &WebSocketConflictContext<'_>| ctx.cli.copy),
-            ConflictRule::flag("discard", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.discard
-            }),
-            ConflictRule::flag("digest", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.digest.is_some()
-            }),
-            ConflictRule::flag("edit", |ctx: &WebSocketConflictContext<'_>| ctx.cli.edit),
-            ConflictRule::flag("form", |ctx: &WebSocketConflictContext<'_>| {
-                !ctx.cli.form.is_empty()
-            }),
-            ConflictRule::flag("grpc", |ctx: &WebSocketConflictContext<'_>| ctx.cli.grpc),
-            ConflictRule::flag("grpc-describe", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.grpc_describe.is_some()
-            }),
-            ConflictRule::flag("grpc-list", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.grpc_list
-            }),
-            ConflictRule::flag("multipart", |ctx: &WebSocketConflictContext<'_>| {
-                !ctx.cli.multipart.is_empty()
-            }),
-            ConflictRule::flag("output", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.output.is_some()
-            }),
-            ConflictRule::flag(
-                "remote-header-name",
-                |ctx: &WebSocketConflictContext<'_>| ctx.cli.remote_header_name,
-            ),
-            ConflictRule::flag("remote-name", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.remote_name
-            }),
-            ConflictRule::flag("retry", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.retry() > 0
-            }),
-            ConflictRule::flag("retry-delay", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.retry_delay.is_some()
-            }),
-            ConflictRule::flag("xml", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.cli.xml.is_some()
-            }),
-            ConflictRule::flag("insecure", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.plain_ws && ctx.cli.insecure
-            }),
-            ConflictRule::flag("max-tls", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.plain_ws && ctx.cli.max_tls.is_some()
-            }),
-            ConflictRule::flag("min-tls", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.plain_ws && ctx.cli.min_tls.is_some()
-            }),
-            ConflictRule::flag("tls", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.plain_ws && ctx.cli.tls.is_some()
-            }),
-            ConflictRule::flag("cert", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.plain_ws && ctx.cli.cert.is_some()
-            }),
-            ConflictRule::flag("key", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.plain_ws && ctx.cli.key.is_some()
-            }),
-            ConflictRule::flag("ca-cert", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.plain_ws && !ctx.cli.ca_cert.is_empty()
-            }),
-            ConflictRule::flag("ech", |ctx: &WebSocketConflictContext<'_>| {
-                ctx.plain_ws && ctx.cli.ech.is_some()
-            }),
-        ],
-    );
 
-    if let Some(flag) = conflicting_flag {
+    // Flags that always conflict with websocket.
+    if let Some(flag) = crate::flag_registry::first_websocket_always_conflicting_flag(cli) {
+        return Err(
+            format!("'{scheme}://' scheme and '--{flag}' flag cannot be used together").into(),
+        );
+    }
+
+    // TLS flags only conflict with plain ws:// (not wss://).
+    if scheme == "ws"
+        && let Some(flag) = crate::flag_registry::first_websocket_plain_conflicting_flag(cli)
+    {
         return Err(
             format!("'{scheme}://' scheme and '--{flag}' flag cannot be used together").into(),
         );

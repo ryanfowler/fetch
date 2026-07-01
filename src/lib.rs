@@ -7,6 +7,7 @@ pub mod dns;
 pub(crate) mod duration;
 pub mod error;
 pub mod fileutil;
+pub(crate) mod flag_registry;
 pub mod format;
 pub mod grpc;
 pub mod http;

@@ -730,36 +730,12 @@ fn truncated_warning(types: &[&'static str]) -> String {
 pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     let mut ignored = Vec::new();
     crate::inspection::append_shared_ignored_request_flags(cli, &mut ignored);
-    if let Some(flag) = crate::cli::http_version_flag_name(cli) {
-        ignored.push(match flag {
-            "http1" => "--http1",
-            "http2" => "--http2",
-            "http3" => "--http3",
-            _ => "--http",
-        });
-    }
+    crate::inspection::append_shared_ignored_http_version_flags(cli, &mut ignored);
     if cli.inspect_tls {
         ignored.push("--inspect-tls");
     }
     crate::inspection::append_shared_ignored_auth_flags(cli, &mut ignored);
-    if !cli.ca_cert.is_empty() {
-        ignored.push("--ca-cert");
-    }
-    if cli.cert.is_some() {
-        ignored.push("--cert");
-    }
-    if cli.key.is_some() {
-        ignored.push("--key");
-    }
-    if cli.tls.is_some() || cli.min_tls.is_some() {
-        ignored.push("--tls");
-    }
-    if cli.max_tls.is_some() {
-        ignored.push("--max-tls");
-    }
-    if cli.insecure {
-        ignored.push("--insecure");
-    }
+    crate::inspection::append_shared_ignored_tls_flags(cli, &mut ignored);
     crate::inspection::append_shared_ignored_response_flags(cli, &mut ignored);
     ignored
 }
@@ -1277,7 +1253,7 @@ mod tests {
         assert_eq!(
             ignored_inspection_flags(&cli),
             [
-                "--data/--json/--xml",
+                "--data",
                 "--grpc",
                 "--proto-file",
                 "--proto-import",
@@ -1291,7 +1267,7 @@ mod tests {
                 "--http",
                 "--bearer",
                 "--insecure",
-                "--compress/--no-encode",
+                "--compress",
                 "--format",
                 "--image",
                 "--pager",
@@ -1301,6 +1277,25 @@ mod tests {
                 "--ws-message-mode",
                 "--dry-run",
             ]
+        );
+    }
+
+    #[test]
+    fn inspect_dns_dns_server_is_not_reported_as_ignored() {
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "https://example.com",
+            "--inspect-dns",
+            "--dns-server",
+            "1.1.1.1",
+        ])
+        .unwrap();
+
+        let ignored = ignored_inspection_flags(&cli);
+
+        assert!(
+            !ignored.contains(&"--dns-server"),
+            "--dns-server must not be in ignored flags for --inspect-dns: {ignored:?}"
         );
     }
 

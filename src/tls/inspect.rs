@@ -932,7 +932,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         assert_eq!(
             ignored_inspection_flags(&cli),
             [
-                "--data/--json/--xml",
+                "--data",
                 "--grpc",
                 "--proto-file",
                 "--proto-import",
@@ -944,7 +944,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
                 "--timing",
                 "--proxy",
                 "--bearer",
-                "--compress/--no-encode",
+                "--compress",
                 "--format",
                 "--image",
                 "--pager",
