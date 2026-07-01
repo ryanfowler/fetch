@@ -261,7 +261,7 @@ pub(super) fn print_redirect_status(cli: &Cli, response: &Response) {
         printer.write_styled(reason, &[status_color]);
     }
     printer.push_str("\n");
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 pub(super) fn timeout_error_message(cli: &Cli, err: &transport::Error) -> Option<String> {

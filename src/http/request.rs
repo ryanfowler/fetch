@@ -58,7 +58,7 @@ pub(super) fn print_dry_run_body(cli: &Cli, body: &RequestBody) -> Result<(), Fe
     if cli.verbose < 2 {
         let mut printer = core::Printer::stderr(cli.color.as_deref());
         core::write_status_line_no_flush(&mut printer, "");
-        flush_stderr(printer);
+        core::flush_stderr(printer);
     }
     let preview = dry_run_body_preview(body, DRY_RUN_BODY_PREVIEW_BYTES)?;
     if !is_printable(&preview.bytes) {
@@ -83,7 +83,7 @@ pub(super) fn print_dry_run_body(cli: &Cli, body: &RequestBody) -> Result<(), Fe
 fn print_dry_run_binary_warning(cli: &Cli) {
     let mut printer = core::Printer::stderr(cli.color.as_deref());
     core::write_warning_msg_no_flush(&mut printer, "the request body appears to be binary");
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 fn print_dry_run_truncation_warning(cli: &Cli, limit: usize) {
@@ -92,7 +92,7 @@ fn print_dry_run_truncation_warning(cli: &Cli, limit: usize) {
         &mut printer,
         format!("the request body preview was truncated after {limit} bytes"),
     );
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 pub(super) fn build_request(

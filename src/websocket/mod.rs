@@ -637,7 +637,7 @@ fn print_request_metadata(cli: &Cli, method: &str, url: &Url, headers: Option<&W
         printer.write_request_prefix();
         printer.push_str("\n");
     }
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 fn print_response_metadata(
@@ -684,7 +684,7 @@ fn print_response_metadata(
         printer.write_response_prefix();
     }
     printer.push_str("\n");
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 fn header_lines(headers: &WsHeaderMap) -> Vec<(String, String)> {
@@ -716,11 +716,6 @@ fn ws_version_label(version: WsVersion) -> &'static str {
         WsVersion::HTTP_3 => "HTTP/3.0",
         _ => "HTTP/?",
     }
-}
-
-fn flush_stderr(mut printer: core::Printer) {
-    let mut stderr = std::io::stderr();
-    let _ = printer.flush_to(&mut stderr);
 }
 
 async fn read_messages<S>(cli: &Cli, stream: &mut S) -> Result<(), FetchError>
