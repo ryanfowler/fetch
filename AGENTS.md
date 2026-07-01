@@ -1,20 +1,14 @@
 # fetch
 
-This file provides guidance to AI agents when working with code in this repository. Keep this file updated after making changes.
+Guidance for AI agents working in this repo. Keep this file current when behavior or workflow changes.
 
-## Project Overview
+## Snapshot
 
-`fetch` is a terminal-native API client implemented as the Rust Cargo binary
-named `fetch`. It covers requests, streams, and network debugging with
-automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf,
-msgpack), image rendering in terminals, gRPC support with reflection/discovery
-and JSON-to-protobuf conversion, WebSockets, DNS/TLS inspection, timing, and
-authentication (Basic, Digest, Bearer, AWS SigV4).
+`fetch` is a Rust terminal-native API client (`cargo` binary: `fetch`) for HTTP requests, streaming, WebSockets, gRPC/reflection/protobuf, DNS/TLS inspection, timing, auth (Basic/Digest/Bearer/AWS SigV4), rich response formatting (JSON/XML/YAML/HTML/CSS/CSV/Markdown/msgpack/protobuf/SSE/NDJSON/images), and self-update/session workflows.
 
-## Common Commands
+## Commands
 
-After Rust code changes, AI agents must run the fast local gate plus focused
-tests that cover the touched area:
+Rust code changes:
 
 ```bash
 cargo fmt
@@ -22,18 +16,14 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features --lib --bins
 ```
 
-Then run the narrowest relevant integration test target or test name:
+Then run the narrowest relevant test, e.g.:
 
 ```bash
-# Run a focused Rust integration test
 cargo test --locked --all-features --test http request_construction_and_data_sources
-
-# Run a focused Rust unit test
 cargo test --locked --all-features image::
 ```
 
-Before opening a PR, after touching shared request/response/transport behavior,
-or when the safe scope is unclear, run the full CI-equivalent test suite:
+Full CI-equivalent before PRs, shared transport/request/response changes, or unclear scope:
 
 ```bash
 cargo fmt --check
@@ -42,193 +32,100 @@ cargo test --locked --all-features --lib --bins
 cargo test --locked --all-features --test cli --test formatting --test grpc --test http --test network --test terminal --test update --test websocket -- --test-threads=1
 ```
 
-For documentation-only changes, skip Cargo build/lint/test unless the docs
-change Rust examples or generated CLI output. Format only the files that
-changed:
+Docs-only changes: skip Cargo unless examples/generated CLI output changed; format changed docs only:
 
 ```bash
 prettier -w README.md docs/**/*.md AGENTS.md
 ```
 
-Only run release builds when validating release packaging, installer,
-self-update, or target-specific build changes:
+Release/package/update validation only:
 
 ```bash
 cargo build --release --locked
 ```
 
-## Architecture
+## Architecture Map
 
-### Entry Point
+| Area | Files | Notes |
+| --- | --- | --- |
+| Entry | `src/main.rs`, `src/app.rs`, `src/cli.rs` | `main` uses a larger-stack Tokio thread; `app` heap-pins the top-level future. Do not revert. |
+| Core IO | `src/core.rs`, `src/output`, `src/fileutil.rs` | Central printer/color/format/stdout policy, atomic writes, `~/` expansion, cross-platform locks. Prefer `core::write_stdout`, `core::stdio`, `core::color_enabled`, `core::format_enabled`; avoid direct `print!`/`println!` and ad-hoc terminal checks. |
+| Config | `src/config` | INI with host overlays. Config-backed options belong in `config_options!`; duplicate host sections are errors. Metadata commands parse config best-effort only. |
+| HTTP | `src/http`, `src/http/response`, `src/http/transport`, `src/net.rs` | Request building/execution, response orchestration, retries, proxies, TLS, Unix sockets, timing. Transport code owns DNS/TCP/TLS/QUIC setup; reuse `src/net.rs` dialing/proxy helpers. |
+| DNS | `src/dns` | Custom UDP/TCP/TLS/QUIC/DoH resolvers, inspection, HTTPS/SVCB, EDNS/truncation fallback. Reuse `custom.rs`, `wire.rs`, `doh.rs`; inspection orchestration/rendering stays under `src/dns/inspect*`. |
+| TLS | `src/tls` | Shared rustls config, client auth, min/max TLS, ECH, inspection. Inspection orchestration in `inspect.rs`; cert/DER/render helpers stay split. |
+| Formatting | `src/format`, `src/format/content_type.rs`, `src/image` | MIME-to-formatter policy, streaming formatters, built-in image defaults; external image adapters only for `--image external`/config and must be bounded. |
+| gRPC/protobuf | `src/grpc`, `src/proto` | Framing/status/reflection, local schema/discovery/conversion/JSON streams. Reuse standard gRPC headers/status/framed-body helpers. |
+| WebSocket | `src/websocket` | Interactive and non-interactive message loops; custom dialer for DNS/proxy/TLS. |
+| Auth/session/update | `src/auth`, `src/session.rs`, `src/update`, `install.sh` | Auth helpers; locked cookie sessions; HTTPS self-update with checksum/archive validation and no origin-specific TLS overrides. |
+| Tests | `tests/`, `tests/support/` | Integration tests run the compiled binary; support code is split by domain. `run_fetch` isolates HTTP/3 cache by default. |
 
-`src/main.rs` is intentionally thin and delegates to `src/app.rs`, which parses
-CLI arguments via `src/cli.rs`, loads config via `src/config`, dispatches
-metadata/update/DNS/TLS inspection modes, and executes requests via `src/http`.
+Request flow: CLI parse → config merge → request build (gRPC may load/reflect schema and frame protobuf) → transport execute → response format/output/pager/clipboard.
 
-### Key Packages
+## Invariants & Implementation Notes
 
-- **src/auth** - Basic, Bearer, Digest, and AWS Signature V4 authentication helpers.
-- **src/cli** - Command-line argument parsing, shell completion, and `--from-curl` support.
-- **src/config** - INI-format config file parsing with host-specific overrides.
-- **src/core.rs** - Shared printer, color, format, and terminal utilities.
-- **src/fileutil.rs** - Atomic file replacement, home-directory path expansion, and shared cross-platform advisory file locks.
-- **src/dns** - DNS-over-HTTPS, UDP DNS, system resolver fallback, and `--inspect-dns`.
-- **src/format** - Response body formatters for JSON, XML, YAML, HTML, CSS, CSV, Markdown, msgpack, protobuf, SSE, NDJSON, gRPC, and images.
-- **src/grpc** - gRPC framing, reflection, status handling, and protobuf request/response support.
-- **src/http** - Core HTTP request construction and execution, response orchestration, multipart uploads, output routing, retries, proxies, TLS, Unix sockets, and timing.
-- **src/image** - Terminal image rendering split by concern: decoding and external adapters, EXIF orientation, terminal capability detection, and Kitty/iTerm2/block renderers.
-- **src/output** - Response output, progress summaries, and atomic output-file writes.
-- **src/proto** - Protocol buffer descriptor loading, compilation, and dynamic message handling.
-- **src/session.rs** - Named cookie sessions with persistent storage across invocations.
-- **src/tls** - TCP and QUIC/TLS inspection.
-- **src/update** - Self-update orchestration, split into release client,
-  archive download/validation, install/replacement, locking, and auto-update
-  scheduling modules.
-- **src/websocket** - WebSocket message loop and interactive terminal prompt.
+### Transport, DNS, TLS, HTTP/3
 
-### Request Flow
+- Direct HTTPS can opportunistically discover HTTP/3 via HTTPS/SVCB `h3`; proxy, Unix socket, explicit `--http`, gRPC, and WebSocket paths bypass auto-H3. Explicit `--http 1|2|3` forces a version, not a cap.
+- Auto-H3 must not delay normal TCP/TLS: start SVCB discovery in parallel, race QUIC only if a usable candidate appears before TCP/TLS wins, and share the started `--connect-timeout` budget across branches. Use `net::race_staggered`/`AbortOnDropJoin` for per-address races.
+- HTTP/3 alternatives are cached as bounded sharded JSON under `http3/<prefix>/<hash>.json`, scoped by normalized origin + resolver key, storing alternative authorities (not IPs), expiring by SVCB TTL/Alt-Svc `ma` with a hard cap. Never use for proxy, Unix socket, IP literal, non-HTTPS, explicit `--http`, gRPC, or WebSocket. Do not learn Alt-Svc from `--insecure` responses.
+- Preserve reqwest-like safe retries for HTTP/2/3 protocol NACKs (`REFUSED_STREAM`, `GOAWAY(NO_ERROR)`, HTTP/3 connection timeout) only when the request body is replayable.
+- Custom/direct DNS is scoped per request URL and redirect target. A/AAAA run concurrently and may proceed once one family succeeds; preserve successful records if the other fails, resolver order in diagnostics, IPv6 scope IDs, and Happy Eyeballs staggering.
+- `--dns-server` schemes: bare/`udp://IP[:PORT]`, `tcp://`, `tls://`/`dot://` (853), `quic://`/`doq://` (853). TLS/QUIC resolver hostnames resolve via system DNS and provide SNI/verification.
+- UDP DNS advertises EDNS(0), randomizes IDs, falls back to TCP on truncation using the remaining timeout, and uses a 5s receive timeout when no request/connect timeout exists. DoH uses RFC8484 POST first, JSON fallback, shared `DohClient` for concurrent families, main transport pooling, and a 1 MiB response cap.
+- Timeout handling lives in `src/duration.rs`; use `TimeoutBudget` for HTTP/WebSocket/DNS/TLS, cap sleeps/work to remaining budget, and preserve the original request-timeout diagnostic.
+- TLS versions are only 1.2/1.3. `--tls` aliases min TLS; prefer `--min-tls`/`--max-tls` in docs. rustls uses `aws-lc-rs` with post-quantum preference enabled.
+- ECH: flags `--ech auto|on|off`, `--ech-config`, `--ech-grease`, `--ech-hard-fail`; ECH comes from HTTPS/SVCB key 5 or explicit config, requires TLS 1.3, and is fetched even when remote-resolving proxies skip A/AAAA. DNS inspection prints `ECH=<base64>`.
+- Request/DoH HTTPS/`wss://` use rustls platform verification while preserving request-path CA, mTLS, `--insecure`, and TLS min/max. HTTPS proxy TLS is separate and must not inherit origin CA/client auth/`--insecure`.
 
-1. CLI args parsed via `src/cli.rs` into an `App` struct
-2. Config file merged via `src/config`
-3. HTTP request built from merged config and CLI state
-4. If gRPC: load local proto schema or resolve it via reflection, setup descriptors, convert JSON→protobuf, frame message
-5. HTTP client executes request
-6. Response formatted based on Content-Type and output to stdout (optionally via pager)
+### Requests, bodies, retries, curl
 
-## Recent Notes
+- Request `Content-Length` inference is centralized in `src/http/mod.rs` and only runs when neither `Content-Length` nor `Transfer-Encoding` was supplied.
+- Body-producing flags (`--data`, `--json`, `--xml`, `--form`, `--multipart`, `--edit`) infer `POST` unless `--method` is explicit; explicit methods (including GET with body) win.
+- Retryable uploads use replayable body descriptors, not one universal `Vec<u8>`: file/multipart sources reopen for retries/307/308; stdin streams once and errors if replay is required. Multipart boundaries are stable; multipart part headers/content type/length are resolved when built.
+- Digest auth retries use bounded cleanup for 401 bodies and retry through a fresh client before dropping an abandoned challenge body; malformed/unsupported challenges fail before replay checks.
+- `--basic`/`--digest` preserve exact bytes around the first colon; do not trim spaces.
+- `--from-curl` should no-op only defaults/presentation flags. Unsupported semantic flags (`-n`, `--netrc`, `-f`, `--fail`, `-N`, `--no-buffer`, `--proto-default`, `--proto-redir`, etc.) must diagnose clearly. Single `-d @file`/`@-` uses native streaming; composite data/materialized `--data-urlencode @file` caps at 16 MiB.
+- Schemeless URLs default to HTTPS for hostnames and HTTP for `localhost`/IP literals; dry-run shows normalized absolute URL and HTTPS plaintext failures suggest `http://`.
+- Default request `Accept` is `application/json, */*;q=0.5`. `--sort-headers` sorts displayed headers only.
 
-- ECH (Encrypted Client Hello) support is implemented via `--ech auto|on|off`, `--ech-config`, `--ech-grease`, and `--ech-hard-fail` flags. ECH configs are discovered from DNS HTTPS/SVCB records (ech SvcParam key 5), decoded into `rustls::client::EchConfig`, and wired into `rustls::ClientConfig` via `with_ech()`. The ECH mode is resolved in `src/http/client.rs` (`resolve_ech_mode`, `build_ech_config_from_raw`, `ech_mode_from_https_records`, `generate_ech_grease_config`). TLS config building in `src/tls/mod.rs` (`rustls_platform_client_config_with_options`) accepts an optional `EchMode`. `--ech-hard-fail` checks `ClientConnection::ech_status()` in `tls_stream_for_config`. WebSocket ECH uses a simpler path (`resolve_websocket_ech_mode`) that prefers explicit `--ech-config` and falls back to GREASE in auto mode. ECH requires TLS 1.3; the `configure_tls` function rejects ECH with TLS 1.2 min/max. SVCB records for ECH are fetched independently of A/AAAA resolution in `resolve_dns_for_client_inner`, including through remote-resolving proxies (HTTP CONNECT, SOCKS5H) where A/AAAA lookup is skipped but HTTPS/SVCB is still queried for ECH. `--from-curl` translates curl's `--ech` and `--ech-hard-fail` flags. DNS inspection displays `ECH=<base64>` in SVCB output.
-- `--grpc-list` and `--grpc-describe` provide grpcurl-style discovery using reflection or local descriptor files.
-- `--grpc` now automatically tries gRPC reflection when no local schema is supplied.
-- Plaintext loopback gRPC servers are supported via `h2c` for calls and discovery; h2c is gRPC-only.
-- Formatted gRPC responses with `Content-Type: application/grpc+proto` stream through `FrameDecoder`, writing each complete message immediately while preserving trailers.
-- gRPC calls and reflection advertise `grpc-accept-encoding: gzip`; response frames with the compressed flag are decompressed with the response `grpc-encoding` before protobuf decoding, with unsupported encodings reported by name.
-- gRPC standard request headers, status extraction from headers/trailers, and full framed-body reads live under `src/grpc`; request execution and reflection should reuse those helpers instead of duplicating protocol handling.
-- gRPC reflection framed-body reads apply reflection-specific decoded-byte and message-count limits before retaining messages; keep reflection discovery bounded even when servers send many individually valid frames.
-- HTTP response handling is split under `src/http/response/`: `stdout.rs` owns terminal/pager policy, `stream.rs` owns decoded streaming and trailer capture, `formatters.rs` owns buffered and streaming body formatting, and `metadata.rs` owns response metadata, timing, clipboard outcomes, and status finalization.
-- Raw decoded response streaming in `src/http/response/stream.rs` should route through the shared sink copy helper so prefix writes, byte counting, clipboard capture, flushes, and broken-pipe policy stay centralized.
-- Formatted SSE, NDJSON, and gRPC stdout streaming share `src/http/response/stream.rs`'s formatter callback driver for decoded reads, clipboard capture, byte counting, trailer extraction, and flushes; keep per-format parsing inside the callbacks. Formatted NDJSON caps each pending unterminated record at `MAX_BUFFERED_RESPONSE_BYTES`.
-- Client-streaming and bidi gRPC calls stream JSON input into framed protobuf request bodies instead of materializing the whole stream up front; stdin-backed gRPC JSON streams use the shared incremental parser behind a blocking stdin bridge, discard leading whitespace before each message, cap pending incomplete JSON at `framing::MAX_MESSAGE_SIZE`, and Windows pipe stdin is peeked before reads so complete request messages can be sent before EOF without byte-at-a-time reads.
-- Custom UDP DNS queries advertise EDNS(0) and retry truncated responses over TCP.
-- `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP or DoH responses. UDP inspection queries retry truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, render a warning about incomplete results and exit non-zero instead of silently omitting that record type.
-- `--inspect-tls --http 3` performs QUIC/TLS inspection with `h3` ALPN instead of the TCP TLS path.
-- `--inspect-tls` honors `--dns-server` for both TCP and QUIC inspection, resolving domain targets through the configured UDP or DoH resolver before the TLS handshake.
-- Rust `--inspect-tls` renders a verified certificate chain when verification succeeds, appending omitted trusted roots or replacing server-sent cross-signed roots with the matching platform/custom trusted root for expiry display; `--insecure` keeps the raw peer chain.
-- `--tls` remains a compatibility alias for setting the minimum TLS version; prefer `--min-tls` in new docs/examples, and use `--max-tls` to cap negotiation or combine min/max for an exact TLS version.
-- Rust TLS version options accept only TLS 1.2 and TLS 1.3; legacy TLS 1.0/1.1 values are rejected consistently for CLI flags, config, WebSocket, and inspection paths.
-- Rustls is built with `aws-lc-rs` and `prefer-post-quantum`; keep post-quantum key exchange preference enabled unless there is a concrete compatibility or provider reason to disable it.
-- TLS inspection keeps its custom verifier for certificate display and OCSP capture, but Rustls protocol-version selection and PEM/client-auth material parsing should stay centralized in `src/tls/mod.rs`.
-- TLS inspection orchestration stays in `src/tls/inspect.rs`; DER reading, certificate/OCSP parsing, and display-chain shaping live under `src/tls/inspect/cert.rs` and `src/tls/inspect/der.rs`, while TLS inspection output rendering lives in `src/tls/inspect/render.rs`.
-- Direct HTTPS requests discover HTTP/3 via DNS HTTPS/SVCB records advertising `h3`, race QUIC setup against the normal TCP/TLS `h2`/`http/1.1` ALPN path, and send the request once on the winning transport. With `--dns-server`, HTTPS-record discovery uses that custom UDP or DoH resolver; without it, discovery uses the platform resolver, matching normal A/AAAA lookup behavior. Proxy, Unix socket, explicit HTTP version, and gRPC/WebSocket paths bypass auto-H3. Explicit `--http 1`, `--http 2`, and `--http 3` remain forced protocol selections, not version caps. Auto-H3 HTTPS/SVCB discovery is opportunistic and must not delay normal connection setup: start it in parallel with normal A/AAAA lookup and TCP/TLS setup, race QUIC only when a usable `h3` candidate is discovered before TCP/TLS wins, and skip SVCB target-name resolution that would require an extra DNS wait unless address hints, an origin target, or an IP target are already available. The auto-H3 QUIC/TCP race shares one started `--connect-timeout` budget across both branches; do not create fresh branch-local connect budgets after the fallback delay.
-- Automatic HTTP/3 stores learned alternatives in a bounded sharded JSON cache under the user cache directory (`http3/<prefix>/<hash>.json`). Cache entries are scoped by normalized origin and resolver key, store alternative authorities instead of IP addresses, expire by HTTPS/SVCB TTL or `Alt-Svc` `ma` with a hard retention cap, and should not be used for proxy, Unix socket, IP-literal, non-HTTPS, explicit `--http`, or gRPC/WebSocket paths. Fresh HTTPS/SVCB candidates take precedence when available promptly, but cached alternatives race while slower HTTPS/SVCB discovery continues so learned `Alt-Svc` entries are not hidden behind unsupported or slow HTTPS-record lookups. `Alt-Svc` learning is disabled for `--insecure` responses.
-- The custom transport should preserve reqwest's safe default retries for HTTP/2/3 protocol NACKs such as remote `REFUSED_STREAM`, remote `GOAWAY(NO_ERROR)`, and HTTP/3 connection timeout signals, but only when the request body can be replayed.
-- WebSocket terminal sessions use the interactive prompt by default and can be controlled with `--ws-interactive auto|on|off`; output-file/clipboard/retry flags are rejected because the WebSocket path streams through the message loop instead of the normal response pipeline.
-- WebSocket requests require HTTP/1.1 for the upgrade handshake; reject explicit `--http 2` and `--http 3` instead of silently performing an HTTP/1.1 upgrade.
-- Non-interactive WebSocket stdin connects before reading piped input, streams lines through a bounded bridge while receiving messages concurrently, preserves empty lines as empty text messages, and closes the send half on stdin EOF while continuing to read server messages. `--ws-message-mode auto|text|binary` controls outgoing frame type; `auto` sends invalid UTF-8 payloads as binary, and `binary` streams piped stdin as raw byte chunks.
-- Non-interactive WebSocket text output writes through locked stdout, flushes after each received message, and treats `BrokenPipe` as normal downstream termination. Incoming binary frames write raw bytes to non-terminal stdout; terminal stdout keeps a binary guard instead of printing unsafe payloads.
-- WebSocket receive limits are owned by fetch: incoming frames and assembled messages are capped at 16 MiB with a fetch diagnostic when exceeded.
-- WebSocket URL userinfo is handled like HTTP URL userinfo: percent-decoded credentials become a Basic `Authorization` header, the handshake request is built from the stripped URL, and explicit `-H Authorization`, `--basic`, `--bearer`, or AWS SigV4 auth still override it.
-- `wss://` WebSocket handshakes build a rustls client config so `--ca-cert`, `--cert`/`--key`, `--insecure`, and TLS min/max settings apply; plain `ws://` rejects TLS flags. WebSocket requests use a custom dialer so `--dns-server` works for direct connections and local target resolution through plain `socks5://` proxies; `socks5h://` keeps target DNS resolution remote. `--proxy` supports HTTP CONNECT plus SOCKS5/SOCKS5H tunnels before the WebSocket/TLS handshake. HTTP proxy userinfo sends `Proxy-Authorization: Basic`, including username-only URLs as an empty-password credential. `--connect-timeout` bounds WebSocket DNS, TCP, proxy negotiation, and TLS setup, capped by the remaining `--timeout` budget when both are set.
-- WebSocket handshakes honor `--session` and configured `session = ...` by sending matching stored cookies during the upgrade and persisting `Set-Cookie` headers from successful handshake responses.
-- HTTPS proxy TLS is configured separately from origin TLS: origin `--ca-cert`, `--cert`/`--key`, and `--insecure` do not apply to proxy handshakes. Proxy TLS should continue to use platform verification by default and must not receive origin client auth.
-- HTTP client setup computes the effective explicit/env/system proxy decision, including `NO_PROXY`, before target DNS pre-resolution for `--dns-server`, `--timing`, and `-vvv`; skip local A/AAAA DNS whenever the selected proxy resolves targets remotely (HTTP CONNECT, SOCKS5H), while HTTPS/SVCB queries for ECH are still performed, and only pre-resolve proxied target hosts for plain `socks5://`.
-- Metadata-only commands (`--help`, `--version`, `--buildinfo`) perform best-effort config parsing for presentation settings, but config errors and background auto-updates cannot block them.
-- Rust formatting code has a central `core::Printer`/`PrinterHandle` and ANSI `Sequence` abstraction; JSON/NDJSON write through the printer directly, formatter/progress/timing/inspection helpers route escape emission through the shared printer, and stderr metadata/error/warning renderers use the same printer for request/response headers and `--inspect-dns`/`--inspect-tls`. Production renderers should expose printer-oriented `*_to(..., &mut core::Printer)` entry points where practical; boolean color wrappers are test-only compatibility helpers.
-- CLI stdout paths that are not already using a stream/pager writer should use `core::write_stdout` or another checked writer instead of `print!`/`println!`, including metadata, completion, gRPC discovery, and WebSocket message output.
-- Rust stdio terminal detection and color/format auto policy are centralized in `src/core.rs`; prefer `core::stdio()`, `core::color_enabled`, and `core::format_enabled` over direct `IsTerminal` checks or local auto-policy helpers.
-- The fetch-owned HTTP transport lives under `src/http/transport/`: `client.rs` owns the client API, pooling, TCP/TLS connector, and request helpers; `h3.rs` owns HTTP/3 discovery, cache use, QUIC connections, and race logic; `proxy.rs` owns proxy selection and proxy dialing; `body.rs` owns transport body/response wrappers. `mod.rs` should stay a thin re-export and shared error boundary. Shared network dialing for DNS-aware TCP, HTTP CONNECT, SOCKS5/SOCKS5H, and proxy auth lives in `src/net.rs`; HTTP, WebSocket, DoH, and update code should reuse those helpers instead of duplicating dialer code.
-- Rust error rendering uses rich diagnostics for common CLI/config errors, styling labels, flags/options, invalid values, file paths, and config line context while preserving plain-text `Display` output.
-- Config-backed options are declared in `src/config/mod.rs`'s `config_options!` descriptor table, which generates storage fields and drives parsing, host overlay, CLI source tracking, config application, and CLI/docs parity tests. Use the table's common descriptor shapes (`scalar`, `boolean`, `vec_prepend`, and `alias_mapping`) for ordinary options, and only fall back to fully custom parse/overlay/apply closures for unusual CLI storage such as counted flags. Add new config-backed options there instead of editing separate option lists.
-- Duplicate host config sections are rejected during config parsing with a line-numbered error that also reports the first section line; do not rely on replacement or merge semantics.
-- Rust `-vvv` output prints config, DNS, TCP, TLS/QUIC, and TTFB debug metadata through the central printer, including color policy and the blank response-header separator before formatted bodies.
-- Rust `--timing` enables DNS pre-resolution timing and transport connection timing so the waterfall includes DNS, TCP, TLS/QUIC, TTFB, and Body phases. The direct transport owns DNS/TCP/TLS/QUIC setup, so keep new timing instrumentation in `src/http/transport/` and `src/net.rs`.
-- `src/main.rs` runs the Tokio runtime on an explicitly larger stack thread, and the top-level app future in `src/app.rs` is heap-pinned before the shutdown-signal `tokio::select!`; do not move it back to `tokio::pin!` or the default process main stack because the combined async request/WebSocket/inspection state can overflow Windows' smaller main-thread stack even for metadata commands.
-- Rust response body paging is controlled by `--pager auto|on|off` or `pager = ...`; `auto` routes terminal stdout through `$PAGER` when set, otherwise falls back to `less -FIRX`, `on` forces the pager, and `off` disables it. `NO_PAGER` disables the default `auto` pager, and `$LESS` is honored by not adding fallback `less` flags when it is set. `$PAGER` is split with POSIX shell-style quoting but launched directly, so shell operators are not interpreted. Image responses and output-file writes bypass the pager.
-- Protocol buffer support is split under `src/proto/`: `schema.rs` owns descriptor loading, local schema lookup, and `protoc` invocation; `discovery.rs` owns local gRPC discovery rendering; `convert.rs` owns JSON/protobuf conversion and descriptor-backed gRPC frame formatting; `json_stream.rs` owns incremental JSON-to-gRPC request streaming and stdin/Windows pipe reading; `descriptor_wire.rs` owns small descriptor wire parsing helpers.
-- Timeout duration parsing, Go-style duration formatting, elapsed request budgets, connect/DNS timeout caps, and shared `request timed out after ...` errors live in `src/duration.rs`; HTTP, WebSocket, DNS inspection, and TLS inspection paths should reuse `TimeoutBudget` instead of recomputing remaining time locally, and response body deadlines should preserve the original request timeout diagnostic.
-- HTTP retries keep the original `--timeout` operation deadline across attempts, cap retry sleeps to the remaining budget, refresh per-request timeouts before each send, and use best-effort byte/time-bounded drains for retry cleanup responses.
-- Custom/direct DNS observes timeout budgets during transport setup: `--connect-timeout` bounds DNS and connect work when set, otherwise DNS uses the remaining `--timeout` budget, and DoH lookup clients receive the same budget.
-- Custom/direct DNS is scoped to the request URL; manual redirects that change scheme, host, or port rebuild the transport client and resolve the redirect target so `--dns-server`, `-vvv`, and `--timing` stay aligned with the actual target.
-- Custom/direct DNS runs A and AAAA lookups concurrently for both UDP and DoH, preserves any successful records when the other family fails, and starts TCP once a usable address family is available instead of waiting for both families. If A resolves before AAAA, hold IPv4 briefly for the Happy Eyeballs resolution delay before starting the IPv4 TCP attempt. System resolver paths must preserve full `SocketAddr` values, including IPv6 scope IDs from `getaddrinfo`, through connection setup.
-- DNS diagnostics keep transport socket addresses and displayed DNS addresses in resolver order, with display-only stable deduping. TCP and HTTP/3 connection setup stagger address attempts with the shared Happy Eyeballs fallback delay and cancel losing attempts after one address connects. HTTPS/SVCB address hints are unordered inputs; order them for HTTP/3 by interleaving families, starting with the origin lookup's preferred family when available and IPv6 otherwise.
-- Staggered per-address connect races for TCP and HTTP/3 should go through `net::race_staggered`, which uses `AbortOnDropJoin` so losing or abandoned connection attempts are aborted consistently.
-- DNS fallback paths share the top-level lookup timeout budget: DoH RFC 8484 POST and JSON fallback requests use one `TimeoutBudget`, and truncated UDP responses use the remaining budget for TCP fallback instead of restarting the timeout.
-- Custom UDP DNS uses random query IDs and applies a 5s per-query receive timeout when no request/connect timeout is available, so unresponsive UDP resolvers cannot hang indefinitely.
-- DoH lookups use the main HTTP transport client's ALPN-negotiated pool so concurrent HTTPS query types share an HTTP/2 connection when the resolver supports `h2`, falling back to HTTP/1.1 only when needed. Dynamic direct A/AAAA family lookups should pass a shared `DohClient` into both family futures; avoid regressing to one TLS connection per A/AAAA query.
-- DoH responses are capped at 1 MiB while buffering; oversized responses must fail with a DNS error instead of growing memory without bound.
-- DoH resolver URLs are queried with RFC 8484 `application/dns-message` POST requests first, falling back to Google-style JSON DoH for compatibility; keep the same response size cap on both paths.
-- `--dns-server` accepts URL-style schemes: bare `IP[:PORT]` or `udp://IP[:PORT]` for UDP (with TCP fallback on truncation), `tcp://IP[:PORT]` for plain DNS over TCP, `tls://HOST[:PORT]`/`dot://HOST[:PORT]` for DNS over TLS (default port 853), and `quic://HOST[:PORT]`/`doq://HOST[:PORT]` for DNS over QUIC (default port 853). Hostnames for TLS/QUIC resolvers are resolved via the system resolver and used for TLS SNI/verification.
-- DNS over TCP, TLS, and QUIC pipe A and AAAA queries over one connection (separate QUIC streams) and read the responses by matching query IDs; no truncation fallback is needed for stream-based transports.
-- DNS implementation details are centralized under `src/dns`: `custom.rs` owns `--dns-server` dispatch, `wire.rs` owns DNS packet encoding/parsing, and `doh.rs` owns DoH querying. Request, TLS, WebSocket, and inspection code should reuse those helpers instead of branching on DoH vs UDP locally.
-- DNS inspection lookup orchestration stays in `src/dns/inspect.rs`; RDATA formatting and DoH generic-RDATA normalization live in `src/dns/inspect/rdata.rs`, while DNS inspection output rendering lives in `src/dns/inspect/render.rs`.
-- HTTP request, DoH HTTPS, and WebSocket `wss://` connections use rustls' platform verifier to match the old reqwest path and avoid loading native roots into a Rust store during request/DNS timing; request-path TLS config still needs to preserve `--ca-cert`, mTLS, `--insecure`, and TLS min/max behavior.
-- GitHub Actions run Cargo fmt, clippy, unit tests, and the Rust integration suite. Release builds Cargo archives named for the self-updater, Linux GNU binaries are built with a prebuilt `cargo-zigbuild` against an explicit glibc 2.28 floor, Windows release binaries use the static MSVC CRT, and each archive is uploaded with a SHA-256 sidecar. The release workflow supports manual dry runs via `workflow_dispatch`, uploading archives as workflow artifacts unless explicitly told to upload to an existing GitHub Release. Release builds set `FETCH_VERSION` from the release tag/manual version so the compiled binary reports the published or test version; `Cargo.toml` intentionally remains `0.0.0` unless crate publishing becomes a goal. Local builds derive `FETCH_VERSION` from a matching `v*` git tag, then `git describe`, then `v0.0.0-dev`. Build info marks `vcs.modified` from tracked Git changes only, ignoring untracked files such as local Zig caches.
-- Rust is pinned to 1.96.0 via `rust-toolchain.toml`; keep `Cargo.toml`'s `rust-version` and GitHub Actions toolchain setup aligned with that version.
-- Rust default config discovery on Windows honors `XDG_CONFIG_HOME/fetch/config` and `HOME/.config/fetch/config` before falling back to `AppData/fetch/config`; Windows mTLS integration fixtures use RSA test certificates to stay compatible with rustls platform verification.
-- `--copy` tees decoded response bodies to the system clipboard for both stdout and output-file responses, using platform clipboard commands (`pbcopy`, `wl-copy`, `xclip`, `xsel`, or `clip.exe`) and skipping clipboard writes when the decoded body exceeds 1 MiB.
-- Clipboard command execution is bounded while stdin is written and while waiting for exit; `--copy` kills a clipboard backend that does not finish within the short wait timeout and reports a warning instead of hanging indefinitely.
-- Named session saves take a per-session advisory lock, reload the latest JSON, and merge only local cookie creates/updates/deletes before atomic replacement so concurrent `--session` invocations preserve distinct cookie changes. Session saves use a short bounded lock wait and report a warning instead of hanging indefinitely when another process keeps the session lock.
-- Explicit self-updates use a bounded update-lock wait capped by the request timeout or the fixed update-lock timeout; background auto-update checks keep using nonblocking lock acquisition.
-- Session and update lock acquisition should go through `fileutil::FileLock` so cross-platform open/retry/flock/LockFileEx/unlock behavior stays centralized while call sites own their timeout diagnostics.
-- User-supplied paths that support `~/` expansion should use `fileutil::expand_home`; keep the raw input string separately when diagnostics must preserve exactly what the user typed.
-- Self-update release metadata, artifact, checksum, and redirect-target URLs require HTTPS by default; only internal update/test overrides such as an `http://` `FETCH_INTERNAL_UPDATE_URL` may use HTTP for local fixtures.
-- Self-update networking must not inherit origin-specific TLS overrides such as
-  `--insecure`, client `--cert`/`--key`, TLS version pins, forced HTTP version,
-  or Unix sockets from config or request CLI state. It may preserve operational
-  settings such as proxy, DNS server, timeouts, verbosity, and custom CA roots.
-- `install.sh` verifies release archives against their `.sha256` sidecars before extraction and must not auto-edit shell startup files for completions during default installs. Completion installation is opt-in via `--completions` or `FETCH_INSTALL_COMPLETIONS=1`; otherwise print manual commands.
-- Output-file downloads keep `*.download` temp files behind a drop guard so cancellation paths such as Ctrl-C clean up partial files; Unix atomic installs also sync the parent directory after rename/link updates for stronger crash durability.
-- Top-level Ctrl-C/SIGINT handling exits 130 for interrupted requests, including streaming modes such as WebSocket; keep return-code docs aligned if this changes.
-- Self-updates stream release artifacts while calculating SHA-256 on the fly: `.tar.gz`/`.tgz` artifacts unpack directly into the update temp directory through a bounded reader, while `.zip` artifacts stream to a temp archive file first because zip extraction needs seekable input. Non-Windows replacement copies the new executable into the target directory before calling `fileutil::atomic_replace_file` so Unix parent-directory syncs are preserved.
-- Response bodies that appear binary are not written to stdout when stdout is a terminal unless output is explicitly forced with `--output -`; this guard applies to both buffered formatting fallback output and raw streaming paths such as `--format off`.
-- Image rendering defaults (`auto`) use built-in Rust decoders only; external adapters (`vips`, `magick`, `ffmpeg`) require `--image external` or `image = external` and run with bounded stdin/stdout/stderr and timeout handling.
-- MessagePack `str` values and string map keys validate UTF-8 before JSON formatting; invalid `str` bytes return `MsgPackError`, while `bin` values continue to render as base64 JSON strings. Empty string map keys are valid and preserved.
-- Response compression negotiation is controlled by `--compress auto|br|gzip|zstd|off` or `compress = ...`; `brotli` is accepted as an alias for `br`, `auto` requests and decodes gzip/brotli/zstd, single-algorithm modes only request/decode that algorithm, and `off` leaves compressed bodies untouched.
-- Output files receive decoded/decompressed response bodies by default; docs should point users to `--compress off` or `compress = off` for byte-for-byte downloads of `.gz`, `.br`, or `.zst` assets served with `Content-Encoding`.
-- Formatted SSE responses stream incrementally to stdout with terminal color when enabled, rendering events as `event:`/`data:` blocks while formatting JSON data. Auto-compressed SSE responses are retried without `Accept-Encoding` so intermediaries do not buffer events; request timeouts from flags, curl commands, or config remain enforced.
-- The auto-compressed SSE retry without `Accept-Encoding` is limited to safe methods (`GET`/`HEAD`); non-safe methods keep the original compressed response and warn instead of silently replaying a state-changing request.
-- Formatted NDJSON responses stream incrementally to stdout when formatting is enabled, splitting decoded bytes on newlines, formatting each record with the JSON-line formatter, and flushing after each record.
-- Digest authentication retries use bounded cleanup for 401 challenge bodies. Challenge responses that may be abandoned before EOF are retried through a fresh client before the first response is dropped so a local TCP abort from abandoning that response cannot poison the follow-up request. Unsupported or malformed Digest challenges surface an explicit diagnostic before the body replay check.
-- `--sort-headers` or `sort-headers = true` sorts displayed request/response headers alphabetically by name in verbose output without changing the actual request header order.
-- Default HTTP requests send `Accept: application/json, */*;q=0.5`, preferring JSON while allowing any other response type as a lower-priority fallback.
-- Request `Content-Length` inference is centralized in `src/http/mod.rs` and only runs when neither `Content-Length` nor `Transfer-Encoding` was supplied, keeping verbose/dry-run output aligned with the sent request and avoiding invalid mixed framing.
-- HTTP dry-run request rendering should happen before ordinary transport client construction so it does not consult DNS, proxies, or TLS setup. gRPC dry-runs with no local schema may still build a client for reflection because protobuf framing needs the resolved method descriptor.
-- `--basic` and `--digest` credentials preserve exact bytes around the first colon; leading/trailing spaces in usernames or passwords are significant and are not trimmed after CLI or `--from-curl` parsing.
-- `--from-curl` should only no-op curl flags that already match fetch defaults or curl presentation-only progress flags. Unsupported semantic flags such as `-n`/`--netrc`, `-f`/`--fail`, `-N`/`--no-buffer`, `--proto-default`, and `--proto-redir` return clear diagnostics instead of being ignored.
-- `--from-curl -d @file` and `-d @-` use the native streaming request body source when they are the single non-`-G` data value. Composite curl data bodies and `--data-urlencode @file` still materialize for curl-compatible concatenation/encoding, but cap the generated body at 16 MiB with a clear diagnostic.
-- The HTTP/2/3 environment-proxy guard implements `NO_PROXY` matching for hosts, domains, IP literals, CIDR ranges, and `*` so env proxies do not incorrectly block direct private-network requests.
-- Body-producing flags (`--data`, `--json`, `--xml`, `--form`,
-  `--multipart`, and `--edit`) infer `POST` when `--method` is omitted.
-  Explicit methods still win, including `-m GET` with a body.
-- Schemeless URLs default to HTTPS for hostnames, but `localhost` and all IP
-  literals default to HTTP. Dry-run output includes the normalized absolute URL,
-  and schemeless HTTPS connect/TLS failures suggest the equivalent `http://`
-  URL for plaintext services.
+### Response/output/formatting
 
-Retryable requests use replayable request bodies so retries and 307/308 redirects can resend data without holding unrelated state.
-Multipart `-F` request bodies are produced with a stable boundary so redirected requests preserve the original body shape.
-Multipart file parts resolve their rendered per-part headers, detected content type, and file length when the `Multipart` value is built; preview, buffered writes, length calculation, and async streaming should reuse that stored request shape instead of regenerating headers or re-sniffing files.
-Rust request uploads use a replayable body descriptor instead of a universal `Vec<u8>`: literal/form/edit/gRPC bodies remain buffered when required, while `@file`, `@-`, JSON/XML file inputs, and multipart file parts stream into hyper request bodies. File and multipart sources can be reopened for retries and 307/308 redirects; stdin streams once and reports an error if a replay is required.
+- Response handling split: `stdout.rs` terminal/pager policy; `stream.rs` decoded streaming, shared sink copy, formatter callback driver, trailers/byte counts/clipboard/broken-pipe handling; `formatters.rs` buffered/streaming body formatting; `metadata.rs` timing/clipboard/status metadata.
+- SSE, NDJSON, and gRPC formatted stdout streaming share the `stream.rs` callback driver. Keep per-format parsing in callbacks; NDJSON pending records cap at `MAX_BUFFERED_RESPONSE_BYTES`.
+- Binary-looking bodies are not written to terminal stdout unless forced with `--output -`, for both buffered fallback and raw streaming (`--format off`).
+- `--compress auto|br|gzip|zstd|off` controls negotiation/decoding (`brotli` aliases `br`). Output files receive decoded bodies by default; document `--compress off` for byte-for-byte compressed downloads.
+- Auto-compressed SSE retries without `Accept-Encoding` only for safe methods (`GET`/`HEAD`); unsafe methods warn and keep the original response.
+- Pager: `--pager auto|on|off`; `NO_PAGER` disables auto fallback; `$PAGER` is shell-split but launched directly; `$LESS` suppresses fallback flags. Images/output files bypass pager.
+- `--copy` tees decoded stdout/output-file bodies to platform clipboard commands, skips >1 MiB, and bounds stdin/write/wait, killing hung backends with a warning.
+- Content type policy belongs in `src/format/content_type.rs`; update README/docs when user-visible formats or MIME behavior change.
 
-### Content Type Detection
+### gRPC/protobuf
 
-`src/format/content_type.rs` centralizes MIME policy, mapping MIME types to response formatter kinds, preferred file extensions, and request-body default Content-Types for `@file` and multipart file parts. Supported formatter types include JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, gRPC, SSE, NDJSON, Markdown, and images.
+- `--grpc-list`/`--grpc-describe` use reflection or local descriptors; `--grpc` auto-reflects when no local schema is supplied. Plaintext loopback h2c is gRPC-only.
+- gRPC requests advertise `grpc-accept-encoding: gzip`; compressed response frames use `grpc-encoding` and unsupported encodings report by name.
+- Reflection framed-body reads are bounded by decoded bytes and message count. Client/bidi streaming should stream incremental JSON into framed protobuf without materializing full input; stdin uses the shared incremental parser, whitespace skipping, `framing::MAX_MESSAGE_SIZE`, and Windows pipe peeking.
+- `application/grpc+proto` formatted responses stream complete frames immediately while preserving trailers.
 
-## Testing
+### WebSocket
 
-- Rust unit tests live alongside modules in `src/`.
-- Rust integration tests live in focused files under `tests/`, with shared
-  harness code split by domain under `tests/support/` (HTTP, TLS, HTTP/3,
-  gRPC, DNS, WebSocket, proxy, PTY, terminal, update, and auth helpers), and
-  run the compiled Rust binary via Cargo.
-- The shared integration `run_fetch` harness isolates automatic HTTP/3 cache
-  state with a per-process temp `FETCH_INTERNAL_HTTP3_CACHE_DIR` by default;
-  cache-specific tests should pass an explicit shared temp dir through
-  `FetchOpts.env`.
-- CI runs Rust checks once on Ubuntu and runs the Rust integration harness once on each supported GitHub Actions runner: Ubuntu, macOS, and Windows.
+- Requires HTTP/1.1 upgrade; reject explicit `--http 2|3`. Output-file/clipboard/retry flags are invalid because the path streams through the message loop.
+- Interactive prompt default is controlled by `--ws-interactive auto|on|off`.
+- Non-interactive stdin connects before reading piped input, sends lines concurrently with receive, preserves empty text lines, closes send half at EOF, and continues receiving. `--ws-message-mode auto|text|binary`; `auto` sends invalid UTF-8 as binary, `binary` streams raw chunks.
+- Text output locks stdout, flushes per message, and treats broken pipe as normal. Incoming binary writes raw bytes only to non-terminal stdout; terminals use a guard. Incoming frames/messages are capped at 16 MiB.
+- URL userinfo becomes Basic auth on the stripped URL unless explicit auth headers/options override. `wss://` honors request TLS options; `ws://` rejects TLS flags. DNS/proxy/connect timeout behavior mirrors HTTP, with SOCKS5H resolving remotely and plain SOCKS5 locally. Sessions send/persist cookies on successful handshakes.
+
+### Inspection, sessions, update, platform
+
+- `--inspect-dns` resolves without HTTP, shows common records/backend/duration/TTLs, retries truncated UDP over TCP, and exits non-zero with a warning if fallback cannot complete a record type.
+- `--inspect-tls --http 3` uses QUIC/TLS with `h3`; inspection honors `--dns-server`. Verified chain rendering may append/replace trusted roots for expiry display; `--insecure` shows raw peer chain.
+- Session saves lock per session, reload latest JSON, merge only local cookie changes, atomically replace, and warn on bounded lock wait. Update locks use `fileutil::FileLock`; background checks are nonblocking.
+- Self-update metadata/artifact/checksum/redirect URLs require HTTPS except internal test overrides; update networking must not inherit origin-specific TLS/version/Unix-socket config, but may keep proxy/DNS/timeouts/verbosity/custom CA. Artifacts stream with SHA-256; tar extracts streaming, zip uses temp archive; Unix replacement preserves atomic parent-dir sync.
+- `install.sh` verifies `.sha256`; completion install is opt-in (`--completions` or `FETCH_INSTALL_COMPLETIONS=1`) and must not auto-edit shell startup files by default.
+- Ctrl-C/SIGINT exits 130, including streaming modes. Output downloads keep `*.download` temps under a drop guard.
+- Rust is pinned to 1.96.0 (`rust-toolchain.toml`); keep `Cargo.toml` rust-version and CI aligned. Windows config search prefers XDG/HOME paths before AppData; Windows mTLS fixtures use RSA certs.
+- GitHub Actions run fmt/clippy/unit/integration. Release builds archive names for self-updater, Linux GNU uses `cargo-zigbuild` with glibc 2.28 floor, Windows uses static MSVC CRT, archives get SHA-256 sidecars, `FETCH_VERSION` comes from release tag/manual version (local: matching `v*`, then `git describe`, then `v0.0.0-dev`), and `vcs.modified` ignores untracked files.
 
 ## Docs
 
-High level documentation exists in the README. All detailed documentation exists in the `docs/` directory, and should be kept up-to-date with any code changes.
-
-The `--edit` workflow accepts `VISUAL`/`EDITOR` values with flags and also preserves executable paths that contain spaces, even when those paths are not shell-quoted.
+README is high-level; detailed docs are under `docs/`. Keep docs and generated CLI output aligned with code. The `--edit` workflow accepts `VISUAL`/`EDITOR` values with flags and preserves executable paths containing spaces even when unquoted.
