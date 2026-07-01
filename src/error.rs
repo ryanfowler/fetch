@@ -340,7 +340,7 @@ pub fn write_cli_error_with_color(err: impl std::fmt::Display, color: Option<&st
     printer.push_str("\nFor more information, try '");
     printer.write_styled("--help", &[Sequence::Bold]);
     printer.push_str("'.\n");
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 pub fn write_runtime_error(err: FetchError) {
@@ -358,7 +358,7 @@ pub fn write_runtime_error_with_color(err: FetchError, color: Option<&str>) {
             printer.push_str("\nIf you absolutely trust the server, try '");
             printer.write_styled("--insecure", &[Sequence::Bold]);
             printer.push_str("'.\n");
-            flush_stderr(printer);
+            core::flush_stderr(printer);
         }
         _ => write_cli_error_with_color(err, color),
     }
@@ -368,20 +368,20 @@ pub fn write_error_with_color(err: impl std::fmt::Display, color: Option<&str>) 
     let err = FetchError::from_message(err.to_string());
     let mut printer = Printer::stderr(color);
     write_fetch_error_msg_no_flush(&mut printer, &err);
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 pub fn write_warning_with_color(msg: impl std::fmt::Display, color: Option<&str>) {
     let mut printer = Printer::stderr(color);
     core::write_warning_msg_no_flush(&mut printer, msg);
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 pub fn write_warning_with_separator_with_color(msg: impl std::fmt::Display, color: Option<&str>) {
     let mut printer = Printer::stderr(color);
     core::write_warning_msg_no_flush(&mut printer, msg);
     core::write_warning_separator_no_flush(&mut printer);
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 pub fn write_warnings_with_separator_with_color<I, M>(warnings: I, color: Option<&str>)
@@ -397,13 +397,8 @@ where
     }
     if wrote_warning {
         core::write_warning_separator_no_flush(&mut printer);
-        flush_stderr(printer);
+        core::flush_stderr(printer);
     }
-}
-
-fn flush_stderr(mut printer: Printer) {
-    let mut stderr = std::io::stderr();
-    let _ = printer.flush_to(&mut stderr);
 }
 
 fn write_fetch_error_msg_no_flush(printer: &mut Printer, err: &FetchError) {

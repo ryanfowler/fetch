@@ -132,7 +132,7 @@ pub(super) fn print_response_metadata(cli: &Cli, response: &Response) {
         printer.write_response_prefix();
     }
     printer.push_str("\n");
-    flush_stderr(printer);
+    core::flush_stderr(printer);
 }
 
 pub(super) fn exit_code(status: u16, ignore_status: bool) -> i32 {

@@ -161,7 +161,7 @@ pub(super) fn print_request_metadata(
         printer.write_request_prefix();
         printer.push_str("\n");
     }
-    flush_stderr(printer);
+    core::flush_stderr(printer);
     Ok(())
 }
 
@@ -232,11 +232,6 @@ pub(crate) fn validate_ech_for_url(cli: &Cli, url: &Url) -> Result<(), FetchErro
         return Err("--ech requires an https:// URL".into());
     }
     Ok(())
-}
-
-pub(super) fn flush_stderr(mut printer: core::Printer) {
-    let mut stderr = std::io::stderr();
-    let _ = printer.flush_to(&mut stderr);
 }
 
 pub(crate) fn request_target(url: &Url) -> String {
