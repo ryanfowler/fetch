@@ -62,6 +62,7 @@ pub struct ParsedCurl {
     pub has_content_type: bool,
     pub has_accept: bool,
     pub allowed_proto: String,
+    pub ech: String,
     json_defaults: bool,
 }
 
@@ -464,6 +465,11 @@ fn parse_long_flag(
         "range" => {
             let (value, consumed) = consume_arg(name)?;
             parsed.ranges.push(value);
+            Ok(consumed)
+        }
+        "ech" => {
+            let (value, consumed) = consume_arg(name)?;
+            parsed.ech = value;
             Ok(consumed)
         }
         "http1.0" => {

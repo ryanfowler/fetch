@@ -703,6 +703,7 @@ mod tests {
             no_default_alpn: false,
             port,
             ipv4_hint: Vec::new(),
+            ech: None,
             ipv6_hint: Vec::new(),
             mandatory: Vec::new(),
             unsupported_mandatory: Vec::new(),

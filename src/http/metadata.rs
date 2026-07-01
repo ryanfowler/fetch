@@ -227,6 +227,13 @@ pub(super) fn validate_http_version_options(
     }
 }
 
+pub(crate) fn validate_ech_for_url(cli: &Cli, url: &Url) -> Result<(), FetchError> {
+    if url.scheme() != "https" && matches!(cli.ech.as_deref(), Some("auto" | "on")) {
+        return Err("--ech requires an https:// URL".into());
+    }
+    Ok(())
+}
+
 pub(super) fn flush_stderr(mut printer: core::Printer) {
     let mut stderr = std::io::stderr();
     let _ = printer.flush_to(&mut stderr);

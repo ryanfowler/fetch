@@ -15,6 +15,7 @@ use crate::dns::svcb::{HttpsRecordResolver, SvcbRecord};
 use crate::duration::{TimeoutBudget, request_timeout_message};
 use crate::error::FetchError;
 use crate::timing::{DnsTiming, TransportTiming};
+use rustls::client::EchMode;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum ClientMode {
@@ -86,6 +87,7 @@ struct ClientDnsDiscovery {
     dns_server: Option<String>,
     auto_http3: Option<AutoHttp3Config>,
     auto_http3_discovery: bool,
+    ech_https_records: Vec<SvcbRecord>,
 }
 
 pub(crate) async fn build_client_for_url(
@@ -111,12 +113,22 @@ pub(crate) async fn build_client_for_url(
             dns_server: cli.dns_server.clone(),
             auto_http3: None,
             auto_http3_discovery: auto_http3,
+            ech_https_records: Vec::new(),
         }
     } else {
         resolve_dns_for_client(cli, url, dns_timeout, effective_proxy, auto_http3).await?
     };
+    // Resolve ECH mode before extracting fields from discovery
+    let ech_mode = if should_configure_tls(cli, url) {
+        resolve_ech_mode(cli, &discovery)?
+    } else {
+        None
+    };
     let dns_resolution = discovery.dns_resolution;
     let runtime_dns_resolution = discovery.runtime_dns_resolution;
+    let auto_http3_config = discovery.auto_http3;
+    let auto_http3_discovery = discovery.auto_http3_discovery;
+    let dns_server = discovery.dns_server;
     let mut builder = Client::builder()
         .use_rustls_tls()
         .no_brotli()
@@ -125,10 +137,10 @@ pub(crate) async fn build_client_for_url(
     builder = configure_http_version(builder, context.mode);
     builder = configure_unix_socket(builder, cli.unix.as_deref())?;
     builder = configure_http3_local_address(builder, http_version, url);
-    if let Some(auto_http3) = discovery.auto_http3 {
+    if let Some(auto_http3) = auto_http3_config {
         builder = builder.auto_http3(auto_http3);
     }
-    if discovery.auto_http3_discovery {
+    if auto_http3_discovery {
         builder = builder.auto_http3_discovery();
     }
     if auto_http3 {
@@ -137,7 +149,7 @@ pub(crate) async fn build_client_for_url(
             builder = builder.http3_cache(Arc::new(cache), !cli.insecure);
         }
     }
-    if let Some(dns_server) = discovery.dns_server {
+    if let Some(dns_server) = dns_server {
         builder = builder.dns_server(dns_server);
     }
     if let Some(resolution) = &runtime_dns_resolution {
@@ -150,7 +162,9 @@ pub(crate) async fn build_client_for_url(
         builder = builder.connection_timing(connect_timing.clone());
     }
     if should_configure_tls(cli, url) {
-        builder = configure_tls(builder, cli)?;
+        let hard_fail = matches!(cli.ech.as_deref(), Some("on"));
+        builder = builder.ech_hard_fail(hard_fail);
+        builder = configure_tls(builder, cli, ech_mode)?;
     }
     builder = configure_proxy(builder, cli.proxy.as_deref(), http_version, url)?;
     if let Some(timeout) =
@@ -222,6 +236,8 @@ async fn resolve_dns_for_client_inner(
     effective_proxy: Option<EffectiveProxy>,
     auto_http3: bool,
 ) -> Result<ClientDnsDiscovery, FetchError> {
+    let need_ech_svcb = url.scheme() == "https" && is_ech_active(cli);
+    let need_svcb = auto_http3 || need_ech_svcb;
     let Some(host) = url.host_str() else {
         return Ok(ClientDnsDiscovery {
             dns_resolution: None,
@@ -229,18 +245,51 @@ async fn resolve_dns_for_client_inner(
             dns_server: None,
             auto_http3: None,
             auto_http3_discovery: false,
+            ech_https_records: Vec::new(),
         });
     };
-    if host.parse::<IpAddr>().is_ok()
-        || cli.unix.is_some()
-        || effective_proxy.is_some_and(|proxy| !proxy.uses_local_target_dns())
-    {
+    if host.parse::<IpAddr>().is_ok() || cli.unix.is_some() {
         return Ok(ClientDnsDiscovery {
             dns_resolution: None,
             runtime_dns_resolution: None,
             dns_server: None,
             auto_http3: None,
             auto_http3_discovery: false,
+            ech_https_records: Vec::new(),
+        });
+    }
+    // Proxy resolves target addresses remotely: skip A/AAAA but still
+    // query HTTPS/SVCB records when ECH is active so the client can
+    // discover the server's ECH configuration. Do not enable auto-H3
+    // through a proxy; auto_http3_allowed already blocks that path.
+    if effective_proxy.is_some_and(|proxy| !proxy.uses_local_target_dns()) {
+        if need_ech_svcb {
+            let ech_timeout = timeout
+                .remaining()
+                .ok()
+                .flatten()
+                .unwrap_or(Duration::from_secs(5));
+            let https_records = if let Some(dns_server) = cli.dns_server.as_deref() {
+                lookup_ech_https_records(Some(dns_server), host, ech_timeout).await
+            } else {
+                lookup_ech_https_records(None, host, ech_timeout).await
+            };
+            return Ok(ClientDnsDiscovery {
+                dns_resolution: None,
+                runtime_dns_resolution: None,
+                dns_server: None,
+                auto_http3: None,
+                auto_http3_discovery: false,
+                ech_https_records: https_records,
+            });
+        }
+        return Ok(ClientDnsDiscovery {
+            dns_resolution: None,
+            runtime_dns_resolution: None,
+            dns_server: None,
+            auto_http3: None,
+            auto_http3_discovery: false,
+            ech_https_records: Vec::new(),
         });
     }
 
@@ -251,11 +300,22 @@ async fn resolve_dns_for_client_inner(
 
     if let Some(dns_server) = cli.dns_server.as_deref() {
         let start = Instant::now();
-        let (addrs, https_records) = if auto_http3 {
+        let (addrs, https_records) = if need_ech_svcb {
+            // ECH requires HTTPS records; don't use the abort-early auto-H3
+            // pattern which may discard them before the SVCB query finishes.
+            let ech_timeout = timeout
+                .remaining()
+                .ok()
+                .flatten()
+                .unwrap_or(Duration::from_secs(5));
+            let https_records = lookup_ech_https_records(Some(dns_server), host, ech_timeout).await;
+            let addrs = custom::lookup_ips(dns_server, host, timeout.timeout()).await;
+            (addrs?, https_records)
+        } else if let Some(auto_http3_budget) = auto_http3_discovery {
             let https = spawn_auto_http3_https_records(
                 Some(dns_server.to_string()),
                 host.to_string(),
-                auto_http3_discovery,
+                Some(auto_http3_budget),
             );
             let addrs = custom::lookup_ips(dns_server, host, timeout.timeout()).await;
             let https_records = take_finished_auto_http3_https_records(https).await;
@@ -293,16 +353,18 @@ async fn resolve_dns_for_client_inner(
             dns_server: None,
             auto_http3: auto_http3_config,
             auto_http3_discovery: false,
+            ech_https_records: https_records,
         });
     }
 
-    if !debug_dns && !auto_http3 {
+    if !debug_dns && !need_svcb {
         return Ok(ClientDnsDiscovery {
             dns_resolution: None,
             runtime_dns_resolution: None,
             dns_server: None,
             auto_http3: None,
             auto_http3_discovery: false,
+            ech_https_records: Vec::new(),
         });
     }
 
@@ -315,8 +377,24 @@ async fn resolve_dns_for_client_inner(
     });
     let start = Instant::now();
     let lookup = tokio::net::lookup_host((host, port));
-    let (socket_addrs, https_records) = if auto_http3 {
-        let https = spawn_auto_http3_https_records(None, host.to_string(), auto_http3_discovery);
+    let (socket_addrs, https_records) = if need_ech_svcb {
+        // ECH requires HTTPS records; await the SVCB query properly instead
+        // of using the abort-early auto-H3 pattern.
+        let ech_timeout = timeout
+            .remaining()
+            .ok()
+            .flatten()
+            .unwrap_or(Duration::from_secs(5));
+        let https_records = lookup_ech_https_records(None, host, ech_timeout).await;
+        let socket_addrs = lookup.await;
+        (
+            socket_addrs
+                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
+                .collect::<Vec<_>>(),
+            https_records,
+        )
+    } else if let Some(auto_http3_budget) = auto_http3_discovery {
+        let https = spawn_auto_http3_https_records(None, host.to_string(), Some(auto_http3_budget));
         let socket_addrs = lookup.await;
         let https_records = take_finished_auto_http3_https_records(https).await;
         (
@@ -360,6 +438,7 @@ async fn resolve_dns_for_client_inner(
         dns_server: None,
         auto_http3: auto_http3_config,
         auto_http3_discovery: false,
+        ech_https_records: https_records,
     })
 }
 
@@ -368,6 +447,35 @@ fn dynamic_dns_for_client(cli: &Cli, url: &Url, effective_proxy: Option<Effectiv
         .is_some_and(|host| host.parse::<IpAddr>().is_err())
         && cli.unix.is_none()
         && effective_proxy.is_none()
+        && !is_ech_active(cli)
+}
+
+fn is_ech_active(cli: &Cli) -> bool {
+    crate::tls::ech::is_ech_active(cli)
+}
+
+fn resolve_ech_mode(
+    cli: &Cli,
+    discovery: &ClientDnsDiscovery,
+) -> Result<Option<EchMode>, FetchError> {
+    let candidates = ech_candidates_from_records(&discovery.ech_https_records);
+    crate::tls::ech::resolve_ech_mode(cli, &candidates)
+}
+
+/// Extract ECH candidate byte slices from SVCB records, filtered and sorted
+/// by SvcPriority. Excludes alias-mode (priority 0) and records with
+/// unsupported mandatory parameters.
+fn ech_candidates_from_records(records: &[SvcbRecord]) -> Vec<&[u8]> {
+    let mut usable: Vec<&SvcbRecord> = records
+        .iter()
+        .filter(|r| !r.is_alias_mode() && r.is_usable())
+        .collect();
+    // Lower priority values are more preferred (RFC 9460 §2.4.2).
+    usable.sort_by_key(|r| r.priority);
+    usable
+        .iter()
+        .filter_map(|r| r.ech.as_deref().filter(|b| !b.is_empty()))
+        .collect()
 }
 
 async fn lookup_auto_http3_https_records(
@@ -378,6 +486,24 @@ async fn lookup_auto_http3_https_records(
     let Some(timeout) = discovery_budget.and_then(AutoHttp3DiscoveryBudget::remaining) else {
         return Vec::new();
     };
+    let resolver = dns_server
+        .map(HttpsRecordResolver::Custom)
+        .unwrap_or(HttpsRecordResolver::System);
+    tokio::time::timeout(
+        timeout,
+        crate::dns::svcb::lookup_https_records(resolver, host, Some(timeout)),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default()
+}
+
+async fn lookup_ech_https_records(
+    dns_server: Option<&str>,
+    host: &str,
+    timeout: Duration,
+) -> Vec<SvcbRecord> {
     let resolver = dns_server
         .map(HttpsRecordResolver::Custom)
         .unwrap_or(HttpsRecordResolver::System);
@@ -631,9 +757,46 @@ pub(crate) fn http3_local_address(url: &Url) -> Option<IpAddr> {
     }
 }
 
+pub(crate) async fn resolve_websocket_ech_mode(
+    cli: &Cli,
+    url: &Url,
+    timeout: TimeoutBudget,
+) -> Result<Option<EchMode>, FetchError> {
+    if url.scheme() != "wss" || !is_ech_active(cli) {
+        return Ok(None);
+    }
+    let Some(host) = url.host_str() else {
+        return Ok(None);
+    };
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(None);
+    }
+    let ech_timeout = timeout
+        .remaining()
+        .ok()
+        .flatten()
+        .unwrap_or(Duration::from_secs(5));
+    let resolver = cli
+        .dns_server
+        .as_deref()
+        .map(crate::dns::svcb::HttpsRecordResolver::Custom)
+        .unwrap_or(crate::dns::svcb::HttpsRecordResolver::System);
+    let records = tokio::time::timeout(
+        ech_timeout,
+        crate::dns::svcb::lookup_https_records(resolver, host, Some(ech_timeout)),
+    )
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
+    let candidates = ech_candidates_from_records(&records);
+    crate::tls::ech::resolve_ech_mode(cli, &candidates)
+}
+
 pub(crate) fn configure_tls(
     mut builder: ClientBuilder,
     cli: &Cli,
+    ech_mode: Option<EchMode>,
 ) -> Result<ClientBuilder, FetchError> {
     let min_tls = cli.min_tls.as_deref().or(cli.tls.as_deref());
     let min_tls_option = min_tls.map(|value| {
@@ -643,6 +806,22 @@ pub(crate) fn configure_tls(
             ("tls", value)
         }
     });
+    if ech_mode.is_some() {
+        if let Some(min_tls_option) = min_tls_option
+            && crate::tls::tls_order(min_tls_option.0, min_tls_option.1).is_ok_and(|o| o < 13)
+        {
+            return Err(
+                "--ech requires TLS 1.3 or higher; use --min-tls 1.3 or remove --ech".into(),
+            );
+        }
+        if let Some(max_tls) = cli.max_tls.as_deref()
+            && crate::tls::tls_order("max-tls", max_tls).is_ok_and(|o| o < 13)
+        {
+            return Err(
+                "--ech requires TLS 1.3 or higher; remove --max-tls or use --max-tls 1.3".into(),
+            );
+        }
+    }
     crate::tls::ensure_rustls_supported_range(min_tls_option, cli.max_tls.as_deref())?;
     builder = builder.tls_config(crate::tls::rustls_platform_client_config_with_options(
         &cli.ca_cert,
@@ -651,6 +830,7 @@ pub(crate) fn configure_tls(
         cli.insecure,
         min_tls_option,
         cli.max_tls.as_deref(),
+        ech_mode,
     )?);
     Ok(builder)
 }
@@ -1000,6 +1180,7 @@ mod tests {
             no_default_alpn: false,
             port,
             ipv4_hint: Vec::new(),
+            ech: None,
             ipv6_hint: Vec::new(),
             mandatory: Vec::new(),
             unsupported_mandatory: Vec::new(),
@@ -1332,7 +1513,7 @@ mod tests {
         let cli =
             Cli::try_parse_from(["fetch", "--min-tls", "1.0", "https://example.com"]).unwrap();
 
-        let err = configure_tls(Client::builder().use_rustls_tls(), &cli).unwrap_err();
+        let err = configure_tls(Client::builder().use_rustls_tls(), &cli, None).unwrap_err();
 
         assert_eq!(
             err.to_string(),
@@ -1342,12 +1523,136 @@ mod tests {
         let cli =
             Cli::try_parse_from(["fetch", "--max-tls", "1.1", "https://example.com"]).unwrap();
 
-        let err = configure_tls(Client::builder().use_rustls_tls(), &cli).unwrap_err();
+        let err = configure_tls(Client::builder().use_rustls_tls(), &cli, None).unwrap_err();
 
         assert_eq!(
             err.to_string(),
             "invalid value '1.1' for option '--max-tls': must be one of [1.2, 1.3]"
         );
+    }
+
+    // --- ech_candidates_from_records ---
+
+    fn ech_record(priority: u16, ech: Option<&[u8]>) -> SvcbRecord {
+        let mut record = https_record(priority, ".", &["h2"], None);
+        record.ech = ech.map(|b| b.to_vec());
+        record
+    }
+
+    #[test]
+    fn ech_candidates_empty_records() {
+        let candidates = ech_candidates_from_records(&[]);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn ech_candidates_alias_mode_excluded() {
+        let records = [ech_record(0, Some(b"valid-alias"))];
+        let candidates = ech_candidates_from_records(&records);
+        assert!(
+            candidates.is_empty(),
+            "alias-mode (priority 0) records should be excluded"
+        );
+    }
+
+    #[test]
+    fn ech_candidates_unsupported_mandatory_excluded() {
+        let mut record = ech_record(1, Some(b"has-mandatory"));
+        record.unsupported_mandatory = vec![99];
+        let records = [record];
+        let candidates = ech_candidates_from_records(&records);
+        assert!(
+            candidates.is_empty(),
+            "records with unsupported mandatory params should be excluded"
+        );
+    }
+
+    #[test]
+    fn ech_candidates_one_valid_config() {
+        let records = [ech_record(1, Some(b"ech-bytes"))];
+        let candidates = ech_candidates_from_records(&records);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], b"ech-bytes");
+    }
+
+    #[test]
+    fn ech_candidates_malformed_then_valid_preserves_order() {
+        let records = [
+            ech_record(10, Some(b"malformed-first")),
+            ech_record(20, Some(b"valid-second")),
+        ];
+        let candidates = ech_candidates_from_records(&records);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], b"malformed-first");
+        assert_eq!(candidates[1], b"valid-second");
+    }
+
+    #[test]
+    fn ech_candidates_sorted_by_priority() {
+        // Lower priority is more preferred (RFC 9460).
+        let records = [
+            ech_record(30, Some(b"low-priority")),
+            ech_record(10, Some(b"high-priority")),
+            ech_record(20, Some(b"mid-priority")),
+        ];
+        let candidates = ech_candidates_from_records(&records);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], b"high-priority");
+        assert_eq!(candidates[1], b"mid-priority");
+        assert_eq!(candidates[2], b"low-priority");
+    }
+
+    #[test]
+    fn ech_candidates_mixed_usable_and_unusable_records() {
+        // Alias and unusable records are removed; remaining are sorted.
+        let mut unsupported = ech_record(5, Some(b"unsupported-ech"));
+        unsupported.unsupported_mandatory = vec![99];
+
+        let records = [
+            ech_record(0, Some(b"alias-ech")), // alias mode - excluded
+            unsupported,                       // unsupported mandatory - excluded
+            ech_record(30, Some(b"low-priority")),
+            ech_record(10, Some(b"high-priority")),
+        ];
+        let candidates = ech_candidates_from_records(&records);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0], b"high-priority");
+        assert_eq!(candidates[1], b"low-priority");
+    }
+
+    #[test]
+    fn ech_candidates_record_without_ech_is_skipped() {
+        let records = [ech_record(10, None), ech_record(20, Some(b"has-ech"))];
+        let candidates = ech_candidates_from_records(&records);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], b"has-ech");
+    }
+
+    #[test]
+    fn ech_candidates_empty_ech_slice_is_skipped() {
+        let records = [ech_record(10, Some(b"")), ech_record(20, Some(b"has-ech"))];
+        let candidates = ech_candidates_from_records(&records);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], b"has-ech");
+    }
+
+    #[test]
+    fn ech_candidates_multiple_service_priorities() {
+        // Multiple service-mode records with different priorities.
+        let records = [
+            ech_record(50, Some(b"lowest")),
+            ech_record(10, Some(b"highest")),
+            ech_record(30, Some(b"mid")),
+            ech_record(20, Some(b"mid-high")),
+            ech_record(40, Some(b"mid-low")),
+        ];
+        let candidates = ech_candidates_from_records(&records);
+        assert_eq!(candidates.len(), 5);
+        assert_eq!(candidates[0], b"highest");
+        assert_eq!(candidates[1], b"mid-high");
+        assert_eq!(candidates[2], b"mid");
+        assert_eq!(candidates[3], b"mid-low");
+        assert_eq!(candidates[4], b"lowest");
     }
 
     #[cfg(unix)]

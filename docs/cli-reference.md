@@ -455,6 +455,26 @@ Maximum TLS version. Values: `1.2`, `1.3`. Combine with `--min-tls` to allow a b
 fetch --min-tls 1.2 --max-tls 1.2 example.com
 ```
 
+### `--ech MODE`
+
+Encrypted Client Hello mode. Values: `auto`, `on`, `off`. Default: `off`.
+
+- **`auto`** — Use ECH if the server advertises it via DNS HTTPS/SVCB records.
+  Falls back to GREASE ECH when no real config is found. If the server
+  rejects the offer, the connection proceeds gracefully.
+- **`on`** — Require ECH. Errors if the server doesn't advertise ECH in DNS,
+  and fails if the server rejects the offer.
+- **`off`** — Never use ECH.
+
+ECH requires TLS 1.3 and is incompatible with `--min-tls 1.2`.
+
+```sh
+fetch --ech auto example.com
+fetch --ech on cloudflare.com
+```
+
+See [Encrypted Client Hello](ech.md) for details.
+
 ### `--inspect-tls`
 
 Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. With `--http 3`, inspection uses a QUIC handshake and offers `h3` ALPN. Request-only CLI flags (e.g. `--data`, `--timing`, `--grpc`) warn that no HTTP request will be sent and those flags have no effect; config-file defaults do not trigger this warning.

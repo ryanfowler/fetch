@@ -598,6 +598,14 @@ fn apply_from_curl(cli: &mut Cli) -> Result<(), FetchError> {
     if !parsed.doh_url.is_empty() {
         cli.dns_server = Some(parsed.doh_url.clone());
     }
+    if !parsed.ech.is_empty() {
+        cli.ech = Some(match parsed.ech.as_str() {
+            "hard" | "on" | "yes" | "true" => "on".to_string(),
+            "auto" => "auto".to_string(),
+            "false" | "off" => "off".to_string(),
+            other => other.to_string(),
+        });
+    }
     if parsed.retry > 0 {
         cli.retry = Some(parsed.retry);
     }
@@ -703,6 +711,7 @@ fn validate_from_curl_exclusives(cli: &Cli) -> Result<(), FetchError> {
             ConflictRule::flag("grpc-describe", |cli: &Cli| cli.grpc_describe.is_some()),
             ConflictRule::flag("grpc-list", |cli: &Cli| cli.grpc_list),
             ConflictRule::flag("query", |cli: &Cli| !cli.query.is_empty()),
+            ConflictRule::flag("ech", |cli: &Cli| cli.ech.is_some()),
         ],
     );
 
@@ -808,6 +817,9 @@ fn validate_websocket_exclusives(cli: &Cli) -> Result<(), FetchError> {
             }),
             ConflictRule::flag("ca-cert", |ctx: &WebSocketConflictContext<'_>| {
                 ctx.plain_ws && !ctx.cli.ca_cert.is_empty()
+            }),
+            ConflictRule::flag("ech", |ctx: &WebSocketConflictContext<'_>| {
+                ctx.plain_ws && ctx.cli.ech.is_some()
             }),
         ],
     );
@@ -1390,6 +1402,47 @@ mod tests {
 
         let err = apply_from_curl(&mut cli).unwrap_err().to_string();
         assert!(err.contains("cannot be used together"));
+    }
+
+    #[test]
+    fn from_curl_exclusive_with_ech_is_rejected() {
+        let mut cli = Cli::try_parse_from([
+            "fetch",
+            "--from-curl",
+            "curl --ech hard https://example.com",
+            "--ech",
+            "off",
+        ])
+        .unwrap();
+
+        let err = apply_from_curl(&mut cli).unwrap_err().to_string();
+        assert_eq!(err, "'--from-curl' and '--ech' cannot be used together");
+    }
+
+    #[test]
+    fn from_curl_ech_mappings() {
+        let cases = [
+            ("hard", "on"),
+            ("true", "on"),
+            ("yes", "on"),
+            ("on", "on"),
+            ("auto", "auto"),
+            ("false", "off"),
+            ("off", "off"),
+            // Unknown values pass through unchanged
+            ("grease", "grease"),
+        ];
+
+        for (curl_val, want) in cases {
+            let command = format!("curl --ech {curl_val} https://example.com");
+            let mut cli = Cli::try_parse_from(["fetch", "--from-curl", &command]).unwrap();
+            apply_from_curl(&mut cli).unwrap();
+            assert_eq!(
+                cli.ech.as_deref(),
+                Some(want),
+                "curl --ech {curl_val} should map to {want}"
+            );
+        }
     }
 
     #[test]

@@ -147,6 +147,7 @@ async fn tls_connector(insecure: bool) -> Result<TlsConnector, DnsTransportError
         insecure,
         None,
         None,
+        None,
     )
     .map_err(|err| DnsTransportError(err.to_string()))?;
     Ok(TlsConnector::from(Arc::new(config)))
@@ -164,6 +165,7 @@ pub(crate) async fn quic_connection(
         None,
         None,
         insecure,
+        None,
         None,
         None,
     )

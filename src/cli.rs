@@ -227,6 +227,15 @@ pub struct Cli {
     #[arg(long = "dry-run", help = "Print out the request info and exit")]
     pub dry_run: bool,
 
+    #[arg(
+        long = "ech",
+        value_name = "MODE",
+        value_parser = ["auto", "on", "off"],
+        hide_possible_values = true,
+        help = "Encrypted Client Hello mode [auto, on, off]"
+    )]
+    pub ech: Option<String>,
+
     #[arg(short = 'e', long, help = "Use an editor to modify the request body")]
     pub edit: bool,
 

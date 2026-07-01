@@ -2065,3 +2065,50 @@ fn timeout_copy_discard_and_session_cases() {
     assert_exit(&res, 1);
     assert!(res.stderr.contains("invalid session name"));
 }
+
+#[test]
+fn ech_rejected_for_plain_http() {
+    // --ech auto on http:// should be rejected
+    let res = run_fetch(&["--ech", "auto", "http://ech-reject.invalid"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains("--ech requires an https:// URL"),
+        "expected ECH scheme error, got:\n{}",
+        res.stderr
+    );
+
+    // --ech on on http:// should be rejected
+    let res = run_fetch(&["--ech", "on", "http://ech-reject.invalid"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains("--ech requires an https:// URL"),
+        "expected ECH scheme error, got:\n{}",
+        res.stderr
+    );
+
+    // --ech off on http:// should be harmless (no error)
+    // It will fail with connection error, not scheme validation
+    let res = run_fetch(&["--ech", "off", "http://ech-reject.invalid"]);
+    assert_exit(&res, 1);
+    assert!(
+        !res.stderr.contains("--ech requires an https:// URL"),
+        "--ech off should not produce scheme error, got:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
+fn ech_allowed_for_https() {
+    // --ech auto on https:// with a self-signed server should proceed past
+    // scheme validation (the actual error should be about the certificate,
+    // not about the URL scheme).
+    let tls = support::tls::start_tls_server(|_| TestResponse::ok("ech-test"));
+    let res = run_fetch(&[&tls.url, "--ech", "auto", "--insecure"]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "ech-test");
+    assert!(
+        !res.stderr.contains("--ech requires an https:// URL"),
+        "--ech auto on https:// should not produce scheme error, got:\n{}",
+        res.stderr
+    );
+}
