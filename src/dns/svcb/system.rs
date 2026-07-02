@@ -1,14 +1,34 @@
+#[cfg(target_os = "macos")]
 use std::ffi::CString;
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::time::Instant;
 
+#[cfg(any(target_os = "macos", test))]
 use crate::dns::wire;
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
 
-use super::{SvcbRecord, parse_rdata};
+use super::SvcbRecord;
+#[cfg(any(target_os = "macos", windows, test))]
+use super::parse_rdata;
 
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) async fn lookup_https_records(
+    host: &str,
+    timeout: TimeoutBudget,
+) -> Result<Vec<SvcbRecord>, FetchError> {
+    let Some(server_addr) = resolv_conf_nameserver() else {
+        return Ok(Vec::new());
+    };
+    match super::lookup_udp_https_records(server_addr, host, timeout).await {
+        Ok(records) => Ok(records),
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 pub(super) async fn lookup_https_records(
     host: &str,
     timeout: TimeoutBudget,
@@ -200,40 +220,19 @@ fn poll_timeout_ms(deadline: Option<Instant>) -> Option<libc::c_int> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn lookup_https_records_blocking(
-    host: &str,
-    _timeout: Option<Duration>,
-) -> Result<Vec<SvcbRecord>, FetchError> {
-    use std::os::raw::{c_char, c_int};
-
-    #[cfg_attr(all(target_os = "linux", target_env = "gnu"), link(name = "resolv"))]
-    unsafe extern "C" {
-        fn res_query(
-            dname: *const c_char,
-            class: c_int,
-            typ: c_int,
-            answer: *mut u8,
-            anslen: c_int,
-        ) -> c_int;
+fn resolv_conf_nameserver() -> Option<std::net::SocketAddr> {
+    let resolv_conf = std::fs::read_to_string("/etc/resolv.conf").ok()?;
+    for line in resolv_conf.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 2 || fields[0] != "nameserver" {
+            continue;
+        }
+        if let Ok(ip) = fields[1].parse::<std::net::IpAddr>() {
+            return Some(std::net::SocketAddr::new(ip, 53));
+        }
     }
-
-    let host = CString::new(host)
-        .map_err(|_| FetchError::Message("DNS host contains an interior NUL byte".to_string()))?;
-    let mut response = vec![0_u8; u16::MAX as usize];
-    let len = unsafe {
-        res_query(
-            host.as_ptr(),
-            c_int::from(wire::CLASS_IN),
-            c_int::from(wire::TYPE_HTTPS),
-            response.as_mut_ptr(),
-            response.len() as c_int,
-        )
-    };
-    if len <= 0 {
-        return Ok(Vec::new());
-    }
-    response.truncate(len as usize);
-    records_from_wire_response(&response)
+    None
 }
 
 #[cfg(windows)]
@@ -409,7 +408,7 @@ fn lookup_https_records_blocking(
     Ok(Vec::new())
 }
 
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
+#[cfg(test)]
 fn records_from_wire_response(raw: &[u8]) -> Result<Vec<SvcbRecord>, FetchError> {
     let records =
         wire::parse_response_without_id(raw).map_err(|err| FetchError::Runtime(err.to_string()))?;

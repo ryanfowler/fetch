@@ -66,7 +66,7 @@ pub(crate) fn parse_response<'a>(
     parse_response_inner(raw, Some(expected_id))
 }
 
-#[cfg(any(all(unix, not(target_os = "macos")), test))]
+#[cfg(test)]
 pub(crate) fn parse_response_without_id(raw: &[u8]) -> Result<Vec<ResourceRecord<'_>>, WireError> {
     parse_response_inner(raw, None)
 }
