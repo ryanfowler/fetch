@@ -586,6 +586,7 @@ fn alpn_protocols(http_version: Option<HttpVersion>) -> &'static [&'static str] 
 pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     let mut ignored = Vec::new();
     crate::inspection::append_shared_ignored_request_flags(cli, &mut ignored);
+    crate::inspection::append_shared_ignored_http_version_flags(cli, &mut ignored);
     crate::inspection::append_shared_ignored_auth_flags(cli, &mut ignored);
     crate::inspection::append_shared_ignored_response_flags(cli, &mut ignored);
     ignored
