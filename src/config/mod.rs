@@ -903,7 +903,9 @@ pub fn validate(cli: &Cli) -> Result<(), FetchError> {
 fn get_config_file(path: Option<&str>) -> Result<Option<(PathBuf, String)>, FetchError> {
     if let Some(path) = path {
         let path = absolute_path(crate::fileutil::expand_home(path))?;
-        let contents = std::fs::read_to_string(&path)?;
+        let contents = std::fs::read_to_string(&path).map_err(|err| {
+            FetchError::Message(format!("config file '{}': {err}", path.display()))
+        })?;
         return Ok(Some((path, contents)));
     }
 
