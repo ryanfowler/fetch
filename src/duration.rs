@@ -74,7 +74,10 @@ pub(crate) fn duration_from_seconds(
     seconds: f64,
 ) -> Result<Option<Duration>, FetchError> {
     if !seconds.is_finite() || !(0.0..=MAX_DURATION_SECONDS).contains(&seconds) {
-        return Err(format!("{flag} must be a non-negative number").into());
+        return Err(format!(
+            "invalid value '{seconds}' for option '--{flag}': must be a non-negative number"
+        )
+        .into());
     }
     if seconds == 0.0 {
         return Ok(None); // 0 means no timeout (curl-compatible)
@@ -311,7 +314,12 @@ mod tests {
 
         for seconds in [-1.0, f64::NAN, f64::INFINITY, 1e100] {
             let err = duration_from_seconds("timeout", seconds).unwrap_err();
-            assert_eq!(err.to_string(), "timeout must be a non-negative number");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "invalid value '{seconds}' for option '--timeout': must be a non-negative number"
+                )
+            );
         }
     }
 
