@@ -202,11 +202,11 @@ fn request_ctrl_c_exits_interrupted() {
     let mut child = cmd.spawn().expect("spawn fetch for signal test");
 
     started_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv_timeout(Duration::from_secs(3))
         .expect("request did not reach server");
     let rc = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
     assert_eq!(rc, 0, "failed to send SIGINT");
-    let status = wait_child(&mut child, Duration::from_secs(5))
+    let status = wait_child(&mut child, Duration::from_secs(3))
         .unwrap_or_else(|| {
             let _ = child.kill();
             panic!("fetch did not exit after SIGINT")

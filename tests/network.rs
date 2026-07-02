@@ -66,7 +66,7 @@ fn custom_dns_connects_after_fast_a_without_waiting_for_slow_aaaa() {
     let dns_addr = start_udp_dns_server_with_delayed_aaaa(
         "fetch-happy-a-first.test.",
         Ipv4Addr::new(127, 0, 0, 1),
-        Duration::from_secs(4),
+        Duration::from_secs(1),
     );
 
     let start = std::time::Instant::now();
@@ -322,7 +322,7 @@ fn http3_go_harness_cases() {
             return H3Response::ok(body)
                 .header("Content-Type", "text/plain")
                 .header("Content-Encoding", "zstd")
-                .delay_body(Duration::from_millis(100));
+                .delay_body(Duration::from_millis(50));
         }
         if req.path == "/h3-grpc-trailer-error" {
             return H3Response::ok("")
@@ -729,7 +729,7 @@ fn default_https_races_cached_alt_svc_without_waiting_for_slow_https_record_look
             }
             TestResponse::status(404, "Not Found", "")
         },
-        Duration::from_millis(250),
+        Duration::from_millis(100),
     );
     let h2_url = format!("{}/cached-alt-svc-race", h2.url);
     let dns_addr = start_udp_dns_server_dropping_https("localhost.", Ipv4Addr::new(127, 0, 0, 1));

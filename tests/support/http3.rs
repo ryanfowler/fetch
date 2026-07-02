@@ -90,23 +90,24 @@ pub(crate) struct H3TestServer {
     pub(crate) url: String,
     pub(crate) ca_cert_path: PathBuf,
     pub(crate) requests: Arc<Mutex<Vec<H3Request>>>,
+    request_notify: mpsc::Receiver<()>,
     pub(crate) connections: Arc<AtomicUsize>,
 }
 
 pub(crate) fn wait_for_h3_requests(server: &H3TestServer, count: usize) -> Vec<H3Request> {
     let start = Instant::now();
-    loop {
-        let requests = server.requests();
-        if requests.len() >= count {
-            return requests;
+    while server.requests().len() < count {
+        let remaining = Duration::from_secs(3).saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            let requests = server.requests();
+            panic!(
+                "timed out waiting for {count} HTTP/3 requests; got {}",
+                requests.len()
+            );
         }
-        assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "timed out waiting for {count} HTTP/3 requests; got {}",
-            requests.len()
-        );
-        thread::sleep(Duration::from_millis(10));
+        let _ = server.request_notify.recv_timeout(remaining);
     }
+    server.requests()
 }
 
 pub(crate) fn start_http3_server(
@@ -138,6 +139,7 @@ pub(crate) fn start_http3_server(
     let requests_for_thread = Arc::clone(&requests);
     let connections_for_thread = Arc::clone(&connections);
     let (addr_tx, addr_rx) = mpsc::channel();
+    let (notify_tx, notify_rx) = mpsc::channel();
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -154,6 +156,7 @@ pub(crate) fn start_http3_server(
                 let handler = Arc::clone(&handler);
                 let requests = Arc::clone(&requests_for_thread);
                 let connections = Arc::clone(&connections_for_thread);
+                let notify = notify_tx.clone();
                 tokio::spawn(async move {
                     let Ok(connection) = incoming.await else {
                         return;
@@ -170,6 +173,7 @@ pub(crate) fn start_http3_server(
                         };
                         let handler = Arc::clone(&handler);
                         let requests = Arc::clone(&requests);
+                        let notify = notify.clone();
                         tokio::spawn(async move {
                             let Ok((req, mut stream)) = resolver.resolve_request().await else {
                                 return;
@@ -207,6 +211,7 @@ pub(crate) fn start_http3_server(
                                 body,
                             };
                             requests.lock().unwrap().push(h3_req.clone());
+                            let _ = notify.send(());
                             let response = handler(h3_req);
                             let mut builder = http::Response::builder().status(response.status);
                             for (name, value) in response.headers {
@@ -259,6 +264,7 @@ pub(crate) fn start_http3_server(
         url,
         ca_cert_path,
         requests,
+        request_notify: notify_rx,
         connections,
     }
 }
