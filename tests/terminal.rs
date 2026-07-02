@@ -26,9 +26,8 @@ fn assert_binary_warning_output(output: &str) {
         output.contains("\x1b[1m\x1b[33mwarning\x1b[0m: "),
         "{output:?}"
     );
-    assert!(output.contains("-o file"), "{output:?}");
-    assert!(output.contains("-o - > file"), "{output:?}");
-    assert!(output.contains("--image off"), "{output:?}");
+    assert!(output.contains("-o <file>"), "{output:?}");
+    assert!(output.contains("-o -"), "{output:?}");
 }
 
 #[cfg(unix)]

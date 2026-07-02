@@ -298,7 +298,7 @@ fetch --grpc --proto-file service.proto \
 
 2. **Force output to stdout**:
    ```sh
-   fetch -o - example.com/file.bin > output.bin
+   fetch -o - example.com/file.bin
    ```
 
 ### Large Response Truncated
