@@ -156,23 +156,42 @@ fn write_to_command(command: &ClipboardCommand, bytes: &[u8]) -> CopyOutcome {
     write_to_command_with_timeout(command, bytes, CLIPBOARD_COMMAND_TIMEOUT)
 }
 
+fn spawn_with_retry(command: &ClipboardCommand) -> Result<Child, String> {
+    let mut last_error = String::new();
+    for i in 0..5 {
+        match Command::new(command.program)
+            .args(command.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(err) => {
+                last_error = err.to_string();
+                if err.raw_os_error() == Some(26) {
+                    // ETXTBUSY: transient; retry with backoff.
+                    thread::sleep(Duration::from_millis(10 << i));
+                    continue;
+                }
+                return Err(last_error);
+            }
+        }
+    }
+    Err(last_error)
+}
+
 fn write_to_command_with_timeout(
     command: &ClipboardCommand,
     bytes: &[u8],
     timeout: Duration,
 ) -> CopyOutcome {
-    let mut child = match Command::new(command.program)
-        .args(command.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    let mut child = match spawn_with_retry(command) {
         Ok(child) => child,
-        Err(err) => {
+        Err(message) => {
             return CopyOutcome::Failed {
                 command: command.label(),
-                message: err.to_string(),
+                message,
             };
         }
     };
