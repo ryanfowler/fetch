@@ -375,8 +375,7 @@ To force output:
 
 ```sh
 fetch -o file.dat example.com/binary.dat
-fetch -o - example.com/binary.dat > file.dat
-fetch --image off example.com/image.png
+fetch -o - example.com/binary.dat
 ```
 
 ## Configuration

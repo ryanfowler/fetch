@@ -164,7 +164,7 @@ pub(super) fn response_header_content_type_label(headers: &HeaderMap) -> String 
 
 pub(super) fn binary_response_warning(content_type: &str) -> String {
     format!(
-        "the response body appears to be binary (content type: {content_type})\n\nUse '-o file' to save it, '-o - > file' to redirect raw bytes, or '--image off' to disable terminal image rendering."
+        "the response body appears to be binary (content type: {content_type})\n\nUse '-o <file>' to save to a file, or '-o -' to force raw stdout output."
     )
 }
 
@@ -217,9 +217,8 @@ mod tests {
     fn binary_response_warning_includes_content_type_and_alternatives() {
         let warning = binary_response_warning("application/octet-stream");
         assert!(warning.contains("content type: application/octet-stream"));
-        assert!(warning.contains("-o file"));
-        assert!(warning.contains("-o - > file"));
-        assert!(warning.contains("--image off"));
+        assert!(warning.contains("-o <file>"));
+        assert!(warning.contains("-o -"));
     }
 
     #[test]
