@@ -96,11 +96,13 @@ impl UpdateClient {
         let timeout = cli
             .timeout
             .map(|seconds| duration_from_seconds("timeout", seconds))
-            .transpose()?;
+            .transpose()?
+            .flatten();
         let connect_timeout = cli
             .connect_timeout
             .map(|seconds| duration_from_seconds("connect-timeout", seconds))
-            .transpose()?;
+            .transpose()?
+            .flatten();
         Ok(Self {
             cli: Some(sanitized_update_cli(cli)),
             timeout,

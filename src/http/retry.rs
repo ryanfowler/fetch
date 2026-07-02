@@ -269,7 +269,7 @@ pub(super) fn timeout_error_message(cli: &Cli, err: &transport::Error) -> Option
         return None;
     }
     let seconds = cli.timeout?;
-    let duration = duration_from_seconds("timeout", seconds).ok()?;
+    let duration = duration_from_seconds("timeout", seconds).ok().flatten()?;
     Some(request_timeout_message(duration))
 }
 

@@ -69,11 +69,17 @@ impl TimeoutBudget {
     }
 }
 
-pub(crate) fn duration_from_seconds(flag: &str, seconds: f64) -> Result<Duration, FetchError> {
+pub(crate) fn duration_from_seconds(
+    flag: &str,
+    seconds: f64,
+) -> Result<Option<Duration>, FetchError> {
     if !seconds.is_finite() || !(0.0..=MAX_DURATION_SECONDS).contains(&seconds) {
         return Err(format!("{flag} must be a non-negative number").into());
     }
-    Ok(Duration::from_secs_f64(seconds))
+    if seconds == 0.0 {
+        return Ok(None); // 0 means no timeout (curl-compatible)
+    }
+    Ok(Some(Duration::from_secs_f64(seconds)))
 }
 
 pub(crate) fn remaining_timeout(
@@ -284,10 +290,23 @@ mod tests {
     }
 
     #[test]
+    fn duration_from_seconds_handles_zero_as_no_timeout() {
+        // 0 means "no timeout" (curl-compatible)
+        assert_eq!(duration_from_seconds("timeout", 0.0).unwrap(), None);
+        assert_eq!(duration_from_seconds("connect-timeout", 0.0).unwrap(), None);
+
+        // Non-zero values still produce a duration
+        assert_eq!(
+            duration_from_seconds("timeout", 1.5).unwrap(),
+            Some(Duration::from_millis(1500))
+        );
+    }
+
+    #[test]
     fn duration_from_seconds_rejects_values_outside_supported_range() {
         assert_eq!(
             duration_from_seconds("timeout", 1.5).unwrap(),
-            Duration::from_millis(1500)
+            Some(Duration::from_millis(1500))
         );
 
         for seconds in [-1.0, f64::NAN, f64::INFINITY, 1e100] {
