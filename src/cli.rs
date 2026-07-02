@@ -396,7 +396,7 @@ pub struct Cli {
         short = 'o',
         long,
         value_name = "PATH",
-        conflicts_with = "remote_name",
+        conflicts_with_all = ["remote_name"],
         help = "Write the response body to a file"
     )]
     pub output: Option<String>,
