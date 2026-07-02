@@ -767,7 +767,9 @@ Unknown curl flags return an error.
 
 ### `-h, --help`
 
-Print help information.
+Print help information. Use `-v --help` or `--verbose --help` for the detailed,
+colorized CLI reference. Detailed help follows `--pager`; use `--pager off` to
+print directly and `--color off` to disable color.
 
 ### `-V, --version`
 

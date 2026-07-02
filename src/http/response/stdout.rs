@@ -1,12 +1,5 @@
 use super::*;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct PagerCommand {
-    pub(super) program: String,
-    pub(super) args: Vec<String>,
-    pub(super) is_fallback: bool,
-}
-
 pub(super) struct StdoutBody {
     pub(super) bytes: Vec<u8>,
     pub(super) content_type: ContentType,
@@ -37,43 +30,14 @@ pub(super) fn should_page_stdout(
     let pager_allowed = !bytes.is_empty() && content_type != ContentType::Image;
     pager_allowed
         && match crate::cli::PagerMode::from_cli(cli) {
-            crate::cli::PagerMode::Auto => stdout_is_terminal && !pager_disabled_by_env(),
+            crate::cli::PagerMode::Auto => stdout_is_terminal && !output::pager::disabled_by_env(),
             crate::cli::PagerMode::On => true,
             crate::cli::PagerMode::Off => false,
         }
 }
 
 pub(super) fn write_stdout_bytes_with_pager(bytes: &[u8]) -> Result<(), FetchError> {
-    let pager = pager_command();
-    let mut child = match std::process::Command::new(&pager.program)
-        .args(&pager.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(err) if pager.is_fallback && err.kind() == ErrorKind::NotFound => {
-            core::write_stdout(bytes)?;
-            return Ok(());
-        }
-        Err(err) => return Err(err.into()),
-    };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        match stdin.write_all(bytes) {
-            Ok(()) => {}
-            Err(err) if err.kind() == ErrorKind::BrokenPipe => {}
-            Err(err) => return Err(err.into()),
-        }
-    }
-
-    let status = child.wait()?;
-    if !status.success() {
-        return Err(FetchError::Runtime(format!("pager exited with {status}")));
-    }
-
-    Ok(())
+    output::pager::write_bytes(bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -94,7 +58,7 @@ pub(super) fn stdout_stream_target(
     let is_image = response_header_content_type(headers) == ContentType::Image;
     match crate::cli::PagerMode::from_cli(cli) {
         crate::cli::PagerMode::Auto
-            if stdout_is_terminal && !is_image && !pager_disabled_by_env() =>
+            if stdout_is_terminal && !is_image && !output::pager::disabled_by_env() =>
         {
             Some(StdoutStreamTarget::Pager)
         }
@@ -102,44 +66,6 @@ pub(super) fn stdout_stream_target(
         crate::cli::PagerMode::Auto | crate::cli::PagerMode::Off | crate::cli::PagerMode::On => {
             Some(StdoutStreamTarget::Direct)
         }
-    }
-}
-
-pub(super) fn pager_command() -> PagerCommand {
-    pager_command_with_env(|name| std::env::var_os(name).and_then(os_string_to_string))
-}
-
-fn pager_disabled_by_env() -> bool {
-    std::env::var_os("NO_PAGER").is_some()
-}
-
-fn os_string_to_string(value: std::ffi::OsString) -> Option<String> {
-    value.into_string().ok()
-}
-
-fn pager_command_with_env<F>(mut get_env: F) -> PagerCommand
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    if let Some(value) = get_env("PAGER") {
-        let args = shlex::split(&value).unwrap_or_default();
-        if let Some((program, args)) = args.split_first() {
-            return PagerCommand {
-                program: program.clone(),
-                args: args.to_vec(),
-                is_fallback: false,
-            };
-        }
-    }
-
-    PagerCommand {
-        program: "less".to_string(),
-        args: if get_env("LESS").is_some() {
-            Vec::new()
-        } else {
-            vec!["-FIRX".to_string()]
-        },
-        is_fallback: true,
     }
 }
 
@@ -219,77 +145,6 @@ mod tests {
         assert!(warning.contains("content type: application/octet-stream"));
         assert!(warning.contains("-o <file>"));
         assert!(warning.contains("-o -"));
-    }
-
-    #[test]
-    fn pager_command_uses_pager_or_less_fallback() {
-        let got = pager_command_with_env(|_| None);
-        assert_eq!(
-            got,
-            PagerCommand {
-                program: "less".to_string(),
-                args: vec!["-FIRX".to_string()],
-                is_fallback: true,
-            }
-        );
-
-        let got = pager_command_with_env(|name| match name {
-            "LESS" => Some("-SR".to_string()),
-            _ => None,
-        });
-        assert_eq!(
-            got,
-            PagerCommand {
-                program: "less".to_string(),
-                args: Vec::new(),
-                is_fallback: true,
-            }
-        );
-
-        let got = pager_command_with_env(|name| match name {
-            "PAGER" => Some(r#""/usr/local/bin/my pager" --plain"#.to_string()),
-            _ => None,
-        });
-        assert_eq!(
-            got,
-            PagerCommand {
-                program: "/usr/local/bin/my pager".to_string(),
-                args: vec!["--plain".to_string()],
-                is_fallback: false,
-            }
-        );
-    }
-
-    #[test]
-    fn pager_command_uses_shlex_for_pager_environment() {
-        let got = pager_command_with_env(|name| match name {
-            "PAGER" => Some(r#"less --prompt='fetch > ' --pattern=a\ b"#.to_string()),
-            _ => None,
-        });
-        assert_eq!(
-            got,
-            PagerCommand {
-                program: "less".to_string(),
-                args: vec!["--prompt=fetch > ".to_string(), "--pattern=a b".to_string(),],
-                is_fallback: false,
-            }
-        );
-    }
-
-    #[test]
-    fn pager_command_falls_back_for_invalid_pager_environment() {
-        let got = pager_command_with_env(|name| match name {
-            "PAGER" => Some(r#"less "unterminated"#.to_string()),
-            _ => None,
-        });
-        assert_eq!(
-            got,
-            PagerCommand {
-                program: "less".to_string(),
-                args: vec!["-FIRX".to_string()],
-                is_fallback: true,
-            }
-        );
     }
 
     #[test]

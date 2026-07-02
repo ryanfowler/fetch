@@ -44,7 +44,14 @@ fetch httpbin.org/json
 
 # Make a request for an image
 fetch picsum.photos/1024/1024
+
+# Open the full command menu / detailed CLI reference
+fetch -v -h
 ```
+
+> Tip: `fetch -h` shows concise help. Add `-v` (`fetch -v -h` or
+> `fetch -v --help`) to open the full, colorized command menu with detailed
+> options, examples, and pager support.
 
 ## Output Model
 
@@ -58,11 +65,13 @@ in the pager from `$PAGER`; set `NO_PAGER` or use `--pager off` to write
 directly. If `$PAGER` is unset, fetch falls back to `less -FIRX` and honors
 `$LESS` instead of adding default flags. `$PAGER` is split with POSIX
 shell-style quoting, but fetch launches the pager directly and does not
-interpret shell operators such as pipes or redirects. When stdout is redirected
-or piped, formatting turns off by default; use `--format on` to force formatted
-output in a pipe. Binary-looking responses are not printed to a terminal unless
-you explicitly choose an output path with `-o file`, force raw stdout with
-`-o - > file`, or disable terminal image rendering with `--image off`.
+interpret shell operators such as pipes or redirects. Detailed help
+(`fetch -v --help`) is colorized and uses the same pager controls. When stdout
+is redirected or piped, formatting turns off by default; use `--format on` to
+force formatted output in a pipe. Binary-looking responses are not printed to a
+terminal unless you explicitly choose an output path with `-o file`, force raw
+stdout with `-o - > file`, or disable terminal image rendering with
+`--image off`.
 
 ## Examples
 

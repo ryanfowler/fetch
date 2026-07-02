@@ -495,7 +495,7 @@ async fn stream_async_reader_to_pager(
     prefix: &[u8],
     capture: Option<&mut clipboard::Capture>,
 ) -> Result<i64, FetchError> {
-    let pager = pager_command();
+    let pager = output::pager::command();
     let mut child = match tokio::process::Command::new(&pager.program)
         .args(&pager.args)
         .stdin(Stdio::piped())
