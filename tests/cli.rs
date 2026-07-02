@@ -24,6 +24,25 @@ fn help_matches_go_harness_expectations() {
 }
 
 #[test]
+fn verbose_help_prints_cli_reference() {
+    let res = run_fetch(&["-v", "--help", "--pager", "off"]);
+    assert_exit(&res, 0);
+    assert!(res.stderr.is_empty(), "stderr: {}", res.stderr);
+    assert!(res.stdout.contains("# CLI Reference"));
+    assert!(res.stdout.contains("## Usage"));
+    assert!(res.stdout.contains("### -v, --verbose"));
+}
+
+#[test]
+fn verbose_help_colorizes_markdown_when_color_is_forced() {
+    let res = run_fetch(&["-v", "--help", "--pager", "off", "--color", "on"]);
+    assert_exit(&res, 0);
+    assert!(res.stderr.is_empty(), "stderr: {}", res.stderr);
+    assert!(res.stdout.contains("\x1b["), "stdout was not colorized");
+    assert!(res.stdout.contains("CLI Reference"));
+}
+
+#[test]
 fn cli_parse_errors_match_go_harness() {
     let cases = [
         (vec![], "<URL> must be provided"),

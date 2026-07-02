@@ -16,6 +16,7 @@ use crate::output::progress::{
 };
 
 pub mod clipboard;
+pub mod pager;
 pub mod progress;
 
 #[derive(Debug, Error)]

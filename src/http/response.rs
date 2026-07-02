@@ -20,7 +20,7 @@ use metadata::{
     body_duration, check_grpc_status, exit_code, finalize_streamed_response,
     handle_clipboard_outcome, print_response_metadata, print_timing,
 };
-use stdout::{pager_command, stdout_stream_target, write_stdout_bytes};
+use stdout::{stdout_stream_target, write_stdout_bytes};
 use stream::{
     read_decoded_response_body_limited, stream_response_to_discard, stream_response_to_output,
     stream_response_to_stdout,

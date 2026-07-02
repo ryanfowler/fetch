@@ -13,6 +13,7 @@ use crate::error::{FetchError, write_cli_error_with_color, write_runtime_error_w
 const CURL_DEFAULT_MAX_REDIRECTS: usize = 50;
 const MAX_MATERIALIZED_CURL_DATA_BYTES: usize = 16 * 1024 * 1024;
 const INTERRUPTED_EXIT_CODE: i32 = 130;
+const VERBOSE_HELP: &str = include_str!("../docs/cli-reference.md");
 
 pub async fn main_entry() -> i32 {
     crate::tls::install_default_crypto_provider();
@@ -96,6 +97,30 @@ fn handle_parse_error(err: clap::Error, color: Option<&str>) -> i32 {
 
     write_cli_error_with_color(format_parse_error_message(&err), color);
     1
+}
+
+fn help_verbose_requested_from_args(args: impl IntoIterator<Item = String>) -> bool {
+    let mut has_help = false;
+    let mut has_verbose = false;
+
+    for arg in args {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--help" {
+            has_help = true;
+        } else if arg == "--verbose" {
+            has_verbose = true;
+        } else if let Some(shorts) = arg.strip_prefix('-')
+            && !shorts.is_empty()
+            && !shorts.starts_with('-')
+        {
+            has_help |= shorts.contains('h');
+            has_verbose |= shorts.contains('v');
+        }
+    }
+
+    has_help && has_verbose
 }
 
 fn color_setting_from_args(args: impl IntoIterator<Item = String>) -> Option<String> {
@@ -262,7 +287,8 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     if cli.help || cli.version || cli.buildinfo {
         crate::config::apply_best_effort(cli);
         if cli.help {
-            print_help(cli)?;
+            let verbose_help = help_verbose_requested_from_args(std::env::args().skip(1));
+            print_help(cli, verbose_help)?;
             return Ok(0);
         }
         if cli.version {
@@ -449,7 +475,20 @@ fn check_file_exists(path: &str) -> Result<(), FetchError> {
     }
 }
 
-fn print_help(cli: &Cli) -> Result<(), FetchError> {
+fn print_help(cli: &Cli, verbose: bool) -> Result<(), FetchError> {
+    if verbose {
+        let stdout_is_terminal = core::stdio().stdout_is_terminal();
+        let mut printer =
+            core::Printer::with_color_setting(cli.color.as_deref(), stdout_is_terminal);
+        crate::format::markdown::format_markdown_to(VERBOSE_HELP.as_bytes(), &mut printer)
+            .map_err(|err| FetchError::Message(err.to_string()))?;
+        let mut help = printer.into_bytes();
+        if !help.ends_with(b"\n") {
+            help.push(b'\n');
+        }
+        return crate::output::pager::write_text(cli, &help);
+    }
+
     let mut command = Cli::command().color(clap_color_choice(cli.color.as_deref()));
     command.print_help()?;
     core::write_stdout(b"\n")?;
@@ -1017,6 +1056,29 @@ fn newline_terminated(mut bytes: Vec<u8>) -> Vec<u8> {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn verbose_help_is_requested_only_by_explicit_help_and_verbose_flags() {
+        assert!(!help_verbose_requested_from_args(["--help".to_string()]));
+        assert!(help_verbose_requested_from_args([
+            "-v".to_string(),
+            "--help".to_string()
+        ]));
+        assert!(help_verbose_requested_from_args([
+            "--verbose".to_string(),
+            "--help".to_string()
+        ]));
+        assert!(help_verbose_requested_from_args(["-vh".to_string()]));
+        assert!(help_verbose_requested_from_args([
+            "-vv".to_string(),
+            "-h".to_string()
+        ]));
+        assert!(!help_verbose_requested_from_args([
+            "--".to_string(),
+            "--help".to_string(),
+            "-v".to_string()
+        ]));
+    }
 
     #[test]
     fn clap_parse_errors_are_rendered_like_go_parser() {
