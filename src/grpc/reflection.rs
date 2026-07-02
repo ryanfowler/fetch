@@ -45,11 +45,13 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
     let request_timeout = cli
         .timeout
         .map(|seconds| duration_from_seconds("timeout", seconds))
-        .transpose()?;
+        .transpose()?
+        .flatten();
     let connect_timeout = cli
         .connect_timeout
         .map(|seconds| duration_from_seconds("connect-timeout", seconds))
-        .transpose()?;
+        .transpose()?
+        .flatten();
     crate::tls::install_default_crypto_provider();
     let connect_timing = crate::http::client::ConnectionTiming::default();
     let client_build = crate::http::client::ClientBuildContext {

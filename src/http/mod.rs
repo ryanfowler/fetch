@@ -116,11 +116,13 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     let request_timeout = cli
         .timeout
         .map(|seconds| duration_from_seconds("timeout", seconds))
-        .transpose()?;
+        .transpose()?
+        .flatten();
     let connect_timeout = cli
         .connect_timeout
         .map(|seconds| duration_from_seconds("connect-timeout", seconds))
-        .transpose()?;
+        .transpose()?
+        .flatten();
     crate::tls::install_default_crypto_provider();
 
     let connect_timing = client::ConnectionTiming::default();
@@ -211,7 +213,8 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     };
 
     let retry_count = cli.retry();
-    let retry_delay = duration_from_seconds("retry-delay", cli.retry_delay())?;
+    let retry_delay =
+        duration_from_seconds("retry-delay", cli.retry_delay())?.unwrap_or(Duration::ZERO);
     let total_attempts = total_attempts_for_retry(retry_count)?;
     let original_body_replayable = request_body_replayable(&body);
     let mut attempt = 0;

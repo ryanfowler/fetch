@@ -237,6 +237,7 @@ fn websocket_request_timeout(cli: &Cli) -> Result<Option<Duration>, FetchError> 
     cli.timeout
         .map(|seconds| duration_from_seconds("timeout", seconds))
         .transpose()
+        .map(|opt| opt.flatten())
 }
 
 fn websocket_connect_timeout(
@@ -247,7 +248,8 @@ fn websocket_connect_timeout(
     let connect_timeout = cli
         .connect_timeout
         .map(|seconds| duration_from_seconds("connect-timeout", seconds))
-        .transpose()?;
+        .transpose()?
+        .flatten();
     TimeoutBudget::for_connect(connect_timeout, request_timeout, request_start)
 }
 
