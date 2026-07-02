@@ -100,7 +100,7 @@ fn schemeless_https_connect_error_suggests_plaintext_url() {
     let join = thread::spawn(move || {
         for _ in 0..2 {
             let Ok(mut stream) =
-                accept_tcp_connection(&listener, Duration::from_secs(5), "plaintext TLS hint")
+                accept_tcp_connection(&listener, Duration::from_secs(3), "plaintext TLS hint")
             else {
                 return;
             };

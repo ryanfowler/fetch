@@ -29,8 +29,14 @@ Full CI-equivalent before PRs, shared transport/request/response changes, or unc
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features --lib --bins
-cargo test --locked --all-features --test cli --test formatting --test grpc --test http --test network --test terminal --test update --test websocket -- --test-threads=1
+cargo test --locked --all-features --test cli --test formatting --test grpc --test http --test network --test terminal --test update --test websocket
 ```
+
+The integration test suite uses `TcpListener::bind("127.0.0.1:0")` and
+`UdpSocket::bind("127.0.0.1:0")` for all test servers, so tests are safe to run in
+parallel. If transient "Connection refused" errors occur from port reuse races, add
+`-- --test-threads=1` to force sequential execution. The `TestServer` and
+`H3TestServer` use `mpsc` channels instead of polling for request notification.
 
 Docs-only changes: skip Cargo unless examples/generated CLI output changed; format changed docs only:
 
@@ -58,7 +64,7 @@ cargo build --release --locked
 | gRPC/protobuf | `src/grpc`, `src/proto` | Framing/status/reflection, local schema/discovery/conversion/JSON streams. Reuse standard gRPC headers/status/framed-body helpers. |
 | WebSocket | `src/websocket` | Interactive and non-interactive message loops; custom dialer for DNS/proxy/TLS. |
 | Auth/session/update | `src/auth`, `src/session.rs`, `src/update`, `install.sh` | Auth helpers; locked cookie sessions; HTTPS self-update with checksum/archive validation and no origin-specific TLS overrides. |
-| Tests | `tests/`, `tests/support/` | Integration tests run the compiled binary; support code is split by domain. `run_fetch` isolates HTTP/3 cache by default. |
+| Tests | `tests/`, `tests/support/` | Integration tests run the compiled binary; support code is split by domain. `run_fetch` isolates HTTP/3 cache by default. `TestServer`/`H3TestServer` use `mpsc` channel notification (not polling). `wait_for_requests` blocks via `recv_timeout` on the notification channel. |
 
 Request flow: CLI parse → config merge → request build (gRPC may load/reflect schema and frame protobuf) → transport execute → response format/output/pager/clipboard.
 

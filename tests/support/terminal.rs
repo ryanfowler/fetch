@@ -74,7 +74,7 @@ pub(crate) fn run_image_render_pty(env: Vec<(String, String)>) -> String {
     let mut child = cmd.spawn().expect("spawn fetch under PTY");
     drop(pty.slave);
     let capture = start_pty_capture(&pty.master);
-    let status = wait_child(&mut child, Duration::from_secs(5))
+    let status = wait_child(&mut child, Duration::from_secs(3))
         .unwrap_or_else(|| {
             let _ = child.kill();
             panic!(
@@ -158,7 +158,7 @@ pub(crate) fn run_fetch_pty_with_fake_less_env(
     let mut child = cmd.spawn().expect("spawn fetch under PTY");
     drop(pty.slave);
     let capture = start_pty_capture(&pty.master);
-    let status = wait_child(&mut child, Duration::from_secs(5))
+    let status = wait_child(&mut child, Duration::from_secs(3))
         .unwrap_or_else(|| {
             let _ = child.kill();
             panic!(
@@ -221,7 +221,7 @@ pub(crate) fn run_binary_pty_with_fake_less(
     let mut child = cmd.spawn().expect("spawn fetch under PTY");
     drop(pty.slave);
     let capture = start_pty_capture(&pty.master);
-    let status = wait_child(&mut child, Duration::from_secs(5))
+    let status = wait_child(&mut child, Duration::from_secs(3))
         .unwrap_or_else(|| {
             let _ = child.kill();
             panic!(
@@ -286,7 +286,7 @@ pub(crate) fn run_image_pty_with_fake_less(
     let mut child = cmd.spawn().expect("spawn fetch under PTY");
     drop(pty.slave);
     let capture = start_pty_capture(&pty.master);
-    let status = wait_child(&mut child, Duration::from_secs(5))
+    let status = wait_child(&mut child, Duration::from_secs(3))
         .unwrap_or_else(|| {
             let _ = child.kill();
             panic!(

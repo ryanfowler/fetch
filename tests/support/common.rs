@@ -116,7 +116,7 @@ pub(crate) fn run_fetch_once(opts: FetchOpts, args: &[&str]) -> FetchOutput {
         if child.try_wait().expect("poll fetch").is_some() {
             break;
         }
-        if start.elapsed() > Duration::from_secs(30) {
+        if start.elapsed() > Duration::from_secs(15) {
             let _ = child.kill();
             let out = child.wait_with_output().expect("wait killed fetch");
             return FetchOutput {

@@ -266,7 +266,7 @@ pub(crate) fn start_stalling_proxy(scheme: &str) -> String {
                 let _ = conn.set_read_timeout(Some(Duration::from_millis(200)));
                 let mut buf = [0_u8; 1024];
                 let _ = conn.read(&mut buf);
-                thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(3));
             });
         }
     });

@@ -85,8 +85,9 @@ impl TestResponse {
 pub(crate) struct TestServer {
     pub(crate) url: String,
     pub(crate) requests: Arc<Mutex<Vec<TestRequest>>>,
-    pub(crate) shutdown: Option<mpsc::Sender<()>>,
-    pub(crate) join: Option<thread::JoinHandle<()>>,
+    request_notify: mpsc::Receiver<()>,
+    shutdown: Option<mpsc::Sender<()>>,
+    join: Option<thread::JoinHandle<()>>,
 }
 
 pub(crate) struct PartialBodyReplayServer {
@@ -106,11 +107,12 @@ impl TestServer {
         let url = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let handler = Arc::new(handler);
-        let (tx, rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let (notify_tx, notify_rx) = mpsc::channel();
         let request_log = Arc::clone(&requests);
         let join = thread::spawn(move || {
             loop {
-                if rx.try_recv().is_ok() {
+                if shutdown_rx.try_recv().is_ok() {
                     break;
                 }
                 match listener.accept() {
@@ -118,12 +120,14 @@ impl TestServer {
                         let _ = stream.set_nonblocking(false);
                         let handler = Arc::clone(&handler);
                         let request_log = Arc::clone(&request_log);
+                        let notify = notify_tx.clone();
                         thread::spawn(move || {
                             let mut writer = stream.try_clone().expect("clone response stream");
                             let mut reader = BufReader::new(stream);
                             while let Some(req) = read_request(&mut reader) {
                                 let close = req.header("connection").eq_ignore_ascii_case("close");
                                 request_log.lock().unwrap().push(req.clone());
+                                let _ = notify.send(());
                                 let resp = handler(req);
                                 write_response(&mut writer, resp);
                                 if close {
@@ -142,7 +146,8 @@ impl TestServer {
         Self {
             url,
             requests,
-            shutdown: Some(tx),
+            request_notify: notify_rx,
+            shutdown: Some(shutdown_tx),
             join: Some(join),
         }
     }
@@ -178,7 +183,7 @@ impl PartialBodyReplayServer {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let request_log = Arc::clone(&requests);
         let join = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + Duration::from_secs(5);
             let mut first = true;
             while Instant::now() < deadline {
                 match listener.accept() {
@@ -206,7 +211,7 @@ impl PartialBodyReplayServer {
                             let _ = stream.write_all(&body);
                             let _ = stream.flush();
                             thread::spawn(move || {
-                                let deadline = Instant::now() + Duration::from_secs(5);
+                                let deadline = Instant::now() + Duration::from_secs(3);
                                 let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
                                 let mut buf = [0_u8; 1024];
                                 while Instant::now() < deadline {
@@ -355,16 +360,16 @@ pub(crate) fn write_response(stream: &mut impl Write, resp: TestResponse) {
 
 pub(crate) fn wait_for_requests(server: &TestServer, count: usize) -> Vec<TestRequest> {
     let start = Instant::now();
-    loop {
-        let requests = server.requests();
-        if requests.len() >= count {
-            return requests;
+    while server.requests().len() < count {
+        let remaining = Duration::from_secs(2).saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            let requests = server.requests();
+            panic!(
+                "timed out waiting for {count} requests; got {}",
+                requests.len()
+            );
         }
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "timed out waiting for {count} requests; got {}",
-            requests.len()
-        );
-        thread::sleep(Duration::from_millis(10));
+        let _ = server.request_notify.recv_timeout(remaining);
     }
+    server.requests()
 }
