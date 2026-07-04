@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
@@ -187,7 +189,13 @@ enum ResolverTarget {
     },
 }
 
-pub async fn execute(cli: &Cli, ignored_flags: &[&'static str]) -> Result<i32, FetchError> {
+type InspectFuture<'a> = Pin<Box<dyn Future<Output = Result<i32, FetchError>> + 'a>>;
+
+pub fn execute<'a>(cli: &'a Cli, ignored_flags: &'a [&'static str]) -> InspectFuture<'a> {
+    Box::pin(execute_inner(cli, ignored_flags))
+}
+
+async fn execute_inner(cli: &Cli, ignored_flags: &[&'static str]) -> Result<i32, FetchError> {
     let request_start = Instant::now();
     let url = crate::http::normalize_url(cli.url.as_deref().expect("URL checked by app"))?;
     if !ignored_flags.is_empty() && !cli.silent {
