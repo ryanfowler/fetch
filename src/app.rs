@@ -4,7 +4,9 @@ use clap::{
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io::Read;
+use std::pin::Pin;
 
 use crate::cli::{Cli, from_curl};
 use crate::core;
@@ -15,7 +17,13 @@ const MAX_MATERIALIZED_CURL_DATA_BYTES: usize = 16 * 1024 * 1024;
 const INTERRUPTED_EXIT_CODE: i32 = 130;
 const VERBOSE_HELP: &str = include_str!("../docs/cli-reference.md");
 
-pub async fn main_entry() -> i32 {
+type MainFuture = Pin<Box<dyn Future<Output = i32>>>;
+
+pub fn main_entry() -> MainFuture {
+    Box::pin(main_entry_inner())
+}
+
+async fn main_entry_inner() -> i32 {
     crate::tls::install_default_crypto_provider();
 
     if let Some(code) = crate::update::maybe_run_self_delete_helper() {
@@ -371,7 +379,7 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
         return Box::pin(crate::grpc::reflection::execute_discovery(cli)).await;
     }
 
-    Box::pin(crate::http::execute(cli)).await
+    crate::http::execute(cli).await
 }
 
 fn normalize_extra_args(cli: &mut Cli) -> Result<(), FetchError> {

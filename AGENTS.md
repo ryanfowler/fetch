@@ -54,7 +54,7 @@ cargo build --release --locked
 
 | Area | Files | Notes |
 | --- | --- | --- |
-| Entry | `src/main.rs`, `src/app.rs`, `src/cli.rs` | `main` uses a larger-stack Tokio thread; `app` heap-pins the top-level future. Do not revert. |
+| Entry | `src/main.rs`, `src/app.rs`, `src/cli.rs` | `main` runs the Tokio runtime on a spawned thread without overriding the platform default stack size; this avoids Windows' small process-main stack while removing the custom 16 MiB stack. Do not move stack-heavy entry futures back to the process main thread. |
 | Core IO | `src/core.rs`, `src/output`, `src/fileutil.rs` | Central printer/color/format/stdout policy, atomic writes, `~/` expansion, cross-platform locks. Prefer `core::write_stdout`, `core::stdio`, `core::color_enabled`, `core::format_enabled`; avoid direct `print!`/`println!` and ad-hoc terminal checks. |
 | Config | `src/config` | INI with host overlays. Config-backed options belong in `config_options!`; duplicate host sections are errors. Metadata commands parse config best-effort only. |
 | HTTP | `src/http`, `src/http/response`, `src/http/transport`, `src/net.rs` | Request building/execution, response orchestration, retries, proxies, TLS, Unix sockets, timing. Transport code owns DNS/TCP/TLS/QUIC setup; reuse `src/net.rs` dialing/proxy helpers. |

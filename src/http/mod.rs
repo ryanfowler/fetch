@@ -1,5 +1,6 @@
 use std::error::Error as StdError;
 use std::fmt;
+use std::future::Future;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::pin::Pin;
@@ -92,7 +93,13 @@ use transport::{Body, Client, RequestBuilder, Response};
 
 type AsyncReadBox = Pin<Box<dyn AsyncRead + Send>>;
 
-pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
+type HttpFuture<'a> = Pin<Box<dyn Future<Output = Result<i32, FetchError>> + 'a>>;
+
+pub fn execute(cli: &Cli) -> HttpFuture<'_> {
+    Box::pin(execute_inner(cli))
+}
+
+async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
     let http_version = crate::cli::selected_http_version(cli).map_err(FetchError::Message)?;
     let http_version = effective_http_version(cli, http_version);
     let mut url = normalize_url(cli.url.as_deref().expect("URL checked by app"))?;
@@ -136,7 +143,8 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     };
     let mut initial_client = None;
     if cli.grpc && grpc_method.is_none() {
-        let reflection_client = client::build_client_for_url(cli, &url, &client_build).await?;
+        let reflection_client =
+            Box::pin(client::build_client_for_url(cli, &url, &client_build)).await?;
         let request_requires_schema = grpc_request_requires_schema(cli);
         match Box::pin(crate::grpc::reflection::schema_for_call(
             cli,
@@ -209,7 +217,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     let initial_client = match initial_client {
         Some(client) => client,
-        None => client::build_client_for_url(cli, &url, &client_build).await?,
+        None => Box::pin(client::build_client_for_url(cli, &url, &client_build)).await?,
     };
 
     let retry_count = cli.retry();
@@ -273,7 +281,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
             let req = apply_request_timeout(req, request_timeout, request_start)?;
             request_client.clear_runtime_dns_resolution();
             connect_timing.clear();
-            match req.send().await {
+            match Box::pin(req.send()).await {
                 Ok(response) => {
                     record_request_dns_timing(cli, &request_client, &mut timing);
                     if let Some(redirect) = redirect_target(cli, &response, redirect_count)? {
@@ -295,9 +303,12 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         request_body = redirected.body;
                         strip_entity_headers |= redirected.strip_entity_headers;
                         if refresh_client {
-                            request_client =
-                                client::build_client_for_url(cli, &request_url, &client_build)
-                                    .await?;
+                            request_client = Box::pin(client::build_client_for_url(
+                                cli,
+                                &request_url,
+                                &client_build,
+                            ))
+                            .await?;
                         }
                         redirect_count += 1;
                         continue;
@@ -327,7 +338,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         connect_debug_target(&response, &request_url, dns_resolution.as_ref());
                     timing::print_debug_lines(&timing, &connect_target, cli.color.as_deref());
                 }
-                let response = apply_digest_challenge(
+                let response = Box::pin(apply_digest_challenge(
                     response,
                     DigestRetryContext {
                         client: &request_client.client,
@@ -341,7 +352,7 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
                         auth_allowed: same_origin(&url, &request_url),
                     },
                     digest_credentials.as_ref(),
-                )
+                ))
                 .await?;
                 let status = response.status();
                 let retry_sse_uncompressed =

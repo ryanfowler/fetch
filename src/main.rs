@@ -1,12 +1,9 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const APP_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
-
 fn main() {
     let code = std::thread::Builder::new()
         .name("fetch-main".to_string())
-        .stack_size(APP_THREAD_STACK_SIZE)
         .spawn(|| {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

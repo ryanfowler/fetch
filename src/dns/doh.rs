@@ -251,19 +251,19 @@ impl DohClient {
         body: Option<Vec<u8>>,
     ) -> Result<DohResponseBody, DnsError> {
         self.budget
-            .run(async {
+            .run(Box::pin(async {
                 let mut request = self.client.request(method, url).headers(headers);
                 if let Some(body) = body {
                     request = request.body(body);
                 }
                 let response = Box::pin(request.send()).await?;
-                buffer_response_with_limit(
+                Box::pin(buffer_response_with_limit(
                     response,
                     DOH_RESPONSE_MAX_BYTES,
                     DOH_RESPONSE_LIMIT_ERROR,
-                )
+                ))
                 .await
-            })
+            }))
             .await
             .map_err(|err| DnsError(err.to_string()))
     }
