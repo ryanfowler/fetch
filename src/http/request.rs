@@ -407,8 +407,9 @@ pub(crate) fn request_body_sha256_hex(body: &RequestBody) -> Result<String, Fetc
     let mut hasher = Sha256::new();
     match &body.source {
         RequestBodySource::Bytes(bytes) => hasher.update(bytes),
-        RequestBodySource::File { path, .. } => {
-            hash_reader(&mut hasher, std::fs::File::open(path)?)?;
+        RequestBodySource::File { path, len } => {
+            let file = open_regular_file_at_len(path, *len)?;
+            hash_reader(&mut hasher, file.take(*len))?;
         }
         RequestBodySource::Multipart(multipart) => {
             let mut writer = Sha256Writer(&mut hasher);
@@ -525,9 +526,11 @@ pub(super) fn inferred_request_body_content_len(
 pub(crate) fn request_body_to_transport_body(body: RequestBodyPayload) -> Result<Body, FetchError> {
     match body.source {
         RequestBodySource::Bytes(bytes) => Ok(Body::from(bytes)),
-        RequestBodySource::File { path, .. } => {
-            let file = std::fs::File::open(&path)?;
-            Ok(Body::from(tokio::fs::File::from_std(file)))
+        RequestBodySource::File { path, len } => {
+            let file = open_regular_file_at_len(&path, len)?;
+            Ok(Body::wrap_stream(ReaderStream::new(
+                tokio::fs::File::from_std(file).take(len),
+            )))
         }
         RequestBodySource::Stdin => Ok(Body::wrap_stream(ReaderStream::new(tokio::io::stdin()))),
         RequestBodySource::Multipart(multipart) => Ok(Body::wrap_stream(multipart.stream())),
@@ -550,9 +553,9 @@ pub(crate) fn request_body_source_to_async_reader(
 ) -> Result<AsyncReadBox, FetchError> {
     match source {
         RequestBodySource::Bytes(bytes) => Ok(Box::pin(Cursor::new(bytes))),
-        RequestBodySource::File { path, .. } => {
-            let file = std::fs::File::open(&path)?;
-            Ok(Box::pin(tokio::fs::File::from_std(file)))
+        RequestBodySource::File { path, len } => {
+            let file = open_regular_file_at_len(&path, len)?;
+            Ok(Box::pin(tokio::fs::File::from_std(file).take(len)))
         }
         RequestBodySource::Stdin => Ok(Box::pin(tokio::io::stdin())),
         RequestBodySource::Multipart(multipart) => Ok(Box::pin(StreamReader::new(
@@ -598,7 +601,12 @@ pub(crate) fn request_body_source_to_bytes(
 ) -> Result<Vec<u8>, FetchError> {
     match source {
         RequestBodySource::Bytes(bytes) => Ok(bytes.to_vec()),
-        RequestBodySource::File { path, .. } => Ok(std::fs::read(path)?),
+        RequestBodySource::File { path, len } => {
+            let file = open_regular_file_at_len(&path, len)?;
+            let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+            file.take(len).read_to_end(&mut out)?;
+            Ok(out)
+        }
         RequestBodySource::Stdin => {
             let mut buf = Vec::new();
             std::io::stdin().read_to_end(&mut buf)?;
@@ -627,8 +635,8 @@ fn request_body_source_to_bytes_limited(
         }
         RequestBodySource::File { path, len } => {
             ensure_materialized_len_u64(len, max_bytes, limit_error)?;
-            let file = std::fs::File::open(path)?;
-            read_to_end_limited(file, max_bytes, limit_error)
+            let file = open_regular_file_at_len(&path, len)?;
+            read_to_end_limited(file.take(len), max_bytes, limit_error)
         }
         RequestBodySource::Stdin => {
             let stdin = std::io::stdin();
@@ -723,6 +731,7 @@ impl Write for LimitedBytesWriter<'_> {
     }
 }
 
+#[derive(Debug)]
 struct DryRunBodyPreview {
     bytes: Vec<u8>,
     truncated: bool,
@@ -744,10 +753,16 @@ fn dry_run_source_preview(
             bytes: bytes.slice(..bytes.len().min(limit)).to_vec(),
             truncated: bytes.len() > limit,
         }),
-        RequestBodySource::File { path, len } => Ok(DryRunBodyPreview {
-            bytes: read_file_prefix(path, limit)?,
-            truncated: *len > u64::try_from(limit).unwrap_or(u64::MAX),
-        }),
+        RequestBodySource::File { path, len } => {
+            let file = open_regular_file_at_len(path, *len)?;
+            let mut bytes = Vec::new();
+            file.take(u64::try_from(limit).unwrap_or(u64::MAX))
+                .read_to_end(&mut bytes)?;
+            Ok(DryRunBodyPreview {
+                bytes,
+                truncated: *len > u64::try_from(limit).unwrap_or(u64::MAX),
+            })
+        }
         RequestBodySource::Stdin => read_prefix_preview(std::io::stdin().lock(), limit),
         RequestBodySource::Multipart(multipart) => {
             let (bytes, truncated) = multipart
@@ -902,9 +917,7 @@ pub(super) fn body_value_source(
                 err.into()
             }
         })?;
-        if metadata.is_dir() {
-            return Err(format!("file '{path}' is a directory").into());
-        }
+        validate_regular_file_metadata(path, &metadata)?;
         let content_type = if detect_content_type {
             Some(detect_body_file_content_type(&expanded)?)
         } else {
@@ -922,6 +935,36 @@ pub(super) fn body_value_source(
         RequestBodySource::Bytes(Bytes::copy_from_slice(value.as_bytes())),
         detect_content_type.then(|| sniff_content_type_like_go(value.as_bytes())),
     ))
+}
+
+fn validate_regular_file_metadata(
+    display_path: impl std::fmt::Display,
+    metadata: &std::fs::Metadata,
+) -> Result<(), FetchError> {
+    if !metadata.file_type().is_file() {
+        return Err(
+            format!("file '{display_path}' is not a regular file; use @- to stream stdin").into(),
+        );
+    }
+    Ok(())
+}
+
+fn open_regular_file_at_len(
+    path: impl AsRef<Path>,
+    expected_len: u64,
+) -> Result<std::fs::File, FetchError> {
+    let path = path.as_ref();
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    validate_regular_file_metadata(path.display(), &metadata)?;
+    if metadata.len() != expected_len {
+        return Err(format!(
+            "file '{}' changed size while preparing the request body",
+            path.display()
+        )
+        .into());
+    }
+    Ok(file)
 }
 
 pub(super) fn detect_body_file_content_type(path: &Path) -> Result<String, FetchError> {
@@ -1098,7 +1141,43 @@ mod tests {
         let err = request_body(&cli).unwrap_err().to_string();
         assert_eq!(
             err,
-            format!("file '{}' is a directory", dir.path().display())
+            format!(
+                "file '{}' is not a regular file; use @- to stream stdin",
+                dir.path().display()
+            )
+        );
+    }
+
+    #[test]
+    fn dry_run_file_preview_rechecks_captured_file_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.txt");
+        std::fs::write(&path, b"old").unwrap();
+        let body = RequestBodyPayload {
+            source: RequestBodySource::File {
+                path: path.display().to_string(),
+                len: 3,
+            },
+            content_type: None,
+        };
+        std::fs::write(&path, b"new contents").unwrap();
+
+        let err = dry_run_body_preview(&body, 1024).unwrap_err();
+
+        assert!(err.to_string().contains("changed size"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_body_rejects_non_regular_body_file() {
+        let cli =
+            Cli::try_parse_from(["fetch", "--data", "@/dev/null", "https://example.com"]).unwrap();
+
+        let err = request_body(&cli).unwrap_err().to_string();
+
+        assert_eq!(
+            err,
+            "file '/dev/null' is not a regular file; use @- to stream stdin"
         );
     }
 

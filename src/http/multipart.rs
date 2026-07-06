@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use futures_util::Stream;
 use thiserror::Error;
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
 use crate::format::content_type;
 
@@ -15,8 +15,8 @@ use crate::format::content_type;
 pub enum MultipartError {
     #[error("file does not exist: '{0}'")]
     FileDoesNotExist(String),
-    #[error("file is a directory: '{0}'")]
-    FileIsDirectory(String),
+    #[error("file is not a regular file; use @- to stream stdin: '{0}'")]
+    FileIsNotRegular(String),
     #[error("invalid multipart {kind}: value contains ASCII control character")]
     InvalidDispositionValue { kind: &'static str },
     #[error("multipart body is too large to compute Content-Length")]
@@ -109,9 +109,10 @@ impl Multipart {
                     append_preview(&mut out, limit, field.header.as_bytes());
                     if out.len() < limit {
                         let remaining = limit - out.len();
-                        let mut input = std::fs::File::open(&file.path)?;
+                        let mut input = open_file_part(file)?;
+                        let read_limit = file.len.min(u64::try_from(remaining).unwrap_or(u64::MAX));
                         Read::by_ref(&mut input)
-                            .take(u64::try_from(remaining).unwrap_or(u64::MAX))
+                            .take(read_limit)
                             .read_to_end(&mut out)?;
                     }
                     append_preview(&mut out, limit, b"\r\n");
@@ -143,8 +144,8 @@ impl Multipart {
                 }
                 FieldValue::File(file) => {
                     out.write_all(field.header.as_bytes())?;
-                    let mut file = std::fs::File::open(&file.path)?;
-                    std::io::copy(&mut file, &mut out)?;
+                    let input = open_file_part(file)?;
+                    std::io::copy(&mut input.take(file.len), &mut out)?;
                     out.write_all(b"\r\n")?;
                 }
             }
@@ -225,10 +226,40 @@ fn validate_file_path(path: &Path) -> Result<std::fs::Metadata, MultipartError> 
         }
         Err(err) => return Err(err.into()),
     };
-    if metadata.is_dir() {
-        return Err(MultipartError::FileIsDirectory(path.display().to_string()));
+    if !metadata.file_type().is_file() {
+        return Err(MultipartError::FileIsNotRegular(path.display().to_string()));
     }
     Ok(metadata)
+}
+
+fn validate_opened_file_part(
+    file: &FilePart,
+    metadata: &std::fs::Metadata,
+) -> Result<(), MultipartError> {
+    if !metadata.file_type().is_file() {
+        return Err(MultipartError::FileIsNotRegular(
+            file.path.display().to_string(),
+        ));
+    }
+    if metadata.len() != file.len {
+        return Err(MultipartError::Io(std::io::Error::other(format!(
+            "file '{}' changed size while preparing the multipart body",
+            file.path.display()
+        ))));
+    }
+    Ok(())
+}
+
+fn open_file_part(file: &FilePart) -> Result<std::fs::File, MultipartError> {
+    let opened = std::fs::File::open(&file.path)?;
+    validate_opened_file_part(file, &opened.metadata()?)?;
+    Ok(opened)
+}
+
+async fn open_file_part_async(file: &FilePart) -> Result<tokio::fs::File, MultipartError> {
+    let opened = tokio::fs::File::open(&file.path).await?;
+    validate_opened_file_part(file, &opened.metadata().await?)?;
+    Ok(opened)
 }
 
 fn escape_multipart_string(value: &str) -> String {
@@ -316,12 +347,18 @@ pub struct MultipartStream {
     state: MultipartStreamState,
 }
 
-type OpenFileFuture = Pin<Box<dyn Future<Output = std::io::Result<tokio::fs::File>> + Send>>;
+type OpenFileFuture = Pin<Box<dyn Future<Output = Result<tokio::fs::File, MultipartError>> + Send>>;
 
 enum MultipartStreamState {
     Field,
-    OpeningFile { header: Bytes, open: OpenFileFuture },
-    File(tokio::fs::File),
+    OpeningFile {
+        header: Bytes,
+        open: OpenFileFuture,
+    },
+    File {
+        file: tokio::io::Take<tokio::fs::File>,
+        remaining: u64,
+    },
     FileCrlf,
     Done,
 }
@@ -358,9 +395,12 @@ impl Stream for MultipartStream {
                             chunk.extend_from_slice(self.multipart.boundary.as_bytes());
                             chunk.extend_from_slice(b"\r\n");
                             chunk.extend_from_slice(field.header.as_bytes());
+                            let file_part = file.clone();
                             self.state = MultipartStreamState::OpeningFile {
                                 header: Bytes::from(chunk),
-                                open: Box::pin(tokio::fs::File::open(file.path.clone())),
+                                open: Box::pin(
+                                    async move { open_file_part_async(&file_part).await },
+                                ),
                             };
                             continue;
                         }
@@ -369,21 +409,36 @@ impl Stream for MultipartStream {
                 MultipartStreamState::OpeningFile { header, open } => {
                     let file = match open.as_mut().poll(cx) {
                         Poll::Ready(Ok(file)) => file,
-                        Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err.into()))),
+                        Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err))),
                         Poll::Pending => return Poll::Pending,
                     };
                     let header = std::mem::replace(header, Bytes::new());
-                    self.state = MultipartStreamState::File(file);
+                    let file_len = match &self.multipart.fields[self.index].value {
+                        FieldValue::File(file) => file.len,
+                        FieldValue::Text(_) => 0,
+                    };
+                    self.state = MultipartStreamState::File {
+                        file: file.take(file_len),
+                        remaining: file_len,
+                    };
                     return Poll::Ready(Some(Ok(header)));
                 }
-                MultipartStreamState::File(file) => {
+                MultipartStreamState::File { file, remaining } => {
+                    if *remaining == 0 {
+                        self.state = MultipartStreamState::FileCrlf;
+                        continue;
+                    }
                     let mut bytes = [0_u8; 8192];
-                    let mut read_buf = ReadBuf::new(&mut bytes);
+                    let read_len = bytes
+                        .len()
+                        .min(usize::try_from(*remaining).unwrap_or(usize::MAX));
+                    let mut read_buf = ReadBuf::new(&mut bytes[..read_len]);
                     match Pin::new(file).poll_read(cx, &mut read_buf) {
                         Poll::Ready(Ok(())) if read_buf.filled().is_empty() => {
                             self.state = MultipartStreamState::FileCrlf;
                         }
                         Poll::Ready(Ok(())) => {
+                            *remaining = remaining.saturating_sub(read_buf.filled().len() as u64);
                             return Poll::Ready(Some(Ok(Bytes::copy_from_slice(
                                 read_buf.filled(),
                             ))));
@@ -491,6 +546,21 @@ mod tests {
     }
 
     #[test]
+    fn multipart_preview_rechecks_captured_file_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.txt");
+        std::fs::write(&path, b"old").unwrap();
+        let multipart = Multipart::from_cli_fields(&[format!("file=@{}", path.display())])
+            .unwrap()
+            .unwrap();
+        std::fs::write(&path, b"new contents").unwrap();
+
+        let err = multipart.preview(1024).unwrap_err();
+
+        assert!(err.to_string().contains("changed size"));
+    }
+
+    #[test]
     fn multipart_content_len_reports_body_too_large_on_overflow() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("payload.txt");
@@ -528,7 +598,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err =
             Multipart::from_cli_fields(&[format!("file=@{}", dir.path().display())]).unwrap_err();
-        assert!(err.to_string().contains("file is a directory"));
+        assert!(err.to_string().contains("file is not a regular file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multipart_rejects_non_regular_file_fields() {
+        let err = Multipart::from_cli_fields(&["file=@/dev/null".to_string()]).unwrap_err();
+
+        assert!(err.to_string().contains("file is not a regular file"));
     }
 
     #[test]
