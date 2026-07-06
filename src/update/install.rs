@@ -83,14 +83,15 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 pub(super) fn self_replace(exe_path: &Path, new_exe_path: &Path) -> Result<(), FetchError> {
     let dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
-    let temp_exe_path = create_temp_file_path(dir, TEMP_EXE_SUFFIX);
-    copy_file(&temp_exe_path, new_exe_path)?;
+    let temp_exe_path = copy_file_to_new_temp(dir, TEMP_EXE_SUFFIX, new_exe_path)?;
 
-    let old_exe_path = create_temp_file_path(dir, RELOCATED_SUFFIX);
-    std::fs::rename(exe_path, &old_exe_path).map_err(|err| {
-        let _ = std::fs::remove_file(&temp_exe_path);
-        FetchError::from(err)
-    })?;
+    let old_exe_path = match rename_to_unique_temp(exe_path, dir, RELOCATED_SUFFIX) {
+        Ok(path) => path,
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp_exe_path);
+            return Err(err);
+        }
+    };
 
     if let Err(err) = std::fs::rename(&temp_exe_path, exe_path) {
         return match std::fs::rename(&old_exe_path, exe_path) {
@@ -107,11 +108,7 @@ pub(super) fn self_replace(exe_path: &Path, new_exe_path: &Path) -> Result<(), F
 #[cfg(not(windows))]
 pub(super) fn self_replace(exe_path: &Path, new_exe_path: &Path) -> Result<(), FetchError> {
     let dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
-    let temp_path = create_temp_file_path(dir, ".__temp");
-    if let Err(err) = copy_file(&temp_path, new_exe_path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(err);
-    }
+    let temp_path = copy_file_to_new_temp(dir, ".__temp", new_exe_path)?;
 
     if let Err(err) = crate::fileutil::atomic_replace_file(&temp_path, exe_path) {
         let _ = std::fs::remove_file(&temp_path);
@@ -125,15 +122,61 @@ fn create_temp_file_path(dir: &Path, suffix: &str) -> PathBuf {
     dir.join(format!(".fetch.{}{suffix}", unique_suffix()))
 }
 
-fn copy_file(dst: &Path, src: &Path) -> Result<(), FetchError> {
+const TEMP_FILE_ATTEMPTS: usize = 100;
+
+fn copy_file_to_new_temp(dir: &Path, suffix: &str, src: &Path) -> Result<PathBuf, FetchError> {
+    for _ in 0..TEMP_FILE_ATTEMPTS {
+        let path = create_temp_file_path(dir, suffix);
+        match copy_file_exclusive(&path, src) {
+            Ok(()) => return Ok(path),
+            Err(FetchError::Io(err)) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(FetchError::Message(
+        "unable to create unique temporary update file".to_string(),
+    ))
+}
+
+#[cfg(windows)]
+fn rename_to_unique_temp(src: &Path, dir: &Path, suffix: &str) -> Result<PathBuf, FetchError> {
+    for _ in 0..TEMP_FILE_ATTEMPTS {
+        let path = create_temp_file_path(dir, suffix);
+        match std::fs::rename(src, &path) {
+            Ok(()) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Err(FetchError::Message(
+        "unable to create unique temporary update file".to_string(),
+    ))
+}
+
+fn copy_file_exclusive(dst: &Path, src: &Path) -> Result<(), FetchError> {
     let metadata = std::fs::metadata(src)?;
-    std::fs::copy(src, dst)?;
-    std::fs::set_permissions(dst, metadata.permissions())?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
+    let mut src_file = std::fs::File::open(src)?;
+    let mut dst_file = std::fs::OpenOptions::new()
         .write(true)
+        .create_new(true)
         .open(dst)?;
-    file.sync_all()?;
+
+    if let Err(err) = std::io::copy(&mut src_file, &mut dst_file) {
+        let _ = std::fs::remove_file(dst);
+        return Err(err.into());
+    }
+    if let Err(err) = dst_file.set_permissions(metadata.permissions()) {
+        let _ = std::fs::remove_file(dst);
+        return Err(err.into());
+    }
+    if let Err(err) = dst_file.sync_all() {
+        let _ = std::fs::remove_file(dst);
+        return Err(err.into());
+    }
     Ok(())
 }
 
@@ -150,8 +193,7 @@ fn schedule_self_deletion_on_shutdown(exe_path: &Path) -> Result<(), FetchError>
         exe_dir = std::env::temp_dir();
     }
 
-    let self_delete_path = create_temp_file_path(&exe_dir, SELF_DELETE_SUFFIX);
-    copy_file(&self_delete_path, &delete_path)?;
+    let self_delete_path = copy_file_to_new_temp(&exe_dir, SELF_DELETE_SUFFIX, &delete_path)?;
 
     let self_delete_handle = open_delete_on_close_handle(&self_delete_path)?;
     let duplicated_parent = duplicate_current_process_handle()?;
@@ -314,14 +356,23 @@ pub(super) fn current_exe() -> Result<PathBuf, FetchError> {
 #[cfg(unix)]
 pub(super) fn can_replace_file(path: &Path) -> bool {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let temp_path = dir.join(format!(".fetch-update-{}", unique_suffix()));
-    match std::fs::File::create(&temp_path) {
-        Ok(file) => {
-            drop(file);
-            std::fs::remove_file(temp_path).is_ok()
+    for _ in 0..TEMP_FILE_ATTEMPTS {
+        let temp_path = dir.join(format!(".fetch-update-{}", unique_suffix()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => {
+                drop(file);
+                return std::fs::remove_file(temp_path).is_ok();
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return false,
         }
-        Err(_) => false,
     }
+
+    false
 }
 
 #[cfg(not(unix))]
