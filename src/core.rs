@@ -170,17 +170,14 @@ pub fn write_stdout(bytes: impl AsRef<[u8]>) -> std::io::Result<StdoutWriteStatu
 }
 
 pub fn bytes_appear_printable(bytes: &[u8]) -> bool {
-    let mut preview = bytes;
-    if bytes.len() > 1024 {
-        preview = &bytes[..1024];
-    }
-    if preview.contains(&0) {
+    if bytes.contains(&0) {
         return false;
     }
 
+    let max_unsafe = (bytes.len() / 10).max(1);
     let mut safe = 0usize;
     let mut total = 0usize;
-    let mut remaining = preview;
+    let mut remaining = bytes;
     while !remaining.is_empty() {
         match std::str::from_utf8(remaining) {
             Ok(valid) => {
@@ -208,6 +205,9 @@ pub fn bytes_appear_printable(bytes: &[u8]) -> bool {
                     break;
                 }
                 total += 1;
+                if total - safe > max_unsafe {
+                    return false;
+                }
                 remaining = &remaining[valid_up_to + err.error_len().unwrap()..];
             }
         }
