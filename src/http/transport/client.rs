@@ -56,6 +56,7 @@ pub(super) struct ClientConfig {
     pub(super) dns_overrides: HashMap<String, Vec<SocketAddr>>,
     pub(super) proxies: Vec<Proxy>,
     pub(super) tls_config: Option<rustls::ClientConfig>,
+    pub(super) doh_tls_config: Option<rustls::ClientConfig>,
     pub(super) request_timeout: Option<Duration>,
     pub(super) request_timeout_message: Option<String>,
     pub(super) connect_timeout: Option<Duration>,
@@ -90,6 +91,7 @@ impl Client {
                 dns_overrides: HashMap::new(),
                 proxies: Vec::new(),
                 tls_config: None,
+                doh_tls_config: None,
                 request_timeout: None,
                 request_timeout_message: None,
                 connect_timeout: None,
@@ -473,6 +475,11 @@ impl ClientBuilder {
         self
     }
 
+    pub(crate) fn doh_tls_config(mut self, config: rustls::ClientConfig) -> Self {
+        self.config.doh_tls_config = Some(config);
+        self
+    }
+
     pub(crate) fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.config.connect_timeout = Some(timeout);
         self
@@ -606,7 +613,13 @@ pub(super) async fn connect_direct_tcp_config(
             tcp_duration: tcp_start.elapsed(),
         });
     }
-    crate::net::connect_tcp_traced(url, config.dns_server.as_deref(), timeout).await
+    crate::net::connect_tcp_traced_with_doh_tls(
+        url,
+        config.dns_server.as_deref(),
+        config.doh_tls_config.clone(),
+        timeout,
+    )
+    .await
 }
 
 pub(super) fn record_dns_trace(

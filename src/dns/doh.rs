@@ -99,8 +99,19 @@ pub(crate) fn client(timeout: Option<Duration>) -> Result<DohClient, DnsError> {
 }
 
 pub(crate) fn client_with_budget(budget: TimeoutBudget) -> Result<DohClient, DnsError> {
-    let tls_config =
-        crate::tls::rustls_platform_client_config().map_err(|err| DnsError(err.to_string()))?;
+    client_with_budget_and_tls_config(budget, None)
+}
+
+pub(crate) fn client_with_budget_and_tls_config(
+    budget: TimeoutBudget,
+    tls_config: Option<rustls::ClientConfig>,
+) -> Result<DohClient, DnsError> {
+    let tls_config = match tls_config {
+        Some(config) => config,
+        None => {
+            crate::tls::rustls_platform_client_config().map_err(|err| DnsError(err.to_string()))?
+        }
+    };
     let client = Client::builder()
         .tls_config(tls_config)
         .build()

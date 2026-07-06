@@ -228,9 +228,14 @@ async fn dial_websocket(
         url,
         cli.proxy.as_deref(),
         cli.dns_server.as_deref(),
+        websocket_doh_tls_config(cli)?,
         timeout,
     ))
     .await
+}
+
+fn websocket_doh_tls_config(cli: &Cli) -> Result<Option<rustls::ClientConfig>, FetchError> {
+    crate::http::client::doh_tls_config_for_cli(cli)
 }
 
 fn websocket_request_timeout(cli: &Cli) -> Result<Option<Duration>, FetchError> {
@@ -1071,6 +1076,7 @@ mod tests {
         let stream = crate::net::dial_socks5_proxy(
             &proxy_url,
             &target,
+            None,
             None,
             TimeoutBudget::new(Some(Duration::from_secs(5))),
         )

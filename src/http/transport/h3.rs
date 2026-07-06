@@ -178,8 +178,12 @@ impl Client {
         discovery_start: std::time::Instant,
         timeout: TimeoutBudget,
     ) -> DynamicHttp3ConnectOutcome {
-        let origin_addrs_task =
-            spawn_auto_http3_origin_addrs(self.config.dns_server.clone(), host.clone(), timeout);
+        let origin_addrs_task = spawn_auto_http3_origin_addrs(
+            self.config.dns_server.clone(),
+            host.clone(),
+            self.config.doh_tls_config.clone(),
+            timeout,
+        );
         let records =
             lookup_auto_http3_https_records(self.config.dns_server.as_deref(), &host, timeout)
                 .await;
@@ -193,6 +197,7 @@ impl Client {
         let origin_addrs = take_finished_auto_http3_origin_addrs(origin_addrs_task).await;
         let addrs = auto_http3_addrs_for_records(
             self.config.dns_server.as_deref(),
+            self.config.doh_tls_config.clone(),
             url,
             &records,
             &origin_addrs,
@@ -472,10 +477,11 @@ fn record_dynamic_http3_outcome(
 pub(super) fn spawn_auto_http3_origin_addrs(
     dns_server: Option<String>,
     host: String,
+    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> JoinHandle<Vec<SocketAddr>> {
     tokio::spawn(async move {
-        crate::net::resolve_host(&host, dns_server.as_deref(), timeout)
+        crate::net::resolve_host_with_doh_tls(&host, dns_server.as_deref(), doh_tls_config, timeout)
             .await
             .unwrap_or_default()
     })
@@ -527,6 +533,7 @@ fn auto_http3_lookup_timeout(timeout: TimeoutBudget) -> Option<Duration> {
 
 async fn auto_http3_addrs_for_records(
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     url: &Url,
     records: &[SvcbRecord],
     origin_addrs: &[SocketAddr],
@@ -556,12 +563,17 @@ async fn auto_http3_addrs_for_records(
                     .map(|addr| SocketAddr::new(addr.ip(), port))
                     .collect();
             } else if target.eq_ignore_ascii_case(origin_host) {
-                record_addrs = crate::net::resolve_host(origin_host, dns_server, timeout)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|addr| SocketAddr::new(addr.ip(), port))
-                    .collect();
+                record_addrs = crate::net::resolve_host_with_doh_tls(
+                    origin_host,
+                    dns_server,
+                    doh_tls_config.clone(),
+                    timeout,
+                )
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|addr| SocketAddr::new(addr.ip(), port))
+                .collect();
             } else if let Ok(ip) = target.parse::<IpAddr>() {
                 record_addrs.push(SocketAddr::new(ip, port));
             }
@@ -573,6 +585,7 @@ async fn auto_http3_addrs_for_records(
 
 async fn auto_http3_addrs_for_cached_candidates(
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     candidates: &[Http3CacheCandidate],
     timeout: TimeoutBudget,
 ) -> Vec<SocketAddr> {
@@ -583,12 +596,17 @@ async fn auto_http3_addrs_for_cached_candidates(
         let record_addrs = if let Ok(ip) = candidate.alt_host.parse::<IpAddr>() {
             vec![SocketAddr::new(ip, candidate.alt_port)]
         } else {
-            crate::net::resolve_host(&candidate.alt_host, dns_server, timeout)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|addr| SocketAddr::new(addr.ip(), candidate.alt_port))
-                .collect()
+            crate::net::resolve_host_with_doh_tls(
+                &candidate.alt_host,
+                dns_server,
+                doh_tls_config.clone(),
+                timeout,
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|addr| SocketAddr::new(addr.ip(), candidate.alt_port))
+            .collect()
         };
         append_unique_socket_addrs(&mut addrs, record_addrs);
     }
@@ -796,6 +814,7 @@ impl Client {
         let cache = self.config.http3_cache.as_ref()?;
         let addrs = auto_http3_addrs_for_cached_candidates(
             self.config.dns_server.as_deref(),
+            self.config.doh_tls_config.clone(),
             &candidates,
             timeout,
         )
@@ -832,15 +851,20 @@ impl Client {
             (addrs, None)
         } else {
             let dns_start = std::time::Instant::now();
-            let addrs = crate::net::resolve_host(host, self.config.dns_server.as_deref(), timeout)
-                .await
-                .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?
-                .into_iter()
-                .map(|mut addr| {
-                    addr.set_port(port);
-                    addr
-                })
-                .collect();
+            let addrs = crate::net::resolve_host_with_doh_tls(
+                host,
+                self.config.dns_server.as_deref(),
+                self.config.doh_tls_config.clone(),
+                timeout,
+            )
+            .await
+            .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))?
+            .into_iter()
+            .map(|mut addr| {
+                addr.set_port(port);
+                addr
+            })
+            .collect();
             (addrs, Some(dns_start.elapsed()))
         };
         if let Some(duration) = dns_duration {

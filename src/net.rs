@@ -60,28 +60,31 @@ pub(crate) async fn dial_url(
     url: &Url,
     proxy: Option<&str>,
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
     if let Some(proxy) = proxy {
-        return dial_proxy(proxy, url, dns_server, timeout).await;
+        return dial_proxy(proxy, url, dns_server, doh_tls_config, timeout).await;
     }
-    let stream = connect_tcp(url, dns_server, timeout).await?;
+    let stream = connect_tcp_with_doh_tls(url, dns_server, doh_tls_config, timeout).await?;
     Ok(Box::pin(stream))
 }
 
-pub(crate) async fn connect_tcp(
+pub(crate) async fn connect_tcp_with_doh_tls(
     url: &Url,
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<TcpStream, FetchError> {
-    connect_tcp_traced(url, dns_server, timeout)
+    connect_tcp_traced_with_doh_tls(url, dns_server, doh_tls_config, timeout)
         .await
         .map(|trace| trace.stream)
 }
 
-pub(crate) async fn connect_tcp_traced(
+pub(crate) async fn connect_tcp_traced_with_doh_tls(
     url: &Url,
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<TcpConnectTrace, FetchError> {
     let host = url
@@ -107,16 +110,20 @@ pub(crate) async fn connect_tcp_traced(
 
     timeout_fetch(
         timeout,
-        connect_host_happy_eyeballs_traced(host, port, dns_server, timeout),
+        connect_host_happy_eyeballs_traced(host, port, dns_server, doh_tls_config, timeout),
     )
     .await
 }
 
-pub(crate) async fn resolve_host(
+pub(crate) async fn resolve_host_with_doh_tls(
     host: &str,
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<Vec<SocketAddr>, FetchError> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, 0)]);
+    }
     let Some(dns_server) = dns_server else {
         return tokio::net::lookup_host((host, 0))
             .await
@@ -124,7 +131,12 @@ pub(crate) async fn resolve_host(
             .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")));
     };
 
-    let addrs = crate::dns::custom::lookup_ips(dns_server, host, timeout.remaining()?).await?;
+    let addrs = if is_doh_dns_server(dns_server) {
+        let shared_doh = shared_doh_resolver(dns_server, host, timeout, doh_tls_config.as_ref())?;
+        resolve_doh_ips(host, dns_server, Some(&shared_doh), timeout).await?
+    } else {
+        crate::dns::custom::lookup_ips(dns_server, host, timeout.remaining()?).await?
+    };
     Ok(addrs
         .into_iter()
         .map(|addr| SocketAddr::new(addr, 0))
@@ -234,17 +246,16 @@ async fn resolve_custom_host_family(
 }
 
 fn shared_doh_resolver(
-    dns_server: Option<&str>,
+    dns_server: &str,
     host: &str,
     timeout: TimeoutBudget,
-) -> Result<Option<SharedDohResolver>, FetchError> {
-    let Some(dns_server) = dns_server.filter(|server| is_doh_dns_server(server)) else {
-        return Ok(None);
-    };
+    doh_tls_config: Option<&rustls::ClientConfig>,
+) -> Result<SharedDohResolver, FetchError> {
     let server_url = parse_doh_dns_server(dns_server)?;
-    let client = crate::dns::doh::client_with_budget(timeout)
-        .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?;
-    Ok(Some(SharedDohResolver { server_url, client }))
+    let client =
+        crate::dns::doh::client_with_budget_and_tls_config(timeout, doh_tls_config.cloned())
+            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?;
+    Ok(SharedDohResolver { server_url, client })
 }
 
 fn is_doh_dns_server(dns_server: &str) -> bool {
@@ -254,6 +265,46 @@ fn is_doh_dns_server(dns_server: &str) -> bool {
 fn parse_doh_dns_server(dns_server: &str) -> Result<Url, FetchError> {
     Url::parse(dns_server)
         .map_err(|err| FetchError::Message(format!("invalid dns-server '{dns_server}': {err}")))
+}
+
+async fn resolve_doh_ips(
+    host: &str,
+    dns_server: &str,
+    shared_doh: Option<&SharedDohResolver>,
+    timeout: TimeoutBudget,
+) -> Result<Vec<IpAddr>, FetchError> {
+    let (ipv4, ipv6) = tokio::join!(
+        resolve_doh_host_family(
+            host,
+            dns_server,
+            shared_doh,
+            "A",
+            crate::dns::wire::TYPE_A,
+            timeout,
+        ),
+        resolve_doh_host_family(
+            host,
+            dns_server,
+            shared_doh,
+            "AAAA",
+            crate::dns::wire::TYPE_AAAA,
+            timeout,
+        )
+    );
+
+    let mut addrs = Vec::new();
+    if let Ok(records) = &ipv4 {
+        addrs.extend(records.iter().copied());
+    }
+    if let Ok(records) = &ipv6 {
+        addrs.extend(records.iter().copied());
+    }
+    if !addrs.is_empty() {
+        return Ok(addrs);
+    }
+    ipv4?;
+    ipv6?;
+    Err(FetchError::Runtime(format!("lookup {host}: no such host")))
 }
 
 async fn resolve_doh_host_family(
@@ -479,9 +530,18 @@ pub(crate) async fn connect_host_happy_eyeballs_traced(
     host: &str,
     port: u16,
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<TcpConnectTrace, FetchError> {
-    let shared_doh = shared_doh_resolver(dns_server, host, timeout)?;
+    let shared_doh = match dns_server.filter(|s| is_doh_dns_server(s)) {
+        Some(server) => Some(shared_doh_resolver(
+            server,
+            host,
+            timeout,
+            doh_tls_config.as_ref(),
+        )?),
+        None => None,
+    };
     let dns_start = Instant::now();
     let mut ipv4 = Box::pin(resolve_host_family(
         host,
@@ -904,6 +964,7 @@ pub(crate) async fn dial_proxy(
     proxy: &str,
     target: &Url,
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
     let proxy_url = parse_proxy_url(proxy)?;
@@ -911,7 +972,9 @@ pub(crate) async fn dial_proxy(
         "http" | "https" => {
             dial_http_proxy_tunnel(proxy, &proxy_url, target, timeout, None, None).await
         }
-        "socks5" | "socks5h" => dial_socks5_proxy(&proxy_url, target, dns_server, timeout).await,
+        "socks5" | "socks5h" => {
+            dial_socks5_proxy(&proxy_url, target, dns_server, doh_tls_config, timeout).await
+        }
         scheme => Err(FetchError::Message(format!(
             "invalid proxy '{proxy}': unsupported proxy scheme '{scheme}'"
         ))),
@@ -1086,6 +1149,7 @@ pub(crate) async fn dial_socks5_proxy(
     proxy_url: &Url,
     target: &Url,
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
     let stream = connect_socks5_proxy(proxy_url, timeout).await?;
@@ -1097,6 +1161,7 @@ pub(crate) async fn dial_socks5_proxy(
             proxy_url.scheme() == "socks5h",
             target,
             dns_server,
+            doh_tls_config,
             timeout,
         ),
     )
@@ -1240,6 +1305,7 @@ async fn write_socks5_target(
     remote_dns: bool,
     target: &Url,
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<(), FetchError> {
     let host = target
@@ -1261,7 +1327,7 @@ async fn write_socks5_target(
     } else if let Ok(ip) = host.parse::<IpAddr>() {
         write_socks5_ip(request, ip);
     } else {
-        let addr = resolve_host(host, dns_server, timeout)
+        let addr = resolve_host_with_doh_tls(host, dns_server, doh_tls_config, timeout)
             .await?
             .into_iter()
             .next()
