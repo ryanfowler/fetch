@@ -623,7 +623,7 @@ fn apply_from_curl(cli: &mut Cli) -> Result<(), FetchError> {
 
     cli.redirects = Some(if parsed.follow_redirects {
         if parsed.max_redirects_set {
-            usize::try_from(parsed.max_redirects).unwrap_or(usize::MAX)
+            parsed.max_redirects
         } else {
             CURL_DEFAULT_MAX_REDIRECTS
         }
@@ -908,12 +908,15 @@ fn append_raw_query(url: &mut String, query: &str) {
     if query.is_empty() {
         return;
     }
-    if url.contains('?') {
-        url.push('&');
+
+    let fragment_start = url.find('#').unwrap_or(url.len());
+    let separator = if url[..fragment_start].contains('?') {
+        '&'
     } else {
-        url.push('?');
-    }
-    url.push_str(query);
+        '?'
+    };
+    url.insert(fragment_start, separator);
+    url.insert_str(fragment_start + separator.len_utf8(), query);
 }
 
 fn parse_aws_sigv4(value: &str) -> Result<String, FetchError> {
@@ -1295,6 +1298,30 @@ mod tests {
             cli.url.as_deref(),
             Some("https://example.com?q=search&limit=10")
         );
+    }
+
+    #[test]
+    fn from_curl_get_data_inserts_query_before_fragment() {
+        let cases = [
+            (
+                "curl -G -d a=1 'https://x/path#frag'",
+                "https://x/path?a=1#frag",
+            ),
+            (
+                "curl -G -d a=1 'https://x/path?old=1#frag'",
+                "https://x/path?old=1&a=1#frag",
+            ),
+            ("curl -G -d a=1 'x/path#frag'", "x/path?a=1#frag"),
+        ];
+
+        for (command, want) in cases {
+            let mut cli = Cli::try_parse_from(["fetch", "--from-curl", command]).unwrap();
+
+            apply_from_curl(&mut cli).unwrap();
+
+            assert_eq!(cli.data, None);
+            assert_eq!(cli.url.as_deref(), Some(want), "command: {command}");
+        }
     }
 
     fn curl_test_path(path: &std::path::Path) -> String {
