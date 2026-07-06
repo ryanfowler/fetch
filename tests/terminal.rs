@@ -10,9 +10,9 @@ use std::time::Duration;
 use support::common::{assert_exit, fetch_bin, wait_child};
 use support::http::{TestResponse, TestServer};
 use support::terminal::{
-    image_pty_env, run_binary_pty_with_fake_less, run_fetch_pty_with_fake_less,
-    run_fetch_pty_with_fake_less_env, run_fetch_with_fake_less, run_image_pty_with_fake_less,
-    run_image_render_pty,
+    image_pty_env, run_binary_pty_with_custom_body, run_binary_pty_with_fake_less,
+    run_fetch_pty_with_fake_less, run_fetch_pty_with_fake_less_env, run_fetch_with_fake_less,
+    run_image_pty_with_fake_less, run_image_render_pty,
 };
 
 fn assert_binary_warning_output(output: &str) {
@@ -107,6 +107,43 @@ fn terminal_stdout_format_off_warns_instead_of_streaming_binary_response() {
 
     assert_binary_warning_output(&output);
     assert!(!output.contains("abc\0def"), "{output:?}");
+    assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
+    assert!(less_input.is_none(), "pager received input: {less_input:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_stdout_midstream_binary_detection() {
+    // Large printable prefix so the first read buffer(s) pass the
+    // binary check, followed by a NUL byte and trailing data.  The
+    // mid-stream check in copy_checked_async_reader_to_stdout must
+    // detect the binary tail.
+    //
+    // NOTE: the exact chunk boundary depends on TCP / HTTP body
+    // framing and is non-deterministic.  The unit tests in
+    // src/http/response/stream.rs (checked_copy_triggers_on_binary_
+    // after_printable_prefix, checked_copy_handles_split_utf8_across_
+    // reads) exercise the mid-stream path deterministically via
+    // controlled chunked readers.
+    const PREFIX_LEN: usize = 17 * 1024;
+    let mut body = vec![b'A'; PREFIX_LEN];
+    body.extend_from_slice(b"\0BINARY_AFTER");
+
+    let (output, less_args, less_input) =
+        run_binary_pty_with_custom_body(&["--format", "off", "--pager", "off"], body);
+
+    assert_binary_warning_output(&output);
+    // At least one full read buffer of 'A's (the first non-empty
+    // chunk) must have been written before the binary tail was
+    // detected.  The exact count depends on TCP framing.
+    let a_count = output.matches('A').count();
+    assert!(
+        a_count > 0,
+        "expected some 'A's in output, got {a_count}; output length: {}",
+        output.len()
+    );
+    // The data after the NUL must not reach the terminal.
+    assert!(!output.contains("BINARY_AFTER"), "{output:?}");
     assert!(less_args.is_none(), "pager was invoked: {less_args:?}");
     assert!(less_input.is_none(), "pager received input: {less_input:?}");
 }

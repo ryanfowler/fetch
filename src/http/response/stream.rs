@@ -347,7 +347,178 @@ async fn stream_response_to_stdout_with_binary_check(
         return Ok(i64::try_from(n).unwrap_or(i64::MAX).saturating_add(drained));
     }
 
-    copy_async_reader_to_stdout_target(reader, target, first_chunk, capture).await
+    // Write first chunk and continue checking subsequent chunks against binary data.
+    match target {
+        StdoutStreamTarget::Direct => {
+            let mut stdout = tokio::io::stdout();
+            copy_checked_async_reader_to_stdout(
+                reader,
+                &mut stdout,
+                first_chunk,
+                capture,
+                cli,
+                response_headers,
+            )
+            .await
+        }
+        StdoutStreamTarget::Pager => {
+            stream_checked_async_reader_to_pager(
+                reader,
+                first_chunk,
+                capture,
+                cli,
+                response_headers,
+            )
+            .await
+        }
+    }
+}
+
+/// Like [`copy_async_reader_to_sink`] but checks every chunk with
+/// [`is_printable`] before writing.  If any chunk appears binary the
+/// function drains the remainder and sets `triggered` so the caller can
+/// emit a warning.
+///
+/// To avoid false positives when a multi-byte UTF-8 character is split
+/// across transport read boundaries, trailing incomplete UTF-8 bytes
+/// from one chunk are prepended to the next chunk before classification.
+async fn copy_checked_async_reader_to_writer<W>(
+    reader: &mut AsyncReadBox,
+    writer: &mut W,
+    prefix: &[u8],
+    mut capture: Option<&mut clipboard::Capture>,
+    broken_pipe: SinkBrokenPipePolicy,
+    triggered: &mut bool,
+) -> std::io::Result<i64>
+where
+    W: AsyncWrite + Unpin,
+{
+    *triggered = false;
+    let mut written = 0i64;
+
+    // Carries incomplete trailing bytes from a previous chunk so that
+    // split multi-byte characters are classified on the combined bytes.
+    let mut carry: Vec<u8> = Vec::with_capacity(4);
+    if !prefix.is_empty() {
+        if !is_printable(prefix) {
+            *triggered = true;
+            if let Some(capture) = capture.as_mut() {
+                capture.push(prefix);
+            }
+            written = written.saturating_add(i64::try_from(prefix.len()).unwrap_or(i64::MAX));
+            let mut sink = tokio::io::sink();
+            let drained = copy_async_reader_to_writer(reader, &mut sink, capture).await?;
+            return Ok(written.saturating_add(drained));
+        }
+
+        let (complete, tail) = split_incomplete_trailing_utf8(prefix);
+        if !complete.is_empty()
+            && write_stream_chunk(writer, complete, &mut capture, &mut written, broken_pipe).await?
+                == SinkWriteStatus::Closed
+        {
+            return Ok(written);
+        }
+        carry.extend_from_slice(tail);
+    }
+
+    let mut combined: Vec<u8> = Vec::new();
+    let mut buf = vec![0; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            if !carry.is_empty() {
+                // Flush an orphaned incomplete suffix. Writing it now
+                // preserves the original bytes; the classifier already
+                // approved the preceding chunk with this suffix present.
+                if write_stream_chunk(writer, &carry, &mut capture, &mut written, broken_pipe)
+                    .await?
+                    == SinkWriteStatus::Closed
+                {
+                    return Ok(written);
+                }
+                carry.clear();
+            }
+            let _ = stream_sink_status(writer.flush().await, broken_pipe)?;
+            return Ok(written);
+        }
+
+        // Build a combined slice for classification: any trailing
+        // bytes from the previous chunk + the new data.
+        combined.clear();
+        combined.extend_from_slice(&carry);
+        combined.extend_from_slice(&buf[..n]);
+
+        if !is_printable(&combined) {
+            *triggered = true;
+            if let Some(capture) = capture.as_mut() {
+                capture.push(&combined);
+            }
+            written = written.saturating_add(i64::try_from(combined.len()).unwrap_or(i64::MAX));
+            carry.clear();
+            let mut sink = tokio::io::sink();
+            let drained = copy_async_reader_to_writer(reader, &mut sink, capture).await?;
+            return Ok(written.saturating_add(drained));
+        }
+
+        // Classification passed.  Keep any trailing incomplete UTF-8
+        // for the next chunk and write the complete portion now.
+        let (complete, tail) = split_incomplete_trailing_utf8(&combined);
+        if !complete.is_empty()
+            && write_stream_chunk(writer, complete, &mut capture, &mut written, broken_pipe).await?
+                == SinkWriteStatus::Closed
+        {
+            return Ok(written);
+        }
+        carry.clear();
+        carry.extend_from_slice(tail);
+    }
+}
+
+/// Splits `bytes` into a complete prefix and an incomplete trailing
+/// portion (at most 3 bytes).  The incomplete portion is the longest
+/// suffix that by itself forms an invalid, truncated UTF-8 sequence.
+fn split_incomplete_trailing_utf8(bytes: &[u8]) -> (&[u8], &[u8]) {
+    let len = bytes.len();
+    // Check from shortest to longest tail so we find the smallest
+    // incomplete suffix.
+    for tail_len in 1..=4.min(len) {
+        let split = len - tail_len;
+        if let Err(e) = std::str::from_utf8(&bytes[split..])
+            && e.error_len().is_none()
+        {
+            return (&bytes[..split], &bytes[split..]);
+        }
+    }
+    (bytes, &[])
+}
+
+/// Like [`copy_checked_async_reader_to_writer`] specialised for stdout:
+/// emits the binary warning to stderr when the guard triggers.
+async fn copy_checked_async_reader_to_stdout(
+    reader: &mut AsyncReadBox,
+    stdout: &mut tokio::io::Stdout,
+    prefix: &[u8],
+    capture: Option<&mut clipboard::Capture>,
+    cli: &Cli,
+    response_headers: &HeaderMap,
+) -> Result<i64, FetchError> {
+    let mut triggered = false;
+    let written = copy_checked_async_reader_to_writer(
+        reader,
+        stdout,
+        prefix,
+        capture,
+        SinkBrokenPipePolicy::TreatAsClosed,
+        &mut triggered,
+    )
+    .await?;
+    if triggered {
+        write_warning(
+            cli,
+            &binary_response_warning(&response_header_content_type_label(response_headers)),
+        );
+    }
+    Ok(written)
 }
 
 async fn copy_async_reader_to_stdout_target(
@@ -537,6 +708,77 @@ async fn stream_async_reader_to_pager(
     Ok(bytes_written)
 }
 
+/// Like [`stream_async_reader_to_pager`] but checks each chunk for
+/// binary data before writing.  If binary is detected mid-stream the
+/// function drains the remainder, emits a warning, and returns.
+async fn stream_checked_async_reader_to_pager(
+    reader: &mut AsyncReadBox,
+    prefix: &[u8],
+    capture: Option<&mut clipboard::Capture>,
+    cli: &Cli,
+    response_headers: &HeaderMap,
+) -> Result<i64, FetchError> {
+    let pager = output::pager::command();
+    let mut child = match tokio::process::Command::new(&pager.program)
+        .args(&pager.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(err) if pager.is_fallback && err.kind() == ErrorKind::NotFound => {
+            let mut stdout = tokio::io::stdout();
+            let mut triggered = false;
+            let written = copy_checked_async_reader_to_writer(
+                reader,
+                &mut stdout,
+                prefix,
+                capture,
+                SinkBrokenPipePolicy::TreatAsClosed,
+                &mut triggered,
+            )
+            .await?;
+            if triggered {
+                write_warning(
+                    cli,
+                    &binary_response_warning(&response_header_content_type_label(response_headers)),
+                );
+            }
+            return Ok(written);
+        }
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut bytes_written = 0i64;
+    let mut triggered = false;
+    if let Some(mut stdin) = child.stdin.take() {
+        bytes_written = copy_checked_async_reader_to_writer(
+            reader,
+            &mut stdin,
+            prefix,
+            capture,
+            SinkBrokenPipePolicy::TreatAsClosed,
+            &mut triggered,
+        )
+        .await?;
+    }
+
+    let status = child.wait().await?;
+    if !status.success() {
+        return Err(FetchError::Runtime(format!("pager exited with {status}")));
+    }
+
+    if triggered {
+        write_warning(
+            cli,
+            &binary_response_warning(&response_header_content_type_label(response_headers)),
+        );
+    }
+
+    Ok(bytes_written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +899,219 @@ mod tests {
 
         assert_eq!(written, 64 * 1024);
         assert_eq!(writer.bytes, vec![b'a'; 64 * 1024]);
+    }
+
+    /// When a body is entirely printable the checked copy forwards every byte.
+    #[tokio::test]
+    async fn checked_copy_forwards_printable_body() {
+        let body: Vec<u8> = (b'a'..=b'z').cycle().take(20 * 1024).collect();
+        let mut reader: AsyncReadBox = Box::pin(std::io::Cursor::new(body.clone()));
+        let mut writer = RecordingAsyncWriter::default();
+        let mut triggered = false;
+
+        let written = copy_checked_async_reader_to_writer(
+            &mut reader,
+            &mut writer,
+            &[],
+            None,
+            SinkBrokenPipePolicy::Propagate,
+            &mut triggered,
+        )
+        .await
+        .unwrap();
+
+        assert!(!triggered, "guard should not trigger on printable body");
+        assert_eq!(written, i64::try_from(body.len()).unwrap());
+        assert_eq!(writer.bytes, body);
+        assert_eq!(writer.flushes, 1);
+    }
+
+    /// When a prefix is printable but a later chunk contains binary data
+    /// the checked copy must forward the prefix, consume the rest, and
+    /// signal that the guard triggered.
+    #[tokio::test]
+    async fn checked_copy_triggers_on_binary_after_printable_prefix() {
+        // The read buffer is 64 KiB; use a body larger than one buffer
+        // so the first read is all-printable and the second contains
+        // the binary tail.
+        let prefix_len = 65 * 1024;
+        let mut body = vec![b'A'; prefix_len];
+        body.extend_from_slice(b"\0MORE");
+
+        let mut reader: AsyncReadBox = Box::pin(std::io::Cursor::new(body.clone()));
+        let mut writer = RecordingAsyncWriter::default();
+        let mut triggered = false;
+
+        let written = copy_checked_async_reader_to_writer(
+            &mut reader,
+            &mut writer,
+            &[],
+            None,
+            SinkBrokenPipePolicy::Propagate,
+            &mut triggered,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            triggered,
+            "guard must trigger when binary chunk appears mid-stream"
+        );
+        // The first 64 KiB were forwarded before the binary tail was
+        // encountered in the second read.
+        assert_eq!(writer.bytes.len(), 64 * 1024);
+        assert!(writer.bytes.iter().all(|&b| b == b'A'));
+        // The total byte count includes everything (forwarded + consumed).
+        assert_eq!(written, i64::try_from(body.len()).unwrap());
+    }
+
+    #[test]
+    fn trailing_utf8_detects_split_multibyte_characters() {
+        // Complete sequences return no tail.
+        assert_eq!(
+            split_incomplete_trailing_utf8(b"hello"),
+            (&b"hello"[..], &b""[..])
+        );
+        // 2-byte: é = C3 A9
+        assert_eq!(
+            split_incomplete_trailing_utf8(b"abc\xC3\xA9"),
+            (&b"abc\xC3\xA9"[..], &b""[..])
+        );
+        // Truncated 2-byte: only start byte remains.
+        let (complete, tail) = split_incomplete_trailing_utf8(b"abc\xC3");
+        assert_eq!(complete, b"abc");
+        assert_eq!(tail, b"\xC3");
+        // Truncated 3-byte: start + one continuation.
+        // ☃ (U+2603) = E2 98 83
+        let (complete, tail) = split_incomplete_trailing_utf8(b"ab\xE2\x98");
+        assert_eq!(complete, b"ab");
+        assert_eq!(tail, b"\xE2\x98");
+        // Truncated 4-byte: start + two continuation.
+        // 😀 (U+1F600) = F0 9F 98 80
+        let (complete, tail) = split_incomplete_trailing_utf8(b"a\xF0\x9F\x98");
+        assert_eq!(complete, b"a");
+        assert_eq!(tail, b"\xF0\x9F\x98");
+        // Orphaned continuation bytes (no start byte in slice) are
+        // not marked as incomplete because we can't know the expected
+        // length — the start byte was in a previous chunk.
+        assert_eq!(
+            split_incomplete_trailing_utf8(b"\x98\x80"),
+            (&b"\x98\x80"[..], &b""[..])
+        );
+    }
+
+    /// If binary data follows an incomplete UTF-8 tail, the carried
+    /// byte is consumed and counted even though it is not written.
+    #[tokio::test]
+    async fn checked_copy_counts_carried_bytes_when_binary_triggers() {
+        let prefix = b"ok\xC3";
+        let suffix = b"\0rest";
+        let mut reader: AsyncReadBox = Box::pin(std::io::Cursor::new(suffix));
+        let mut writer = RecordingAsyncWriter::default();
+        let mut triggered = false;
+
+        let written = copy_checked_async_reader_to_writer(
+            &mut reader,
+            &mut writer,
+            prefix,
+            None,
+            SinkBrokenPipePolicy::Propagate,
+            &mut triggered,
+        )
+        .await
+        .unwrap();
+
+        assert!(triggered, "guard must trigger on binary data after carry");
+        assert_eq!(written, i64::try_from(prefix.len() + suffix.len()).unwrap());
+        assert_eq!(writer.bytes, b"ok");
+    }
+
+    /// Valid UTF-8 text split between the initial prefix and the first
+    /// reader chunk must not trigger the binary guard.
+    #[tokio::test]
+    async fn checked_copy_handles_split_utf8_after_prefix() {
+        let prefix = b"caf\xC3";
+        let suffix = b"\xA9 au lait";
+        let mut reader: AsyncReadBox = Box::pin(std::io::Cursor::new(suffix));
+        let mut writer = RecordingAsyncWriter::default();
+        let mut triggered = false;
+
+        let written = copy_checked_async_reader_to_writer(
+            &mut reader,
+            &mut writer,
+            prefix,
+            None,
+            SinkBrokenPipePolicy::Propagate,
+            &mut triggered,
+        )
+        .await
+        .unwrap();
+
+        assert!(!triggered, "guard must not trigger on valid split UTF-8");
+        assert_eq!(written, i64::try_from(prefix.len() + suffix.len()).unwrap());
+        assert_eq!(writer.bytes, b"caf\xC3\xA9 au lait");
+    }
+
+    /// Valid UTF-8 text split across read boundaries must not trigger
+    /// the binary guard.
+    #[tokio::test]
+    async fn checked_copy_handles_split_utf8_across_reads() {
+        // "café" repeated so that the multi-byte 'é' (C3 A9) is split
+        // across reads: the first 4-byte read ends with C3, and the
+        // next read starts with A9.
+        let body: Vec<u8> = b"caf\xC3\xA9".repeat(16 * 1024);
+        // Wrap in a reader that returns at most 4 bytes at a time,
+        // guaranteeing that C3 and A9 land in different chunks.
+        let reader = ChunkedReader {
+            inner: std::io::Cursor::new(body.clone()),
+            chunk_size: 4,
+        };
+        let mut reader: AsyncReadBox = Box::pin(reader);
+        let mut writer = RecordingAsyncWriter::default();
+        let mut triggered = false;
+
+        let written = copy_checked_async_reader_to_writer(
+            &mut reader,
+            &mut writer,
+            &[],
+            None,
+            SinkBrokenPipePolicy::Propagate,
+            &mut triggered,
+        )
+        .await
+        .unwrap();
+
+        assert!(!triggered, "guard must not trigger on valid split UTF-8");
+        assert_eq!(written, i64::try_from(body.len()).unwrap());
+        assert_eq!(writer.bytes, body);
+    }
+
+    /// Test helper that wraps a [`std::io::Read`] and limits each
+    /// [`AsyncRead::poll_read`] call to at most `chunk_size` bytes.
+    struct ChunkedReader<R> {
+        inner: R,
+        chunk_size: usize,
+    }
+
+    impl<R: std::io::Read + Unpin> AsyncRead for ChunkedReader<R> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let limit = self.chunk_size.min(buf.remaining());
+            if limit == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let mut tmp = vec![0u8; limit];
+            match self.inner.read(&mut tmp) {
+                Ok(0) => Poll::Ready(Ok(())),
+                Ok(n) => {
+                    buf.put_slice(&tmp[..n]);
+                    Poll::Ready(Ok(()))
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
+        }
     }
 }
