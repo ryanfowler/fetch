@@ -4,8 +4,6 @@ mod install;
 mod lock;
 mod schedule;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use archive::{
     download_artifact, download_checksum, fetch_filename, goarch, goos, release_artifact,
     unpack_artifact_from_file, verify_artifact_checksum,
@@ -198,11 +196,7 @@ fn vcs_revision() -> Option<String> {
 }
 
 fn unique_suffix() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    format!("{}-{nanos}", std::process::id())
+    format!("{:032x}", rand::random::<u128>())
 }
 
 #[cfg(test)]
