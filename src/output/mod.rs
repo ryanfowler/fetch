@@ -605,7 +605,10 @@ fn filename_from_url_path(url: &Url) -> Option<String> {
         if after.is_empty() {
             continue;
         }
-        if let Ok(filename) = sanitize_filename(after) {
+        let decoded = percent_decode(after)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_else(|| after.to_string());
+        if let Ok(filename) = validate_filename_component(&decoded, after) {
             return Some(filename);
         }
     }
@@ -616,24 +619,34 @@ fn sanitize_filename(filename: &str) -> Result<String, OutputError> {
     let Some(base) = filename.rsplit(['/', '\\']).next() else {
         return Err(OutputError::InvalidFilename(filename.to_string()));
     };
+    validate_filename_component(base, filename)
+}
+
+fn validate_filename_component(base: &str, original: &str) -> Result<String, OutputError> {
     if base.is_empty()
         || base == "."
         || base == ".."
+        || base.contains(['/', '\\'])
         || base.chars().any(char::is_control)
-        || looks_like_windows_drive_path(base)
+        || has_unsafe_windows_filename_component(base)
         || is_windows_reserved_filename(base)
     {
-        return Err(OutputError::InvalidFilename(filename.to_string()));
+        return Err(OutputError::InvalidFilename(original.to_string()));
     }
     Ok(base.to_string())
 }
 
-fn looks_like_windows_drive_path(filename: &str) -> bool {
-    let mut chars = filename.chars();
-    matches!(
-        (chars.next(), chars.next()),
-        (Some(letter), Some(':')) if letter.is_ascii_alphabetic()
-    )
+fn has_unsafe_windows_filename_component(component: &str) -> bool {
+    if component.chars().any(is_windows_forbidden_filename_char) {
+        return true;
+    }
+
+    let normalized = component.trim_end_matches([' ', '.']);
+    normalized.len() != component.len() || normalized.is_empty()
+}
+
+fn is_windows_forbidden_filename_char(ch: char) -> bool {
+    matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*')
 }
 
 fn is_windows_reserved_filename(filename: &str) -> bool {
@@ -902,8 +915,19 @@ mod tests {
             ("control character", "bad\nname.txt", Err(())),
             ("windows reserved name", "CON", Err(())),
             ("windows reserved name with extension", "nul.txt", Err(())),
-            ("windows drive-relative path", "C:evil.txt", Err(())),
-            ("windows drive prefix", "D:", Err(())),
+            ("windows reserved name with trailing space", "CON ", Err(())),
+            (
+                "windows drive-relative path with colon",
+                "C:evil.txt",
+                Err(()),
+            ),
+            ("windows drive prefix with colon", "D:", Err(())),
+            ("alternate data stream syntax", "foo:bar", Err(())),
+            ("question mark", "foo?.txt", Err(())),
+            ("angle brackets", "a<b>.txt", Err(())),
+            ("trailing dot", "file.", Err(())),
+            ("trailing space", "file ", Err(())),
+            ("all dots", "...", Err(())),
             ("hidden file", ".hidden", Ok(".hidden")),
         ];
 
@@ -927,6 +951,26 @@ mod tests {
 
         assert_eq!(path, "path_to_file.txt");
         assert_eq!(resolved.warning, None);
+    }
+
+    #[test]
+    fn remote_name_skips_windows_unsafe_url_path_components() {
+        let headers = HeaderMap::new();
+        let tests = [
+            ("http://example.com/fallback/foo%3Abar", "fallback"),
+            ("http://example.com/fallback/foo%3F.txt", "fallback"),
+            ("http://example.com/fallback/a%2Fb", "fallback"),
+            ("http://example.com/fallback/a%5Cb", "fallback"),
+            ("http://example.com/fallback/file.", "fallback"),
+            ("http://example.com/fallback/file%20", "fallback"),
+        ];
+
+        for (input, expected) in tests {
+            let url = Url::parse(input).unwrap();
+            let resolved = resolve_output_path(None, true, false, &url, &headers).unwrap();
+            assert_eq!(resolved.path.as_deref(), Some(expected), "{input}");
+            assert_eq!(resolved.warning, None, "{input}");
+        }
     }
 
     #[test]
@@ -1001,22 +1045,29 @@ mod tests {
 
     #[test]
     fn remote_header_name_falls_back_to_url_on_invalid_content_disposition_filename() {
-        let url = Url::parse("http://example.com/fallback.txt").unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_DISPOSITION,
-            r#"attachment; filename="..""#.parse().unwrap(),
-        );
+        let tests = ["..", "foo:bar", "foo?.txt", "file.", "file "];
 
-        let resolved = resolve_output_path(None, true, true, &url, &headers).unwrap();
+        for filename in tests {
+            let url = Url::parse("http://example.com/fallback.txt").unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                CONTENT_DISPOSITION,
+                format!(r#"attachment; filename="{filename}""#)
+                    .parse()
+                    .unwrap(),
+            );
 
-        let path = resolved.path.unwrap();
+            let resolved = resolve_output_path(None, true, true, &url, &headers).unwrap();
 
-        assert_eq!(path, "fallback.txt");
-        assert_eq!(
-            resolved.warning.as_deref(),
-            Some("Content-Disposition filename was not usable; falling back to URL filename")
-        );
+            let path = resolved.path.unwrap();
+
+            assert_eq!(path, "fallback.txt", "{filename}");
+            assert_eq!(
+                resolved.warning.as_deref(),
+                Some("Content-Disposition filename was not usable; falling back to URL filename"),
+                "{filename}"
+            );
+        }
     }
 
     #[test]
