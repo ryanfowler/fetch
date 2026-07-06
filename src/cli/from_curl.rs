@@ -37,7 +37,7 @@ pub struct ParsedCurl {
     pub remote_name: bool,
     pub remote_header_name: bool,
     pub follow_redirects: bool,
-    pub max_redirects: i32,
+    pub max_redirects: usize,
     pub max_redirects_set: bool,
     pub timeout: f64,
     pub connect_timeout: f64,
@@ -413,24 +413,18 @@ fn parse_long_flag(
         }
         "max-redirs" => {
             let (value, consumed) = consume_arg(name)?;
-            parsed.max_redirects = value
-                .parse()
-                .map_err(|_| format!("invalid --max-redirs value: {value}"))?;
+            parsed.max_redirects = parse_nonnegative_usize("--max-redirs", &value)?;
             parsed.max_redirects_set = true;
             Ok(consumed)
         }
         "max-time" => {
             let (value, consumed) = consume_arg(name)?;
-            parsed.timeout = value
-                .parse()
-                .map_err(|_| format!("invalid --max-time value: {value}"))?;
+            parsed.timeout = parse_nonnegative_f64("--max-time", &value)?;
             Ok(consumed)
         }
         "connect-timeout" => {
             let (value, consumed) = consume_arg(name)?;
-            parsed.connect_timeout = value
-                .parse()
-                .map_err(|_| format!("invalid --connect-timeout value: {value}"))?;
+            parsed.connect_timeout = parse_nonnegative_f64("--connect-timeout", &value)?;
             Ok(consumed)
         }
         "proxy" => {
@@ -450,16 +444,12 @@ fn parse_long_flag(
         }
         "retry" => {
             let (value, consumed) = consume_arg(name)?;
-            parsed.retry = value
-                .parse()
-                .map_err(|_| format!("invalid --retry value: {value}"))?;
+            parsed.retry = parse_nonnegative_usize("--retry", &value)?;
             Ok(consumed)
         }
         "retry-delay" => {
             let (value, consumed) = consume_arg(name)?;
-            parsed.retry_delay = value
-                .parse()
-                .map_err(|_| format!("invalid --retry-delay value: {value}"))?;
+            parsed.retry_delay = parse_nonnegative_f64("--retry-delay", &value)?;
             Ok(consumed)
         }
         "range" => {
@@ -661,9 +651,7 @@ fn parse_short_flags(
             }
             'm' => {
                 let (value, consumed) = consume_arg(flag)?;
-                parsed.timeout = value
-                    .parse()
-                    .map_err(|_| format!("invalid -m value: {value}"))?;
+                parsed.timeout = parse_nonnegative_f64("-m", &value)?;
                 total += consumed;
             }
             'r' => {
@@ -714,6 +702,29 @@ fn parse_short_flags(
 
 fn next_arg(rest: &[String]) -> Result<(String, usize), ()> {
     rest.first().map(|value| (value.clone(), 1)).ok_or(())
+}
+
+fn parse_nonnegative_usize(flag: &str, value: &str) -> Result<usize, String> {
+    if value.starts_with('-') {
+        return Err(format!("invalid {flag} value: {value}"));
+    }
+    let value_to_parse = value.strip_prefix('+').unwrap_or(value);
+    if value_to_parse.is_empty() {
+        return Err(format!("invalid {flag} value: {value}"));
+    }
+    value_to_parse
+        .parse()
+        .map_err(|_| format!("invalid {flag} value: {value}"))
+}
+
+fn parse_nonnegative_f64(flag: &str, value: &str) -> Result<f64, String> {
+    let parsed = value
+        .parse::<f64>()
+        .map_err(|_| format!("invalid {flag} value: {value}"))?;
+    if !parsed.is_finite() || !(0.0..=crate::duration::MAX_DURATION_SECONDS).contains(&parsed) {
+        return Err(format!("invalid {flag} value: {value}"));
+    }
+    Ok(parsed)
 }
 
 fn parse_header(value: &str) -> Result<Header, String> {
@@ -1003,6 +1014,21 @@ mod tests {
         assert_eq!(parsed.connect_timeout, 0.25);
         assert_eq!(parsed.retry, 3);
         assert_eq!(parsed.retry_delay, 0.5);
+    }
+
+    #[test]
+    fn test_parse_rejects_negative_numeric_values() {
+        for command in [
+            "curl --max-redirs -1 https://example.com",
+            "curl --max-time -5 https://example.com",
+            "curl -m -5 https://example.com",
+            "curl --connect-timeout -5 https://example.com",
+            "curl --retry -1 https://example.com",
+            "curl --retry-delay -5 https://example.com",
+        ] {
+            let err = parse(command).unwrap_err();
+            assert!(err.contains("invalid"), "{command}: {err}");
+        }
     }
 
     #[test]
