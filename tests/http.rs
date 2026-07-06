@@ -97,7 +97,9 @@ fn schemeless_https_connect_error_suggests_plaintext_url() {
         .set_nonblocking(true)
         .expect("set plaintext listener nonblocking");
     let port = listener.local_addr().expect("local addr").port();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let join = thread::spawn(move || {
+        let _ = ready_tx.send(());
         for _ in 0..2 {
             let Ok(mut stream) =
                 accept_tcp_connection(&listener, Duration::from_secs(3), "plaintext TLS hint")
@@ -111,6 +113,9 @@ fn schemeless_https_connect_error_suggests_plaintext_url() {
         }
     });
 
+    ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("plaintext listener thread ready");
     let dns_addr = start_udp_dns_server("fetch-plaintext-hint.test.", Ipv4Addr::new(127, 0, 0, 1));
     let raw_url = format!("fetch-plaintext-hint.test:{port}/status");
     let res = run_fetch_once(FetchOpts::default(), &["--dns-server", &dns_addr, &raw_url]);
@@ -995,7 +1000,10 @@ fn compressed_sse_retry_drains_first_response_before_replay() {
         .expect("set compressed sse retry listener nonblocking");
     let url = format!("http://{}", listener.local_addr().expect("local addr"));
     let (outcome_tx, outcome_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let join = thread::spawn(move || {
+        // Signal that the server thread has started and the listener is ready.
+        let _ = ready_tx.send(());
         let result = (|| -> Result<Duration, String> {
             let mut first_stream = accept_tcp_connection(
                 &listener,
@@ -1071,6 +1079,10 @@ fn compressed_sse_retry_drains_first_response_before_replay() {
         let _ = outcome_tx.send(result);
     });
 
+    // Wait for the server thread to enter its accept loop before connecting.
+    ready_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("compressed SSE retry server ready");
     let res = run_fetch(&[&url, "--format", "on"]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "event: message\ndata: uncompressed\n\n");
