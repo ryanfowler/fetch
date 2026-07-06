@@ -65,11 +65,13 @@ pub(crate) fn run_fetch_opts(opts: FetchOpts, args: &[&str]) -> FetchOutput {
     let env = opts.env.clone();
     let bin = opts.bin.clone();
     let mut result = run_fetch_once(opts, args);
-    for _ in 0..4 {
+    let mut delay_ms: u64 = 25;
+    for _ in 0..9 {
         if !can_retry || !is_transient_local_server_error(&result) {
             return result;
         }
-        thread::sleep(Duration::from_millis(25));
+        thread::sleep(Duration::from_millis(delay_ms));
+        delay_ms = (delay_ms * 2).min(1000);
         result = run_fetch_once(
             FetchOpts {
                 stdin: None,
