@@ -166,6 +166,7 @@ pub(crate) async fn build_client_for_url(
         builder = builder.ech_hard_fail(hard_fail);
         builder = configure_tls(builder, cli, ech_mode)?;
     }
+    builder = configure_doh_tls(builder, cli)?;
     builder = configure_proxy(builder, cli.proxy.as_deref(), http_version, url)?;
     if let Some(timeout) =
         TimeoutBudget::started_at(context.request_timeout, context.request_start).remaining()?
@@ -309,7 +310,7 @@ async fn resolve_dns_for_client_inner(
                 .flatten()
                 .unwrap_or(Duration::from_secs(5));
             let https_records = lookup_ech_https_records(Some(dns_server), host, ech_timeout).await;
-            let addrs = custom::lookup_ips(dns_server, host, timeout.timeout()).await;
+            let addrs = lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout).await;
             (addrs?, https_records)
         } else if let Some(auto_http3_budget) = auto_http3_discovery {
             let https = spawn_auto_http3_https_records(
@@ -317,12 +318,12 @@ async fn resolve_dns_for_client_inner(
                 host.to_string(),
                 Some(auto_http3_budget),
             );
-            let addrs = custom::lookup_ips(dns_server, host, timeout.timeout()).await;
+            let addrs = lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout).await;
             let https_records = take_finished_auto_http3_https_records(https).await;
             (addrs?, https_records)
         } else {
             (
-                custom::lookup_ips(dns_server, host, timeout.timeout()).await?,
+                lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout).await?,
                 Vec::new(),
             )
         };
@@ -330,6 +331,7 @@ async fn resolve_dns_for_client_inner(
         let socket_addrs = custom::socket_addrs_for_override(&addrs);
         let auto_http3_config = auto_http3_config_for_records(
             Some(dns_server),
+            doh_tls_config_for_cli(cli)?,
             url,
             &https_records,
             &socket_addrs,
@@ -414,6 +416,7 @@ async fn resolve_dns_for_client_inner(
     };
     let addrs = dns_timing_addrs(socket_addrs.iter().map(|addr| addr.ip()));
     let auto_http3_config = auto_http3_config_for_records(
+        None,
         None,
         url,
         &https_records,
@@ -611,8 +614,15 @@ fn auto_http3_allowed(
             .is_some_and(|host| host.parse::<IpAddr>().is_err())
 }
 
+#[derive(Clone)]
+struct AutoHttp3ResolveConfig<'a> {
+    dns_server: Option<&'a str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
+}
+
 async fn auto_http3_config_for_records(
     dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
     url: &Url,
     records: &[SvcbRecord],
     origin_addrs: &[SocketAddr],
@@ -631,7 +641,10 @@ async fn auto_http3_config_for_records(
         }
         let port = record.port.unwrap_or(origin_port);
         let record_addrs = auto_http3_record_addrs(
-            dns_server,
+            AutoHttp3ResolveConfig {
+                dns_server,
+                doh_tls_config: doh_tls_config.clone(),
+            },
             origin_host,
             record,
             origin_addrs,
@@ -647,7 +660,7 @@ async fn auto_http3_config_for_records(
 }
 
 async fn auto_http3_record_addrs(
-    dns_server: Option<&str>,
+    resolver: AutoHttp3ResolveConfig<'_>,
     origin_host: &str,
     record: &SvcbRecord,
     origin_addrs: &[SocketAddr],
@@ -678,7 +691,12 @@ async fn auto_http3_record_addrs(
     };
     let timeout = TimeoutBudget::new(Some(timeout));
     let Ok(mut addrs) = timeout
-        .run(crate::net::resolve_host(&target, dns_server, timeout))
+        .run(crate::net::resolve_host_with_doh_tls(
+            &target,
+            resolver.dns_server,
+            resolver.doh_tls_config,
+            timeout,
+        ))
         .await
     else {
         return Vec::new();
@@ -833,6 +851,65 @@ pub(crate) fn configure_tls(
         ech_mode,
     )?);
     Ok(builder)
+}
+
+fn configure_doh_tls(mut builder: ClientBuilder, cli: &Cli) -> Result<ClientBuilder, FetchError> {
+    if let Some(config) = doh_tls_config_for_cli(cli)? {
+        builder = builder.doh_tls_config(config);
+    }
+    Ok(builder)
+}
+
+async fn lookup_custom_ips_with_doh_tls(
+    cli: &Cli,
+    dns_server: &str,
+    host: &str,
+    timeout: TimeoutBudget,
+) -> Result<Vec<IpAddr>, FetchError> {
+    if dns_server.starts_with("http://") || dns_server.starts_with("https://") {
+        return crate::net::resolve_host_with_doh_tls(
+            host,
+            Some(dns_server),
+            doh_tls_config_for_cli(cli)?,
+            timeout,
+        )
+        .await
+        .map(|addrs| addrs.into_iter().map(|addr| addr.ip()).collect());
+    }
+    custom::lookup_ips(dns_server, host, timeout.timeout()).await
+}
+
+pub(crate) fn doh_tls_config_for_cli(
+    cli: &Cli,
+) -> Result<Option<rustls::ClientConfig>, FetchError> {
+    let Some(dns_server) = cli.dns_server.as_deref() else {
+        return Ok(None);
+    };
+    if !(dns_server.starts_with("http://") || dns_server.starts_with("https://")) {
+        return Ok(None);
+    }
+    let min_tls = cli.min_tls.as_deref().or(cli.tls.as_deref());
+    let min_tls_option = min_tls.map(|value| {
+        if cli.min_tls.is_some() {
+            ("min-tls", value)
+        } else {
+            ("tls", value)
+        }
+    });
+    crate::tls::ensure_rustls_supported_range(min_tls_option, cli.max_tls.as_deref())?;
+    // DoH uses request TLS trust/version options, but intentionally does not
+    // attach origin client certificates to the resolver.
+    Ok(Some(
+        crate::tls::rustls_platform_client_config_with_options(
+            &cli.ca_cert,
+            None,
+            None,
+            cli.insecure,
+            min_tls_option,
+            cli.max_tls.as_deref(),
+            None,
+        )?,
+    ))
 }
 
 fn should_configure_tls(cli: &Cli, url: &Url) -> bool {
@@ -1258,6 +1335,7 @@ mod tests {
 
         let got = auto_http3_config_for_records(
             None,
+            None,
             &url,
             &records,
             &origin_addrs,
@@ -1285,6 +1363,7 @@ mod tests {
 
         let ipv4_first = auto_http3_config_for_records(
             None,
+            None,
             &url,
             &[record.clone()],
             &[
@@ -1308,6 +1387,7 @@ mod tests {
         );
 
         let ipv6_first = auto_http3_config_for_records(
+            None,
             None,
             &url,
             &[record],
@@ -1339,6 +1419,7 @@ mod tests {
         assert!(
             auto_http3_config_for_records(
                 None,
+                None,
                 &url,
                 &[],
                 &origin_addrs,
@@ -1350,6 +1431,7 @@ mod tests {
         );
         assert!(
             auto_http3_config_for_records(
+                None,
                 None,
                 &url,
                 &[https_record(1, ".", &["h2"], None)],
@@ -1364,6 +1446,7 @@ mod tests {
         unsupported.unsupported_mandatory = vec![9];
         assert!(
             auto_http3_config_for_records(
+                None,
                 None,
                 &url,
                 &[unsupported],
@@ -1383,6 +1466,7 @@ mod tests {
 
         assert!(
             auto_http3_config_for_records(
+                None,
                 None,
                 &url,
                 &[https_record(1, "h3.example.com.", &["h3"], None)],

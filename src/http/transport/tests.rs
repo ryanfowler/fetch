@@ -154,6 +154,7 @@ async fn dynamic_auto_http3_origin_preference_lookup_allows_custom_dns() {
     let handle = spawn_auto_http3_origin_addrs(
         Some("https://dns.example/dns-query".to_string()),
         "192.0.2.1".to_string(),
+        None,
         TimeoutBudget::new(None),
     );
 

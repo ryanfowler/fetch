@@ -69,10 +69,16 @@ pub(super) async fn dial_stream_for_config(
                 .map(|stream| (stream, false, true, None, None))
                 .map_err(|err| Error::from_fetch(ErrorKind::Connect, err))
         }
-        Some(proxy) => crate::net::dial_proxy(&proxy.url, url, None, timeout)
-            .await
-            .map(|stream| (stream, false, true, None, None))
-            .map_err(|err| Error::from_fetch(ErrorKind::Connect, err)),
+        Some(proxy) => crate::net::dial_proxy(
+            &proxy.url,
+            url,
+            config.dns_server.as_deref(),
+            config.doh_tls_config.clone(),
+            timeout,
+        )
+        .await
+        .map(|stream| (stream, false, true, None, None))
+        .map_err(|err| Error::from_fetch(ErrorKind::Connect, err)),
         None if config.unix_socket.is_some() => {
             #[cfg(unix)]
             {
