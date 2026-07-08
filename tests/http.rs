@@ -551,22 +551,28 @@ fn digest_auth_drain_is_bounded_for_large_challenge_body() {
         "authenticated",
     );
 
-    let res = run_fetch(&[
-        &server.url,
-        "--digest",
-        "user:pass",
-        "--data",
-        "hello=world",
-        "--timeout",
-        "3",
-    ]);
+    let res = run_fetch_once(
+        FetchOpts::default(),
+        &[
+            &server.url,
+            "--digest",
+            "user:pass",
+            "--data",
+            "hello=world",
+            "--timeout",
+            "3",
+        ],
+    );
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "authenticated");
 
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
     assert!(requests[0].header("authorization").is_empty());
-    assert!(requests[1].header("authorization").starts_with("Digest "));
+    assert!(
+        requests[1].header("authorization").starts_with("Digest "),
+        "requests: {requests:?}"
+    );
     assert_eq!(requests[1].body_string(), "hello=world");
 }
 
