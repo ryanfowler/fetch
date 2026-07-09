@@ -129,7 +129,7 @@ Request flow: CLI parse → config merge → request build (gRPC may load/reflec
 - Self-update metadata/artifact/checksum/redirect URLs require HTTPS except internal test overrides; update networking must not inherit origin-specific TLS/version/Unix-socket config, but may keep proxy/DNS/timeouts/verbosity/custom CA. Artifacts stream with SHA-256; tar extracts streaming, zip uses temp archive; Unix replacement preserves atomic parent-dir sync.
 - `install.sh` verifies `.sha256`; completion install is opt-in (`--completions` or `FETCH_INSTALL_COMPLETIONS=1`) and must not auto-edit shell startup files by default.
 - Ctrl-C/SIGINT exits 130, including streaming modes. Output downloads keep `*.download` temps under a drop guard.
-- Rust is pinned to 1.96.1 (`rust-toolchain.toml`); keep `Cargo.toml` rust-version and CI aligned. Windows config search prefers XDG/HOME paths before AppData; Windows mTLS fixtures use RSA certs.
+- Rust is pinned to 1.97.0 (`rust-toolchain.toml`); keep `Cargo.toml` rust-version and CI aligned. Windows config search prefers XDG/HOME paths before AppData; Windows mTLS fixtures use RSA certs.
 - GitHub Actions run fmt/clippy/unit/integration. Release builds archive names for self-updater, Linux GNU uses `cargo-zigbuild` with glibc 2.28 floor, Windows uses static MSVC CRT, archives get SHA-256 sidecars, `FETCH_VERSION` comes from release tag/manual version (local: matching `v*`, then `git describe`, then `v0.0.0-dev`), and `vcs.modified` ignores untracked files.
 
 ## Docs
