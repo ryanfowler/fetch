@@ -44,7 +44,7 @@ mime = "=0.3.17"
 mimalloc = "=0.1.52"
 percent-encoding = "=2.3.2"
 prost = "=0.14.4"
-prost-reflect = { version = "=0.16.4", features = ["serde"] }
+prost-reflect = { version = "=0.16.5", features = ["serde"] }
 prost-types = "=0.14.4"
 psl = "=2.1.218"
 rand = "=0.10.2"
