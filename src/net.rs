@@ -89,7 +89,8 @@ pub(crate) async fn connect_tcp_traced_with_doh_tls(
 ) -> Result<TcpConnectTrace, FetchError> {
     let host = url
         .host_str()
-        .ok_or_else(|| FetchError::Message("URL host is required".to_string()))?;
+        .ok_or_else(|| FetchError::Message("URL host is required".to_string()))?
+        .trim_matches(['[', ']']);
     let port = url
         .port_or_known_default()
         .ok_or_else(|| FetchError::Message("URL port is required".to_string()))?;

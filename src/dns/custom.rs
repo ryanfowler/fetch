@@ -212,34 +212,6 @@ pub(crate) fn socket_addrs_for_override(addrs: &[IpAddr]) -> Vec<SocketAddr> {
     addrs.iter().map(|addr| SocketAddr::new(*addr, 0)).collect()
 }
 
-pub(crate) fn socket_addrs_with_port(
-    addrs: impl IntoIterator<Item = IpAddr>,
-    port: u16,
-) -> Vec<SocketAddr> {
-    let mut addrs = addrs
-        .into_iter()
-        .map(|addr| SocketAddr::new(addr, port))
-        .collect::<Vec<_>>();
-    sort_socket_addrs(&mut addrs);
-    addrs.dedup();
-    addrs
-}
-
-pub(crate) fn sort_socket_addrs(addrs: &mut [SocketAddr]) {
-    addrs.sort_by(|left, right| {
-        compare_ip_addrs(&left.ip(), &right.ip()).then_with(|| left.port().cmp(&right.port()))
-    });
-}
-
-fn compare_ip_addrs(left: &IpAddr, right: &IpAddr) -> std::cmp::Ordering {
-    match (left, right) {
-        (IpAddr::V4(left), IpAddr::V4(right)) => left.octets().cmp(&right.octets()),
-        (IpAddr::V6(left), IpAddr::V6(right)) => left.octets().cmp(&right.octets()),
-        (IpAddr::V4(_), IpAddr::V6(_)) => std::cmp::Ordering::Less,
-        (IpAddr::V6(_), IpAddr::V4(_)) => std::cmp::Ordering::Greater,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
