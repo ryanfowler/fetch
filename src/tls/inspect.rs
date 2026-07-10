@@ -12,7 +12,6 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{
     DigitallySignedStruct, ProtocolVersion, RootCertStore, SignatureScheme, SupportedCipherSuite,
 };
-use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use url::Url;
 
@@ -133,8 +132,6 @@ async fn inspect_tcp(
     timeout: TimeoutBudget,
 ) -> Result<Inspection, FetchError> {
     let host = tls_host(url)?;
-    let port = url.port_or_known_default().unwrap_or(443);
-
     // Resolve ECH configuration from DNS.
     let ech_mode = resolve_inspect_ech_mode(cli, &host, timeout).await?;
 
@@ -156,7 +153,13 @@ async fn inspect_tcp(
 
     let server_name = ServerName::try_from(host.clone())
         .map_err(|_| FetchError::Message(format!("invalid server name '{host}'")))?;
-    let stream = connect_tcp_host(&host, port, cli.dns_server.as_deref(), timeout).await?;
+    let stream = crate::net::connect_tcp_with_doh_tls(
+        url,
+        cli.dns_server.as_deref(),
+        crate::http::client::doh_tls_config_for_cli(cli)?,
+        timeout,
+    )
+    .await?;
     let connector = TlsConnector::from(Arc::new(config));
     let stream = timeout
         .run(async move {
@@ -257,66 +260,6 @@ async fn lookup_inspect_ech_candidates(
         .collect()
 }
 
-async fn connect_tcp_host(
-    host: &str,
-    port: u16,
-    dns_server: Option<&str>,
-    timeout: TimeoutBudget,
-) -> Result<TcpStream, FetchError> {
-    let addrs = resolve_tls_host(host, port, dns_server, timeout).await?;
-    let mut last_err = None;
-
-    for addr in addrs {
-        match timeout
-            .run(async move { TcpStream::connect(addr).await.map_err(FetchError::from) })
-            .await
-        {
-            Ok(stream) => return Ok(stream),
-            Err(err) => last_err = Some(err),
-        }
-    }
-
-    Err(last_err.unwrap_or_else(|| FetchError::Message("no addresses found".to_string())))
-}
-
-async fn resolve_tls_host(
-    host: &str,
-    port: u16,
-    dns_server: Option<&str>,
-    timeout: TimeoutBudget,
-) -> Result<Vec<SocketAddr>, FetchError> {
-    let Some(dns_server) = dns_server else {
-        return timeout
-            .run(async {
-                tokio::net::lookup_host((host, port))
-                    .await
-                    .map(|addrs| addrs.collect())
-                    .map_err(FetchError::from)
-            })
-            .await;
-    };
-    if host.parse::<IpAddr>().is_ok() {
-        return timeout
-            .run(async {
-                tokio::net::lookup_host((host, port))
-                    .await
-                    .map(|addrs| addrs.collect())
-                    .map_err(FetchError::from)
-            })
-            .await;
-    }
-
-    let dns_timeout = timeout.remaining()?;
-    let addrs = timeout
-        .run(crate::dns::custom::lookup_ips(
-            dns_server,
-            host,
-            dns_timeout,
-        ))
-        .await?;
-    Ok(crate::dns::custom::socket_addrs_with_port(addrs, port))
-}
-
 async fn inspect_quic(
     cli: &Cli,
     url: &Url,
@@ -329,39 +272,70 @@ async fn inspect_quic(
     let host = tls_host(url)?;
     ensure_quic_protocol_versions(cli)?;
     let port = url.port_or_known_default().unwrap_or(443);
-    let addrs = resolve_tls_host(&host, port, cli.dns_server.as_deref(), timeout).await?;
+    let addrs = crate::net::resolve_host_with_doh_tls(
+        &host,
+        cli.dns_server.as_deref(),
+        crate::http::client::doh_tls_config_for_cli(cli)?,
+        timeout,
+    )
+    .await?
+    .into_iter()
+    .map(|mut addr| {
+        addr.set_port(port);
+        addr
+    })
+    .collect();
+    let addrs = crate::net::interleave_socket_addrs(addrs)?;
 
     let ca_certs = load_ca_certs(&cli.ca_cert)?;
     let native_roots = load_native_root_certs();
     let trusted_roots = trusted_root_certs(&ca_certs, &native_roots);
-    let ocsp_capture = OcspCapture::default();
-    let mut config =
-        build_client_config(cli, &ca_certs, &native_roots, ocsp_capture.clone(), None)?;
-    config.alpn_protocols = alpn_protocols(Some(HttpVersion::Http3))
-        .iter()
-        .map(|protocol| protocol.as_bytes().to_vec())
-        .collect();
-    let quic_config = quic_client_config(config)?;
+    // Each raced connection needs its own capture: a handshake completing after
+    // the winner must not overwrite the winner's stapled OCSP response.
+    let connections = addrs
+        .into_iter()
+        .map(|addr| {
+            let ocsp_capture = OcspCapture::default();
+            let mut config =
+                build_client_config(cli, &ca_certs, &native_roots, ocsp_capture.clone(), None)?;
+            config.alpn_protocols = alpn_protocols(Some(HttpVersion::Http3))
+                .iter()
+                .map(|protocol| protocol.as_bytes().to_vec())
+                .collect();
+            Ok((addr, quic_client_config(config)?, ocsp_capture))
+        })
+        .collect::<Result<Vec<_>, FetchError>>()?;
 
-    let mut last_err: Option<FetchError> = None;
-    for addr in addrs {
-        ocsp_capture.clear();
-        match inspect_quic_addr(
-            addr,
-            &host,
-            quic_config.clone(),
-            &trusted_roots,
-            !cli.insecure,
-            &ocsp_capture,
-            timeout,
-        )
-        .await
-        {
-            Ok(inspection) => return Ok(inspection),
-            Err(err) => last_err = Some(err),
-        }
-    }
-    Err(last_err.unwrap_or_else(|| FetchError::Message("no addresses found".to_string())))
+    race_quic_inspections(connections, host, trusted_roots, !cli.insecure, timeout).await
+}
+
+type QuicInspectionConnection = (SocketAddr, quinn::ClientConfig, OcspCapture);
+
+async fn race_quic_inspections(
+    connections: Vec<QuicInspectionConnection>,
+    host: String,
+    trusted_roots: Vec<ParsedCert>,
+    verified: bool,
+    timeout: TimeoutBudget,
+) -> Result<Inspection, FetchError> {
+    crate::net::race_staggered(
+        connections,
+        crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY,
+        "lookup returned no addresses",
+        "QUIC inspection connect",
+        move |(addr, quic_config, ocsp_capture)| {
+            inspect_quic_addr(
+                addr,
+                host.clone(),
+                quic_config,
+                trusted_roots.clone(),
+                verified,
+                ocsp_capture,
+                timeout,
+            )
+        },
+    )
+    .await
 }
 
 fn tls_host(url: &Url) -> Result<String, FetchError> {
@@ -377,11 +351,11 @@ fn tls_host(url: &Url) -> Result<String, FetchError> {
 
 async fn inspect_quic_addr(
     addr: SocketAddr,
-    host: &str,
+    host: String,
     quic_config: quinn::ClientConfig,
-    trusted_roots: &[ParsedCert],
+    trusted_roots: Vec<ParsedCert>,
     verified: bool,
-    ocsp_capture: &OcspCapture,
+    ocsp_capture: OcspCapture,
     timeout: TimeoutBudget,
 ) -> Result<Inspection, FetchError> {
     let bind_addr = if addr.is_ipv4() {
@@ -396,7 +370,7 @@ async fn inspect_quic_addr(
     endpoint.set_default_client_config(quic_config);
 
     let connecting = endpoint
-        .connect(addr, host)
+        .connect(addr, &host)
         .map_err(|err| FetchError::Message(err.to_string()))?;
     let connection = timeout
         .run(async {
@@ -406,8 +380,11 @@ async fn inspect_quic_addr(
         })
         .await?;
     let alpn = quic_alpn(&connection);
-    let chain =
-        certificate_chain_for_display(quic_peer_certificates(&connection), trusted_roots, verified);
+    let chain = certificate_chain_for_display(
+        quic_peer_certificates(&connection),
+        &trusted_roots,
+        verified,
+    );
 
     connection.close(0_u32.into(), b"");
     endpoint.close(0_u32.into(), b"");
@@ -1267,6 +1244,83 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     }
 
     #[tokio::test]
+    async fn quic_race_keeps_winning_connection_ocsp_response() {
+        let losing_ocsp = test_ocsp_response(0x80);
+        let winning_ocsp = test_ocsp_response(0x82);
+        let first = match quinn::Endpoint::server(
+            test_quic_server_config_with_ocsp(losing_ocsp),
+            "[::1]:0".parse::<SocketAddr>().unwrap(),
+        ) {
+            Ok(endpoint) => endpoint,
+            Err(err) if err.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                eprintln!("skipping IPv6 QUIC race test: {err}");
+                return;
+            }
+            Err(err) => panic!("bind IPv6 QUIC server: {err}"),
+        };
+        let first_addr = first.local_addr().unwrap();
+        let second = quinn::Endpoint::server(
+            test_quic_server_config_with_ocsp(winning_ocsp.clone()),
+            SocketAddr::new("127.0.0.1".parse().unwrap(), first_addr.port()),
+        )
+        .unwrap();
+        let second_addr = second.local_addr().unwrap();
+
+        // Keep the preferred address's handshake pending long enough for the
+        // staggered fallback to win. Its distinct OCSP response must not leak
+        // into the winning inspection.
+        let losing_server = tokio::spawn(async move {
+            if let Some(incoming) = first.accept().await {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let _ = incoming.await;
+            }
+        });
+        let winning_server = tokio::spawn(async move {
+            if let Some(incoming) = second.accept().await {
+                let _ = incoming.await;
+            }
+        });
+
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "--inspect-tls",
+            "--http",
+            "3",
+            "--insecure",
+            "https://localhost",
+        ])
+        .unwrap();
+        let connections = [first_addr, second_addr]
+            .into_iter()
+            .map(|addr| {
+                let capture = OcspCapture::default();
+                let mut config = build_client_config(&cli, &[], &[], capture.clone(), None)?;
+                config.alpn_protocols = vec![b"h3".to_vec()];
+                Ok((addr, quic_client_config(config)?, capture))
+            })
+            .collect::<Result<Vec<_>, FetchError>>()
+            .unwrap();
+
+        let inspection = tokio::time::timeout(
+            Duration::from_secs(5),
+            race_quic_inspections(
+                connections,
+                "localhost".to_string(),
+                Vec::new(),
+                false,
+                TimeoutBudget::new(None),
+            ),
+        )
+        .await
+        .expect("QUIC inspection race timed out")
+        .unwrap();
+
+        assert_eq!(inspection.ocsp_response, winning_ocsp);
+        losing_server.abort();
+        winning_server.abort();
+    }
+
+    #[tokio::test]
     async fn inspect_http3_uses_quic_and_h3_alpn() {
         let server_config = test_quic_server_config();
         let endpoint =
@@ -1332,6 +1386,10 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     }
 
     fn test_quic_server_config() -> quinn::ServerConfig {
+        test_quic_server_config_with_ocsp(Vec::new())
+    }
+
+    fn test_quic_server_config_with_ocsp(ocsp_response: Vec<u8>) -> quinn::ServerConfig {
         crate::tls::install_default_crypto_provider();
 
         let certs = super::super::pem_certificates(TEST_QUIC_CERT_PEM)
@@ -1344,7 +1402,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             .expect("test QUIC private key");
         let mut crypto = rustls::ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(certs, key)
+            .with_single_cert_with_ocsp(certs, key, ocsp_response)
             .unwrap();
         crypto.alpn_protocols = vec![b"h3".to_vec()];
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto).unwrap()))

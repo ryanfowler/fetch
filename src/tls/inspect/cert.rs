@@ -523,11 +523,4 @@ impl OcspCapture {
             .expect("OCSP capture lock poisoned")
             .clone()
     }
-
-    pub(super) fn clear(&self) {
-        self.response
-            .lock()
-            .expect("OCSP capture lock poisoned")
-            .clear();
-    }
 }
