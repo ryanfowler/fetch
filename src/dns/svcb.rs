@@ -304,13 +304,14 @@ async fn lookup_udp_https_records(
     let mut response = crate::dns::transport::query_udp(server_addr, &raw, udp_timeout)
         .await
         .map_err(|err| FetchError::Runtime(err.to_string()))?;
-    let raw_records = match wire::parse_response(&response, id) {
+    let raw_records = match wire::parse_response(&response, id, host, DNS_TYPE_HTTPS, DNS_CLASS_IN)
+    {
         Ok(records) => records,
         Err(err) if err.is_truncated() => {
             response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
                 .await
                 .map_err(|err| FetchError::Runtime(err.to_string()))?;
-            wire::parse_response(&response, id)
+            wire::parse_response(&response, id, host, DNS_TYPE_HTTPS, DNS_CLASS_IN)
                 .map_err(|err| FetchError::Runtime(err.to_string()))?
         }
         Err(err) => return Err(FetchError::Runtime(err.to_string())),

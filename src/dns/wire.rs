@@ -16,6 +16,8 @@ pub(crate) const CLASS_IN: u16 = 1;
 pub(crate) const EDNS_UDP_PAYLOAD_SIZE: u16 = 1232;
 
 const TRUNCATED_RESPONSE: &str = "DNS response was truncated";
+const FLAG_RESPONSE: u16 = 0x8000;
+const FLAG_OPCODE: u16 = 0x7800;
 const FLAG_TRUNCATED: u16 = 0x0200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,8 +37,9 @@ impl WireError {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct ResourceRecord<'a> {
+    pub(crate) name: String,
     pub(crate) typ: u16,
     pub(crate) class: u16,
     pub(crate) ttl: u32,
@@ -62,18 +65,35 @@ pub(crate) fn build_query(id: u16, host: &str, dns_type: u16) -> Result<Vec<u8>,
 pub(crate) fn parse_response<'a>(
     raw: &'a [u8],
     expected_id: u16,
+    expected_name: &str,
+    expected_type: u16,
+    expected_class: u16,
 ) -> Result<Vec<ResourceRecord<'a>>, WireError> {
-    parse_response_inner(raw, Some(expected_id))
+    parse_response_inner(
+        raw,
+        Some(expected_id),
+        expected_name,
+        expected_type,
+        expected_class,
+    )
 }
 
 #[cfg(test)]
-pub(crate) fn parse_response_without_id(raw: &[u8]) -> Result<Vec<ResourceRecord<'_>>, WireError> {
-    parse_response_inner(raw, None)
+pub(crate) fn parse_response_without_id<'a>(
+    raw: &'a [u8],
+    expected_name: &str,
+    expected_type: u16,
+    expected_class: u16,
+) -> Result<Vec<ResourceRecord<'a>>, WireError> {
+    parse_response_inner(raw, None, expected_name, expected_type, expected_class)
 }
 
 fn parse_response_inner<'a>(
     raw: &'a [u8],
     expected_id: Option<u16>,
+    expected_name: &str,
+    expected_type: u16,
+    expected_class: u16,
 ) -> Result<Vec<ResourceRecord<'a>>, WireError> {
     if raw.len() < 12 {
         return Err(WireError("short DNS response".to_string()));
@@ -82,6 +102,12 @@ fn parse_response_inner<'a>(
         return Err(WireError("mismatched DNS response ID".to_string()));
     }
     let flags = read_u16(raw, 2)?;
+    if flags & FLAG_RESPONSE == 0 {
+        return Err(WireError("DNS message is not a response".to_string()));
+    }
+    if flags & FLAG_OPCODE != 0 {
+        return Err(WireError("unexpected DNS response opcode".to_string()));
+    }
     if flags & FLAG_TRUNCATED != 0 {
         return Err(WireError(TRUNCATED_RESPONSE.to_string()));
     }
@@ -96,18 +122,25 @@ fn parse_response_inner<'a>(
 
     let question_count = usize::from(read_u16(raw, 4)?);
     let answer_count = usize::from(read_u16(raw, 6)?);
+    if question_count != 1 {
+        return Err(WireError("unexpected DNS question count".to_string()));
+    }
     let mut offset = 12;
-    for _ in 0..question_count {
-        let (_, next) = read_name(raw, offset)?;
-        offset = next + 4;
-        if offset > raw.len() {
-            return Err(WireError("short DNS question".to_string()));
-        }
+    let (question_name, next) = read_name(raw, offset)?;
+    offset = next;
+    let question_type = read_u16(raw, offset)?;
+    let question_class = read_u16(raw, offset + 2)?;
+    offset += 4;
+    if !names_equal(&question_name, expected_name)
+        || question_type != expected_type
+        || question_class != expected_class
+    {
+        return Err(WireError("mismatched DNS response question".to_string()));
     }
 
     let mut records = Vec::new();
     for _ in 0..answer_count {
-        let (_, next) = read_name(raw, offset)?;
+        let (name, next) = read_name(raw, offset)?;
         offset = next;
         let typ = read_u16(raw, offset)?;
         let class = read_u16(raw, offset + 2)?;
@@ -120,6 +153,7 @@ fn parse_response_inner<'a>(
         let data_offset = offset;
         offset += rdlen;
         records.push(ResourceRecord {
+            name,
             typ,
             class,
             ttl,
@@ -127,7 +161,40 @@ fn parse_response_inner<'a>(
             data: &raw[data_offset..data_offset + rdlen],
         });
     }
+
+    // Answer records are relevant only when their owner is the queried name or
+    // is reachable from it through an IN-class CNAME chain. Records can appear
+    // in any order, so expand the reachable set to a fixed point first.
+    let mut reachable = vec![expected_name.to_string()];
+    loop {
+        let mut changed = false;
+        for record in &records {
+            if record.class != expected_class
+                || record.typ != TYPE_CNAME
+                || !reachable.iter().any(|name| names_equal(name, &record.name))
+            {
+                continue;
+            }
+            let (target, next) = read_name(raw, record.data_offset)?;
+            if next != record.data_offset + record.data.len() {
+                return Err(WireError("invalid DNS CNAME resource".to_string()));
+            }
+            if !reachable.iter().any(|name| names_equal(name, &target)) {
+                reachable.push(target);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    records.retain(|record| reachable.iter().any(|name| names_equal(name, &record.name)));
     Ok(records)
+}
+
+pub(crate) fn names_equal(left: &str, right: &str) -> bool {
+    left.trim_end_matches('.')
+        .eq_ignore_ascii_case(right.trim_end_matches('.'))
 }
 
 pub(crate) fn read_name(packet: &[u8], offset: usize) -> Result<(String, usize), WireError> {
@@ -240,6 +307,21 @@ fn rcode_name(status: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_query_packet_as_response() {
+        let query = build_query(0x1234, "example.com", TYPE_A).unwrap();
+        let err = parse_response(&query, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+        assert_eq!(err.to_string(), "DNS message is not a response");
+    }
+
+    #[test]
+    fn rejects_mismatched_response_question() {
+        let mut response = build_query(0x1234, "other.example", TYPE_A).unwrap();
+        response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+        let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+        assert_eq!(err.to_string(), "mismatched DNS response question");
+    }
 
     #[test]
     fn build_query_advertises_edns0_udp_payload_size() {

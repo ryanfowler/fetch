@@ -189,7 +189,7 @@ async fn lookup_doh_wire_records_with_client(
         return Err(WireDohError::Fallback);
     }
 
-    match doh_records_from_wire_response(response.body(), id) {
+    match doh_records_from_wire_response(response.body(), id, host, dns_type) {
         Ok(records) => Ok(records),
         Err(err) if is_dns_message_response(&response) || is_dns_wire_error(&err) => {
             Err(WireDohError::Fatal(err))
@@ -345,9 +345,12 @@ fn ip_records(records: Vec<DohRecord>, answer_type: u16) -> Result<Vec<DnsRecord
 fn doh_records_from_wire_response(
     raw: &[u8],
     expected_id: u16,
+    expected_name: &str,
+    expected_type: u16,
 ) -> Result<Vec<DohRecord>, DnsError> {
     let records =
-        wire::parse_response(raw, expected_id).map_err(|err| DnsError(err.to_string()))?;
+        wire::parse_response(raw, expected_id, expected_name, expected_type, DNS_CLASS_IN)
+            .map_err(|err| DnsError(err.to_string()))?;
     let mut out = Vec::new();
     for record in records {
         if record.class != DNS_CLASS_IN {
@@ -355,14 +358,14 @@ fn doh_records_from_wire_response(
         }
         out.push(DohRecord {
             answer_type: record.typ,
-            data: wire_record_data(raw, record)?,
+            data: wire_record_data(raw, &record)?,
             ttl: Some(record.ttl),
         });
     }
     Ok(out)
 }
 
-fn wire_record_data(packet: &[u8], record: wire::ResourceRecord<'_>) -> Result<String, DnsError> {
+fn wire_record_data(packet: &[u8], record: &wire::ResourceRecord<'_>) -> Result<String, DnsError> {
     let offset = record.data_offset;
     let len = record.data.len();
     let rdata = record.data;
@@ -913,6 +916,25 @@ mod tests {
             response.extend_from_slice(&data);
         }
         response
+    }
+
+    #[test]
+    fn wire_response_rejects_unrelated_answer_owner() {
+        let query = wire::build_query(0x1234, "example.com", wire::TYPE_A).unwrap();
+        let (_, _, question_end) = test_dns_question(&query).unwrap();
+        let mut response = wire_response(&query, vec![(wire::TYPE_A, 30, vec![192, 0, 2, 1])]);
+        let mut owner = Vec::new();
+        for label in "unrelated.example".split('.') {
+            owner.push(label.len() as u8);
+            owner.extend_from_slice(label.as_bytes());
+        }
+        owner.push(0);
+        response.splice(question_end..question_end + 2, owner);
+
+        let records =
+            doh_records_from_wire_response(&response, 0x1234, "example.com", wire::TYPE_A).unwrap();
+
+        assert!(records.is_empty());
     }
 
     #[tokio::test]
