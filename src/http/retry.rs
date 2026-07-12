@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) const MAX_PROTOCOL_NACK_RETRIES: usize = 2;
+pub(super) const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 pub(super) fn redirect_requires_client_refresh(
     cli: &Cli,
@@ -413,8 +414,8 @@ pub(super) fn compute_delay(
 
     for _ in 0..attempt {
         delay = delay.saturating_mul(2);
-        if delay > Duration::from_secs(30) {
-            delay = Duration::from_secs(30);
+        if delay > MAX_RETRY_DELAY {
+            delay = MAX_RETRY_DELAY;
             break;
         }
     }
@@ -423,7 +424,9 @@ pub(super) fn compute_delay(
     let jittered = delay.as_secs_f64() + rand::random_range(-jitter..=jitter);
     let delay = Duration::from_secs_f64(jittered.max(0.0));
 
-    delay.max(retry_after)
+    delay
+        .min(MAX_RETRY_DELAY)
+        .max(retry_after.min(MAX_RETRY_DELAY))
 }
 
 pub(super) fn retry_delay_within_timeout(
@@ -632,11 +635,18 @@ mod tests {
         }
 
         let delay = compute_delay(Duration::from_secs(1), 10, Duration::ZERO);
-        assert!(delay <= Duration::from_secs(30).mul_f64(1.25));
+        assert!(delay <= MAX_RETRY_DELAY);
 
         let retry_after = Duration::from_secs(60);
         let delay = compute_delay(Duration::from_secs(1), 0, retry_after);
-        assert!(delay >= retry_after);
+        assert_eq!(delay, MAX_RETRY_DELAY);
+
+        let delay = compute_delay(Duration::from_secs(10), 1, Duration::from_secs(5));
+        assert!(delay >= Duration::from_secs(15));
+        assert!(delay <= Duration::from_secs(25));
+
+        let delay = compute_delay(Duration::from_secs(1), 0, Duration::from_secs(20));
+        assert_eq!(delay, Duration::from_secs(20));
 
         let delay = compute_delay(Duration::ZERO, 0, Duration::ZERO);
         assert!(delay >= Duration::from_millis(750));
@@ -716,6 +726,26 @@ mod tests {
 
         headers.insert(RETRY_AFTER, HeaderValue::from_static("not-a-number"));
         assert_eq!(parse_retry_after(&headers), Duration::ZERO);
+
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("2147483647"));
+        assert_eq!(
+            parse_retry_after(&headers),
+            Duration::from_secs(2_147_483_647)
+        );
+        assert_eq!(
+            compute_delay(Duration::from_secs(1), 0, parse_retry_after(&headers)),
+            MAX_RETRY_DELAY
+        );
+
+        headers.insert(
+            RETRY_AFTER,
+            HeaderValue::from_static("Thu, 31 Dec 2099 23:59:59 GMT"),
+        );
+        assert!(parse_retry_after(&headers) > MAX_RETRY_DELAY);
+        assert_eq!(
+            compute_delay(Duration::from_secs(1), 0, parse_retry_after(&headers)),
+            MAX_RETRY_DELAY
+        );
 
         let future = SystemTime::now() + Duration::from_secs(10);
         let future = httpdate::fmt_http_date(future);
