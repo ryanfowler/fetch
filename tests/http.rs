@@ -623,6 +623,7 @@ fn cross_origin_redirect_strips_explicit_sensitive_headers() {
         if !req.header("authorization").is_empty()
             || !req.header("cookie").is_empty()
             || !req.header("proxy-authorization").is_empty()
+            || req.header("host") == "tenant-a.example"
         {
             return TestResponse::status(400, "Bad Request", "sensitive header leaked");
         }
@@ -641,6 +642,8 @@ fn cross_origin_redirect_strips_explicit_sensitive_headers() {
         "Cookie: sid=secret",
         "--header",
         "Proxy-Authorization: proxy-secret",
+        "--header",
+        "Host: tenant-a.example",
     ]);
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "safe");
@@ -650,6 +653,30 @@ fn cross_origin_redirect_strips_explicit_sensitive_headers() {
     assert!(requests[0].header("authorization").is_empty());
     assert!(requests[0].header("cookie").is_empty());
     assert!(requests[0].header("proxy-authorization").is_empty());
+    assert_ne!(requests[0].header("host"), "tenant-a.example");
+    assert!(!requests[0].header("host").is_empty());
+}
+
+#[test]
+fn same_origin_redirect_preserves_explicit_host_header() {
+    let server = TestServer::start(|req| match req.path.as_str() {
+        "/start" => TestResponse::status(302, "Found", "").header("Location", "/final"),
+        "/final" if req.header("host") == "tenant-a.example" => TestResponse::ok("preserved"),
+        _ => TestResponse::status(400, "Bad Request", "host header changed"),
+    });
+
+    let res = run_fetch(&[
+        &format!("{}/start", server.url),
+        "--header",
+        "Host: tenant-a.example",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "preserved");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].header("host"), "tenant-a.example");
+    assert_eq!(requests[1].header("host"), "tenant-a.example");
 }
 
 #[test]
