@@ -411,7 +411,8 @@ fn lookup_https_records_blocking(
 #[cfg(test)]
 fn records_from_wire_response(raw: &[u8]) -> Result<Vec<SvcbRecord>, FetchError> {
     let records =
-        wire::parse_response_without_id(raw).map_err(|err| FetchError::Runtime(err.to_string()))?;
+        wire::parse_response_without_id(raw, "example.com", wire::TYPE_HTTPS, wire::CLASS_IN)
+            .map_err(|err| FetchError::Runtime(err.to_string()))?;
     Ok(records
         .into_iter()
         .filter(|record| record.class == wire::CLASS_IN && record.typ == wire::TYPE_HTTPS)
@@ -446,7 +447,10 @@ fn write_dns_name(out: &mut Vec<u8>, name: &str) -> Option<()> {
 mod tests {
     use super::*;
 
-    fn dns_response_without_matching_query_id(answer_rdata: Vec<u8>) -> Vec<u8> {
+    fn dns_response_without_matching_query_id(
+        answer_owner: &str,
+        answer_rdata: Vec<u8>,
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&0x1234_u16.to_be_bytes());
         out.extend_from_slice(&0x8180_u16.to_be_bytes());
@@ -457,7 +461,7 @@ mod tests {
         write_dns_name(&mut out, "example.com.").unwrap();
         out.extend_from_slice(&wire::TYPE_HTTPS.to_be_bytes());
         out.extend_from_slice(&wire::CLASS_IN.to_be_bytes());
-        out.extend_from_slice(&[0xc0, 0x0c]);
+        write_dns_name(&mut out, answer_owner).unwrap();
         out.extend_from_slice(&wire::TYPE_HTTPS.to_be_bytes());
         out.extend_from_slice(&wire::CLASS_IN.to_be_bytes());
         out.extend_from_slice(&30_u32.to_be_bytes());
@@ -478,7 +482,7 @@ mod tests {
 
     #[test]
     fn parses_system_wire_response_without_generated_query_id() {
-        let raw = dns_response_without_matching_query_id(https_rdata());
+        let raw = dns_response_without_matching_query_id("example.com.", https_rdata());
 
         let records = records_from_wire_response(&raw).unwrap();
 
@@ -486,5 +490,14 @@ mod tests {
         assert_eq!(records[0].priority, 1);
         assert_eq!(records[0].target, ".");
         assert_eq!(records[0].alpn, ["h3"]);
+    }
+
+    #[test]
+    fn rejects_unrelated_https_answer_owner() {
+        let raw = dns_response_without_matching_query_id("unrelated.example.", https_rdata());
+
+        let records = records_from_wire_response(&raw).unwrap();
+
+        assert!(records.is_empty());
     }
 }

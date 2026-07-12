@@ -480,16 +480,18 @@ async fn lookup_udp_records(
     let mut response = crate::dns::transport::query_udp(server_addr, &raw, udp_timeout)
         .await
         .map_err(QueryError::other)?;
-    let raw_records = match wire::parse_response(&response, id) {
-        Ok(records) => records,
-        Err(err) if err.is_truncated() => {
-            response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
-                .await
-                .map_err(QueryError::truncated)?;
-            wire::parse_response(&response, id).map_err(QueryError::truncated)?
-        }
-        Err(err) => return Err(QueryError::other(err)),
-    };
+    let raw_records =
+        match wire::parse_response(&response, id, host, query_type.dns_type, DNS_CLASS_IN) {
+            Ok(records) => records,
+            Err(err) if err.is_truncated() => {
+                response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
+                    .await
+                    .map_err(QueryError::truncated)?;
+                wire::parse_response(&response, id, host, query_type.dns_type, DNS_CLASS_IN)
+                    .map_err(QueryError::truncated)?
+            }
+            Err(err) => return Err(QueryError::other(err)),
+        };
     records_from_wire_response(&response, raw_records)
 }
 
@@ -522,7 +524,7 @@ async fn lookup_tcp_records(
     })
     .await
     .map_err(|_| QueryError::other("DNS lookup timed out"))??;
-    inspect_records_from_response(&response, id)
+    inspect_records_from_response(&response, id, host, query_type.dns_type)
 }
 
 /// Query a single record type over a fresh TCP+TLS connection.
@@ -556,7 +558,7 @@ async fn lookup_tls_records(
     })
     .await
     .map_err(|_| QueryError::other("DNS lookup timed out"))??;
-    inspect_records_from_response(&response, id)
+    inspect_records_from_response(&response, id, host, query_type.dns_type)
 }
 
 /// Query a single record type over a fresh QUIC connection.
@@ -592,14 +594,28 @@ async fn lookup_quic_records(
     .await
     .map_err(|_| QueryError::other("DNS lookup timed out"))?
     .map_err(QueryError::other)?;
-    inspect_records_from_response(&response, crate::dns::resolver::DOQ_MESSAGE_ID)
+    inspect_records_from_response(
+        &response,
+        crate::dns::resolver::DOQ_MESSAGE_ID,
+        host,
+        query_type.dns_type,
+    )
 }
 
 fn inspect_records_from_response(
     response: &[u8],
     expected_id: u16,
+    expected_name: &str,
+    expected_type: u16,
 ) -> Result<Vec<Record>, QueryError> {
-    let raw_records = wire::parse_response(response, expected_id).map_err(QueryError::other)?;
+    let raw_records = wire::parse_response(
+        response,
+        expected_id,
+        expected_name,
+        expected_type,
+        DNS_CLASS_IN,
+    )
+    .map_err(QueryError::other)?;
     records_from_wire_response(response, raw_records)
 }
 

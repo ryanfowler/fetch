@@ -80,13 +80,13 @@ async fn lookup_udp_type_with_budget(
     let response = crate::dns::transport::query_udp(*server_addr, &raw, timeout)
         .await
         .map_err(resolver_error)?;
-    match dns_records_from_response(&response, id) {
+    match dns_records_from_response(&response, id, host, dns_type) {
         Ok(records) => Ok(records),
         Err(err) if err.is_truncated() => {
             let response = crate::dns::transport::query_tcp(*server_addr, &raw, budget)
                 .await
                 .map_err(resolver_error)?;
-            dns_records_from_response(&response, id).map_err(resolver_error)
+            dns_records_from_response(&response, id, host, dns_type).map_err(resolver_error)
         }
         Err(err) => Err(resolver_error(err)),
     }
@@ -216,7 +216,7 @@ pub(crate) async fn lookup_quic_type(
             .map_err(resolver_error)
     })
     .await?;
-    dns_records_from_response(&response, DOQ_MESSAGE_ID).map_err(resolver_error)
+    dns_records_from_response(&response, DOQ_MESSAGE_ID, host, dns_type).map_err(resolver_error)
 }
 
 async fn lookup_stream_type<S: AsyncRead + AsyncWrite + Unpin>(
@@ -240,7 +240,7 @@ async fn lookup_stream_type<S: AsyncRead + AsyncWrite + Unpin>(
     if response.len() < 2 {
         return Err(ResolverError("short DNS response".to_string()));
     }
-    dns_records_from_response(&response, id).map_err(resolver_error)
+    dns_records_from_response(&response, id, host, dns_type).map_err(resolver_error)
 }
 
 async fn run_stream_lookup<S: AsyncRead + AsyncWrite + Unpin>(
@@ -286,8 +286,10 @@ async fn run_stream_lookup<S: AsyncRead + AsyncWrite + Unpin>(
     let a_response = a_response.ok_or_else(|| ResolverError("missing DNS response".to_string()))?;
     let aaaa_response =
         aaaa_response.ok_or_else(|| ResolverError("missing DNS response".to_string()))?;
-    let a_records = dns_records_from_response(&a_response, id_a).map_err(resolver_error);
-    let aaaa_records = dns_records_from_response(&aaaa_response, id_aaaa).map_err(resolver_error);
+    let a_records =
+        dns_records_from_response(&a_response, id_a, host, DNS_TYPE_A).map_err(resolver_error);
+    let aaaa_records = dns_records_from_response(&aaaa_response, id_aaaa, host, DNS_TYPE_AAAA)
+        .map_err(resolver_error);
     combine_results(a_records, aaaa_records)
 }
 
@@ -304,8 +306,8 @@ async fn run_quic_lookup(
     let timeout = budget.remaining().map_err(resolver_error)?;
     let (a_records, aaaa_records) = with_optional_timeout(timeout, async {
         let (a_result, aaaa_result) = tokio::join!(
-            quic_single_query(connection, query_a, DOQ_MESSAGE_ID),
-            quic_single_query(connection, query_aaaa, DOQ_MESSAGE_ID),
+            quic_single_query(connection, query_a, DOQ_MESSAGE_ID, host, DNS_TYPE_A),
+            quic_single_query(connection, query_aaaa, DOQ_MESSAGE_ID, host, DNS_TYPE_AAAA),
         );
         Ok::<_, ResolverError>((a_result, aaaa_result))
     })
@@ -330,11 +332,13 @@ async fn quic_single_query(
     connection: &quinn::Connection,
     query: Vec<u8>,
     expected_id: u16,
+    host: &str,
+    dns_type: u16,
 ) -> Result<Vec<DnsRecord>, ResolverError> {
     let response = crate::dns::transport::quic_query(connection, &query)
         .await
         .map_err(resolver_error)?;
-    dns_records_from_response(&response, expected_id).map_err(resolver_error)
+    dns_records_from_response(&response, expected_id, host, dns_type).map_err(resolver_error)
 }
 
 fn combine_results(
@@ -388,9 +392,17 @@ fn dns_server_value_error(server: &str) -> ResolverError {
 fn dns_records_from_response(
     raw: &[u8],
     expected_id: u16,
+    expected_name: &str,
+    expected_type: u16,
 ) -> Result<Vec<DnsRecord>, wire::WireError> {
-    let records = wire::parse_response(raw, expected_id)?;
-    Ok(records.into_iter().filter_map(ip_record).collect())
+    let records =
+        wire::parse_response(raw, expected_id, expected_name, expected_type, DNS_CLASS_IN)?;
+
+    Ok(records
+        .into_iter()
+        .filter(|record| record.typ == expected_type)
+        .filter_map(ip_record)
+        .collect())
 }
 
 fn ip_record(record: wire::ResourceRecord<'_>) -> Option<DnsRecord> {
@@ -554,6 +566,30 @@ mod tests {
 
         assert_eq!(err.to_string(), "DNS lookup timed out");
         drop(socket);
+    }
+
+    #[test]
+    fn response_rejects_unrelated_address_owner() {
+        let response =
+            test_response_with_answers(&[("unrelated.example", DNS_TYPE_A, vec![192, 0, 2, 1])]);
+
+        let records =
+            dns_records_from_response(&response, 0x1234, "example.com", DNS_TYPE_A).unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn response_accepts_address_through_cname_chain() {
+        let mut cname = Vec::new();
+        write_test_name(&mut cname, "alias.example");
+        let response = test_response_with_answers(&[
+            ("example.com", wire::TYPE_CNAME, cname),
+            ("alias.example", DNS_TYPE_A, vec![192, 0, 2, 1]),
+        ]);
+
+        let records =
+            dns_records_from_response(&response, 0x1234, "example.com", DNS_TYPE_A).unwrap();
+        assert_eq!(records[0].ip, "192.0.2.1".parse::<IpAddr>().unwrap());
     }
 
     #[test]
@@ -1165,6 +1201,35 @@ mod tests {
         let mut query = vec![0u8; len];
         stream.read_exact(&mut query).ok()?;
         Some(query)
+    }
+
+    fn test_response_with_answers(answers: &[(&str, u16, Vec<u8>)]) -> Vec<u8> {
+        let query = wire::build_query(0x1234, "example.com", DNS_TYPE_A).unwrap();
+        let question_end = question_end(&query).unwrap() + 4;
+        let mut response = Vec::new();
+        response.extend_from_slice(&0x1234u16.to_be_bytes());
+        response.extend_from_slice(&0x8180u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        response.extend_from_slice(&0u32.to_be_bytes());
+        response.extend_from_slice(&query[12..question_end]);
+        for (name, typ, data) in answers {
+            write_test_name(&mut response, name);
+            response.extend_from_slice(&typ.to_be_bytes());
+            response.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+            response.extend_from_slice(&60u32.to_be_bytes());
+            response.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            response.extend_from_slice(data);
+        }
+        response
+    }
+
+    fn write_test_name(raw: &mut Vec<u8>, name: &str) {
+        for label in name.trim_end_matches('.').split('.') {
+            raw.push(label.len() as u8);
+            raw.extend_from_slice(label.as_bytes());
+        }
+        raw.push(0);
     }
 
     fn write_answer(response: &mut Vec<u8>, dns_type: u16, ttl: u32, data: &[u8]) {
