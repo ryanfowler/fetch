@@ -166,6 +166,7 @@ pub(super) fn same_origin(a: &Url, b: &Url) -> bool {
 pub(super) fn strip_cross_origin_sensitive_headers(headers: &mut HeaderMap) {
     headers.remove(AUTHORIZATION);
     headers.remove(COOKIE);
+    headers.remove(HOST);
     headers.remove(PROXY_AUTHORIZATION);
 }
 
