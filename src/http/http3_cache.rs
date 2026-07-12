@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::HeaderMap;
@@ -19,7 +20,13 @@ const MAX_SHARDS: usize = 1024;
 const MAX_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 const DEFAULT_ALT_SVC_MA_SECS: u64 = 24 * 60 * 60;
 const GLOBAL_PRUNE_INTERVAL_SECS: u64 = 24 * 60 * 60;
+const ACCESS_UPDATE_INTERVAL_SECS: u64 = 60 * 60;
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_millis(200);
+
+// Http3Cache instances are created per client, but all instances use the same
+// process cache location. Keep prune scheduling process-wide so constructing a
+// new client does not enqueue another marker read and shard traversal.
+static NEXT_GLOBAL_PRUNE_AT: AtomicU64 = AtomicU64::new(0);
 
 const SOURCE_HTTPS: &str = "https";
 const SOURCE_ALT_SVC: &str = "alt-svc";
@@ -94,7 +101,7 @@ impl Http3Cache {
         Self { dir: Some(dir) }
     }
 
-    pub(crate) fn candidates(
+    pub(crate) async fn candidates(
         &self,
         url: &Url,
         dns_server: Option<&str>,
@@ -102,40 +109,59 @@ impl Http3Cache {
         let Some((key, path)) = self.key_and_path(url, dns_server) else {
             return Vec::new();
         };
-        let now = now_secs();
-        let Some(mut shard) = self.read_valid_shard(&path, &key) else {
-            return Vec::new();
-        };
-        prune_expired_candidates(&mut shard.candidates, now);
-        if shard.candidates.is_empty() {
-            self.update_shard(&path, &key, |_, _| {});
-            return Vec::new();
-        }
-        let candidates = shard
-            .candidates
-            .into_iter()
-            .map(|candidate| Http3CacheCandidate {
-                alt_host: candidate.alt_host,
-                alt_port: candidate.alt_port,
-                priority: candidate.priority,
-            })
-            .collect::<Vec<_>>();
-        self.update_shard(&path, &key, |shard, now| {
+        let cache = self.clone();
+        let read_path = path.clone();
+        let read_key = key.clone();
+        let (candidates, update_recency) = tokio::task::spawn_blocking(move || {
+            let now = now_secs();
+            let Some(mut shard) = cache.read_valid_shard(&read_path, &read_key) else {
+                return (Vec::new(), false);
+            };
             prune_expired_candidates(&mut shard.candidates, now);
-            for stored in &mut shard.candidates {
-                if candidates
-                    .iter()
-                    .any(|candidate| candidate.matches_stored(stored))
-                {
-                    stored.last_used_at = now;
-                }
-            }
-        });
-        self.maybe_prune_global(now);
+            let update_recency = shard.candidates.iter().any(|candidate| {
+                now.saturating_sub(candidate.last_used_at) >= ACCESS_UPDATE_INTERVAL_SECS
+            });
+            let candidates = shard
+                .candidates
+                .into_iter()
+                .map(|candidate| Http3CacheCandidate {
+                    alt_host: candidate.alt_host,
+                    alt_port: candidate.alt_port,
+                    priority: candidate.priority,
+                })
+                .collect();
+            (candidates, update_recency)
+        })
+        .await
+        .unwrap_or_default();
+
+        // Return the hit without waiting for recency maintenance. Rewriting at
+        // most hourly preserves useful global-pruning order without putting
+        // locking and fsync on every request's hot path.
+        if update_recency {
+            let cache = self.clone();
+            let touched = candidates.clone();
+            tokio::task::spawn_blocking(move || {
+                cache.update_shard(&path, &key, |shard, now| {
+                    prune_expired_candidates(&mut shard.candidates, now);
+                    for stored in &mut shard.candidates {
+                        if touched
+                            .iter()
+                            .any(|candidate| candidate.matches_stored(stored))
+                        {
+                            stored.last_used_at = now;
+                        }
+                    }
+                });
+            });
+        }
+
+        // Pruning is wholly best-effort and must not delay connection setup.
+        self.schedule_global_prune();
         candidates
     }
 
-    pub(crate) fn remove_candidates(
+    pub(crate) async fn remove_candidates(
         &self,
         url: &Url,
         dns_server: Option<&str>,
@@ -147,17 +173,22 @@ impl Http3Cache {
         let Some((key, path)) = self.key_and_path(url, dns_server) else {
             return;
         };
-        self.update_shard(&path, &key, |shard, now| {
-            prune_expired_candidates(&mut shard.candidates, now);
-            shard.candidates.retain(|stored| {
-                !candidates
-                    .iter()
-                    .any(|candidate| candidate.matches_stored(stored))
+        let cache = self.clone();
+        let candidates = candidates.to_vec();
+        let _ = tokio::task::spawn_blocking(move || {
+            cache.update_shard(&path, &key, |shard, now| {
+                prune_expired_candidates(&mut shard.candidates, now);
+                shard.candidates.retain(|stored| {
+                    !candidates
+                        .iter()
+                        .any(|candidate| candidate.matches_stored(stored))
+                });
             });
-        });
+        })
+        .await;
     }
 
-    pub(crate) fn store_https_records(
+    pub(crate) async fn store_https_records(
         &self,
         url: &Url,
         dns_server: Option<&str>,
@@ -196,51 +227,64 @@ impl Http3Cache {
             return;
         }
 
-        self.update_shard(&path, &key, |shard, now| {
-            prune_expired_candidates(&mut shard.candidates, now);
-            for (priority, alt_host, alt_port, ttl) in &candidates {
-                let ttl = u64::from(*ttl).min(MAX_RETENTION_SECS);
-                let candidate = StoredCandidate {
-                    source: SOURCE_HTTPS.to_string(),
-                    alt_host: alt_host.clone(),
-                    alt_port: *alt_port,
-                    priority: Some(*priority),
-                    expires_at: now.saturating_add(ttl),
-                    learned_at: now,
-                    last_used_at: now,
-                };
-                upsert_candidate(&mut shard.candidates, candidate);
-            }
-            prune_candidate_count(&mut shard.candidates);
-        });
+        let cache = self.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            cache.update_shard(&path, &key, |shard, now| {
+                prune_expired_candidates(&mut shard.candidates, now);
+                for (priority, alt_host, alt_port, ttl) in &candidates {
+                    let ttl = u64::from(*ttl).min(MAX_RETENTION_SECS);
+                    let candidate = StoredCandidate {
+                        source: SOURCE_HTTPS.to_string(),
+                        alt_host: alt_host.clone(),
+                        alt_port: *alt_port,
+                        priority: Some(*priority),
+                        expires_at: now.saturating_add(ttl),
+                        learned_at: now,
+                        last_used_at: now,
+                    };
+                    upsert_candidate(&mut shard.candidates, candidate);
+                }
+                prune_candidate_count(&mut shard.candidates);
+            });
+        })
+        .await;
     }
 
-    pub(crate) fn store_alt_svc(&self, url: &Url, dns_server: Option<&str>, headers: &HeaderMap) {
+    pub(crate) async fn store_alt_svc(
+        &self,
+        url: &Url,
+        dns_server: Option<&str>,
+        headers: &HeaderMap,
+    ) {
         let Some((key, path)) = self.key_and_path(url, dns_server) else {
             return;
         };
         let Some(update) = parse_alt_svc_headers(url, headers, now_secs()) else {
             return;
         };
-        self.update_shard(&path, &key, |shard, now| {
-            prune_expired_candidates(&mut shard.candidates, now);
-            if update.clear {
-                shard
-                    .candidates
-                    .retain(|candidate| candidate.source != SOURCE_ALT_SVC);
-            }
-            for (alt_host, alt_port) in &update.remove {
-                shard.candidates.retain(|candidate| {
-                    !(candidate.source == SOURCE_ALT_SVC
-                        && candidate.alt_host.eq_ignore_ascii_case(alt_host)
-                        && candidate.alt_port == *alt_port)
-                });
-            }
-            for candidate in update.candidates.clone() {
-                upsert_candidate(&mut shard.candidates, candidate);
-            }
-            prune_candidate_count(&mut shard.candidates);
-        });
+        let cache = self.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            cache.update_shard(&path, &key, |shard, now| {
+                prune_expired_candidates(&mut shard.candidates, now);
+                if update.clear {
+                    shard
+                        .candidates
+                        .retain(|candidate| candidate.source != SOURCE_ALT_SVC);
+                }
+                for (alt_host, alt_port) in &update.remove {
+                    shard.candidates.retain(|candidate| {
+                        !(candidate.source == SOURCE_ALT_SVC
+                            && candidate.alt_host.eq_ignore_ascii_case(alt_host)
+                            && candidate.alt_port == *alt_port)
+                    });
+                }
+                for candidate in update.candidates.clone() {
+                    upsert_candidate(&mut shard.candidates, candidate);
+                }
+                prune_candidate_count(&mut shard.candidates);
+            });
+        })
+        .await;
     }
 
     fn key_and_path(&self, url: &Url, dns_server: Option<&str>) -> Option<(CacheKey, PathBuf)> {
@@ -298,6 +342,25 @@ impl Http3Cache {
         let _ = write_shard(path, &shard);
     }
 
+    fn schedule_global_prune(&self) {
+        let now = now_secs();
+        let next = NEXT_GLOBAL_PRUNE_AT.load(Ordering::Relaxed);
+        if now < next
+            || NEXT_GLOBAL_PRUNE_AT
+                .compare_exchange(
+                    next,
+                    now.saturating_add(GLOBAL_PRUNE_INTERVAL_SECS),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return;
+        }
+        let cache = self.clone();
+        tokio::task::spawn_blocking(move || cache.maybe_prune_global(now));
+    }
+
     fn maybe_prune_global(&self, now: u64) {
         let Some(dir) = &self.dir else {
             return;
@@ -326,14 +389,10 @@ impl Http3CacheCandidate {
 
 fn http3_cache_dir() -> std::io::Result<PathBuf> {
     if let Some(dir) = std::env::var_os("FETCH_INTERNAL_HTTP3_CACHE_DIR") {
-        let dir = PathBuf::from(dir);
-        create_cache_dir(&dir)?;
-        return Ok(dir);
+        return Ok(PathBuf::from(dir));
     }
     let base = default_cache_dir()?;
-    let dir = base.join("fetch").join("http3");
-    create_cache_dir(&dir)?;
-    Ok(dir)
+    Ok(base.join("fetch").join("http3"))
 }
 
 fn default_cache_dir() -> std::io::Result<PathBuf> {
@@ -763,13 +822,15 @@ mod tests {
         assert_eq!(key.resolver_key, "system");
     }
 
-    #[test]
-    fn stores_https_records_per_origin_shard() {
+    #[tokio::test]
+    async fn stores_https_records_per_origin_shard() {
         let dir = TempDir::new().unwrap();
         let cache = Http3Cache::with_dir(dir.path().to_path_buf());
-        cache.store_https_records(&test_url(), None, &[record(".", Some(9443), Some(60))]);
+        cache
+            .store_https_records(&test_url(), None, &[record(".", Some(9443), Some(60))])
+            .await;
 
-        let got = cache.candidates(&test_url(), None);
+        let got = cache.candidates(&test_url(), None).await;
         assert_eq!(
             got,
             vec![Http3CacheCandidate {
@@ -781,29 +842,66 @@ mod tests {
         assert!(
             cache
                 .candidates(&test_url(), Some("127.0.0.1:53"))
+                .await
                 .is_empty()
         );
     }
 
-    #[test]
-    fn ignores_https_records_without_ttl() {
+    #[tokio::test]
+    async fn ignores_https_records_without_ttl() {
         let dir = TempDir::new().unwrap();
         let cache = Http3Cache::with_dir(dir.path().to_path_buf());
-        cache.store_https_records(&test_url(), None, &[record(".", Some(9443), None)]);
+        cache
+            .store_https_records(&test_url(), None, &[record(".", Some(9443), None)])
+            .await;
 
-        assert!(cache.candidates(&test_url(), None).is_empty());
+        assert!(cache.candidates(&test_url(), None).await.is_empty());
     }
 
-    #[test]
-    fn removes_failed_candidates() {
+    #[tokio::test]
+    async fn removes_failed_candidates() {
         let dir = TempDir::new().unwrap();
         let cache = Http3Cache::with_dir(dir.path().to_path_buf());
-        cache.store_https_records(&test_url(), None, &[record(".", Some(9443), Some(60))]);
-        let candidates = cache.candidates(&test_url(), None);
+        cache
+            .store_https_records(&test_url(), None, &[record(".", Some(9443), Some(60))])
+            .await;
+        let candidates = cache.candidates(&test_url(), None).await;
 
-        cache.remove_candidates(&test_url(), None, &candidates);
+        cache
+            .remove_candidates(&test_url(), None, &candidates)
+            .await;
 
-        assert!(cache.candidates(&test_url(), None).is_empty());
+        assert!(cache.candidates(&test_url(), None).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cache_hit_refreshes_stale_recency_in_background() {
+        let dir = TempDir::new().unwrap();
+        let cache = Http3Cache::with_dir(dir.path().to_path_buf());
+        cache
+            .store_https_records(&test_url(), None, &[record(".", Some(9443), Some(60))])
+            .await;
+        let (key, path) = cache.key_and_path(&test_url(), None).unwrap();
+        let mut shard = cache.read_valid_shard(&path, &key).unwrap();
+        shard.candidates[0].last_used_at = 1;
+        write_shard(&path, &shard).unwrap();
+
+        assert!(!cache.candidates(&test_url(), None).await.is_empty());
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let refreshed = cache
+                .read_valid_shard(&path, &key)
+                .is_some_and(|shard| shard.candidates[0].last_used_at > 1);
+            if refreshed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recency was not refreshed"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[test]
@@ -878,8 +976,8 @@ mod tests {
         assert!(outside_file.exists());
     }
 
-    #[test]
-    fn caps_candidates_per_origin() {
+    #[tokio::test]
+    async fn caps_candidates_per_origin() {
         let dir = TempDir::new().unwrap();
         let cache = Http3Cache::with_dir(dir.path().to_path_buf());
         let records = (0..8)
@@ -890,9 +988,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        cache.store_https_records(&test_url(), None, &records);
+        cache.store_https_records(&test_url(), None, &records).await;
 
-        let got = cache.candidates(&test_url(), None);
+        let got = cache.candidates(&test_url(), None).await;
         assert_eq!(got.len(), MAX_CANDIDATES_PER_ORIGIN);
         assert_eq!(got[0].priority, Some(1));
         assert_eq!(got[3].priority, Some(4));

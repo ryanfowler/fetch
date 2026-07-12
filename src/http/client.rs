@@ -340,7 +340,9 @@ async fn resolve_dns_for_client_inner(
         )
         .await;
         if auto_http3 {
-            Http3Cache::new().store_https_records(url, Some(dns_server), &https_records);
+            Http3Cache::new()
+                .store_https_records(url, Some(dns_server), &https_records)
+                .await;
         }
         return Ok(ClientDnsDiscovery {
             dns_resolution: Some(DnsResolution {
@@ -426,7 +428,9 @@ async fn resolve_dns_for_client_inner(
     )
     .await;
     if auto_http3 {
-        Http3Cache::new().store_https_records(url, None, &https_records);
+        Http3Cache::new()
+            .store_https_records(url, None, &https_records)
+            .await;
     }
     Ok(ClientDnsDiscovery {
         dns_resolution: Some(DnsResolution {

@@ -192,9 +192,13 @@ impl Client {
                 "unsupported HTTP version: {version:?}"
             ))),
         };
-        if let Ok(response) = &response {
-            self.store_http3_alt_svc(&url, response.headers());
-            self.store_response_cookies(&url, response.headers());
+        let response_headers = response
+            .as_ref()
+            .ok()
+            .map(|response| response.headers().clone());
+        if let Some(headers) = response_headers {
+            self.store_response_cookies(&url, &headers);
+            self.store_http3_alt_svc(&url, &headers).await;
         }
         Ok(response)
     }
@@ -218,14 +222,16 @@ impl Client {
         session.set_cookies(&mut headers.get_all(SET_COOKIE).iter(), url);
     }
 
-    fn store_http3_alt_svc(&self, url: &Url, headers: &HeaderMap) {
+    async fn store_http3_alt_svc(&self, url: &Url, headers: &HeaderMap) {
         if !self.config.learn_alt_svc {
             return;
         }
         let Some(cache) = &self.config.http3_cache else {
             return;
         };
-        cache.store_alt_svc(url, self.config.dns_server.as_deref(), headers);
+        cache
+            .store_alt_svc(url, self.config.dns_server.as_deref(), headers)
+            .await;
     }
 
     pub(super) fn apply_proxy_authorization(
