@@ -156,8 +156,11 @@ impl Client {
             .config
             .http3_cache
             .as_ref()
-            .map(|cache| cache.candidates(url, self.config.dns_server.as_deref()))
-            .unwrap_or_default();
+            .map(|cache| cache.candidates(url, self.config.dns_server.as_deref()));
+        let cached_candidates = match cached_candidates {
+            Some(candidates) => candidates.await,
+            None => Vec::new(),
+        };
         let fresh = self.connect_fresh_dynamic_auto_http3_client(
             url,
             origin.clone(),
@@ -188,7 +191,9 @@ impl Client {
             lookup_auto_http3_https_records(self.config.dns_server.as_deref(), &host, timeout)
                 .await;
         if let Some(cache) = &self.config.http3_cache {
-            cache.store_https_records(url, self.config.dns_server.as_deref(), &records);
+            cache
+                .store_https_records(url, self.config.dns_server.as_deref(), &records)
+                .await;
         }
         if records.is_empty() {
             origin_addrs_task.abort();
@@ -799,7 +804,9 @@ impl Client {
         timeout: TimeoutBudget,
     ) -> Option<Result<Http3ConnectResult, Error>> {
         let cache = self.config.http3_cache.as_ref()?;
-        let candidates = cache.candidates(url, self.config.dns_server.as_deref());
+        let candidates = cache
+            .candidates(url, self.config.dns_server.as_deref())
+            .await;
         self.connect_cached_auto_http3_client_with_candidates(url, origin, candidates, timeout)
             .await
     }
@@ -826,7 +833,9 @@ impl Client {
             .connect_http3_client_with_addrs(url, origin, addrs, timeout)
             .await;
         if result.is_err() {
-            cache.remove_candidates(url, self.config.dns_server.as_deref(), &candidates);
+            cache
+                .remove_candidates(url, self.config.dns_server.as_deref(), &candidates)
+                .await;
         }
         Some(result)
     }
