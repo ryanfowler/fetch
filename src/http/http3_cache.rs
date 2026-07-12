@@ -620,38 +620,80 @@ fn prune_global(dir: &Path, now: u64) {
 }
 
 fn collect_shard_summaries(dir: &Path, now: u64, out: &mut Vec<ShardSummary>) {
+    // The cache layout is exactly <root>/<two hex digits>/<full hash>.json. Do not
+    // recurse: besides being unnecessary, recursion could follow a corrupted
+    // cache's directory symlinks outside the cache root.
+    let Ok(metadata) = fs::symlink_metadata(dir) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return;
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_shard_summaries(&path, now, out);
-            continue;
-        }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(mut shard) = fs::read(&path)
-            .ok()
-            .and_then(|data| serde_json::from_slice::<ShardFile>(&data).ok())
-        else {
+    for shard_dir in entries.flatten() {
+        let Ok(file_type) = shard_dir.file_type() else {
             continue;
         };
-        prune_expired_candidates(&mut shard.candidates, now);
-        let expired = shard.candidates.is_empty();
-        let last_used_at = shard
-            .candidates
-            .iter()
-            .map(|candidate| candidate.last_used_at)
-            .max()
-            .unwrap_or(0);
-        out.push(ShardSummary {
-            path,
-            expired,
-            last_used_at,
-        });
+        if file_type.is_symlink() || !file_type.is_dir() || !is_hex_name(&shard_dir.file_name(), 2)
+        {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(shard_dir.path()) else {
+            continue;
+        };
+        for entry in files.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_symlink()
+                || !file_type.is_file()
+                || !is_shard_file_name(&entry.file_name(), &shard_dir.file_name())
+            {
+                continue;
+            }
+            let Some(mut shard) = fs::read(&path)
+                .ok()
+                .and_then(|data| serde_json::from_slice::<ShardFile>(&data).ok())
+            else {
+                continue;
+            };
+            prune_expired_candidates(&mut shard.candidates, now);
+            let expired = shard.candidates.is_empty();
+            let last_used_at = shard
+                .candidates
+                .iter()
+                .map(|candidate| candidate.last_used_at)
+                .max()
+                .unwrap_or(0);
+            out.push(ShardSummary {
+                path,
+                expired,
+                last_used_at,
+            });
+        }
     }
+}
+
+fn is_hex_name(name: &std::ffi::OsStr, len: usize) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    name.len() == len && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_shard_file_name(name: &std::ffi::OsStr, prefix: &std::ffi::OsStr) -> bool {
+    let (Some(name), Some(prefix)) = (name.to_str(), prefix.to_str()) else {
+        return false;
+    };
+    let Some(hash) = name.strip_suffix(".json") else {
+        return false;
+    };
+    hash.len() == 64
+        && hash.starts_with(prefix)
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -796,6 +838,44 @@ mod tests {
 
         assert!(update.candidates.is_empty());
         assert_eq!(update.remove, vec![("example.com".to_string(), 443)]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn global_pruning_skips_directory_and_file_symlinks_and_cycles() {
+        use std::os::unix::fs::symlink;
+
+        let cache_dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let expired = ShardFile {
+            version: CACHE_VERSION,
+            origin: "https://outside.example".to_string(),
+            resolver_key: SYSTEM_RESOLVER_KEY.to_string(),
+            candidates: Vec::new(),
+        };
+        let outside_file = outside.path().join(format!("ab{}.json", "0".repeat(62)));
+        fs::write(&outside_file, serde_json::to_vec(&expired).unwrap()).unwrap();
+
+        // A valid-looking shard directory must not be followed outside the root.
+        symlink(outside.path(), cache_dir.path().join("ab")).unwrap();
+
+        // Nor may a valid-looking shard file itself be a symlink.
+        let file_symlink_dir = cache_dir.path().join("cd");
+        fs::create_dir(&file_symlink_dir).unwrap();
+        symlink(
+            &outside_file,
+            file_symlink_dir.join(format!("cd{}.json", "0".repeat(62))),
+        )
+        .unwrap();
+
+        // A cycle under a real shard directory must not be traversed.
+        let cycle_dir = cache_dir.path().join("ef");
+        fs::create_dir(&cycle_dir).unwrap();
+        symlink(cache_dir.path(), cycle_dir.join("cycle")).unwrap();
+
+        prune_global(cache_dir.path(), now_secs());
+
+        assert!(outside_file.exists());
     }
 
     #[test]
