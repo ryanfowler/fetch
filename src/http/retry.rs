@@ -187,14 +187,22 @@ pub(super) fn redirected_request(
 ) -> Result<RedirectedRequest, FetchError> {
     let mut strip_entity_headers = false;
     match status {
-        StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND | StatusCode::SEE_OTHER => {
-            if method != Method::GET && method != Method::HEAD {
+        StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND if method == Method::POST => {
+            method = Method::GET;
+            body = None;
+            strip_entity_headers = true;
+        }
+        StatusCode::SEE_OTHER => {
+            if method != Method::HEAD {
                 method = Method::GET;
             }
             body = None;
             strip_entity_headers = true;
         }
-        StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT
+        StatusCode::MOVED_PERMANENTLY
+        | StatusCode::FOUND
+        | StatusCode::TEMPORARY_REDIRECT
+        | StatusCode::PERMANENT_REDIRECT
             if !request_body_replayable(&body) =>
         {
             return Err(FetchError::Runtime(
@@ -509,23 +517,97 @@ pub(crate) fn total_attempts_for_retry(retry_count: usize) -> Result<usize, Fetc
 mod tests {
     use super::*;
 
-    #[test]
-    fn redirected_post_to_get_marks_entity_headers_for_stripping() {
-        let original_body = Some(RequestBodyPayload::from_bytes(
+    fn test_body() -> RequestBody {
+        Some(RequestBodyPayload::from_bytes(
             b"payload".to_vec(),
             Some("text/plain".to_string()),
-        ));
+        ))
+    }
 
+    #[test]
+    fn redirect_method_and_body_semantics() {
+        for status in [StatusCode::MOVED_PERMANENTLY, StatusCode::FOUND] {
+            let redirected = redirected_request(Method::POST, test_body(), status).unwrap();
+            assert_eq!(redirected.method, Method::GET);
+            assert!(redirected.body.is_none());
+            assert!(redirected.strip_entity_headers);
+
+            for method in [Method::PUT, Method::PATCH, Method::DELETE, Method::GET] {
+                let redirected = redirected_request(method.clone(), test_body(), status).unwrap();
+                assert_eq!(redirected.method, method);
+                assert!(redirected.body.is_some());
+                assert!(!redirected.strip_entity_headers);
+            }
+        }
+
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            let redirected =
+                redirected_request(method, test_body(), StatusCode::SEE_OTHER).unwrap();
+            assert_eq!(redirected.method, Method::GET);
+            assert!(redirected.body.is_none());
+            assert!(redirected.strip_entity_headers);
+        }
         let redirected =
-            redirected_request(Method::POST, original_body, StatusCode::FOUND).unwrap();
-        assert_eq!(redirected.method, Method::GET);
+            redirected_request(Method::HEAD, test_body(), StatusCode::SEE_OTHER).unwrap();
+        assert_eq!(redirected.method, Method::HEAD);
         assert!(redirected.body.is_none());
         assert!(redirected.strip_entity_headers);
 
-        let preserved =
-            redirected_request(Method::POST, None, StatusCode::TEMPORARY_REDIRECT).unwrap();
-        assert_eq!(preserved.method, Method::POST);
-        assert!(!preserved.strip_entity_headers);
+        for status in [
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+        ] {
+            for method in [
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::PATCH,
+                Method::DELETE,
+                Method::HEAD,
+            ] {
+                let redirected = redirected_request(method.clone(), test_body(), status).unwrap();
+                assert_eq!(redirected.method, method);
+                assert!(redirected.body.is_some());
+                assert!(!redirected.strip_entity_headers);
+            }
+        }
+    }
+
+    #[test]
+    fn redirect_rejects_stdin_when_body_must_be_preserved() {
+        for status in [
+            StatusCode::MOVED_PERMANENTLY,
+            StatusCode::FOUND,
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+        ] {
+            let body = Some(RequestBodyPayload {
+                source: RequestBodySource::Stdin,
+                content_type: None,
+            });
+            let err = redirected_request(Method::PUT, body, status)
+                .err()
+                .expect("stdin-backed redirect should fail");
+            assert!(err.to_string().contains("cannot be replayed for redirect"));
+        }
+
+        // Rewrites do not need to replay stdin.
+        for status in [
+            StatusCode::MOVED_PERMANENTLY,
+            StatusCode::FOUND,
+            StatusCode::SEE_OTHER,
+        ] {
+            let body = Some(RequestBodyPayload {
+                source: RequestBodySource::Stdin,
+                content_type: None,
+            });
+            let method = if status == StatusCode::SEE_OTHER {
+                Method::PUT
+            } else {
+                Method::POST
+            };
+            assert!(redirected_request(method, body, status).is_ok());
+        }
     }
 
     #[test]
