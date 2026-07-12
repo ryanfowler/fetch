@@ -694,6 +694,7 @@ dependencies = [
  "ipnet",
  "libc",
  "md-5",
+ "memchr",
  "mimalloc",
  "mime",
  "percent-encoding",

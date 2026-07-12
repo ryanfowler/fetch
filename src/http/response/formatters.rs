@@ -208,13 +208,21 @@ impl StdoutStreamFormatter for FormattedNdjsonStream {
     fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<Vec<u8>>, FetchError> {
         self.pending.extend_from_slice(chunk);
         let mut outputs = Vec::new();
-        while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
-            self.ensure_record_len_within_limit(newline)?;
-            let mut record = self.pending.drain(..=newline).collect::<Vec<_>>();
-            record.pop();
-            if let Some(output) = formatted_ndjson_record(&record, self.use_color, true) {
+        let mut record_start = 0;
+
+        for newline in memchr::memchr_iter(b'\n', &self.pending) {
+            let record = &self.pending[record_start..newline];
+            self.ensure_record_len_within_limit(record.len())?;
+            if let Some(output) = formatted_ndjson_record(record, self.use_color, true) {
                 outputs.push(output);
             }
+            record_start = newline + 1;
+        }
+
+        if record_start > 0 {
+            let remaining = self.pending.len() - record_start;
+            self.pending.copy_within(record_start.., 0);
+            self.pending.truncate(remaining);
         }
         self.ensure_record_len_within_limit(self.pending.len())?;
         Ok(outputs)
@@ -788,15 +796,46 @@ mod tests {
     }
 
     #[test]
-    fn formatted_ndjson_errors_on_oversized_unterminated_record() {
-        let mut formatter = FormattedNdjsonStream::with_record_limit(false, 8);
+    fn formatted_ndjson_stream_handles_record_boundaries_and_fallbacks() {
+        let mut formatter = FormattedNdjsonStream::with_record_limit(false, 32);
+        let mut got = Vec::new();
 
-        let err = formatter.push_chunk(b"123456789").unwrap_err();
+        for chunk in [
+            b"{\"a\":".as_slice(),
+            b"1}\n\n{\"b\":2}\r\ninvalid\n{\"final\"".as_slice(),
+            b":true}".as_slice(),
+        ] {
+            got.extend(formatter.push_chunk(chunk).unwrap().into_iter().flatten());
+        }
+        got.extend(formatter.finish().unwrap().into_iter().flatten());
 
         assert_eq!(
-            err.to_string(),
-            "NDJSON record exceeds 8 bytes and cannot be formatted as a stream"
+            String::from_utf8(got).unwrap(),
+            "{ \"a\": 1 }\n{ \"b\": 2 }\ninvalid\n{ \"final\": true }\n"
         );
+    }
+
+    #[test]
+    fn formatted_ndjson_accepts_record_exactly_at_limit() {
+        let mut formatter = FormattedNdjsonStream::with_record_limit(false, 8);
+
+        assert_eq!(
+            formatter.push_chunk(b"12345678\n").unwrap(),
+            vec![b"12345678\n".to_vec()]
+        );
+    }
+
+    #[test]
+    fn formatted_ndjson_errors_on_oversized_records() {
+        for input in [b"123456789".as_slice(), b"123456789\n".as_slice()] {
+            let mut formatter = FormattedNdjsonStream::with_record_limit(false, 8);
+            let err = formatter.push_chunk(input).unwrap_err();
+
+            assert_eq!(
+                err.to_string(),
+                "NDJSON record exceeds 8 bytes and cannot be formatted as a stream"
+            );
+        }
     }
 
     #[test]
