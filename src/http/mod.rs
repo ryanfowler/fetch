@@ -231,7 +231,6 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
         let mut request_url = url.clone();
         let mut request_body = body.clone();
         let mut request_client = initial_client.clone();
-        let mut redirect_statuses = Vec::new();
         let mut redirect_count = 0_usize;
         let mut protocol_nack_retries = 0_usize;
         let mut strip_entity_headers = false;
@@ -288,7 +287,6 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
                         timing.mark_response_headers();
                         timing.set_transport(connect_timing.timing());
                         print_redirect_status(cli, &response);
-                        redirect_statuses.push(response.status());
                         let redirected =
                             redirected_request(request_method, request_body, response.status())?;
                         let refresh_client = redirect_requires_client_refresh(
@@ -347,7 +345,6 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
                         headers: headers.clone(),
                         body: request_body.clone(),
                         cli,
-                        redirect_statuses,
                         strip_entity_headers,
                         auth_allowed: same_origin(&url, &request_url),
                     },

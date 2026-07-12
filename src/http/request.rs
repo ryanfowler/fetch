@@ -198,7 +198,6 @@ pub(super) struct DigestRetryContext<'a> {
     pub(super) headers: HeaderMap,
     pub(super) body: RequestBody,
     pub(super) cli: &'a Cli,
-    pub(super) redirect_statuses: Vec<StatusCode>,
     pub(super) strip_entity_headers: bool,
     pub(super) auth_allowed: bool,
 }
@@ -231,8 +230,8 @@ pub(super) async fn apply_digest_challenge(
     let challenge = digest::parse_challenge(&challenge).map_err(digest_challenge_error)?;
 
     let challenged_url = response.url().clone();
-    let (challenged_method, challenged_body) =
-        digest_challenged_request(context.method, context.body, &context.redirect_statuses);
+    let challenged_method = context.method;
+    let challenged_body = context.body;
     let auth = match digest::response(
         challenged_method.as_str(),
         &request_target(&challenged_url),
@@ -320,30 +319,6 @@ pub(super) fn response_connection_close(response: &Response) -> bool {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
         .any(|token| token.trim().eq_ignore_ascii_case("close"))
-}
-
-pub(super) fn digest_challenged_request(
-    original_method: Method,
-    original_body: RequestBody,
-    redirect_statuses: &[StatusCode],
-) -> (Method, RequestBody) {
-    let mut method = original_method;
-    let mut body = original_body;
-
-    for status in redirect_statuses {
-        match *status {
-            StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND | StatusCode::SEE_OTHER => {
-                if method != Method::GET && method != Method::HEAD {
-                    method = Method::GET;
-                }
-                body = None;
-            }
-            StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT => {}
-            _ => {}
-        }
-    }
-
-    (method, body)
 }
 
 pub(super) fn digest_credentials(
@@ -1212,38 +1187,6 @@ mod tests {
         );
         assert!(digest_credentials(Some("nocolon")).is_err());
         assert_eq!(digest_credentials(None).unwrap(), None);
-    }
-
-    #[test]
-    fn digest_challenge_after_redirect_uses_go_redirect_method_and_body() {
-        let original_body = Some(RequestBodyPayload::from_bytes(
-            b"payload".to_vec(),
-            Some("text/plain".to_string()),
-        ));
-
-        let (method, body) = digest_challenged_request(
-            Method::POST,
-            original_body.clone(),
-            &[StatusCode::SEE_OTHER],
-        );
-        assert_eq!(method, Method::GET);
-        assert!(body.is_none());
-
-        let (method, body) = digest_challenged_request(
-            Method::POST,
-            original_body.clone(),
-            &[StatusCode::TEMPORARY_REDIRECT],
-        );
-        assert_eq!(method, Method::POST);
-        assert_eq!(request_body_bytes(&body), Some(b"payload".as_slice()));
-
-        let (method, body) = digest_challenged_request(
-            Method::HEAD,
-            original_body,
-            &[StatusCode::MOVED_PERMANENTLY],
-        );
-        assert_eq!(method, Method::HEAD);
-        assert!(body.is_none());
     }
 
     #[test]

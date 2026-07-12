@@ -463,6 +463,47 @@ fn digest_auth_replays_after_challenge() {
 }
 
 #[test]
+fn digest_auth_preserves_put_body_after_found_redirect() {
+    let server = TestServer::start(|req| match req.path.as_str() {
+        "/start" => TestResponse::status(302, "Found", "").header("Location", "/target"),
+        "/target" if req.header("authorization").is_empty() => {
+            TestResponse::status(401, "Unauthorized", "").header(
+                "WWW-Authenticate",
+                r#"Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5""#,
+            )
+        }
+        "/target" => TestResponse::ok("authenticated"),
+        _ => TestResponse::status(404, "Not Found", ""),
+    });
+
+    let res = run_fetch(&[
+        &format!("{}/start", server.url),
+        "--method",
+        "PUT",
+        "--data",
+        "payload",
+        "--digest",
+        "user:pass",
+    ]);
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "authenticated");
+
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3, "requests: {requests:?}");
+    assert_eq!(requests[0].path, "/start");
+    for request in &requests[1..] {
+        assert_eq!(request.path, "/target");
+        assert_eq!(request.method, "PUT");
+        assert_eq!(request.body_string(), "payload");
+    }
+    assert!(requests[1].header("authorization").is_empty());
+    assert!(
+        requests[2].header("authorization").starts_with("Digest "),
+        "requests: {requests:?}"
+    );
+}
+
+#[test]
 fn digest_auth_reports_unsupported_qop_challenge() {
     let challenged = Arc::new(AtomicUsize::new(0));
     let challenged_for_handler = Arc::clone(&challenged);
