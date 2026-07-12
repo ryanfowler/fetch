@@ -375,8 +375,18 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
                 }
                 if attempt < retry_count && should_retry_status(status) {
                     ensure_body_replayable(original_body_replayable, "retry")?;
-                    let requested_delay =
-                        compute_delay(retry_delay, attempt, parse_retry_after(response.headers()));
+                    let retry_after = parse_retry_after(response.headers());
+                    if retry_after > MAX_RETRY_DELAY {
+                        write_warning_before_output(
+                            cli,
+                            &format!(
+                                "Retry-After requested {}; limiting retry delay to {}",
+                                format_delay(retry_after),
+                                format_delay(MAX_RETRY_DELAY)
+                            ),
+                        );
+                    }
+                    let requested_delay = compute_delay(retry_delay, attempt, retry_after);
                     drain_response_body_bounded(response).await;
                     let delay = retry_delay_within_timeout(
                         requested_delay,

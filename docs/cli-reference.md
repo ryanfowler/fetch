@@ -369,7 +369,7 @@ fetch --retry 2 --retry-delay 0.5 example.com
 
 Initial delay between retries in seconds. Default: `1`. Accepts decimal values.
 
-The actual delay uses exponential backoff (delay doubles each attempt, capped at 30s) with ±25% jitter. If the server sends a `Retry-After` header, that value is used when it exceeds the computed delay.
+The actual delay uses exponential backoff (delay doubles each attempt) with ±25% jitter. The effective delay is capped at 30 seconds. If the server sends a `Retry-After` header, that value is used when it exceeds the computed delay, but it is also capped at 30 seconds. A warning is emitted when `Retry-After` is clamped unless `--silent` is enabled. An overall `--timeout` remains the final upper bound.
 
 ```sh
 fetch --retry 3 --retry-delay 2 example.com
