@@ -785,6 +785,37 @@ Update fetch binary in place. Use with `--dry-run` to check for updates without 
 See [Updates](updates.md) for release source, verification, permissions,
 background auto-update behavior, and cache/lock files.
 
+### Agent skill options
+
+The fetch Agent Skill is embedded in the binary and can be installed offline.
+Choose an agent-specific location or the interoperable `agents` location:
+
+| Target | User scope | Project scope |
+| --- | --- | --- |
+| `agents` (default) | `~/.agents/skills/fetch` | `.agents/skills/fetch` |
+| `codex` | `~/.codex/skills/fetch` | `.codex/skills/fetch` |
+| `claude` | `~/.claude/skills/fetch` | `.claude/skills/fetch` |
+| `gemini` | `~/.gemini/skills/fetch` | `.gemini/skills/fetch` |
+| `pi` | `~/.pi/agent/skills/fetch` | `.pi/skills/fetch` |
+
+```sh
+fetch --skill                                # print SKILL.md
+fetch --install-skill [agents|codex|claude|gemini|pi|all]
+fetch --uninstall-skill [agents|codex|claude|gemini|pi|all]
+```
+
+User scope is the default; use `--scope project` for the project locations
+shown above. Install and uninstall commands show every destination before
+changing it and ask for confirmation when attached to a terminal. `--dry-run`
+previews changes and `--force` permits replacing or removing a locally modified
+installation. No agent configuration files are changed and installation
+performs no network requests.
+
+Each installed copy contains `.fetch-skill.json`, recording the skill version,
+fetch version, and hashes used to detect local modifications. `all` means the
+five locations listed above; it does not probe and write to additional
+directories.
+
 ### `--complete SHELL`
 
 Output shell completion scripts. Values: `bash`, `fish`, `zsh`.

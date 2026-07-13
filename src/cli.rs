@@ -227,6 +227,9 @@ pub struct Cli {
     #[arg(long = "dry-run", help = "Print out the request info and exit")]
     pub dry_run: bool,
 
+    #[arg(long, help = "Overwrite a modified skill installation")]
+    pub force: bool,
+
     #[arg(
         long = "ech",
         value_name = "MODE",
@@ -335,6 +338,17 @@ pub struct Cli {
 
     #[arg(long = "inspect-tls", help = "Inspect the TLS certificate chain")]
     pub inspect_tls: bool,
+
+    #[arg(
+        long = "install-skill",
+        value_name = "AGENT",
+        num_args = 0..=1,
+        default_missing_value = "auto",
+        value_parser = ["auto", "agents", "codex", "claude", "gemini", "pi", "all"],
+        hide_possible_values = true,
+        help = "Install the bundled agent skill"
+    )]
+    pub install_skill: Option<String>,
 
     #[arg(
         short = 'j',
@@ -495,6 +509,18 @@ pub struct Cli {
     #[arg(short = 's', long, help = "Print only errors to stderr")]
     pub silent: bool,
 
+    #[arg(
+        long,
+        value_name = "SCOPE",
+        value_parser = ["user", "project"],
+        hide_possible_values = true,
+        help = "Skill installation scope [user, project]"
+    )]
+    pub scope: Option<String>,
+
+    #[arg(long, help = "Print the bundled SKILL.md")]
+    pub skill: bool,
+
     #[arg(long = "sort-headers", help = "Sort displayed headers by name")]
     pub sort_headers: bool,
 
@@ -522,6 +548,17 @@ pub struct Cli {
 
     #[arg(long, help = "Update the fetch binary in place")]
     pub update: bool,
+
+    #[arg(
+        long = "uninstall-skill",
+        value_name = "AGENT",
+        num_args = 0..=1,
+        default_missing_value = "auto",
+        value_parser = ["auto", "agents", "codex", "claude", "gemini", "pi", "all"],
+        hide_possible_values = true,
+        help = "Uninstall the agent skill"
+    )]
+    pub uninstall_skill: Option<String>,
 
     #[arg(
         short = 'v',

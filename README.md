@@ -20,6 +20,7 @@ inspection, and request timing in one CLI.
 - **DNS inspection** - Inspect hostname resolution, record families, TTLs, and resolver timing
 - **Timing waterfall** - Visualize request timing phases (DNS, TCP, TLS, TTFB, transfer) with a waterfall chart
 - **Configuration** - Global and per-host configuration file support
+- **Agent skill** - Bundled offline skill installation for Codex, Claude Code, Gemini CLI, and Pi
 
 ## Quick Start
 
@@ -52,6 +53,26 @@ fetch -v -h
 > Tip: `fetch -h` shows concise help. Add `-v` (`fetch -v -h` or
 > `fetch -v --help`) to open the full, colorized command menu with detailed
 > options, examples, and pager support.
+
+#### Install the agent skill
+
+```sh
+# Use the interoperable ~/.agents/skills/fetch location
+fetch --install-skill
+
+# Or install directly for one agent
+fetch --install-skill pi
+
+# Install all generic and agent-specific locations
+fetch --install-skill all
+
+# Preview a project-local installation
+fetch --install-skill all --scope project --dry-run
+```
+
+The skill is embedded in `fetch`, so installation is offline. The installer
+shows destinations before writing, detects modified installations, and does not
+edit agent configuration files. See [the CLI reference](docs/cli-reference.md#agent-skill-options).
 
 ## Output Model
 

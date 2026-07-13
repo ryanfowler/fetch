@@ -9,6 +9,7 @@ license: MIT
 compatibility: Requires the fetch executable and network access.
 metadata:
   repository: https://github.com/ryanfowler/fetch
+  skill-version: "1"
 ---
 
 # fetch

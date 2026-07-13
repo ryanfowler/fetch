@@ -275,6 +275,14 @@ pub(crate) static FLAGS: &[FlagDef] = &[
 
 // ── convenience iterators ──────────────────────────────────────────────
 
+/// Return registry flag names explicitly set on the CLI.
+pub(crate) fn set_flag_names(cli: &Cli) -> impl Iterator<Item = &'static str> + '_ {
+    FLAGS
+        .iter()
+        .filter(move |definition| (definition.is_set)(cli))
+        .map(|definition| definition.name)
+}
+
 /// Push names of all flags in `category` that are set on `cli` into `ignored`.
 pub(crate) fn append_ignored_of_category(
     cli: &Cli,
