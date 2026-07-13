@@ -465,7 +465,8 @@ fn config_error_and_metadata_edges() {
 fn bundled_skill_can_be_printed_and_installed_offline_for_pi() {
     let skill = run_fetch(&["--skill"]);
     assert_exit(&skill, 0);
-    assert!(skill.stdout.starts_with("---\nname: fetch\n"));
+    let normalized_skill = skill.stdout.replace("\r\n", "\n");
+    assert!(normalized_skill.starts_with("---\nname: fetch\n"));
 
     let home = TempDir::new().unwrap();
     let home_value = home.path().to_string_lossy().into_owned();
@@ -536,6 +537,7 @@ fn skill_install_dry_run_and_modification_guard_are_safe() {
 
     let dry_run = run_fetch_opts(opts(), &["--install-skill", "all", "--dry-run"]);
     assert_exit(&dry_run, 0);
+    let dry_run_stderr = dry_run.stderr.replace('\\', "/");
     for path in [
         ".agents/skills/fetch",
         ".codex/skills/fetch",
@@ -543,7 +545,7 @@ fn skill_install_dry_run_and_modification_guard_are_safe() {
         ".gemini/skills/fetch",
         ".pi/agent/skills/fetch",
     ] {
-        assert!(dry_run.stderr.contains(path), "missing destination {path}");
+        assert!(dry_run_stderr.contains(path), "missing destination {path}");
     }
     assert!(!home.path().join(".agents").exists());
 
@@ -581,8 +583,9 @@ fn uninstalling_missing_project_skill_does_not_create_files() {
         &["--uninstall-skill", "pi", "--scope", "project"],
     );
     assert_exit(&result, 0);
-    assert!(result.stderr.contains(".pi/skills/fetch"));
-    assert!(result.stderr.contains("nothing to remove"));
+    let stderr = result.stderr.replace('\\', "/");
+    assert!(stderr.contains(".pi/skills/fetch"));
+    assert!(stderr.contains("nothing to remove"));
     assert!(
         fs::read_dir(project.path()).unwrap().next().is_none(),
         "missing-skill uninstall changed the project directory"
