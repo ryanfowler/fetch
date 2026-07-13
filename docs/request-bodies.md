@@ -47,19 +47,19 @@ cat data.json | fetch -d @- example.com/api
 When using `@filename`, the Content-Type is detected from the file extension.
 Multipart file parts use the same policy. Some examples are:
 
-| Extension        | Content-Type                |
-| ---------------- | --------------------------- |
-| `.json`          | `application/json`          |
-| `.xml`           | `application/xml`           |
-| `.html`, `.htm`  | `text/html`                 |
-| `.txt`, `.text`  | `text/plain`                |
-| `.csv`           | `text/csv`                  |
-| `.md`            | `text/markdown`             |
-| `.ndjson`        | `application/x-ndjson`      |
-| `.msgpack`       | `application/msgpack`       |
-| `.pb`            | `application/protobuf`      |
-| Image extensions | matching `image/*` type     |
-| Unknown          | `application/octet-stream`  |
+| Extension        | Content-Type               |
+| ---------------- | -------------------------- |
+| `.json`          | `application/json`         |
+| `.xml`           | `application/xml`          |
+| `.html`, `.htm`  | `text/html`                |
+| `.txt`, `.text`  | `text/plain`               |
+| `.csv`           | `text/csv`                 |
+| `.md`            | `text/markdown`            |
+| `.ndjson`        | `application/x-ndjson`     |
+| `.msgpack`       | `application/msgpack`      |
+| `.pb`            | `application/protobuf`     |
+| Image extensions | matching `image/*` type    |
+| Unknown          | `application/octet-stream` |
 
 Override with a header:
 

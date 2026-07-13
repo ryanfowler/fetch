@@ -373,3 +373,5 @@ fetch --complete fish > ~/.config/fish/completions/fetch.fish
 - **[Output Formatting](output-formatting.md)** - Formatting and syntax highlighting details
 - **[Updates](updates.md)** - Keep `fetch` current
 - **[Image Rendering](image-rendering.md)** - Rendering images in the terminal
+- **[Agent Skill](agent-skill.md)** - Install the embedded skill for coding agents
+- **[Documentation Index](README.md)** - Browse every guide

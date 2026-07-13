@@ -89,11 +89,17 @@ or raise them to 1.3 when using ECH.
 
 curl's `--ech` flag maps to fetch:
 
-| curl | fetch |
-|------|-------|
-| `--ech hard` | `--ech on` |
-| `--ech true` | `--ech on` |
-| `--ech auto` | `--ech auto` |
-| `--ech false` | `--ech off` |
+| curl          | fetch        |
+| ------------- | ------------ |
+| `--ech hard`  | `--ech on`   |
+| `--ech true`  | `--ech on`   |
+| `--ech auto`  | `--ech auto` |
+| `--ech false` | `--ech off`  |
 
 The `--from-curl` flag translates curl's ECH flags automatically.
+
+## See Also
+
+- [Advanced Features](advanced-features.md#tls-configuration)
+- [Configuration](configuration.md)
+- [CLI Reference](cli-reference.md#--ech-mode)

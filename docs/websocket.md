@@ -141,3 +141,9 @@ fetch --connect-timeout 2 --timeout 10 wss://api.example.com/ws
 - WebSocket requires HTTP/1.1 for the upgrade handshake. Using `--http 2` or `--http 3` with WebSocket is not supported.
 - WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`, `--form`, `--multipart`, `--xml`, `--edit`, output-file/clipboard flags, or retry flags.
 - The pager is disabled for WebSocket output.
+
+## See Also
+
+- [CLI Reference](cli-reference.md#websocket)
+- [Authentication](authentication.md)
+- [Advanced Features](advanced-features.md)

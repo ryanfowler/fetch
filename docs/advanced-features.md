@@ -50,8 +50,7 @@ fetch --dns-server tls://dns.google:853 example.com
 
 ### DNS over QUIC (DoQ)
 
-Use the `quic://` or `doq://` scheme for DNS over QUIC. The default port is
-853. Both IP addresses and hostnames are accepted.
+Use the `quic://` or `doq://` scheme for DNS over QUIC. The default port is 853. Both IP addresses and hostnames are accepted.
 
 ```sh
 fetch --dns-server quic://1.1.1.1 example.com
