@@ -200,6 +200,12 @@ const WS_INTERACTIVE_VALUES: &[FlagValue] = &[
 const FLAGS: &[Flag] = &[
     flag(
         None,
+        "article",
+        "",
+        "Output readable HTML or Markdown with YAML frontmatter",
+    ),
+    flag(
+        None,
         "aws-sigv4",
         "REGION/SERVICE",
         "Sign the request using AWS signature V4",

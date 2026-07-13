@@ -16,6 +16,35 @@ pub(super) async fn read_decoded_response_body_limited(
     response_headers: HeaderMap,
     compression: CompressionMode,
 ) -> Result<(Vec<u8>, HeaderMap), FetchError> {
+    read_decoded_response_body_with_limit_message(
+        response,
+        response_headers,
+        compression,
+        "cannot be buffered; use '--format off' or write to a file to stream it",
+    )
+    .await
+}
+
+pub(super) async fn read_decoded_article_body_limited(
+    response: Response,
+    response_headers: HeaderMap,
+    compression: CompressionMode,
+) -> Result<(Vec<u8>, HeaderMap), FetchError> {
+    read_decoded_response_body_with_limit_message(
+        response,
+        response_headers,
+        compression,
+        "cannot be extracted as an article",
+    )
+    .await
+}
+
+async fn read_decoded_response_body_with_limit_message(
+    response: Response,
+    response_headers: HeaderMap,
+    compression: CompressionMode,
+    limit_message: &str,
+) -> Result<(Vec<u8>, HeaderMap), FetchError> {
     let (reader, trailers) = async_response_reader(response);
     let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
     let mut bytes = Vec::new();
@@ -28,7 +57,7 @@ pub(super) async fn read_decoded_response_body_limited(
         }
         if bytes.len().saturating_add(n) > MAX_BUFFERED_RESPONSE_BYTES {
             return Err(FetchError::Message(format!(
-                "response body exceeds {} bytes and cannot be buffered; use '--format off' or write to a file to stream it",
+                "response body exceeds {} bytes and {limit_message}",
                 MAX_BUFFERED_RESPONSE_BYTES
             )));
         }

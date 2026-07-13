@@ -20,10 +20,10 @@ use metadata::{
     body_duration, check_grpc_status, exit_code, finalize_streamed_response,
     handle_clipboard_outcome, print_response_metadata, print_timing,
 };
-use stdout::{stdout_stream_target, write_stdout_bytes};
+use stdout::{StdoutBody, stdout_stream_target, write_stdout_bytes};
 use stream::{
-    read_decoded_response_body_limited, stream_response_to_discard, stream_response_to_output,
-    stream_response_to_stdout,
+    read_decoded_article_body_limited, read_decoded_response_body_limited,
+    stream_response_to_discard, stream_response_to_output, stream_response_to_stdout,
 };
 
 pub(super) async fn finish_response(
@@ -71,6 +71,20 @@ pub(super) async fn finish_response(
     .map_err(|err| FetchError::Message(err.to_string()))?;
     if let Some(warning) = &resolved_output.warning {
         write_warning(cli, warning);
+    }
+    if cli.article {
+        return finish_article_response(
+            cli,
+            response,
+            response_headers,
+            response_url,
+            compression,
+            status,
+            response_timing,
+            method_is_head,
+            resolved_output.path.as_deref(),
+        )
+        .await;
     }
     if let Some(path) = resolved_output.path {
         let progress = if cli.silent {
@@ -202,4 +216,118 @@ pub(super) async fn finish_response(
 
     let code = exit_code(status.as_u16(), cli.ignore_status);
     Ok(check_grpc_status(cli, &response_headers, &trailers, code))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_article_response(
+    cli: &Cli,
+    response: Response,
+    response_headers: HeaderMap,
+    response_url: url::Url,
+    compression: CompressionMode,
+    status: StatusCode,
+    response_timing: Option<ResponseTiming>,
+    method_is_head: bool,
+    output_path: Option<&str>,
+) -> Result<i32, FetchError> {
+    let body_start = Instant::now();
+    let (bytes, trailers) =
+        read_decoded_article_body_limited(response, response_headers.clone(), compression).await?;
+    let body_duration = body_duration(method_is_head, &bytes, body_start);
+
+    let input_kind = article_response_content_kind(&response_headers, &bytes);
+    if input_kind == ArticleInputKind::Unsupported {
+        let content_type = stdout::response_header_content_type_label(&response_headers);
+        return Err(FetchError::Message(format!(
+            "response content type '{content_type}' is not supported with '--article'; try again without '--article'"
+        )));
+    }
+
+    let raw_content_type = response_headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let (_, charset) = content_type::get_content_type(raw_content_type);
+    let text = formatters::transcode_bytes(&bytes, &charset);
+    let text = String::from_utf8_lossy(&text);
+    let article = match input_kind {
+        ArticleInputKind::Html => {
+            crate::format::article::extract_markdown(&text, response_url.as_str())
+                .map_err(FetchError::Message)?
+        }
+        ArticleInputKind::Markdown => {
+            crate::format::article::add_url_frontmatter(&text, response_url.as_str())
+        }
+        ArticleInputKind::Unsupported => unreachable!("unsupported article input returned above"),
+    };
+
+    if cli.copy {
+        handle_clipboard_outcome(cli, clipboard::copy_bytes(&article));
+    }
+
+    if let Some(path) = output_path {
+        let progress = if cli.silent {
+            output::WriteProgress::disabled()
+        } else {
+            output::WriteProgress::stdio(
+                cli.color.as_deref(),
+                Some(i64::try_from(article.len()).unwrap_or(i64::MAX)),
+            )
+        };
+        output::write_output_with_progress(path, &article, cli.clobber, progress)
+            .await
+            .map_err(|err| FetchError::Message(err.to_string()))?;
+    } else {
+        let stdout_is_terminal = core::stdio().stdout_is_terminal();
+        let rendered = if core::format_enabled(cli.format.as_deref(), stdout_is_terminal) {
+            let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
+            let mut out = core::Printer::new(use_color);
+            if markdown::format_markdown_to(&article, &mut out).is_ok() {
+                out.into_bytes()
+            } else {
+                article.clone()
+            }
+        } else {
+            article.clone()
+        };
+        write_stdout_bytes(
+            cli,
+            &StdoutBody {
+                bytes: rendered,
+                content_type: ContentType::Markdown,
+                content_type_label: "text/markdown; charset=utf-8".to_string(),
+            },
+        )?;
+    }
+
+    print_timing(cli, response_timing, body_duration);
+    let code = exit_code(status.as_u16(), cli.ignore_status);
+    Ok(check_grpc_status(cli, &response_headers, &trailers, code))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ArticleInputKind {
+    Html,
+    Markdown,
+    Unsupported,
+}
+
+fn article_response_content_kind(headers: &HeaderMap, bytes: &[u8]) -> ArticleInputKind {
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    if content_type::get_content_type(content_type).0 == ContentType::Markdown {
+        return ArticleInputKind::Markdown;
+    }
+
+    let declared_html = content_type
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .is_some_and(|mime| {
+            (mime.type_() == mime::TEXT && mime.subtype() == mime::HTML)
+                || (mime.type_() == mime::APPLICATION && mime.subtype().as_str() == "xhtml")
+        });
+    if declared_html || content_type::sniff_content_type(bytes) == ContentType::Html {
+        ArticleInputKind::Html
+    } else {
+        ArticleInputKind::Unsupported
+    }
 }

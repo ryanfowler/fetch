@@ -66,6 +66,107 @@ fn response_formatting_json_ndjson_xml_yaml_html_csv_css_and_sniffing() {
     }
 }
 
+#[test]
+fn article_mode_extracts_markdown_frontmatter_and_uses_html_accept() {
+    let server = TestServer::start(|_| {
+        TestResponse::ok(
+            r#"<!doctype html><html lang="en"><head>
+<title>Readable Article</title>
+<meta name="author" content="Jane Smith">
+<meta property="og:site_name" content="Example News">
+<meta name="description" content="A concise article summary.">
+</head><body><nav>Site navigation</nav><article>
+<h1>Readable Article</h1>
+<p>This is the primary article content, with enough prose to be recognized as the readable part of the page rather than surrounding navigation or other incidental elements.</p>
+<p>Continue with <a href="related">related reading</a> for more detail about this topic and its wider context.</p>
+</article><aside>Unrelated sidebar</aside></body></html>"#,
+        )
+        .header("Content-Type", "text/html; charset=utf-8")
+    });
+
+    let res = run_fetch(&[&format!("{}/posts/one", server.url), "--article"]);
+
+    assert_exit(&res, 0);
+    assert!(res.stdout.starts_with("---\n"), "{}", res.stdout);
+    assert!(res.stdout.contains("title: \"Readable Article\""));
+    assert!(res.stdout.contains("byline: \"Jane Smith\""));
+    assert!(res.stdout.contains("site_name: \"Example News\""));
+    assert!(
+        res.stdout
+            .contains(&format!("url: \"{}/posts/one\"", server.url))
+    );
+    assert!(res.stdout.contains("primary article content"));
+    assert!(
+        res.stdout
+            .contains(&format!("[related reading]({}/posts/related)", server.url)),
+        "{}",
+        res.stdout
+    );
+    assert!(!res.stdout.contains("Site navigation"));
+    assert!(!res.stdout.contains("Unrelated sidebar"));
+    assert!(res.stdout.ends_with('\n'));
+
+    let requests = server.requests();
+    assert_eq!(
+        requests[0].header("accept"),
+        "text/html, application/xhtml+xml;q=0.9, text/markdown;q=0.8, */*;q=0.1"
+    );
+}
+
+#[test]
+fn article_mode_writes_transformed_output_file_and_rejects_non_html() {
+    let server = TestServer::start(|req| {
+        match req.path.as_str() {
+        "/article" => TestResponse::ok(
+            "<html><head><title>Saved Article</title></head><body><article><h1>Saved Article</h1><p>A long and useful paragraph containing the readable document body that should be converted and saved as Markdown output.</p></article></body></html>",
+        )
+        .header("Content-Type", "text/html"),
+        "/markdown" => TestResponse::ok(
+            "# Existing Markdown\n\nThis document should pass through *unchanged*.\n",
+        )
+        .header("Content-Type", "text/markdown; charset=utf-8"),
+        _ => TestResponse::ok(r#"{"ok":true}"#).header("Content-Type", "application/json"),
+    }
+    });
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("article.md");
+
+    let res = run_fetch(&[
+        &format!("{}/article", server.url),
+        "--article",
+        "--output",
+        path.to_str().unwrap(),
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    let saved = fs::read_to_string(path).unwrap();
+    assert!(saved.contains("title: \"Saved Article\""));
+    assert!(saved.contains("readable document body"));
+    assert!(!saved.contains("<article>"));
+
+    let markdown_url = format!("{}/markdown", server.url);
+    let res = run_fetch(&[&markdown_url, "--article"]);
+    assert_exit(&res, 0);
+    assert_eq!(
+        res.stdout,
+        format!(
+            "---\nurl: {markdown_url:?}\n---\n\n# Existing Markdown\n\nThis document should pass through *unchanged*.\n"
+        )
+    );
+    assert!(!res.stdout.contains("title:"));
+    assert!(!res.stdout.contains("length:"));
+
+    let res = run_fetch(&[&format!("{}/json", server.url), "--article"]);
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains(
+            "response content type 'application/json' is not supported with '--article'; try again without '--article'"
+        ),
+        "{}",
+        res.stderr
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn formatted_sse_outputs_events_before_stream_ends() {

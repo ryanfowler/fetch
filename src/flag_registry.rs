@@ -201,6 +201,7 @@ pub(crate) static FLAGS: &[FlagDef] = &[
     })
     .with_from_curl(),
     // ── Response ────────────────────────────────────────────────────────
+    FlagDef::new("--article", Some(FlagCategory::Response), |c| c.article).with_ws_always(),
     FlagDef::new("--compress", Some(FlagCategory::Response), |c| {
         c.compress.is_some()
     }),
