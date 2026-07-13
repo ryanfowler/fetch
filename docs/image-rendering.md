@@ -8,11 +8,11 @@
 
 Control how images are rendered:
 
-| Value      | Description                                                   |
-| ---------- | ------------------------------------------------------------- |
+| Value      | Description                                                    |
+| ---------- | -------------------------------------------------------------- |
 | `auto`     | Try optimal terminal protocol with built-in decoders (default) |
 | `external` | Allow external adapters for additional formats                 |
-| `off`      | Disable image rendering                                       |
+| `off`      | Disable image rendering                                        |
 
 ```sh
 fetch --image external example.com/photo.avif

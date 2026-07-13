@@ -4,187 +4,82 @@ A terminal API client for requests, streams, and network debugging.
 
 ![Example of fetch with an image and JSON responses](./assets/example.png)
 
-`fetch` combines formatted HTTP responses, terminal image rendering,
-WebSockets, gRPC reflection and calls, DNS inspection, TLS certificate
-inspection, and request timing in one CLI.
+`fetch` combines formatted HTTP responses with WebSockets, gRPC, DNS and TLS
+inspection, request timing, authentication, sessions, and terminal-native image
+rendering.
 
 ## Features
 
-- **Response formatting** - Automatic formatting and syntax highlighting for JSON, XML, YAML, HTML, CSS, CSV, Markdown, MessagePack, Protocol Buffers, and more
-- **HTML article to Markdown** - Extract readable content from HTML, convert it to Markdown, and add YAML frontmatter
-- **Image rendering** - Display images directly in your terminal
-- **WebSocket support** - Bidirectional WebSocket connections with automatic JSON formatting
-- **gRPC support** - Make gRPC calls with automatic reflection, discovery, and JSON-to-protobuf conversion
-- **Authentication** - Built-in support for Basic Auth, Bearer Token, AWS Signature V4, and mTLS
-- **Compression** - Automatic gzip, brotli, and zstd response body decompression
-- **TLS inspection** - Inspect TLS certificate chains, expiry, SANs, and OCSP status
-- **DNS inspection** - Inspect hostname resolution, record families, TTLs, and resolver timing
-- **Timing waterfall** - Visualize request timing phases (DNS, TCP, TLS, TTFB, transfer) with a waterfall chart
-- **Configuration** - Global and per-host configuration file support
-- **Agent skill** - Bundled offline skill installation for Codex, Claude Code, Gemini CLI, and Pi
+- HTTP/1.1, HTTP/2, HTTP/3, WebSockets, and gRPC with reflection
+- Automatic formatting for JSON, XML, YAML, HTML, CSV, Markdown, MessagePack,
+  Protocol Buffers, SSE, NDJSON, and images
+- JSON, XML, forms, multipart uploads, files, stdin, and editor-based bodies
+- Basic, Digest, Bearer, AWS SigV4, and mutual TLS authentication
+- DNS, TLS certificate, and request timing diagnostics
+- Proxies, custom DNS, cookie sessions, configuration, and self-update workflows
 
 ## Quick Start
 
-#### Install
+Install on macOS or Linux:
 
 ```sh
-# Install fetch from the shell script (macOS or Linux)
 curl -fsSL https://raw.githubusercontent.com/ryanfowler/fetch/main/install.sh | bash
+```
 
-# Or install fetch with homebrew (macOS or Linux)
+Or use Homebrew or Cargo:
+
+```sh
 brew install ryanfowler/tap/fetch
-
-# Or build fetch from source with Cargo
 cargo install --git https://github.com/ryanfowler/fetch --locked
 ```
 
-#### Usage
+Make a request:
 
 ```sh
-# Make a request for JSON
 fetch httpbin.org/json
-
-# Make a request for an image
-fetch picsum.photos/1024/1024
-
-# Open the full command menu / detailed CLI reference
-fetch -v -h
 ```
 
-> Tip: `fetch -h` shows concise help. Add `-v` (`fetch -v -h` or
-> `fetch -v --help`) to open the full, colorized command menu with detailed
-> options, examples, and pager support.
-
-#### Install the agent skill
+Send JSON (body options infer `POST`):
 
 ```sh
-# Use the interoperable ~/.agents/skills/fetch location
-fetch --install-skill
-
-# Or install directly for one agent
-fetch --install-skill pi
-
-# Install all generic and agent-specific locations
-fetch --install-skill all
-
-# Preview a project-local installation
-fetch --install-skill all --scope project --dry-run
-```
-
-The skill is embedded in `fetch`, so installation is offline. The installer
-shows destinations before writing, detects modified installations, and does not
-edit agent configuration files. See [the CLI reference](docs/cli-reference.md#agent-skill-options).
-
-## Output Model
-
-`fetch` keeps response bodies and metadata separate: the body is written to
-stdout, while status lines, headers, progress, timing, warnings, and errors are
-written to stderr. This makes commands like `fetch example.com/api | jq .` work
-without mixing diagnostics into the pipe.
-
-When stdout is a terminal, supported response bodies are formatted and may open
-in the pager from `$PAGER`; set `NO_PAGER` or use `--pager off` to write
-directly. If `$PAGER` is unset, fetch falls back to `less -FIRX` and honors
-`$LESS` instead of adding default flags. `$PAGER` is split with POSIX
-shell-style quoting, but fetch launches the pager directly and does not
-interpret shell operators such as pipes or redirects. Detailed help
-(`fetch -v --help`) is colorized and uses the same pager controls. When stdout
-is redirected or piped, formatting turns off by default; use `--format on` to
-force formatted output in a pipe. Binary-looking responses are not printed to a
-terminal unless you explicitly choose an output path with `-o file`, force raw
-stdout with `-o - > file`, or disable terminal image rendering with
-`--image off`.
-
-## Examples
-
-### Everyday API Work
-
-```sh
-# POST JSON and format the response automatically
 fetch -j '{"name":"Ada"}' https://httpbin.org/post
+```
 
-# Reuse cookies across requests with a named session
-fetch --session api -j '{"user":"me"}' https://example.com/login
-fetch --session api https://example.com/dashboard
+Inspect a connection or call a reflected gRPC method:
 
-# Convert a curl command into a fetch request
-fetch --from-curl 'curl -H "Authorization: Bearer TOKEN" https://api.example.com'
-
-# Extract readable HTML and convert it to Markdown with YAML frontmatter
-fetch --article https://example.com/post
-
-# Show response headers, request+response headers, or full connection details
-fetch -v https://example.com
-fetch -vv https://example.com
+```sh
 fetch -vvv https://example.com
-```
-
-### DNS, TLS, and Timing Diagnostics
-
-```sh
-# Inspect DNS records, TTLs, resolver backend, and lookup duration
-fetch --inspect-dns example.com
-
-# Run the same DNS inspection through DNS-over-HTTPS
-fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
-
-# Inspect the TLS certificate chain, expiry, SANs, OCSP, ALPN, and cipher suite
-fetch --inspect-tls https://example.com
-
-# Inspect the HTTP/3 QUIC/TLS path
-fetch --inspect-tls --http 3 https://cloudflare.com
-
-# Show a request timing waterfall for DNS, TCP/TLS or QUIC, TTFB, and body transfer
-fetch --timing https://example.com
-```
-
-### WebSocket and gRPC
-
-```sh
-# Connect to a WebSocket and send an initial JSON message
-fetch wss://echo.websocket.events -j '{"type":"ping"}'
-
-# Discover gRPC services using reflection
-fetch --grpc-list https://localhost:50051
-
-# Describe a gRPC service, method, or message
-fetch --grpc-describe grpc.health.v1.Health http://127.0.0.1:50051
-
-# Make a gRPC call with JSON-to-protobuf conversion
 fetch --grpc -j '{"service":""}' \
   http://127.0.0.1:50051/grpc.health.v1.Health/Check
 ```
 
-### Terminal-Friendly Output
+`fetch -h` shows concise help. Use `fetch -v -h` for the complete, colorized
+command menu.
+
+## Output
+
+Response bodies go to stdout; status, headers, timing, warnings, and errors go
+to stderr. This keeps pipelines clean:
 
 ```sh
-# Render images directly in supported terminals
-fetch https://httpbin.org/image/png
-
-# Disable the pager for scripts or small responses
-fetch --pager off https://httpbin.org/json
-
-# Save a response and copy the decoded body to the clipboard
-fetch --copy -o response.json https://httpbin.org/json
-
-# Preserve response bytes for compressed downloads
-fetch --compress off -o archive.tar.gz https://example.com/archive.tar.gz
+fetch example.com/api | jq .
 ```
+
+Terminal output is formatted automatically. Redirected output is unformatted by
+default, and binary responses are protected from accidental terminal output.
+See [Output Formatting](docs/output-formatting.md) for pager, color, binary,
+clipboard, and file behavior.
 
 ## Documentation
 
-- **[Getting Started](docs/getting-started.md)** - Installation, first steps, and basic concepts
-- **[CLI Reference](docs/cli-reference.md)** - Complete reference for all command-line options
-- **[Configuration](docs/configuration.md)** - Configuration file format and options
-- **[Authentication](docs/authentication.md)** - Basic, Bearer, AWS SigV4, and mTLS
-- **[Request Bodies](docs/request-bodies.md)** - JSON, XML, forms, multipart, and file uploads
-- **[Output Formatting](docs/output-formatting.md)** - Supported content types and formatting options
-- **[Image Rendering](docs/image-rendering.md)** - Terminal image protocols and formats
-- **[WebSocket](docs/websocket.md)** - Bidirectional WebSocket connections
-- **[gRPC](docs/grpc.md)** - Making gRPC requests with Protocol Buffers
-- **[Advanced Features](docs/advanced-features.md)** - DNS, proxies, TLS, HTTP versions, and more
-- **[Updates](docs/updates.md)** - Manual updates, auto-update behavior, verification, and update files
-- **[Troubleshooting](docs/troubleshooting.md)** - Common issues, debugging, and exit codes
+Start with the **[documentation index](docs/README.md)**, or jump directly to:
+
+- **[Getting Started](docs/getting-started.md)** — installation and common tasks
+- **[CLI Reference](docs/cli-reference.md)** — every command-line option
+- **[Configuration](docs/configuration.md)** — global and per-host settings
+- **[Request Bodies](docs/request-bodies.md)** — JSON, forms, multipart, and files
+- **[Authentication](docs/authentication.md)** — supported authentication methods
+- **[Troubleshooting](docs/troubleshooting.md)** — diagnostics and exit codes
 
 ## License
 
