@@ -105,6 +105,7 @@ Request flow: CLI parse → config merge → request build (gRPC may load/reflec
 - Pager: `--pager auto|on|off`; `NO_PAGER` disables auto fallback; `$PAGER` is shell-split but launched directly; `$LESS` suppresses fallback flags. Images/output files bypass pager.
 - `--copy` tees decoded stdout/output-file bodies to platform clipboard commands, skips >1 MiB, and bounds stdin/write/wait, killing hung backends with a warning.
 - Content type policy belongs in `src/format/content_type.rs`; update README/docs when user-visible formats or MIME behavior change.
+- `--article` is an explicit buffered HTML/Markdown transformation: Legible extracts readable HTML, htmd converts it to Markdown, and existing Markdown passes through directly. `src/format/article.rs` adds scalar YAML frontmatter (all available article details for HTML, only the final URL for Markdown). It uses the final response URL for relative HTML links, caps decoded responses at 16 MiB and HTML DOM elements at 500,000, writes raw Markdown to files/clipboard, and only applies terminal Markdown styling afterward.
 
 ### gRPC/protobuf
 

@@ -247,6 +247,33 @@ fetch -m HEAD example.com                   # Avoid body transfer when supported
 
 ## Formatting Options
 
+### `--article`
+
+Convert an HTML response to Markdown by extracting its main readable content
+with Legible and converting the extracted HTML with htmd.
+If the response is already `text/markdown` or `text/x-markdown`, its body is
+used directly. HTML output begins with YAML frontmatter containing the title,
+byline, site name, published time, language, direction, text length, excerpt,
+and final response URL when those details are available. Existing Markdown
+receives frontmatter containing only the final response URL.
+
+```sh
+fetch --article example.com/post
+fetch --article --format off example.com/post > post.md
+fetch --article -o post.md example.com/post
+```
+
+The HTML-to-Markdown conversion uses the final URL after redirects to resolve
+relative HTML links. It requires buffering the decoded response and is limited
+to 16 MiB. The flag cannot be combined with gRPC, WebSocket, `--discard`,
+`--remote-name`, or
+`--remote-header-name`. An explicit `Accept` request header overrides article
+mode's HTML-oriented default.
+
+`--format`, `--color`, and `--pager` control terminal presentation of the
+generated Markdown; they do not disable article extraction. Output files and
+non-formatted pipes receive raw, uncolored Markdown.
+
 ### `--format OPTION`
 
 Control response formatting. Values: `auto`, `on`, `off`.

@@ -176,10 +176,12 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
         apply_headers(&mut headers, &cli.headers)?;
         grpc_headers::apply_standard_headers(&mut headers);
     } else {
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static(core::DEFAULT_ACCEPT_HEADER),
-        );
+        let accept = if cli.article {
+            "text/html, application/xhtml+xml;q=0.9, text/markdown;q=0.8, */*;q=0.1"
+        } else {
+            core::DEFAULT_ACCEPT_HEADER
+        };
+        headers.insert(ACCEPT, HeaderValue::from_static(accept));
         apply_headers(&mut headers, &cli.headers)?;
     }
     apply_ranges(&mut headers, &cli.ranges);

@@ -11,6 +11,7 @@ inspection, and request timing in one CLI.
 ## Features
 
 - **Response formatting** - Automatic formatting and syntax highlighting for JSON, XML, YAML, HTML, CSS, CSV, Markdown, MessagePack, Protocol Buffers, and more
+- **HTML article to Markdown** - Extract readable content from HTML, convert it to Markdown, and add YAML frontmatter
 - **Image rendering** - Display images directly in your terminal
 - **WebSocket support** - Bidirectional WebSocket connections with automatic JSON formatting
 - **gRPC support** - Make gRPC calls with automatic reflection, discovery, and JSON-to-protobuf conversion
@@ -108,6 +109,9 @@ fetch --session api https://example.com/dashboard
 
 # Convert a curl command into a fetch request
 fetch --from-curl 'curl -H "Authorization: Bearer TOKEN" https://api.example.com'
+
+# Extract readable HTML and convert it to Markdown with YAML frontmatter
+fetch --article https://example.com/post
 
 # Show response headers, request+response headers, or full connection details
 fetch -v https://example.com

@@ -123,6 +123,31 @@ Features:
 fetch example.com
 ```
 
+#### Convert readable HTML to Markdown
+
+Use `--article` to extract the main readable content from an HTML response with
+Legible and convert that extracted HTML to Markdown with htmd:
+
+```sh
+fetch --article example.com/post
+fetch --article --format off example.com/post > post.md
+fetch --article -o post.md example.com/post
+```
+
+The converted HTML document starts with YAML frontmatter containing
+available article metadata such as `title`, `byline`, `site_name`,
+`published_time`, `lang`, `dir`, `length`, and `excerpt`. It also includes
+`url`, set to the final response URL after redirects. Relative links are
+resolved against that URL.
+
+If the response is already `text/markdown` or `text/x-markdown`, its Markdown
+body is used directly and only `url` is added as frontmatter.
+
+Article extraction is a body transformation rather than terminal presentation:
+`--format`, `--color`, and `--pager` only control how the resulting Markdown is
+displayed. Output files receive raw, uncolored Markdown. Extraction requires
+buffering the decoded HTML and therefore has a 16 MiB response limit.
+
 ### CSS
 
 **Content-Type**: `text/css`

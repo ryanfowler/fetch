@@ -108,6 +108,13 @@ pub struct Cli {
     #[arg(value_name = "URL", help = "The URL to make a request to")]
     pub url: Option<String>,
 
+    #[arg(
+        long,
+        conflicts_with_all = ["discard", "grpc", "grpc_describe", "grpc_list", "remote_name"],
+        help = "Output readable HTML or Markdown"
+    )]
+    pub article: bool,
+
     #[arg(last = true, hide = true)]
     pub extra_args: Vec<String>,
 

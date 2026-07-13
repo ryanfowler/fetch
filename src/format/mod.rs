@@ -1,3 +1,4 @@
+pub mod article;
 pub mod content_type;
 pub mod css;
 pub mod csv;
