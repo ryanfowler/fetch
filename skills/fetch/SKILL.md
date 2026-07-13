@@ -2,9 +2,10 @@
 name: fetch
 description: >
   Use the fetch CLI to call and debug HTTP APIs, inspect JSON responses,
-  test authentication, diagnose DNS and TLS, measure request timing, call
-  gRPC services, and interact with WebSockets. Prefer this skill when a task
-  requires making or troubleshooting a network request from the terminal.
+  test authentication, diagnose DNS and TLS, measure request timing, extract
+  readable articles, call gRPC services, and interact with WebSockets. Prefer
+  this skill when a task requires making or troubleshooting a network request
+  from the terminal.
 license: MIT
 compatibility: Requires the fetch executable and network access.
 metadata:
@@ -14,7 +15,8 @@ metadata:
 
 # fetch
 
-Use `fetch` for terminal-native HTTP, API, DNS/TLS, gRPC, and WebSocket work.
+Use `fetch` for terminal-native HTTP, API, article extraction, DNS/TLS, gRPC,
+and WebSocket work.
 
 ## Agent-safe defaults
 
@@ -55,6 +57,9 @@ fetch --dry-run -vv -j @request.json https://api.example.com/items
 # Save a large or binary response
 fetch --pager off -o response.bin https://example.com/download
 
+# Extract a readable article as raw Markdown
+fetch --article --pager off --color off --format off https://example.com/post >post.md
+
 # Diagnose the connection
 fetch --inspect-dns example.com
 fetch --inspect-tls https://example.com
@@ -72,6 +77,19 @@ fetch --grpc -j @request.json URL/SERVICE/METHOD
 Read [HTTP recipes](references/http.md), [diagnostics](references/diagnostics.md),
 [gRPC](references/grpc.md), or [WebSockets](references/websocket.md) only when the
 task needs that detail.
+
+## Article extraction
+
+Use `--article` for a readable HTML or Markdown article. HTML is reduced to its
+main content, converted to Markdown, and prefixed with available metadata and
+the final response URL. Existing Markdown is preserved and receives only the
+final URL as frontmatter. Relative HTML links are resolved against the final URL
+after redirects.
+
+Article extraction buffers the decoded response and has a 16 MiB limit. Use
+`--format off` when piping or redirecting raw Markdown; `-o FILE` also writes raw,
+uncolored Markdown. This mode does not render JavaScript, so use a browser for
+client-rendered pages.
 
 ## Security
 
