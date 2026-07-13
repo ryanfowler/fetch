@@ -17,6 +17,7 @@ pub(crate) mod net;
 pub mod output;
 pub mod proto;
 pub mod session;
+pub mod skill;
 pub mod timing;
 pub mod tls;
 pub mod update;

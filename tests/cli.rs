@@ -1,13 +1,21 @@
 mod support;
 
 use std::fs;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::Path;
+#[cfg(unix)]
+use std::process::Command;
+#[cfg(unix)]
+use std::time::Duration;
 use support::common::{FetchOpts, assert_exit, host_port, run_fetch, run_fetch_opts};
 #[cfg(unix)]
-use support::common::{assert_no_closed_stdout_panic, run_fetch_with_closed_stdout};
+use support::common::{assert_no_closed_stdout_panic, fetch_bin, run_fetch_with_closed_stdout};
 #[cfg(unix)]
 use support::grpc::{start_reflection_grpc_h2c_server, write_health_descriptor_set};
 use support::http::{TestResponse, TestServer};
+#[cfg(unix)]
+use support::pty::{configure_pty_child, open_pty, start_pty_capture};
 use tempfile::TempDir;
 
 #[test]
@@ -451,6 +459,173 @@ fn config_error_and_metadata_edges() {
         assert!(res.stderr.is_empty(), "{flag}: {}", res.stderr);
         assert!(!res.stdout.is_empty());
     }
+}
+
+#[test]
+fn bundled_skill_can_be_printed_and_installed_offline_for_pi() {
+    let skill = run_fetch(&["--skill"]);
+    assert_exit(&skill, 0);
+    let normalized_skill = skill.stdout.replace("\r\n", "\n");
+    assert!(normalized_skill.starts_with("---\nname: fetch\n"));
+
+    let home = TempDir::new().unwrap();
+    let home_value = home.path().to_string_lossy().into_owned();
+    let installed = run_fetch_opts(
+        FetchOpts {
+            env: vec![("HOME".to_string(), home_value)],
+            ..FetchOpts::default()
+        },
+        &["--install-skill", "pi"],
+    );
+    assert_exit(&installed, 0);
+    let destination = home.path().join(".pi/agent/skills/fetch");
+    assert_eq!(
+        fs::read_to_string(destination.join("SKILL.md")).unwrap(),
+        skill.stdout
+    );
+    let metadata = fs::read_to_string(destination.join(".fetch-skill.json")).unwrap();
+    assert!(metadata.contains("\"skill_version\": \"1\""));
+    assert!(metadata.contains("\"fetch_version\""));
+}
+
+#[test]
+fn skill_install_default_uses_generic_agents_location() {
+    let home = TempDir::new().unwrap();
+    let result = run_fetch_opts(
+        FetchOpts {
+            env: vec![(
+                "HOME".to_string(),
+                home.path().to_string_lossy().into_owned(),
+            )],
+            ..FetchOpts::default()
+        },
+        &["--install-skill"],
+    );
+    assert_exit(&result, 0);
+    assert!(home.path().join(".agents/skills/fetch/SKILL.md").is_file());
+    assert!(!home.path().join(".codex").exists());
+    assert!(!home.path().join(".pi").exists());
+}
+
+#[test]
+fn skill_actions_reject_options_that_would_be_ignored() {
+    for args in [
+        &["--skill", "--update"][..],
+        &["--skill", "--scope", "project"],
+        &["--skill", "--header", "x-test: true"],
+        &["--install-skill", "--method", "POST"],
+        &["--uninstall-skill", "--complete", "bash"],
+    ] {
+        let result = run_fetch(args);
+        assert_exit(&result, 1);
+        assert!(
+            result.stderr.contains("cannot be used"),
+            "unexpected error for {args:?}: {}",
+            result.stderr
+        );
+    }
+}
+
+#[test]
+fn skill_install_dry_run_and_modification_guard_are_safe() {
+    let home = TempDir::new().unwrap();
+    let home_value = home.path().to_string_lossy().into_owned();
+    let opts = || FetchOpts {
+        env: vec![("HOME".to_string(), home_value.clone())],
+        ..FetchOpts::default()
+    };
+
+    let dry_run = run_fetch_opts(opts(), &["--install-skill", "all", "--dry-run"]);
+    assert_exit(&dry_run, 0);
+    let dry_run_stderr = dry_run.stderr.replace('\\', "/");
+    for path in [
+        ".agents/skills/fetch",
+        ".codex/skills/fetch",
+        ".claude/skills/fetch",
+        ".gemini/skills/fetch",
+        ".pi/agent/skills/fetch",
+    ] {
+        assert!(dry_run_stderr.contains(path), "missing destination {path}");
+    }
+    assert!(!home.path().join(".agents").exists());
+
+    assert_exit(&run_fetch_opts(opts(), &["--install-skill", "all"]), 0);
+    for path in [
+        ".agents/skills/fetch/SKILL.md",
+        ".codex/skills/fetch/SKILL.md",
+        ".claude/skills/fetch/SKILL.md",
+        ".gemini/skills/fetch/SKILL.md",
+        ".pi/agent/skills/fetch/SKILL.md",
+    ] {
+        assert!(home.path().join(path).is_file(), "missing installed {path}");
+    }
+    let skill = home.path().join(".pi/agent/skills/fetch/SKILL.md");
+    fs::write(&skill, "locally modified\n").unwrap();
+    let guarded = run_fetch_opts(opts(), &["--install-skill", "pi"]);
+    assert_exit(&guarded, 1);
+    assert!(guarded.stderr.contains("refusing to overwrite modified"));
+
+    assert_exit(
+        &run_fetch_opts(opts(), &["--install-skill", "pi", "--force"]),
+        0,
+    );
+    assert_ne!(fs::read_to_string(skill).unwrap(), "locally modified\n");
+}
+
+#[test]
+fn uninstalling_missing_project_skill_does_not_create_files() {
+    let project = TempDir::new().unwrap();
+    let result = run_fetch_opts(
+        FetchOpts {
+            cwd: Some(project.path().to_path_buf()),
+            ..FetchOpts::default()
+        },
+        &["--uninstall-skill", "pi", "--scope", "project"],
+    );
+    assert_exit(&result, 0);
+    let stderr = result.stderr.replace('\\', "/");
+    assert!(stderr.contains(".pi/skills/fetch"));
+    assert!(stderr.contains("nothing to remove"));
+    assert!(
+        fs::read_dir(project.path()).unwrap().next().is_none(),
+        "missing-skill uninstall changed the project directory"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_uninstall_rechecks_modifications_after_confirmation() {
+    let home = TempDir::new().unwrap();
+    let home_value = home.path().to_string_lossy().into_owned();
+    let installed = run_fetch_opts(
+        FetchOpts {
+            env: vec![("HOME".to_string(), home_value.clone())],
+            ..FetchOpts::default()
+        },
+        &["--install-skill", "pi"],
+    );
+    assert_exit(&installed, 0);
+
+    let pair = open_pty(24, 100, 0, 0);
+    let capture = start_pty_capture(&pair.master);
+    let mut command = Command::new(fetch_bin());
+    command.args(["--uninstall-skill", "pi"]);
+    command.env("HOME", &home_value).env("NO_COLOR", "");
+    configure_pty_child(&mut command, &pair.slave);
+    let mut child = command.spawn().unwrap();
+    drop(pair.slave);
+
+    capture.wait_for("Uninstall the fetch skill? [y/N]", Duration::from_secs(5));
+    let skill = home.path().join(".pi/agent/skills/fetch/SKILL.md");
+    fs::write(&skill, "modified while confirmation was pending\n").unwrap();
+    let mut input = capture.file.try_clone().unwrap();
+    input.write_all(b"y\n").unwrap();
+
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+    assert!(skill.exists(), "modified installation was removed");
+    assert!(capture.output().contains("refusing to remove modified"));
+    capture.close();
 }
 
 #[test]

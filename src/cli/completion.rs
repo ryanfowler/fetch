@@ -80,6 +80,42 @@ const COMPRESS_VALUES: &[FlagValue] = &[
         value: "Disable compression negotiation",
     },
 ];
+const AGENT_VALUES: &[FlagValue] = &[
+    FlagValue {
+        key: "agents",
+        value: "Open Agent Skills location",
+    },
+    FlagValue {
+        key: "codex",
+        value: "Codex",
+    },
+    FlagValue {
+        key: "claude",
+        value: "Claude Code",
+    },
+    FlagValue {
+        key: "gemini",
+        value: "Gemini CLI",
+    },
+    FlagValue {
+        key: "pi",
+        value: "Pi coding agent",
+    },
+    FlagValue {
+        key: "all",
+        value: "All compatible locations",
+    },
+];
+const SCOPE_VALUES: &[FlagValue] = &[
+    FlagValue {
+        key: "user",
+        value: "Install for the current user",
+    },
+    FlagValue {
+        key: "project",
+        value: "Install in the current project",
+    },
+];
 const FORMAT_VALUES: &[FlagValue] = &[
     FlagValue {
         key: "auto",
@@ -226,6 +262,7 @@ const FLAGS: &[Flag] = &[
         "DNS server IP or DoH URL",
     ),
     flag(None, "dry-run", "", "Print out the request info and exit"),
+    flag(None, "force", "", "Overwrite a modified skill installation"),
     flag(
         Some('e'),
         "edit",
@@ -260,6 +297,14 @@ const FLAGS: &[Flag] = &[
         "Describe a gRPC service, method, or message",
     ),
     flag(None, "grpc-list", "", "List available gRPC services"),
+    Flag {
+        short: None,
+        long: "install-skill",
+        args: "AGENT",
+        description: "Install the bundled agent skill",
+        aliases: &[],
+        values: AGENT_VALUES,
+    },
     flag(
         Some('H'),
         "header",
@@ -396,6 +441,15 @@ const FLAGS: &[Flag] = &[
         "Use a named session for cookies",
     ),
     flag(Some('s'), "silent", "", "Print only errors to stderr"),
+    Flag {
+        short: None,
+        long: "scope",
+        args: "SCOPE",
+        description: "Skill installation scope",
+        aliases: &[],
+        values: SCOPE_VALUES,
+    },
+    flag(None, "skill", "", "Print the bundled SKILL.md"),
     flag(None, "sort-headers", "", "Sort displayed headers by name"),
     flag(
         Some('t'),
@@ -406,6 +460,14 @@ const FLAGS: &[Flag] = &[
     flag(Some('T'), "timing", "", "Display a timing waterfall chart"),
     flag(None, "unix", "PATH", "Make the request over a unix socket"),
     flag(None, "update", "", "Update the fetch binary in place"),
+    Flag {
+        short: None,
+        long: "uninstall-skill",
+        args: "AGENT",
+        description: "Uninstall the agent skill",
+        aliases: &[],
+        values: AGENT_VALUES,
+    },
     flag(Some('v'), "verbose", "", "Verbosity of the output"),
     flag(Some('V'), "version", "", "Print version"),
     Flag {

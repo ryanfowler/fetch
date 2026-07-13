@@ -283,6 +283,12 @@ async fn run(mut cli: Cli) -> Result<i32, RuntimeErrorWithColor> {
 }
 
 async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
+    // Validate skill actions before other metadata dispatch so combinations such
+    // as `--skill --complete` cannot silently choose whichever branch runs first.
+    if crate::skill::is_action(cli) {
+        crate::skill::validate_cli(cli)?;
+    }
+
     if let Some(shell) = cli.complete.as_deref() {
         let output =
             crate::cli::completion::output(shell, &cli.extra_args).map_err(FetchError::Message)?;
@@ -291,6 +297,16 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
     }
 
     normalize_extra_args(cli)?;
+
+    if crate::skill::is_action(cli) {
+        return crate::skill::execute(cli);
+    }
+    if cli.scope.is_some() {
+        return Err("flag '--scope' requires a skill action".into());
+    }
+    if cli.force {
+        return Err("flag '--force' requires a skill action".into());
+    }
 
     if cli.help || cli.version || cli.buildinfo {
         crate::config::apply_best_effort(cli);
