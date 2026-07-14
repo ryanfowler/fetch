@@ -102,6 +102,16 @@ pub(crate) async fn build_client_for_url(
         context.request_timeout,
         context.request_start,
     )?;
+    let connect_timeout_message = connect_budget.timeout().map(|timeout| {
+        if context.connect_timeout == Some(timeout) {
+            request_timeout_message(timeout)
+        } else {
+            context
+                .request_timeout
+                .map(request_timeout_message)
+                .unwrap_or_else(|| request_timeout_message(timeout))
+        }
+    });
     let dns_timeout = connect_budget.remaining()?;
     let effective_proxy = effective_proxy_for_url(cli.proxy.as_deref(), http_version, url)?;
     let auto_http3 = auto_http3_allowed(context.mode, url, cli.unix.as_deref(), effective_proxy);
@@ -178,7 +188,10 @@ pub(crate) async fn build_client_for_url(
         builder = builder.timeout_with_message(timeout, timeout_message);
     }
     if let Some(timeout) = connect_budget.remaining()? {
-        builder = builder.connect_timeout(timeout);
+        builder = builder.connect_timeout_with_message(
+            timeout,
+            connect_timeout_message.expect("finite connect budget has timeout message"),
+        );
     }
     if let Some(session) = context.session {
         builder = builder.cookie_provider(session.cookie_provider());

@@ -60,6 +60,7 @@ pub(super) struct ClientConfig {
     pub(super) request_timeout: Option<Duration>,
     pub(super) request_timeout_message: Option<String>,
     pub(super) connect_timeout: Option<Duration>,
+    pub(super) connect_timeout_message: Option<String>,
     pub(super) session: Option<Arc<crate::session::PersistentCookieStore>>,
     pub(super) connection_timing: Option<crate::http::client::ConnectionTiming>,
     pub(super) dns_resolution: Option<crate::http::client::DnsResolutionHandle>,
@@ -95,6 +96,7 @@ impl Client {
                 request_timeout: None,
                 request_timeout_message: None,
                 connect_timeout: None,
+                connect_timeout_message: None,
                 session: None,
                 connection_timing: None,
                 dns_resolution: None,
@@ -146,7 +148,7 @@ impl Client {
                     .unwrap_or_else(|| request_timeout_message(timeout)),
             )
         });
-        timeout
+        let result = timeout
             .run(self.send(
                 request.method,
                 request.url,
@@ -156,7 +158,15 @@ impl Client {
                 body_deadline,
             ))
             .await
-            .map_err(|err| Error::from_fetch(ErrorKind::Request, err))?
+            .map_err(|err| Error::from_fetch(ErrorKind::Request, err))?;
+        result.map_err(|err| {
+            if err.is_timeout()
+                && let Some(message) = &self.config.connect_timeout_message
+            {
+                return Error::timeout(message.clone());
+            }
+            err
+        })
     }
 
     async fn send(
@@ -486,8 +496,17 @@ impl ClientBuilder {
         self
     }
 
-    pub(crate) fn connect_timeout(mut self, timeout: Duration) -> Self {
+    pub(crate) fn connect_timeout(self, timeout: Duration) -> Self {
+        self.connect_timeout_with_message(timeout, request_timeout_message(timeout))
+    }
+
+    pub(crate) fn connect_timeout_with_message(
+        mut self,
+        timeout: Duration,
+        timeout_message: impl Into<String>,
+    ) -> Self {
         self.config.connect_timeout = Some(timeout);
+        self.config.connect_timeout_message = Some(timeout_message.into());
         self
     }
 
@@ -720,15 +739,17 @@ pub(super) async fn tls_stream_for_config(
 }
 
 fn map_pooled_client_error(err: hyper_util::client::legacy::Error) -> Error {
-    let kind = if err.is_connect() {
-        ErrorKind::Connect
-    } else {
-        ErrorKind::Request
-    };
     let message = err
         .source()
         .map(ToString::to_string)
         .unwrap_or_else(|| err.to_string());
+    let kind = if message.starts_with("request timed out after ") {
+        ErrorKind::Timeout
+    } else if err.is_connect() {
+        ErrorKind::Connect
+    } else {
+        ErrorKind::Request
+    };
     Error::with_source(kind, message, err)
 }
 
