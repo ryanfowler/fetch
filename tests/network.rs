@@ -12,8 +12,9 @@ use support::common::{
 };
 use support::dns::{
     parse_dns_question, start_udp_dns_server, start_udp_dns_server_dropping_https,
-    start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_hosts,
-    start_udp_dns_server_with_https, start_udp_dns_server_with_https_target_dropping_target,
+    start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_delayed_resolution,
+    start_udp_dns_server_with_hosts, start_udp_dns_server_with_https,
+    start_udp_dns_server_with_https_target_dropping_target,
     start_udp_dns_server_with_https_targets_dropping_targets,
     start_udp_dns_server_with_toggleable_https, start_unresponsive_udp_dns_server,
 };
@@ -87,6 +88,42 @@ fn custom_dns_connects_after_fast_a_without_waiting_for_slow_aaaa() {
     );
     assert!(res.stderr.contains("* DNS: fetch-happy-a-first.test"));
     assert!(res.stderr.contains("* TCP: 127.0.0.1:"));
+}
+
+#[test]
+fn connect_timeout_is_shared_between_preresolved_dns_and_tls() {
+    let tls = start_h2_tls_server_with_accept_delay(
+        |_| TestResponse::ok("too late"),
+        Duration::from_millis(700),
+    );
+    let port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server_with_delayed_resolution(
+        "localhost.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        Duration::from_millis(700),
+    );
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        "--http",
+        "2",
+        // ECH discovery makes the client pre-resolve the origin.
+        "--ech",
+        "auto",
+        "--connect-timeout",
+        "1",
+        &format!("https://localhost:{port}/shared-connect-timeout"),
+    ]);
+
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains("request timed out after 1s"),
+        "{}",
+        res.stderr
+    );
 }
 
 #[test]
