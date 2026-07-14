@@ -111,9 +111,12 @@ impl Multipart {
                         let remaining = limit - out.len();
                         let mut input = open_file_part(file)?;
                         let read_limit = file.len.min(u64::try_from(remaining).unwrap_or(u64::MAX));
-                        Read::by_ref(&mut input)
+                        let copied = Read::by_ref(&mut input)
                             .take(read_limit)
                             .read_to_end(&mut out)?;
+                        if u64::try_from(copied).unwrap_or(u64::MAX) != read_limit {
+                            return Err(premature_file_eof().into());
+                        }
                     }
                     append_preview(&mut out, limit, b"\r\n");
                 }
@@ -145,7 +148,7 @@ impl Multipart {
                 FieldValue::File(file) => {
                     out.write_all(field.header.as_bytes())?;
                     let input = open_file_part(file)?;
-                    std::io::copy(&mut input.take(file.len), &mut out)?;
+                    copy_file_exact(input, &mut out, file.len)?;
                     out.write_all(b"\r\n")?;
                 }
             }
@@ -254,6 +257,25 @@ fn open_file_part(file: &FilePart) -> Result<std::fs::File, MultipartError> {
     let opened = std::fs::File::open(&file.path)?;
     validate_opened_file_part(file, &opened.metadata()?)?;
     Ok(opened)
+}
+
+fn premature_file_eof() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "multipart file ended before its expected length",
+    )
+}
+
+fn copy_file_exact(
+    input: impl Read,
+    out: &mut impl Write,
+    expected_len: u64,
+) -> Result<(), MultipartError> {
+    let copied = std::io::copy(&mut input.take(expected_len), out)?;
+    if copied != expected_len {
+        return Err(premature_file_eof().into());
+    }
+    Ok(())
 }
 
 async fn open_file_part_async(file: &FilePart) -> Result<tokio::fs::File, MultipartError> {
@@ -409,7 +431,10 @@ impl Stream for MultipartStream {
                 MultipartStreamState::OpeningFile { header, open } => {
                     let file = match open.as_mut().poll(cx) {
                         Poll::Ready(Ok(file)) => file,
-                        Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err))),
+                        Poll::Ready(Err(err)) => {
+                            self.state = MultipartStreamState::Done;
+                            return Poll::Ready(Some(Err(err)));
+                        }
                         Poll::Pending => return Poll::Pending,
                     };
                     let header = std::mem::replace(header, Bytes::new());
@@ -435,7 +460,8 @@ impl Stream for MultipartStream {
                     let mut read_buf = ReadBuf::new(&mut bytes[..read_len]);
                     match Pin::new(file).poll_read(cx, &mut read_buf) {
                         Poll::Ready(Ok(())) if read_buf.filled().is_empty() => {
-                            self.state = MultipartStreamState::FileCrlf;
+                            self.state = MultipartStreamState::Done;
+                            return Poll::Ready(Some(Err(premature_file_eof().into())));
                         }
                         Poll::Ready(Ok(())) => {
                             *remaining = remaining.saturating_sub(read_buf.filled().len() as u64);
@@ -443,7 +469,10 @@ impl Stream for MultipartStream {
                                 read_buf.filled(),
                             ))));
                         }
-                        Poll::Ready(Err(err)) => return Poll::Ready(Some(Err(err.into()))),
+                        Poll::Ready(Err(err)) => {
+                            self.state = MultipartStreamState::Done;
+                            return Poll::Ready(Some(Err(err.into())));
+                        }
                         Poll::Pending => return Poll::Pending,
                     }
                 }
@@ -461,6 +490,7 @@ impl Stream for MultipartStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
 
     #[test]
     fn multipart_small_json_file_uses_detected_content_type() {
@@ -558,6 +588,54 @@ mod tests {
         let err = multipart.preview(1024).unwrap_err();
 
         assert!(err.to_string().contains("changed size"));
+    }
+
+    #[test]
+    fn copy_file_exact_rejects_a_short_reader() {
+        let mut out = Vec::new();
+
+        let err = copy_file_exact(std::io::Cursor::new(b"short"), &mut out, 10).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MultipartError::Io(ref err) if err.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+    }
+
+    #[tokio::test]
+    async fn multipart_stream_rejects_file_truncated_after_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.txt");
+        std::fs::write(&path, b"expected payload").unwrap();
+        let multipart = Multipart::from_cli_fields(&[format!("file=@{}", path.display())])
+            .unwrap()
+            .unwrap();
+        let mut stream = multipart.stream();
+
+        assert!(stream.next().await.unwrap().is_ok());
+        std::fs::write(&path, b"").unwrap();
+        let err = stream.next().await.unwrap().unwrap_err();
+
+        assert!(matches!(
+            err,
+            MultipartError::Io(ref err) if err.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn multipart_stream_is_terminal_after_file_open_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.txt");
+        std::fs::write(&path, b"payload").unwrap();
+        let multipart = Multipart::from_cli_fields(&[format!("file=@{}", path.display())])
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(path).unwrap();
+        let mut stream = multipart.stream();
+
+        assert!(stream.next().await.unwrap().is_err());
+        assert!(stream.next().await.is_none());
     }
 
     #[test]

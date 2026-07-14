@@ -384,7 +384,7 @@ pub(crate) fn request_body_sha256_hex(body: &RequestBody) -> Result<String, Fetc
         RequestBodySource::Bytes(bytes) => hasher.update(bytes),
         RequestBodySource::File { path, len } => {
             let file = open_regular_file_at_len(path, *len)?;
-            hash_reader(&mut hasher, file.take(*len))?;
+            hash_reader_exact(&mut hasher, file, *len)?;
         }
         RequestBodySource::Multipart(multipart) => {
             let mut writer = Sha256Writer(&mut hasher);
@@ -421,6 +421,25 @@ pub(super) fn hash_reader(hasher: &mut Sha256, mut reader: impl Read) -> Result<
         }
         hasher.update(&buf[..len]);
     }
+}
+
+fn hash_reader_exact(
+    hasher: &mut Sha256,
+    reader: impl Read,
+    expected_len: u64,
+) -> Result<(), FetchError> {
+    let mut reader = reader.take(expected_len);
+    let mut read = 0_u64;
+    let mut buf = [0_u8; 8192];
+    while read < expected_len {
+        let len = reader.read(&mut buf)?;
+        if len == 0 {
+            return Err(premature_request_file_eof().into());
+        }
+        read += len as u64;
+        hasher.update(&buf[..len]);
+    }
+    Ok(())
 }
 
 pub(super) fn hex_sha256_stream(reader: impl Read) -> Result<String, FetchError> {
@@ -498,13 +517,59 @@ pub(super) fn inferred_request_body_content_len(
     request_body_content_len(body)
 }
 
+fn premature_request_file_eof() -> std::io::Error {
+    std::io::Error::new(
+        ErrorKind::UnexpectedEof,
+        "request body file ended before its expected length",
+    )
+}
+
+struct ExactLengthReader<R> {
+    inner: tokio::io::Take<R>,
+    terminal: bool,
+}
+
+impl<R: AsyncRead> ExactLengthReader<R> {
+    fn new(inner: R, expected_len: u64) -> Self {
+        Self {
+            inner: inner.take(expected_len),
+            terminal: false,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ExactLengthReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.terminal || self.inner.limit() == 0 || buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let filled_before = buf.filled().len();
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) if buf.filled().len() == filled_before => {
+                self.terminal = true;
+                Poll::Ready(Err(premature_request_file_eof()))
+            }
+            Poll::Ready(Err(err)) => {
+                self.terminal = true;
+                Poll::Ready(Err(err))
+            }
+            result => result,
+        }
+    }
+}
+
 pub(crate) fn request_body_to_transport_body(body: RequestBodyPayload) -> Result<Body, FetchError> {
     match body.source {
         RequestBodySource::Bytes(bytes) => Ok(Body::from(bytes)),
         RequestBodySource::File { path, len } => {
             let file = open_regular_file_at_len(&path, len)?;
             Ok(Body::wrap_stream(ReaderStream::new(
-                tokio::fs::File::from_std(file).take(len),
+                ExactLengthReader::new(tokio::fs::File::from_std(file), len),
             )))
         }
         RequestBodySource::Stdin => Ok(Body::wrap_stream(ReaderStream::new(tokio::io::stdin()))),
@@ -530,7 +595,10 @@ pub(crate) fn request_body_source_to_async_reader(
         RequestBodySource::Bytes(bytes) => Ok(Box::pin(Cursor::new(bytes))),
         RequestBodySource::File { path, len } => {
             let file = open_regular_file_at_len(&path, len)?;
-            Ok(Box::pin(tokio::fs::File::from_std(file).take(len)))
+            Ok(Box::pin(ExactLengthReader::new(
+                tokio::fs::File::from_std(file),
+                len,
+            )))
         }
         RequestBodySource::Stdin => Ok(Box::pin(tokio::io::stdin())),
         RequestBodySource::Multipart(multipart) => Ok(Box::pin(StreamReader::new(
@@ -579,7 +647,10 @@ pub(crate) fn request_body_source_to_bytes(
         RequestBodySource::File { path, len } => {
             let file = open_regular_file_at_len(&path, len)?;
             let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-            file.take(len).read_to_end(&mut out)?;
+            let copied = file.take(len).read_to_end(&mut out)?;
+            if u64::try_from(copied).unwrap_or(u64::MAX) != len {
+                return Err(premature_request_file_eof().into());
+            }
             Ok(out)
         }
         RequestBodySource::Stdin => {
@@ -611,7 +682,11 @@ fn request_body_source_to_bytes_limited(
         RequestBodySource::File { path, len } => {
             ensure_materialized_len_u64(len, max_bytes, limit_error)?;
             let file = open_regular_file_at_len(&path, len)?;
-            read_to_end_limited(file.take(len), max_bytes, limit_error)
+            let out = read_to_end_limited(file.take(len), max_bytes, limit_error)?;
+            if u64::try_from(out.len()).unwrap_or(u64::MAX) != len {
+                return Err(premature_request_file_eof().into());
+            }
+            Ok(out)
         }
         RequestBodySource::Stdin => {
             let stdin = std::io::stdin();
@@ -730,9 +805,12 @@ fn dry_run_source_preview(
         }),
         RequestBodySource::File { path, len } => {
             let file = open_regular_file_at_len(path, *len)?;
+            let expected = (*len).min(u64::try_from(limit).unwrap_or(u64::MAX));
             let mut bytes = Vec::new();
-            file.take(u64::try_from(limit).unwrap_or(u64::MAX))
-                .read_to_end(&mut bytes)?;
+            let copied = file.take(expected).read_to_end(&mut bytes)?;
+            if u64::try_from(copied).unwrap_or(u64::MAX) != expected {
+                return Err(premature_request_file_eof().into());
+            }
             Ok(DryRunBodyPreview {
                 bytes,
                 truncated: *len > u64::try_from(limit).unwrap_or(u64::MAX),
@@ -1090,6 +1168,19 @@ mod tests {
 
         assert_eq!(body.0, b"message=+hello+");
         assert_eq!(body.1.as_deref(), Some("application/x-www-form-urlencoded"));
+    }
+
+    #[tokio::test]
+    async fn exact_length_reader_rejects_premature_eof_and_becomes_terminal() {
+        let mut reader = ExactLengthReader::new(Cursor::new(b"short".to_vec()), 10);
+        let mut out = Vec::new();
+
+        let err = reader.read_to_end(&mut out).await.unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(out, b"short");
+        let mut after_error = [0_u8; 1];
+        assert_eq!(reader.read(&mut after_error).await.unwrap(), 0);
     }
 
     #[test]
