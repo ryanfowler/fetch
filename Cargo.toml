@@ -33,7 +33,7 @@ h3-quinn = "=0.0.10"
 hmac = "=0.13.0"
 htmd = "=0.5.4"
 http = "=1.4.2"
-http-body = "=1.0.1"
+http-body = "=1.1.0"
 http-body-util = "=0.1.4"
 httpdate = "=1.0.3"
 hyper = { version = "=1.10.1", features = ["client", "http1", "http2"] }
