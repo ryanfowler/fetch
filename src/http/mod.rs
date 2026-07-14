@@ -112,13 +112,26 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
     } else {
         None
     };
-    let mut grpc_method = if let Some(schema) = &grpc_schema {
+    let grpc_method = if let Some(schema) = &grpc_schema {
         Some(proto::method_for_url(schema, &url)?)
     } else {
         None
     };
     let session = load_session(cli)?;
+    let result = execute_request(cli, http_version, url, grpc_method, session.as_ref()).await;
+    if !cli.dry_run {
+        save_session(cli, session.as_ref());
+    }
+    result
+}
 
+async fn execute_request(
+    cli: &Cli,
+    http_version: Option<HttpVersion>,
+    url: Url,
+    mut grpc_method: Option<prost_reflect::MethodDescriptor>,
+    session: Option<&crate::session::Session>,
+) -> Result<i32, FetchError> {
     let request_start = Instant::now();
     let request_timeout = cli
         .timeout
@@ -138,7 +151,7 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
         request_timeout,
         connect_timeout,
         request_start,
-        session: session.as_ref(),
+        session,
         connect_timing: Some(&connect_timing),
     };
     let mut initial_client = None;
@@ -228,7 +241,7 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
     let total_attempts = total_attempts_for_retry(retry_count)?;
     let original_body_replayable = request_body_replayable(&body);
     let mut attempt = 0;
-    let result = loop {
+    loop {
         let mut request_method = method.clone();
         let mut request_url = url.clone();
         let mut request_body = body.clone();
@@ -452,9 +465,7 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
                 break Err(FetchError::Runtime(message));
             }
         }
-    };
-    save_session(cli, session.as_ref());
-    result
+    }
 }
 
 fn record_request_dns_timing(

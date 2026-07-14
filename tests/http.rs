@@ -802,6 +802,77 @@ fn redirects_range_status_and_timeouts() {
 }
 
 #[test]
+fn session_cookies_persist_after_invalid_redirect() {
+    let server = TestServer::start(|req| match req.path.as_str() {
+        "/start" => TestResponse::status(302, "Found", "")
+            .header("Set-Cookie", "sid=redirect; Path=/")
+            .header("Location", "http://[::1"),
+        "/check" if req.header("cookie").contains("sid=redirect") => TestResponse::ok("saved"),
+        "/check" => TestResponse::status(400, "Bad Request", "cookie missing"),
+        _ => TestResponse::status(404, "Not Found", ""),
+    });
+    let dir = TempDir::new().unwrap();
+    let sessions_dir = dir.path().join("sessions");
+    let env = vec![(
+        "FETCH_INTERNAL_SESSIONS_DIR".to_string(),
+        sessions_dir.display().to_string(),
+    )];
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: env.clone(),
+            ..Default::default()
+        },
+        &[
+            &format!("{}/start", server.url),
+            "--session",
+            "redirect-error",
+        ],
+    );
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("invalid redirect location"));
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env,
+            ..Default::default()
+        },
+        &[
+            &format!("{}/check", server.url),
+            "--session",
+            "redirect-error",
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "saved");
+}
+
+#[test]
+fn dry_run_leaves_corrupted_session_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let sessions_dir = dir.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let session_path = sessions_dir.join("dry-run.json");
+    let original = b"not valid session json\n";
+    fs::write(&session_path, original).unwrap();
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: vec![(
+                "FETCH_INTERNAL_SESSIONS_DIR".to_string(),
+                sessions_dir.display().to_string(),
+            )],
+            ..Default::default()
+        },
+        &["https://example.com", "--dry-run", "--session", "dry-run"],
+    );
+
+    assert_exit(&res, 0);
+    assert!(res.stderr.contains("session 'dry-run' is corrupted"));
+    assert_eq!(fs::read(session_path).unwrap(), original);
+}
+
+#[test]
 fn post_to_get_redirect_strips_entity_headers() {
     let server = TestServer::start(|req| match req.path.as_str() {
         "/start" => TestResponse::status(302, "Found", "")
