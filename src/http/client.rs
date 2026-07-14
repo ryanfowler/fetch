@@ -97,12 +97,12 @@ pub(crate) async fn build_client_for_url(
 ) -> Result<UrlClient, FetchError> {
     let http_version = context.mode.http_version();
     validate_client_auth_for_url(cli, url)?;
-    let dns_timeout = TimeoutBudget::for_connect(
+    let connect_budget = TimeoutBudget::for_connect(
         context.connect_timeout,
         context.request_timeout,
         context.request_start,
-    )?
-    .timeout();
+    )?;
+    let dns_timeout = connect_budget.remaining()?;
     let effective_proxy = effective_proxy_for_url(cli.proxy.as_deref(), http_version, url)?;
     let auto_http3 = auto_http3_allowed(context.mode, url, cli.unix.as_deref(), effective_proxy);
     let discovery = if dynamic_dns_for_client(cli, url, effective_proxy) {
@@ -177,7 +177,7 @@ pub(crate) async fn build_client_for_url(
             .unwrap_or_else(|| request_timeout_message(timeout));
         builder = builder.timeout_with_message(timeout, timeout_message);
     }
-    if let Some(timeout) = context.connect_timeout {
+    if let Some(timeout) = connect_budget.remaining()? {
         builder = builder.connect_timeout(timeout);
     }
     if let Some(session) = context.session {

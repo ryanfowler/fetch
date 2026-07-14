@@ -160,6 +160,36 @@ pub(crate) fn start_udp_dns_server_dropping_https(host: &'static str, ip: Ipv4Ad
     addr
 }
 
+pub(crate) fn start_udp_dns_server_with_delayed_resolution(
+    host: &'static str,
+    ip: Ipv4Addr,
+    delay: Duration,
+) -> String {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            let answer =
+                (name == host && qtype == TYPE_A).then_some((TYPE_A, ip.octets().to_vec()));
+            let response = dns_response(&buf[..n], question_end, answer);
+            if name == host && matches!(qtype, TYPE_A | TYPE_AAAA) {
+                let socket = socket.try_clone().expect("clone udp dns server socket");
+                thread::spawn(move || {
+                    thread::sleep(delay);
+                    let _ = socket.send_to(&response, peer);
+                });
+            } else {
+                let _ = socket.send_to(&response, peer);
+            }
+        }
+    });
+    addr
+}
+
 pub(crate) fn start_udp_dns_server_with_delayed_aaaa(
     host: &'static str,
     ip: Ipv4Addr,

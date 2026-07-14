@@ -12,8 +12,9 @@ use support::common::{
 };
 use support::dns::{
     parse_dns_question, start_udp_dns_server, start_udp_dns_server_dropping_https,
-    start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_hosts,
-    start_udp_dns_server_with_https, start_udp_dns_server_with_https_target_dropping_target,
+    start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_delayed_resolution,
+    start_udp_dns_server_with_hosts, start_udp_dns_server_with_https,
+    start_udp_dns_server_with_https_target_dropping_target,
     start_udp_dns_server_with_https_targets_dropping_targets,
     start_udp_dns_server_with_toggleable_https, start_unresponsive_udp_dns_server,
 };
@@ -54,6 +55,26 @@ fn parse_timing_duration(value: &str) -> Option<Duration> {
     }
 }
 
+fn timeout_duration(stderr: &str) -> Option<Duration> {
+    let value = stderr
+        .split("request timed out after ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .trim_end_matches(':');
+    if let Some(milliseconds) = value.strip_suffix("ms") {
+        return milliseconds
+            .parse::<f64>()
+            .ok()
+            .map(|value| Duration::from_secs_f64(value / 1000.0));
+    }
+    value
+        .strip_suffix('s')?
+        .parse::<f64>()
+        .ok()
+        .map(Duration::from_secs_f64)
+}
+
 #[test]
 fn custom_dns_connects_after_fast_a_without_waiting_for_slow_aaaa() {
     let server = TestServer::start(|req| {
@@ -87,6 +108,44 @@ fn custom_dns_connects_after_fast_a_without_waiting_for_slow_aaaa() {
     );
     assert!(res.stderr.contains("* DNS: fetch-happy-a-first.test"));
     assert!(res.stderr.contains("* TCP: 127.0.0.1:"));
+}
+
+#[test]
+fn connect_timeout_is_shared_between_preresolved_dns_and_tls() {
+    let tls = start_h2_tls_server_with_accept_delay(
+        |_| TestResponse::ok("too late"),
+        Duration::from_millis(700),
+    );
+    let port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server_with_delayed_resolution(
+        "localhost.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        Duration::from_millis(700),
+    );
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        "--http",
+        "2",
+        // ECH discovery makes the client pre-resolve the origin.
+        "--ech",
+        "auto",
+        "--connect-timeout",
+        "1",
+        &format!("https://localhost:{port}/shared-connect-timeout"),
+    ]);
+
+    assert_exit(&res, 1);
+    let timeout = timeout_duration(&res.stderr)
+        .unwrap_or_else(|| panic!("missing timeout diagnostic\nstderr:\n{}", res.stderr));
+    assert!(
+        timeout < Duration::from_millis(500),
+        "TLS received the full connect timeout after DNS used most of it: {timeout:?}\nstderr:\n{}",
+        res.stderr
+    );
 }
 
 #[test]
