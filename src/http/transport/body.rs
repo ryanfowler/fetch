@@ -46,6 +46,7 @@ impl BodyDeadline {
 
 pub struct Body {
     inner: UnsyncBoxBody<Bytes, Error>,
+    _client_keepalive: Option<Box<super::client::Client>>,
 }
 
 impl Body {
@@ -66,7 +67,12 @@ impl Body {
     {
         Self {
             inner: BodyExt::boxed_unsync(body),
+            _client_keepalive: None,
         }
+    }
+
+    fn keep_client_alive(&mut self, client: super::client::Client) {
+        self._client_keepalive = Some(Box::new(client));
     }
 
     pub(super) fn map_incoming(body: Incoming) -> Self {
@@ -224,6 +230,10 @@ impl Response {
 
     pub(crate) fn remote_addr(&self) -> Option<SocketAddr> {
         self.remote_addr
+    }
+
+    pub(in crate::http) fn keep_client_alive(&mut self, client: super::client::Client) {
+        self.body.keep_client_alive(client);
     }
 
     pub(crate) async fn chunk(&mut self) -> Result<Option<Bytes>, Error> {

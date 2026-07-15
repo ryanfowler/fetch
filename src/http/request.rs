@@ -249,15 +249,17 @@ pub(super) async fn apply_digest_challenge(
     }
 
     let retry_before_drain = digest_retry_before_drain(&response);
-    let retry_client;
-    let client = if retry_before_drain {
-        retry_client =
+    let retry_client = if retry_before_drain {
+        Some(
             client::build_client_for_url(context.cli, &challenged_url, context.client_build)
-                .await?;
-        &retry_client.client
+                .await?,
+        )
     } else {
-        context.client
+        None
     };
+    let client = retry_client
+        .as_ref()
+        .map_or(context.client, |client| &client.client);
     let retry_request = build_request(
         client,
         challenged_method,
@@ -277,7 +279,16 @@ pub(super) async fn apply_digest_challenge(
         let retry_response: Result<Response, FetchError> =
             retry_request.send().await.map_err(Into::into);
         drop(response);
-        retry_response
+        retry_response.map(|mut response| {
+            // The temporary client's pool owns the connection task. Retain it until the
+            // response body is consumed so dropping the pool cannot cancel that body.
+            response.keep_client_alive(
+                retry_client
+                    .expect("retry-before-drain builds a fresh client")
+                    .client,
+            );
+            response
+        })
     } else {
         drain_response_body_bounded(response).await;
         retry_request.send().await.map_err(Into::into)
