@@ -182,35 +182,45 @@ impl PartialBodyReplayServer {
         let url = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let request_log = Arc::clone(&requests);
+        let next_request = Arc::new(Mutex::new(0_usize));
+        let (done_tx, done_rx) = mpsc::channel();
         let join = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(5);
-            let mut first = true;
-            while Instant::now() < deadline {
+            while Instant::now() < deadline && done_rx.try_recv().is_err() {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-                        let reader_stream = stream.try_clone().expect("clone request stream");
-                        let mut reader = BufReader::new(reader_stream);
-                        let Some(req) = read_request(&mut reader) else {
-                            continue;
-                        };
-                        request_log.lock().unwrap().push(req);
-                        if first {
-                            first = false;
-                            let headers = headers.clone();
-                            let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\n");
-                            for (name, value) in &headers {
-                                let _ = write!(stream, "{name}: {value}\r\n");
-                            }
-                            let _ = write!(
-                                stream,
-                                "Content-Length: 1073741824\r\nConnection: close\r\n\r\n"
-                            );
-                            let body = vec![b'x'; PARTIAL_REPLAY_BODY_PREFIX_BYTES];
-                            let _ = stream.write_all(&body);
-                            let _ = stream.flush();
-                            thread::spawn(move || {
+                        let request_log = Arc::clone(&request_log);
+                        let next_request = Arc::clone(&next_request);
+                        let headers = headers.clone();
+                        let done_tx = done_tx.clone();
+                        thread::spawn(move || {
+                            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+                            let reader_stream = stream.try_clone().expect("clone request stream");
+                            let mut reader = BufReader::new(reader_stream);
+                            let Some(req) = read_request(&mut reader) else {
+                                return;
+                            };
+                            request_log.lock().unwrap().push(req);
+                            let request_index = {
+                                let mut next = next_request.lock().unwrap();
+                                let index = *next;
+                                *next += 1;
+                                index
+                            };
+                            if request_index == 0 {
+                                let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\n");
+                                for (name, value) in &headers {
+                                    let _ = write!(stream, "{name}: {value}\r\n");
+                                }
+                                let _ = write!(
+                                    stream,
+                                    "Content-Length: 1073741824\r\nConnection: close\r\n\r\n"
+                                );
+                                let body = vec![b'x'; PARTIAL_REPLAY_BODY_PREFIX_BYTES];
+                                let _ = stream.write_all(&body);
+                                let _ = stream.flush();
+
                                 let deadline = Instant::now() + Duration::from_secs(3);
                                 let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
                                 let mut buf = [0_u8; 1024];
@@ -227,16 +237,15 @@ impl PartialBodyReplayServer {
                                         Err(_) => break,
                                     }
                                 }
-                                let _ = stream.shutdown(Shutdown::Both);
-                            });
-                        } else {
-                            write_response(
-                                &mut stream,
-                                TestResponse::ok(final_body).header("Connection", "close"),
-                            );
+                            } else {
+                                write_response(
+                                    &mut stream,
+                                    TestResponse::ok(final_body).header("Connection", "close"),
+                                );
+                                let _ = done_tx.send(());
+                            }
                             let _ = stream.shutdown(Shutdown::Both);
-                            break;
-                        }
+                        });
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));
