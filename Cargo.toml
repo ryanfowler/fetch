@@ -2,7 +2,7 @@
 name = "fetch"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.97.0"
+rust-version = "1.97.1"
 
 [[bin]]
 name = "fetch"
