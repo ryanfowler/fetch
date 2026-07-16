@@ -16,7 +16,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: "1.97.0"
+  RUST_VERSION: "1.97.1"
   LINUX_GLIBC_VERSION: "2.28"
   RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
