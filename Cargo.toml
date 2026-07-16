@@ -21,7 +21,7 @@ async-compression = { version = "=0.4.42", features = ["brotli", "gzip", "tokio"
 base64 = "=0.22.1"
 brotli = "=8.0.4"
 bytes = "=1.12.1"
-clap = { version = "=4.6.1", features = ["derive"] }
+clap = { version = "=4.6.2", features = ["derive"] }
 cookie = "=0.18.1"
 cookie_store = "=0.22.1"
 encoding_rs = "=0.8.35"
