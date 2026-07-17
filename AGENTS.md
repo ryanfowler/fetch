@@ -21,6 +21,7 @@ Then run the narrowest relevant test, e.g.:
 ```bash
 cargo test --locked --all-features --test http request_construction_and_data_sources
 cargo test --locked --all-features image::
+cargo test --locked --all-features --test install
 ```
 
 Full CI-equivalent before PRs, shared transport/request/response changes, or unclear scope:
@@ -29,7 +30,7 @@ Full CI-equivalent before PRs, shared transport/request/response changes, or unc
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features --lib --bins
-cargo test --locked --all-features --test cli --test formatting --test grpc --test http --test network --test terminal --test update --test websocket
+cargo test --locked --all-features --test cli --test formatting --test grpc --test http --test install --test network --test terminal --test update --test websocket
 ```
 
 The integration test suite uses `TcpListener::bind("127.0.0.1:0")` and
@@ -128,7 +129,7 @@ Request flow: CLI parse → config merge → request build (gRPC may load/reflec
 - `--inspect-tls --http 3` uses QUIC/TLS with `h3`; inspection honors `--dns-server`. Verified chain rendering may append/replace trusted roots for expiry display; `--insecure` shows raw peer chain.
 - Session saves lock per session, reload latest JSON, merge only local cookie changes, atomically replace, and warn on bounded lock wait. Update locks use `fileutil::FileLock`; background checks are nonblocking.
 - Self-update metadata/artifact/checksum/redirect URLs require HTTPS except internal test overrides; update networking must not inherit origin-specific TLS/version/Unix-socket config, but may keep proxy/DNS/timeouts/verbosity/custom CA. Artifacts stream with SHA-256; tar extracts streaming, zip uses temp archive; Unix replacement preserves atomic parent-dir sync.
-- `install.sh` verifies `.sha256`; completion install is opt-in (`--completions` or `FETCH_INSTALL_COMPLETIONS=1`) and must not auto-edit shell startup files by default.
+- `install.sh` verifies `.sha256`, validates a same-directory staged binary, and atomically renames it over the destination; completion install is opt-in (`--completions` or `FETCH_INSTALL_COMPLETIONS=1`) and must not auto-edit shell startup files by default.
 - Agent Skill files live under `skills/fetch/` and are embedded by `src/skill.rs`. User/project installs support generic `.agents/skills/fetch` plus distinct Codex, Claude, Gemini, and Pi directories, record `.fetch-skill.json` in each copy, use atomic file helpers and a parent-directory operation lock, revalidate before writes/deletions, refuse modified installs without `--force`, reject unrelated CLI options rather than silently ignoring them, and leave no lock/directory artifacts when uninstall targets are all missing. Never add network downloads or agent-config edits to skill installation.
 - Ctrl-C/SIGINT exits 130, including streaming modes. Output downloads keep `*.download` temps under a drop guard.
 - Rust is pinned to 1.97.1 (`rust-toolchain.toml`); keep `Cargo.toml` rust-version and CI aligned. Windows config search prefers XDG/HOME paths before AppData; Windows mTLS fixtures use RSA certs.
