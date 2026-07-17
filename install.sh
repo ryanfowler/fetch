@@ -55,6 +55,7 @@ Options:
 
 Environment:
   FETCH_INSTALL_COMPLETIONS=1 is equivalent to --completions.
+  FETCH_INSTALL_DIR overrides the installation directory.
 EOF
 }
 
@@ -247,7 +248,17 @@ fi
 
 # Create temporary directory.
 TMP_DIR=$(mktemp -d)
-trap 'rm -rf "$TMP_DIR"' EXIT
+STAGED_PATH=""
+cleanup() {
+  rm -rf "$TMP_DIR"
+  if [ -n "$STAGED_PATH" ]; then
+    rm -f "$STAGED_PATH"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 BINARY_PATH="${TMP_DIR}/fetch"
 ARCHIVE_PATH="${BINARY_PATH}.tar.gz"
 CHECKSUM_PATH="${ARCHIVE_PATH}.sha256"
@@ -297,17 +308,51 @@ mv "$EXTRACTED" "$BINARY_PATH"
 chmod 755 "$BINARY_PATH"
 
 # Determine installation directory.
-if [ -w "/usr/local/bin" ]; then
+if [ -n "${FETCH_INSTALL_DIR:-}" ]; then
+  INSTALL_DIR="$FETCH_INSTALL_DIR"
+elif [ -w "/usr/local/bin" ]; then
   # Can write to /usr/local/bin.
   INSTALL_DIR="/usr/local/bin"
 else
   # Use home directory.
   INSTALL_DIR="$HOME/.local/bin"
-  mkdir -p "$INSTALL_DIR"
 fi
 
-mv "$BINARY_PATH" "$INSTALL_DIR/fetch"
-info "fetch successfully installed to '${DIM}${INSTALL_DIR}/fetch${RESET}'"
+if ! mkdir -p "$INSTALL_DIR"; then
+  error "unable to create installation directory '${INSTALL_DIR}'"
+  exit 1
+fi
+
+# Stage on the destination filesystem so replacing an existing installation is
+# one atomic rename. Keep STAGED_PATH set until the rename succeeds so the exit
+# trap removes partial copies after errors or interruption.
+if ! STAGED_PATH=$(mktemp "${INSTALL_DIR}/.fetch.install.XXXXXX"); then
+  error "unable to create temporary file in installation directory '${INSTALL_DIR}'"
+  exit 1
+fi
+if ! cp "$BINARY_PATH" "$STAGED_PATH"; then
+  error "unable to stage fetch in installation directory '${INSTALL_DIR}'"
+  exit 1
+fi
+if ! chmod 755 "$STAGED_PATH"; then
+  error "unable to make staged fetch executable"
+  exit 1
+fi
+if ! "$STAGED_PATH" --version > /dev/null 2>&1; then
+  error "downloaded fetch binary failed validation"
+  exit 1
+fi
+TARGET_PATH="$INSTALL_DIR/fetch"
+if [ -d "$TARGET_PATH" ]; then
+  error "installation destination '${TARGET_PATH}' is a directory"
+  exit 1
+fi
+if ! mv -f "$STAGED_PATH" "$TARGET_PATH"; then
+  error "unable to replace '${TARGET_PATH}'"
+  exit 1
+fi
+STAGED_PATH=""
+info "fetch successfully installed to '${DIM}${TARGET_PATH}${RESET}'"
 
 if [ "$INSTALL_COMPLETIONS" = true ]; then
   install_completions
