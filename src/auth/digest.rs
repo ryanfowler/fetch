@@ -18,6 +18,8 @@ pub enum DigestError {
     NotDigest,
     #[error("missing required digest challenge parameter")]
     MissingRequiredParameter,
+    #[error("malformed digest challenge quoted string")]
+    MalformedQuotedString,
     #[error("unsupported digest algorithm: {0}")]
     UnsupportedAlgorithm(String),
     #[error("unsupported digest qop: {0}")]
@@ -40,7 +42,7 @@ pub fn parse_challenge(header: &str) -> Result<Challenge, DigestError> {
     }
 
     let params =
-        parse_params(&header[header.find(' ').map(|idx| idx + 1).unwrap_or(header.len())..]);
+        parse_params(&header[header.find(' ').map(|idx| idx + 1).unwrap_or(header.len())..])?;
     let challenge = Challenge {
         realm: params.get("realm").cloned().unwrap_or_default(),
         nonce: params.get("nonce").cloned().unwrap_or_default(),
@@ -123,7 +125,7 @@ pub fn find_digest_challenge<'a>(values: impl IntoIterator<Item = &'a str>) -> O
     values.into_iter().find_map(extract_digest_challenge)
 }
 
-fn parse_params(mut value: &str) -> std::collections::HashMap<String, String> {
+fn parse_params(mut value: &str) -> Result<std::collections::HashMap<String, String>, DigestError> {
     let mut params = std::collections::HashMap::new();
     while !value.trim_start().is_empty() {
         value = value.trim_start();
@@ -134,7 +136,7 @@ fn parse_params(mut value: &str) -> std::collections::HashMap<String, String> {
         let rest = rest.trim_start();
 
         let (param_value, next) = if rest.starts_with('"') {
-            parse_quoted_string(rest)
+            parse_quoted_string(rest).ok_or(DigestError::MalformedQuotedString)?
         } else {
             match rest.split_once(',') {
                 Some((param, next)) => (param.trim().to_string(), next),
@@ -148,34 +150,28 @@ fn parse_params(mut value: &str) -> std::collections::HashMap<String, String> {
             value = stripped;
         }
     }
-    params
+    Ok(params)
 }
 
-fn parse_quoted_string(value: &str) -> (String, &str) {
-    if !value.starts_with('"') {
-        return (String::new(), value);
-    }
-
-    let bytes = value.as_bytes();
+fn parse_quoted_string(value: &str) -> Option<(String, &str)> {
+    let quoted = value.strip_prefix('"')?;
     let mut out = String::new();
-    let mut i = 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => {
-                i += 1;
-                break;
-            }
-            b'\\' if i + 1 < bytes.len() => {
-                out.push(bytes[i + 1] as char);
-                i += 2;
-            }
-            byte => {
-                out.push(byte as char);
-                i += 1;
+    let mut escaped = false;
+
+    for (index, character) in quoted.char_indices() {
+        if escaped {
+            out.push(character);
+            escaped = false;
+        } else {
+            match character {
+                '\\' => escaped = true,
+                '"' => return Some((out, &quoted[index + character.len_utf8()..])),
+                _ => out.push(character),
             }
         }
     }
-    (out, &value[i..])
+
+    None
 }
 
 fn extract_digest_challenge(value: &str) -> Option<String> {
@@ -335,7 +331,7 @@ fn opaque_param(opaque: &str) -> String {
 }
 
 fn escape_quotes(value: &str) -> String {
-    value.replace('"', "\\\"")
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -393,6 +389,18 @@ mod tests {
                     stale: String::new(),
                 }),
             ),
+            (
+                "utf-8 after escaped quote and escaped backslashes",
+                r#"Digest realm="café \"déjà\" C:\\", nonce="n\\once""#,
+                Ok(Challenge {
+                    realm: "café \"déjà\" C:\\".to_string(),
+                    nonce: "n\\once".to_string(),
+                    opaque: String::new(),
+                    qop: String::new(),
+                    algorithm: String::new(),
+                    stale: String::new(),
+                }),
+            ),
         ];
 
         for (name, input, want) in cases {
@@ -410,6 +418,14 @@ mod tests {
         assert_eq!(
             parse_challenge(r#"Basic realm="test""#),
             Err(DigestError::NotDigest)
+        );
+        assert_eq!(
+            parse_challenge(r#"Digest realm="test", nonce="unterminated"#),
+            Err(DigestError::MalformedQuotedString)
+        );
+        assert_eq!(
+            parse_challenge(r#"Digest realm="test", nonce="trailing\"#),
+            Err(DigestError::MalformedQuotedString)
         );
     }
 
@@ -431,6 +447,25 @@ mod tests {
         assert!(auth.contains(r#"uri="/path?query=1""#));
         assert!(auth.contains(r#"response=""#));
         assert!(!auth.contains("nc="));
+    }
+
+    #[test]
+    fn test_response_escapes_utf8_quotes_and_backslashes() {
+        let challenge = Challenge {
+            realm: "ré\\alm\"".to_string(),
+            nonce: "n\\once\"".to_string(),
+            opaque: "op\\aque\"".to_string(),
+            qop: String::new(),
+            algorithm: "MD5".to_string(),
+            stale: String::new(),
+        };
+
+        let auth = response("GET", "/a\\b\"é", &challenge, "usér\\name\"", "pass").unwrap();
+        assert!(auth.contains("username=\"usér\\\\name\\\"\""));
+        assert!(auth.contains("realm=\"ré\\\\alm\\\"\""));
+        assert!(auth.contains("nonce=\"n\\\\once\\\"\""));
+        assert!(auth.contains("uri=\"/a\\\\b\\\"é\""));
+        assert!(auth.contains("opaque=\"op\\\\aque\\\"\""));
     }
 
     #[test]

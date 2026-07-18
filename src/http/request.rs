@@ -300,7 +300,9 @@ pub(super) fn digest_challenge_error(err: digest::DigestError) -> FetchError {
         digest::DigestError::UnsupportedAlgorithm(_) | digest::DigestError::UnsupportedQop(_) => {
             "unsupported"
         }
-        digest::DigestError::NotDigest | digest::DigestError::MissingRequiredParameter => "invalid",
+        digest::DigestError::NotDigest
+        | digest::DigestError::MissingRequiredParameter
+        | digest::DigestError::MalformedQuotedString => "invalid",
     };
     FetchError::Runtime(format!("{prefix} digest authentication challenge: {err}"))
 }
