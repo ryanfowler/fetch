@@ -12,9 +12,9 @@ use support::common::{
 };
 use support::dns::{
     parse_dns_question, start_udp_dns_server, start_udp_dns_server_dropping_https,
-    start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_delayed_resolution,
-    start_udp_dns_server_with_hosts, start_udp_dns_server_with_https,
-    start_udp_dns_server_with_https_target_dropping_target,
+    start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_delayed_https_and_resolution,
+    start_udp_dns_server_with_delayed_resolution, start_udp_dns_server_with_hosts,
+    start_udp_dns_server_with_https, start_udp_dns_server_with_https_target_dropping_target,
     start_udp_dns_server_with_https_targets_dropping_targets,
     start_udp_dns_server_with_toggleable_https, start_unresponsive_udp_dns_server,
 };
@@ -88,6 +88,62 @@ fn custom_dns_connects_after_fast_a_without_waiting_for_slow_aaaa() {
     );
     assert!(res.stderr.contains("* DNS: fetch-happy-a-first.test"));
     assert!(res.stderr.contains("* TCP: 127.0.0.1:"));
+}
+
+#[test]
+fn ech_discovery_overlaps_custom_address_resolution() {
+    let tls = start_tls_server(|_| TestResponse::ok("ECH DNS overlap"));
+    let port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let (dns_addr, overlapped) = start_udp_dns_server_with_delayed_https_and_resolution(
+        "localhost.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        Duration::from_millis(250),
+    );
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        "--ech",
+        "auto",
+        &format!("https://localhost:{port}/ech-dns-overlap"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "ECH DNS overlap");
+    assert!(
+        overlapped.load(Ordering::SeqCst),
+        "A/AAAA resolution did not overlap the delayed HTTPS lookup"
+    );
+}
+
+#[test]
+fn ech_on_still_overlaps_address_resolution_before_required_failure() {
+    let (dns_addr, overlapped) = start_udp_dns_server_with_delayed_https_and_resolution(
+        "localhost.",
+        Ipv4Addr::new(127, 0, 0, 1),
+        Duration::from_millis(250),
+    );
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ech",
+        "on",
+        "https://localhost/ech-required-dns-overlap",
+    ]);
+
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains("does not advertise ECH"),
+        "{}",
+        res.stderr
+    );
+    assert!(
+        overlapped.load(Ordering::SeqCst),
+        "A/AAAA resolution did not overlap the delayed required HTTPS lookup"
+    );
 }
 
 #[test]

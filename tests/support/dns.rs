@@ -136,6 +136,58 @@ pub(crate) fn start_udp_dns_server_with_https_targets_dropping_targets(
     (addr, dropped_target_a_queries)
 }
 
+pub(crate) fn start_udp_dns_server_with_delayed_https_and_resolution(
+    host: &'static str,
+    ip: Ipv4Addr,
+    delay: Duration,
+) -> (String, Arc<AtomicBool>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    let https_pending = Arc::new(AtomicUsize::new(0));
+    let ordinary_pending = Arc::new(AtomicUsize::new(0));
+    let overlapped = Arc::new(AtomicBool::new(false));
+    let https_for_thread = https_pending.clone();
+    let ordinary_for_thread = ordinary_pending.clone();
+    let overlapped_for_thread = overlapped.clone();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            let answer =
+                (name == host && qtype == TYPE_A).then_some((TYPE_A, ip.octets().to_vec()));
+            let response = dns_response(&buf[..n], question_end, answer);
+            let pending = if name == host && qtype == TYPE_HTTPS {
+                https_for_thread.fetch_add(1, Ordering::SeqCst);
+                if ordinary_for_thread.load(Ordering::SeqCst) > 0 {
+                    overlapped_for_thread.store(true, Ordering::SeqCst);
+                }
+                Some(https_for_thread.clone())
+            } else if name == host && matches!(qtype, TYPE_A | TYPE_AAAA) {
+                ordinary_for_thread.fetch_add(1, Ordering::SeqCst);
+                if https_for_thread.load(Ordering::SeqCst) > 0 {
+                    overlapped_for_thread.store(true, Ordering::SeqCst);
+                }
+                Some(ordinary_for_thread.clone())
+            } else {
+                None
+            };
+            if let Some(pending) = pending {
+                let socket = socket.try_clone().expect("clone udp dns server socket");
+                thread::spawn(move || {
+                    thread::sleep(delay);
+                    pending.fetch_sub(1, Ordering::SeqCst);
+                    let _ = socket.send_to(&response, peer);
+                });
+            } else {
+                let _ = socket.send_to(&response, peer);
+            }
+        }
+    });
+    (addr, overlapped)
+}
+
 pub(crate) fn start_udp_dns_server_dropping_https(host: &'static str, ip: Ipv4Addr) -> String {
     let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
     let addr = socket.local_addr().unwrap().to_string();
