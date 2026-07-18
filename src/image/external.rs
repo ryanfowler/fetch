@@ -430,7 +430,8 @@ fn read_capped_until(mut reader: ChildStdout, cap: usize, deadline: Instant) -> 
             if available == 0 {
                 return Err(std::io::Error::from(ErrorKind::WouldBlock));
             }
-            reader.read(&mut buf[..buf.len().min(available as usize)])
+            let read_len = buf.len().min(available as usize);
+            reader.read(&mut buf[..read_len])
         },
         cap,
         deadline,
