@@ -322,8 +322,10 @@ async fn resolve_dns_for_client_inner(
                 .ok()
                 .flatten()
                 .unwrap_or(Duration::from_secs(5));
-            let https_records = lookup_ech_https_records(Some(dns_server), host, ech_timeout).await;
-            let addrs = lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout).await;
+            let (addrs, https_records) = tokio::join!(
+                lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout),
+                lookup_ech_https_records(Some(dns_server), host, ech_timeout),
+            );
             (addrs?, https_records)
         } else if let Some(auto_http3_budget) = auto_http3_discovery {
             let https = spawn_auto_http3_https_records(
@@ -402,8 +404,8 @@ async fn resolve_dns_for_client_inner(
             .ok()
             .flatten()
             .unwrap_or(Duration::from_secs(5));
-        let https_records = lookup_ech_https_records(None, host, ech_timeout).await;
-        let socket_addrs = lookup.await;
+        let (socket_addrs, https_records) =
+            tokio::join!(lookup, lookup_ech_https_records(None, host, ech_timeout),);
         (
             socket_addrs
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
