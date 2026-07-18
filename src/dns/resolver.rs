@@ -248,9 +248,26 @@ async fn run_stream_lookup<S: AsyncRead + AsyncWrite + Unpin>(
     host: &str,
     budget: TimeoutBudget,
 ) -> Result<Vec<IpAddr>, ResolverError> {
-    let id_a = dns_query_id();
+    run_stream_lookup_with_id_generator(stream, host, budget, dns_query_id).await
+}
+
+async fn run_stream_lookup_with_id_generator<
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut() -> u16,
+>(
+    stream: &mut S,
+    host: &str,
+    budget: TimeoutBudget,
+    mut next_id: F,
+) -> Result<Vec<IpAddr>, ResolverError> {
+    let id_a = next_id();
     let query_a = wire::build_query(id_a, host, DNS_TYPE_A).map_err(resolver_error)?;
-    let id_aaaa = dns_query_id();
+    let id_aaaa = loop {
+        let id = next_id();
+        if id != id_a {
+            break id;
+        }
+    };
     let query_aaaa = wire::build_query(id_aaaa, host, DNS_TYPE_AAAA).map_err(resolver_error)?;
 
     let timeout = budget.remaining().map_err(resolver_error)?;
@@ -953,6 +970,44 @@ mod tests {
             "expected one TCP connection"
         );
         stop();
+    }
+
+    #[tokio::test]
+    async fn stream_lookup_retries_duplicate_query_id() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move {
+            let mut query_ids = Vec::new();
+            for _ in 0..2 {
+                let query = crate::dns::transport::read_framed_response(&mut server)
+                    .await
+                    .unwrap();
+                query_ids.push(u16::from_be_bytes([query[0], query[1]]));
+                let response = tcp_response(&query, DnsServerMode::Success);
+                crate::dns::transport::write_framed_query(&mut server, &response)
+                    .await
+                    .unwrap();
+            }
+            query_ids
+        });
+        let mut ids = [0x1234, 0x1234, 0x5678].into_iter();
+
+        let addrs = run_stream_lookup_with_id_generator(
+            &mut client,
+            "example.com",
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
+            || ids.next().unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            addrs,
+            [
+                "127.0.0.1".parse::<IpAddr>().unwrap(),
+                "::1".parse::<IpAddr>().unwrap(),
+            ]
+        );
+        assert_eq!(server.await.unwrap(), [0x1234, 0x5678]);
     }
 
     #[tokio::test]
