@@ -610,8 +610,11 @@ pub(crate) async fn connect_host_happy_eyeballs_traced(
                         if !addrs.is_empty() {
                             append_unique_socket_addrs(&mut resolved_addrs, &addrs);
                             ipv4_addrs = addrs;
-                            if first_positive_family.is_none() && !ipv6_done {
+                            let ipv4_was_first = first_positive_family.is_none();
+                            if ipv4_was_first {
                                 first_positive_family = Some(AddressFamily::Ipv4);
+                            }
+                            if ipv4_was_first && !ipv6_done {
                                 held_ipv4_until_resolution_delay = true;
                                 resolution_delay.as_mut().reset(tokio::time::Instant::now() + HAPPY_EYEBALLS_RESOLUTION_DELAY);
                             } else {
@@ -620,6 +623,7 @@ pub(crate) async fn connect_host_happy_eyeballs_traced(
                                     &mut scheduled_addrs,
                                     &ipv4_addrs,
                                     &ipv6_addrs,
+                                    first_positive_family.expect("a family produced addresses"),
                                 );
                             }
                         }
@@ -642,6 +646,7 @@ pub(crate) async fn connect_host_happy_eyeballs_traced(
                                 &mut scheduled_addrs,
                                 &ipv4_addrs,
                                 &ipv6_addrs,
+                                first_positive_family.expect("a family produced addresses"),
                             );
                             held_ipv4_until_resolution_delay = false;
                         } else if held_ipv4_until_resolution_delay {
@@ -650,6 +655,7 @@ pub(crate) async fn connect_host_happy_eyeballs_traced(
                                 &mut scheduled_addrs,
                                 &ipv4_addrs,
                                 &ipv6_addrs,
+                                first_positive_family.expect("IPv4 produced addresses"),
                             );
                             held_ipv4_until_resolution_delay = false;
                         }
@@ -662,6 +668,7 @@ pub(crate) async fn connect_host_happy_eyeballs_traced(
                                 &mut scheduled_addrs,
                                 &ipv4_addrs,
                                 &ipv6_addrs,
+                                first_positive_family.expect("IPv4 produced addresses"),
                             );
                             held_ipv4_until_resolution_delay = false;
                         }
@@ -674,6 +681,7 @@ pub(crate) async fn connect_host_happy_eyeballs_traced(
                     &mut scheduled_addrs,
                     &ipv4_addrs,
                     &ipv6_addrs,
+                    first_positive_family.expect("IPv4 produced addresses"),
                 );
                 held_ipv4_until_resolution_delay = false;
             }
@@ -725,13 +733,11 @@ fn enqueue_interleaved(
     scheduled_addrs: &mut Vec<SocketAddr>,
     ipv4_addrs: &[SocketAddr],
     ipv6_addrs: &[SocketAddr],
+    preferred_family: AddressFamily,
 ) {
-    let ordered = if ipv6_addrs.is_empty() {
-        ipv4_addrs.to_vec()
-    } else if ipv4_addrs.is_empty() {
-        ipv6_addrs.to_vec()
-    } else {
-        interleave_socket_addr_families(ipv6_addrs, ipv4_addrs)
+    let ordered = match preferred_family {
+        AddressFamily::Ipv4 => interleave_socket_addr_families(ipv4_addrs, ipv6_addrs),
+        AddressFamily::Ipv6 => interleave_socket_addr_families(ipv6_addrs, ipv4_addrs),
     };
     for addr in ordered {
         if !scheduled_addrs.contains(&addr) {
@@ -1478,6 +1484,46 @@ mod tests {
         assert_eq!(addr.port(), 8443);
         assert_eq!(addr.flowinfo(), 123);
         assert_eq!(addr.scope_id(), 42);
+    }
+
+    #[tokio::test]
+    async fn happy_eyeballs_keeps_ipv4_preferred_when_ipv6_resolves_during_grace_period() {
+        let ipv4 = SocketAddr::new("127.0.0.1".parse().unwrap(), 443);
+        let ipv6 = SocketAddr::new("::1".parse().unwrap(), 443);
+        let mut pending = VecDeque::new();
+        let mut scheduled = Vec::new();
+
+        // Model A resolving first and AAAA resolving during the 50 ms grace period.
+        enqueue_interleaved(
+            &mut pending,
+            &mut scheduled,
+            &[ipv4],
+            &[ipv6],
+            AddressFamily::Ipv4,
+        );
+        assert_eq!(pending.front(), Some(&ipv4));
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            race_staggered(
+                pending.into(),
+                HAPPY_EYEBALLS_FALLBACK_DELAY,
+                "lookup returned no addresses",
+                "test connect",
+                |addr| async move {
+                    if addr.is_ipv4() {
+                        Ok("ipv4")
+                    } else {
+                        std::future::pending::<Result<&str, FetchError>>().await
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("IPv4 should start before the 300 ms fallback delay")
+        .unwrap();
+
+        assert_eq!(result, "ipv4");
     }
 
     #[tokio::test]
