@@ -53,6 +53,7 @@ pub(super) async fn stream_response_to_formatted_sse_stdout(
     compression: CompressionMode,
     copy: bool,
     use_color: bool,
+    har_capture: Option<crate::har::Capture>,
 ) -> Result<StreamedOutput, FetchError> {
     super::stream::stream_formatted_response_to_stdout(
         response,
@@ -60,6 +61,7 @@ pub(super) async fn stream_response_to_formatted_sse_stdout(
         compression,
         copy,
         FormattedSseStream::new(use_color),
+        har_capture,
     )
     .await
 }
@@ -70,6 +72,7 @@ pub(super) async fn stream_response_to_formatted_ndjson_stdout(
     compression: CompressionMode,
     copy: bool,
     use_color: bool,
+    har_capture: Option<crate::har::Capture>,
 ) -> Result<StreamedOutput, FetchError> {
     super::stream::stream_formatted_response_to_stdout(
         response,
@@ -77,6 +80,7 @@ pub(super) async fn stream_response_to_formatted_ndjson_stdout(
         compression,
         copy,
         FormattedNdjsonStream::new(use_color),
+        har_capture,
     )
     .await
 }
@@ -88,6 +92,7 @@ pub(super) async fn stream_response_to_formatted_grpc_stdout(
     copy: bool,
     grpc_response_desc: Option<prost_reflect::MessageDescriptor>,
     use_color: bool,
+    har_capture: Option<crate::har::Capture>,
 ) -> Result<StreamedOutput, FetchError> {
     let formatter = FormattedGrpcStream::new(&response_headers, grpc_response_desc, use_color);
     super::stream::stream_formatted_response_to_stdout(
@@ -96,6 +101,7 @@ pub(super) async fn stream_response_to_formatted_grpc_stdout(
         compression,
         copy,
         formatter,
+        har_capture,
     )
     .await
 }

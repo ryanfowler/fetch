@@ -10,6 +10,7 @@ pub mod fileutil;
 pub(crate) mod flag_registry;
 pub mod format;
 pub mod grpc;
+pub(crate) mod har;
 pub mod http;
 pub mod image;
 pub(crate) mod inspection;

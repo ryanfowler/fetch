@@ -352,6 +352,29 @@ async fn run_inner(cli: &mut Cli) -> Result<i32, FetchError> {
         return Err("flag '--remote-header-name' requires '--remote-name'".into());
     }
 
+    if let Some(path) = cli.har.as_deref() {
+        if path == "-" {
+            return Err(
+                "invalid value '-' for option '--har': stdout is reserved for the response body"
+                    .into(),
+            );
+        }
+        if cli.output.as_deref().is_some_and(|output| {
+            output != "-" && crate::output::destinations_conflict(path, output)
+        }) {
+            return Err("flags '--har' and '--output' cannot use the same path".into());
+        }
+        if cli.dry_run {
+            return Err("flag '--har' cannot be used with '--dry-run'".into());
+        }
+        if cli.inspect_dns || cli.inspect_tls {
+            return Err("flag '--har' cannot be used with inspection modes".into());
+        }
+        if cli.has_grpc_discovery() {
+            return Err("flag '--har' cannot be used with gRPC discovery modes".into());
+        }
+    }
+
     if cli.url.is_none() && cli.has_grpc_discovery() && !cli.has_proto_schema() {
         return Err("<URL> must be provided unless --proto-file or --proto-desc is set".into());
     }

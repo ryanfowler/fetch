@@ -15,11 +15,13 @@ pub(super) async fn read_decoded_response_body_limited(
     response: Response,
     response_headers: HeaderMap,
     compression: CompressionMode,
+    har_capture: Option<crate::har::Capture>,
 ) -> Result<(Vec<u8>, HeaderMap), FetchError> {
     read_decoded_response_body_with_limit_message(
         response,
         response_headers,
         compression,
+        har_capture,
         "cannot be buffered; use '--format off' or write to a file to stream it",
     )
     .await
@@ -29,11 +31,13 @@ pub(super) async fn read_decoded_article_body_limited(
     response: Response,
     response_headers: HeaderMap,
     compression: CompressionMode,
+    har_capture: Option<crate::har::Capture>,
 ) -> Result<(Vec<u8>, HeaderMap), FetchError> {
     read_decoded_response_body_with_limit_message(
         response,
         response_headers,
         compression,
+        har_capture,
         "cannot be extracted as an article",
     )
     .await
@@ -43,10 +47,11 @@ async fn read_decoded_response_body_with_limit_message(
     response: Response,
     response_headers: HeaderMap,
     compression: CompressionMode,
+    har_capture: Option<crate::har::Capture>,
     limit_message: &str,
 ) -> Result<(Vec<u8>, HeaderMap), FetchError> {
-    let (reader, trailers) = async_response_reader(response);
-    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let (mut reader, trailers) =
+        decoded_capturing_response_reader(response, compression, &response_headers, har_capture)?;
     let mut bytes = Vec::new();
     let mut buf = vec![0; 16 * 1024];
     loop {
@@ -114,9 +119,10 @@ pub(super) async fn stream_response_to_discard(
     response: Response,
     response_headers: HeaderMap,
     compression: CompressionMode,
+    har_capture: Option<crate::har::Capture>,
 ) -> Result<StreamedOutput, FetchError> {
-    let (reader, trailers) = async_response_reader(response);
-    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let (mut reader, trailers) =
+        decoded_capturing_response_reader(response, compression, &response_headers, har_capture)?;
     let mut sink = tokio::io::sink();
     let bytes_written = copy_async_reader_to_writer(&mut reader, &mut sink, None).await?;
     let trailers = captured_trailers(&trailers);
@@ -127,6 +133,7 @@ pub(super) async fn stream_response_to_discard(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn stream_response_to_stdout(
     cli: &Cli,
     response: Response,
@@ -135,9 +142,10 @@ pub(super) async fn stream_response_to_stdout(
     copy: bool,
     target: StdoutStreamTarget,
     stdout_is_terminal: bool,
+    har_capture: Option<crate::har::Capture>,
 ) -> Result<StreamedOutput, FetchError> {
-    let (reader, trailers) = async_response_reader(response);
-    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let (mut reader, trailers) =
+        decoded_capturing_response_reader(response, compression, &response_headers, har_capture)?;
     let mut capture = copy.then(clipboard::Capture::default);
     let bytes_written = if terminal_binary_stdout_guard_enabled(cli, stdout_is_terminal) {
         stream_response_to_stdout_with_binary_check(
@@ -166,12 +174,13 @@ pub(super) async fn stream_formatted_response_to_stdout<F>(
     compression: CompressionMode,
     copy: bool,
     mut formatter: F,
+    har_capture: Option<crate::har::Capture>,
 ) -> Result<StreamedOutput, FetchError>
 where
     F: StdoutStreamFormatter,
 {
-    let (reader, trailers) = async_response_reader(response);
-    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let (mut reader, trailers) =
+        decoded_capturing_response_reader(response, compression, &response_headers, har_capture)?;
     let mut stdout = tokio::io::stdout();
     let mut capture = copy.then(clipboard::Capture::default);
     let mut buf = vec![0; 16 * 1024];
@@ -255,6 +264,7 @@ async fn flush_stdout(
     Ok(core::stdout_write_status(stdout.flush().await)?)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn stream_response_to_output(
     response: Response,
     response_headers: HeaderMap,
@@ -263,9 +273,10 @@ pub(super) async fn stream_response_to_output(
     clobber: bool,
     progress: output::WriteProgress,
     copy: bool,
+    har_capture: Option<crate::har::Capture>,
 ) -> Result<StreamedOutput, FetchError> {
-    let (reader, trailers) = async_response_reader(response);
-    let mut reader = decoded_async_response_reader(reader, compression, &response_headers)?;
+    let (mut reader, trailers) =
+        decoded_capturing_response_reader(response, compression, &response_headers, har_capture)?;
     let mut capture = copy.then(clipboard::Capture::default);
     let bytes_written = if let Some(capture) = capture.as_mut() {
         let mut reader = AsyncClipboardTeeReader { reader, capture };
@@ -347,6 +358,56 @@ fn async_response_reader(response: Response) -> (AsyncReadBox, ResponseTrailers)
         }
     });
     (Box::pin(StreamReader::new(stream)), trailers)
+}
+
+fn decoded_capturing_response_reader(
+    response: Response,
+    compression: CompressionMode,
+    response_headers: &HeaderMap,
+    capture: Option<crate::har::Capture>,
+) -> Result<(AsyncReadBox, ResponseTrailers), FetchError> {
+    let (reader, trailers) = async_response_reader(response);
+    let reader = decoded_async_response_reader(reader, compression, response_headers)?;
+    let reader: AsyncReadBox = match capture {
+        Some(capture) => Box::pin(AsyncHarTeeReader {
+            reader,
+            capture,
+            read_started: None,
+        }),
+        None => reader,
+    };
+    Ok((reader, trailers))
+}
+
+struct AsyncHarTeeReader {
+    reader: AsyncReadBox,
+    capture: crate::har::Capture,
+    read_started: Option<Instant>,
+}
+
+impl AsyncRead for AsyncHarTeeReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let started = *self.read_started.get_or_insert_with(Instant::now);
+        let before = buf.filled().len();
+        match self.reader.as_mut().poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                self.capture.add_receive_time(started);
+                self.read_started = None;
+                self.capture.push(&buf.filled()[before..]);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(err)) => {
+                self.capture.add_receive_time(started);
+                self.read_started = None;
+                Poll::Ready(Err(err))
+            }
+            other => other,
+        }
+    }
 }
 
 async fn stream_response_to_stdout_with_binary_check(
@@ -1113,6 +1174,31 @@ mod tests {
         assert!(!triggered, "guard must not trigger on valid split UTF-8");
         assert_eq!(written, i64::try_from(body.len()).unwrap());
         assert_eq!(writer.bytes, body);
+    }
+
+    #[tokio::test]
+    async fn har_receive_timing_excludes_time_between_body_reads() {
+        let capture = crate::har::Capture::default();
+        let reader: AsyncReadBox = Box::pin(ChunkedReader {
+            inner: std::io::Cursor::new(b"ab"),
+            chunk_size: 1,
+        });
+        let mut reader = AsyncHarTeeReader {
+            reader,
+            capture: capture.clone(),
+            read_started: None,
+        };
+        let mut byte = [0_u8; 1];
+        assert_eq!(reader.read(&mut byte).await.unwrap(), 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(reader.read(&mut byte).await.unwrap(), 1);
+        assert_eq!(reader.read(&mut byte).await.unwrap(), 0);
+
+        assert!(
+            capture.receive_time() < Duration::from_millis(50),
+            "HAR receive time included local delay: {:?}",
+            capture.receive_time()
+        );
     }
 
     /// Test helper that wraps a [`std::io::Read`] and limits each

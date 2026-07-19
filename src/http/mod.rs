@@ -132,6 +132,12 @@ async fn execute_request(
     mut grpc_method: Option<prost_reflect::MethodDescriptor>,
     session: Option<&crate::session::Session>,
 ) -> Result<i32, FetchError> {
+    let har_recorder = cli.har.as_ref().map(|_| crate::har::Recorder::new());
+    let har_destination = cli
+        .har
+        .as_deref()
+        .map(|path| crate::har::Destination::reserve(path, cli.clobber))
+        .transpose()?;
     let request_start = Instant::now();
     let request_timeout = cli
         .timeout
@@ -153,6 +159,7 @@ async fn execute_request(
         request_start,
         session,
         connect_timing: Some(&connect_timing),
+        har: har_recorder.as_ref(),
     };
     let mut initial_client = None;
     if cli.grpc && grpc_method.is_none() {
@@ -293,6 +300,7 @@ async fn execute_request(
                 },
             )?;
             let req = apply_request_timeout(req, request_timeout, request_start)?;
+            let exchange_started = SystemTime::now();
             request_client.clear_runtime_dns_resolution();
             connect_timing.clear();
             match Box::pin(req.send()).await {
@@ -323,10 +331,13 @@ async fn execute_request(
                             ))
                             .await?;
                         }
+                        if cli.har.is_some() {
+                            timing = AttemptTiming::start();
+                        }
                         redirect_count += 1;
                         continue;
                     }
-                    break Ok(response);
+                    break Ok((response, exchange_started));
                 }
                 Err(err) => {
                     if protocol_nack_retries < MAX_PROTOCOL_NACK_RETRIES
@@ -334,6 +345,9 @@ async fn execute_request(
                     {
                         ensure_request_body_replayable(&request_body, "protocol retry")?;
                         protocol_nack_retries += 1;
+                        if cli.har.is_some() {
+                            timing = AttemptTiming::start();
+                        }
                         continue;
                     }
                     record_request_dns_timing(cli, &request_client, &mut timing);
@@ -342,7 +356,7 @@ async fn execute_request(
             }
         };
         match attempt_result {
-            Ok(response) => {
+            Ok((response, mut exchange_started)) => {
                 timing.mark_response_headers();
                 timing.set_transport(connect_timing.timing());
                 if cli.verbose >= 3 && !cli.silent {
@@ -351,10 +365,10 @@ async fn execute_request(
                         connect_debug_target(&response, &request_url, dns_resolution.as_ref());
                     timing::print_debug_lines(&timing, &connect_target, cli.color.as_deref());
                 }
-                let response = Box::pin(apply_digest_challenge(
+                let digest_result = Box::pin(apply_digest_challenge(
                     response,
                     DigestRetryContext {
-                        client: &request_client.client,
+                        client: &request_client,
                         client_build: &client_build,
                         method: request_method.clone(),
                         headers: headers.clone(),
@@ -366,6 +380,13 @@ async fn execute_request(
                     digest_credentials.as_ref(),
                 ))
                 .await?;
+                let response = digest_result.response;
+                if let Some(digest_timing) = digest_result.timing {
+                    timing = digest_timing;
+                }
+                if let Some(digest_started) = digest_result.started {
+                    exchange_started = digest_started;
+                }
                 let status = response.status();
                 let retry_sse_uncompressed =
                     should_retry_sse_without_compression(&response, compression);
@@ -431,6 +452,9 @@ async fn execute_request(
                     compression,
                     Some(timing),
                     grpc_method.as_ref(),
+                    har_recorder.as_ref(),
+                    har_destination,
+                    exchange_started,
                 )
                 .await;
             }

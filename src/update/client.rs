@@ -233,6 +233,7 @@ impl UpdateClient {
             request_start: Instant::now(),
             session: None,
             connect_timing: None,
+            har: None,
         };
         client::build_client_for_url(cli, url, &context).await
     }

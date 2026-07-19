@@ -304,6 +304,16 @@ Use `-O` to save using the filename from the URL:
 fetch -O httpbin.org/image/png
 ```
 
+Record the final HTTP exchange as a HAR 1.2 sidecar without changing response
+output:
+
+```sh
+fetch --har request.har httpbin.org/json
+```
+
+HAR files can contain credentials, cookies, and bodies, so handle them as
+sensitive data.
+
 ### Viewing Images
 
 `fetch` can render images directly in terminals that support inline images (Kitty, iTerm2), with a block-character fallback for other terminals.

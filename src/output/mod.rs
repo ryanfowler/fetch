@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use http::header::{CONTENT_DISPOSITION, HeaderMap};
@@ -34,6 +35,8 @@ pub enum OutputError {
         path: String,
         source: std::io::Error,
     },
+    #[error("output file '{0}' changed while the request was running; refusing to overwrite it")]
+    TargetChanged(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -151,8 +154,159 @@ pub fn resolve_output_path(
     Err(OutputError::UnableToInferFileName)
 }
 
+/// Return whether two output spellings identify the same destination.
+///
+/// Existing targets are canonicalized so symlink aliases compare equal. For a
+/// new target, canonicalizing its parent still resolves directory symlinks;
+/// lexical normalization is the fallback when the parent does not yet exist.
+pub(crate) fn destinations_conflict(first: &str, second: &str) -> bool {
+    let first = destination_identity(first);
+    let second = destination_identity(second);
+    if first == second {
+        return true;
+    }
+    let (Some(first_parent), Some(second_parent)) = (first.parent(), second.parent()) else {
+        return false;
+    };
+    if first_parent != second_parent {
+        return false;
+    }
+    let (Some(first_name), Some(second_name)) = (first.file_name(), second.file_name()) else {
+        return false;
+    };
+    if first_name.to_string_lossy().to_lowercase() != second_name.to_string_lossy().to_lowercase() {
+        return false;
+    }
+    filesystem_is_case_insensitive(first_parent)
+}
+
+static CASE_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn filesystem_is_case_insensitive(parent: &Path) -> bool {
+    let sequence = CASE_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let exact_name = format!(".fetch-case-probe-{}-{sequence}-Aa", std::process::id());
+    let folded_name = exact_name.to_ascii_lowercase();
+    let exact_path = parent.join(&exact_name);
+    let folded_path = parent.join(folded_name);
+    let Ok(file) = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&exact_path)
+    else {
+        return cfg!(windows);
+    };
+    drop(file);
+    let insensitive = std::fs::metadata(&folded_path).is_ok();
+    let _ = std::fs::remove_file(exact_path);
+    insensitive
+}
+
+fn destination_identity(path: &str) -> PathBuf {
+    let absolute = absolute_path(Path::new(path)).unwrap_or_else(|_| PathBuf::from(path));
+    if let Ok(canonical) = std::fs::canonicalize(&absolute) {
+        return canonical;
+    }
+    let Some(parent) = absolute.parent() else {
+        return normalize_lexically(&absolute);
+    };
+    let Some(name) = absolute.file_name() else {
+        return normalize_lexically(&absolute);
+    };
+    std::fs::canonicalize(parent)
+        .map(|parent| parent.join(name))
+        .unwrap_or_else(|_| normalize_lexically(&absolute))
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
 pub async fn write_output(path: &str, bytes: &[u8], clobber: bool) -> Result<(), OutputError> {
     write_output_with_progress(path, bytes, clobber, WriteProgress::disabled()).await
+}
+
+/// An atomic output reserved before long-running work begins.
+pub(crate) struct PreparedOutput {
+    download: DownloadTemp,
+    file: File,
+    target_before: Option<TargetSnapshot>,
+}
+
+impl PreparedOutput {
+    pub(crate) fn create(path: &str, clobber: bool) -> Result<Self, OutputError> {
+        let (download, file) = DownloadTemp::create(path, clobber)?;
+        let target_before = target_snapshot(&download.target_path)?;
+        Ok(Self {
+            download,
+            file,
+            target_before,
+        })
+    }
+
+    pub(crate) fn commit(mut self, bytes: &[u8]) -> Result<(), OutputError> {
+        self.file.write_all(bytes)?;
+        self.file.flush()?;
+        if target_snapshot(&self.download.target_path)? != self.target_before {
+            return Err(OutputError::TargetChanged(self.download.requested_path));
+        }
+        let bytes_written = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+        install_download_temp(
+            self.download,
+            self.file,
+            WriteOutcome {
+                bytes_written,
+                summary: None,
+            },
+        )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TargetSnapshot {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+fn target_snapshot(path: &Path) -> Result<Option<TargetSnapshot>, OutputError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            #[cfg(unix)]
+            use std::os::unix::fs::MetadataExt;
+
+            Ok(Some(TargetSnapshot {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+                #[cfg(unix)]
+                device: metadata.dev(),
+                #[cfg(unix)]
+                inode: metadata.ino(),
+            }))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(OutputError::FileCheck {
+            path: path.to_string_lossy().into_owned(),
+            source: err,
+        }),
+    }
 }
 
 pub async fn write_output_with_progress(
@@ -790,6 +944,18 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
     use tokio::io::ReadBuf;
+
+    #[test]
+    fn prepared_output_refuses_target_created_after_reservation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("sidecar.har");
+        let prepared = PreparedOutput::create(target.to_str().unwrap(), true).unwrap();
+        std::fs::write(&target, "response").unwrap();
+
+        let error = prepared.commit(b"har").unwrap_err();
+        assert!(matches!(error, OutputError::TargetChanged(_)));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "response");
+    }
 
     #[derive(Clone)]
     struct SharedBuffer(Arc<Mutex<Vec<u8>>>);

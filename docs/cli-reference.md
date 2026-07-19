@@ -212,6 +212,28 @@ Overwrite existing output file (default behavior is to fail if file exists).
 fetch -o output.json --clobber example.com/data
 ```
 
+### `--har PATH`
+
+Write a HAR 1.2 sidecar containing the final HTTP exchange while preserving the
+normal response output. The capture includes the effective request, finalized
+headers and streamed request body, decoded response body, remote IP, and timing
+information. Unary gRPC is supported; protobuf frames are stored as base64.
+
+```sh
+fetch --har request.har https://api.example.com/users
+fetch -o response.json --har request.har https://api.example.com/users
+```
+
+The destination is reserved before the request, is installed atomically after
+the response completes, and follows `--clobber`. `PATH` cannot be `-` or match
+`--output`. WebSocket, inspection, gRPC discovery, and `--dry-run` modes are not
+supported. The initial HAR contains only the final exchange after redirects,
+retries, or authentication challenges.
+
+HAR files may contain credentials, cookies, request bodies, and response bodies.
+Treat them as sensitive data. Body capture is bounded at 16 MiB; larger bodies
+are counted completely but their text is omitted with a truncation comment.
+
 ### `--copy`
 
 Copy the response body to the system clipboard. The response is still printed

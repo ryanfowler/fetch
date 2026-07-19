@@ -192,7 +192,7 @@ pub(super) fn transport_request_version_for_cli(
 }
 
 pub(super) struct DigestRetryContext<'a> {
-    pub(super) client: &'a Client,
+    pub(super) client: &'a client::UrlClient,
     pub(super) client_build: &'a client::ClientBuildContext<'a>,
     pub(super) method: Method,
     pub(super) headers: HeaderMap,
@@ -202,19 +202,35 @@ pub(super) struct DigestRetryContext<'a> {
     pub(super) auth_allowed: bool,
 }
 
+pub(super) struct DigestChallengeResult {
+    pub(super) response: Response,
+    pub(super) timing: Option<AttemptTiming>,
+    pub(super) started: Option<SystemTime>,
+}
+
+impl DigestChallengeResult {
+    fn unchanged(response: Response) -> Self {
+        Self {
+            response,
+            timing: None,
+            started: None,
+        }
+    }
+}
+
 pub(super) async fn apply_digest_challenge(
     response: Response,
     context: DigestRetryContext<'_>,
     credentials: Option<&(String, String)>,
-) -> Result<Response, FetchError> {
+) -> Result<DigestChallengeResult, FetchError> {
     let Some((username, password)) = credentials else {
-        return Ok(response);
+        return Ok(DigestChallengeResult::unchanged(response));
     };
     if response.status() != StatusCode::UNAUTHORIZED {
-        return Ok(response);
+        return Ok(DigestChallengeResult::unchanged(response));
     }
     if !context.auth_allowed {
-        return Ok(response);
+        return Ok(DigestChallengeResult::unchanged(response));
     }
 
     let challenge = digest::find_digest_challenge(
@@ -225,7 +241,7 @@ pub(super) async fn apply_digest_challenge(
             .filter_map(|value| value.to_str().ok()),
     );
     let Some(challenge) = challenge else {
-        return Ok(response);
+        return Ok(DigestChallengeResult::unchanged(response));
     };
     let challenge = digest::parse_challenge(&challenge).map_err(digest_challenge_error)?;
 
@@ -257,11 +273,9 @@ pub(super) async fn apply_digest_challenge(
     } else {
         None
     };
-    let client = retry_client
-        .as_ref()
-        .map_or(context.client, |client| &client.client);
+    let client = retry_client.as_ref().unwrap_or(context.client);
     let retry_request = build_request(
-        client,
+        &client.client,
         challenged_method,
         challenged_url,
         challenged_headers,
@@ -275,10 +289,41 @@ pub(super) async fn apply_digest_challenge(
         context.client_build.request_start,
     )?;
 
+    let mut challenge_response = Some(response);
+    if !retry_before_drain {
+        drain_response_body_bounded(
+            challenge_response
+                .take()
+                .expect("Digest challenge response is available before draining"),
+        )
+        .await;
+    }
+
+    client.clear_runtime_dns_resolution();
+    if let Some(connect_timing) = context.client_build.connect_timing {
+        connect_timing.clear();
+    }
+    let started = SystemTime::now();
+    let mut timing = AttemptTiming::start();
+    let retry_response: Result<Response, FetchError> =
+        retry_request.send().await.map_err(Into::into);
+    timing.mark_response_headers();
+    timing.set_transport(
+        context
+            .client_build
+            .connect_timing
+            .and_then(client::ConnectionTiming::timing),
+    );
+    timing.set_dns(
+        client
+            .current_dns_resolution()
+            .as_ref()
+            .and_then(|resolution| resolution.timing.as_ref())
+            .map(|dns| dns.duration),
+    );
+
     if retry_before_drain {
-        let retry_response: Result<Response, FetchError> =
-            retry_request.send().await.map_err(Into::into);
-        drop(response);
+        drop(challenge_response.take());
         retry_response.map(|mut response| {
             // The temporary client's pool owns the connection task. Retain it until the
             // response body is consumed so dropping the pool cannot cancel that body.
@@ -287,11 +332,18 @@ pub(super) async fn apply_digest_challenge(
                     .expect("retry-before-drain builds a fresh client")
                     .client,
             );
-            response
+            DigestChallengeResult {
+                response,
+                timing: Some(timing),
+                started: Some(started),
+            }
         })
     } else {
-        drain_response_body_bounded(response).await;
-        retry_request.send().await.map_err(Into::into)
+        retry_response.map(|response| DigestChallengeResult {
+            response,
+            timing: Some(timing),
+            started: Some(started),
+        })
     }
 }
 

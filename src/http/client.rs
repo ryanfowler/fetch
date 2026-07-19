@@ -78,6 +78,7 @@ pub(crate) struct ClientBuildContext<'a> {
     pub(crate) request_start: Instant,
     pub(crate) session: Option<&'a crate::session::Session>,
     pub(crate) connect_timing: Option<&'a ConnectionTiming>,
+    pub(crate) har: Option<&'a crate::har::Recorder>,
 }
 
 #[derive(Clone, Debug)]
@@ -116,7 +117,7 @@ pub(crate) async fn build_client_for_url(
     let effective_proxy = effective_proxy_for_url(cli.proxy.as_deref(), http_version, url)?;
     let auto_http3 = auto_http3_allowed(context.mode, url, cli.unix.as_deref(), effective_proxy);
     let discovery = if dynamic_dns_for_client(cli, url, effective_proxy) {
-        let debug_dns = cli.timing || (cli.verbose >= 3 && !cli.silent);
+        let debug_dns = cli.timing || cli.har.is_some() || (cli.verbose >= 3 && !cli.silent);
         ClientDnsDiscovery {
             dns_resolution: None,
             runtime_dns_resolution: debug_dns.then(DnsResolutionHandle::default),
@@ -167,9 +168,12 @@ pub(crate) async fn build_client_for_url(
     }
     builder = configure_dns_resolution(builder, url.host_str(), dns_resolution.as_ref());
     if let Some(connect_timing) = context.connect_timing
-        && (cli.timing || (cli.verbose >= 3 && !cli.silent))
+        && (cli.timing || cli.har.is_some() || (cli.verbose >= 3 && !cli.silent))
     {
         builder = builder.connection_timing(connect_timing.clone());
+    }
+    if let Some(recorder) = context.har {
+        builder = builder.har_recorder(recorder.clone());
     }
     if should_configure_tls(cli, url) {
         let hard_fail = matches!(cli.ech.as_deref(), Some("on"));

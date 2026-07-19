@@ -136,6 +136,9 @@ pub(crate) static FLAGS: &[FlagDef] = &[
     })
     .with_from_curl()
     .with_ws_always(),
+    FlagDef::new("--har", Some(FlagCategory::Response), |c| c.har.is_some())
+        .with_from_curl()
+        .with_ws_always(),
     FlagDef::new("--remote-name", Some(FlagCategory::Request), |c| {
         c.remote_name
     })

@@ -616,6 +616,24 @@ Sessions are stored as JSON in the user's cache directory:
 
 ## Debugging Network Issues
 
+### HAR Sidecars
+
+Use `--har PATH` to record the final HTTP exchange in HAR 1.2 format while
+leaving normal response output unchanged:
+
+```sh
+fetch --har request.har https://api.example.com/users
+fetch -o response.json --har request.har https://api.example.com/users
+```
+
+The destination is reserved before network I/O and atomically installed after
+the response completes. It honors `--clobber`. Redirect, retry, and
+authentication challenge exchanges are not included; only the final exchange
+is recorded. Captures larger than 16 MiB are counted but omitted from the HAR.
+
+HAR files may contain authorization headers, cookies, request bodies, and
+response bodies. Store and share them as sensitive data.
+
 ### Timing Waterfall
 
 `--timing` (or `-T`) displays a timing waterfall chart after the response, showing how time was spent across DNS resolution, TCP connection setup, TLS handshake, time to first byte, and body download:

@@ -61,6 +61,7 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
         request_start,
         session: session.as_ref(),
         connect_timing: Some(&connect_timing),
+        har: None,
     };
     let client = crate::http::client::build_client_for_url(cli, &url, &client_build)
         .await?
