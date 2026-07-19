@@ -45,6 +45,24 @@ Use `-o FILE` for binary or large output, `--discard` when the body is irrelevan
 and `--image off` for predictable terminal behavior. The body is stdout; metadata
 and errors are stderr. Do not use `2>&1` when parsing the body.
 
+To preserve the final HTTP exchange for debugging without changing normal output,
+write a HAR 1.2 sidecar:
+
+```sh
+fetch --har request.har https://example.com
+fetch -o response.bin --har request.har https://example.com/download
+```
+
+Only the final exchange after redirects, retries, or authentication challenges is
+recorded. `--har` honors `--clobber`; its path cannot be stdout or the response
+output path. Request and response body capture is limited to 16 MiB, after which
+the body is omitted from the HAR. WebSocket, inspection, gRPC discovery, and
+`--dry-run` modes are unsupported.
+
+HAR files may contain credentials, authorization headers, cookies, and request and
+response bodies. Treat them as sensitive: do not commit or share them without
+reviewing and redacting their contents.
+
 ## Translate curl
 
 ```sh
