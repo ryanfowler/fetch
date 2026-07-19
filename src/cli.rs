@@ -422,6 +422,9 @@ pub struct Cli {
     )]
     pub output: Option<String>,
 
+    #[arg(long, value_name = "PATH", help = "Write a HAR 1.2 sidecar file")]
+    pub har: Option<String>,
+
     #[arg(
         long = "proto-desc",
         value_name = "PATH",

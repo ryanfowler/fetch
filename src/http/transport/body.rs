@@ -47,6 +47,7 @@ impl BodyDeadline {
 pub struct Body {
     inner: UnsyncBoxBody<Bytes, Error>,
     _client_keepalive: Option<Box<super::client::Client>>,
+    har_capture: Option<crate::har::Capture>,
 }
 
 impl Body {
@@ -68,7 +69,13 @@ impl Body {
         Self {
             inner: BodyExt::boxed_unsync(body),
             _client_keepalive: None,
+            har_capture: None,
         }
+    }
+
+    pub(crate) fn with_har_capture(mut self, capture: crate::har::Capture) -> Self {
+        self.har_capture = Some(capture);
+        self
     }
 
     fn keep_client_alive(&mut self, client: super::client::Client) {
@@ -118,7 +125,17 @@ impl http_body::Body for Body {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Pin::new(&mut self.inner).poll_frame(cx)
+        match Pin::new(&mut self.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref()
+                    && let Some(capture) = &self.har_capture
+                {
+                    capture.push(data);
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            other => other,
+        }
     }
 
     fn is_end_stream(&self) -> bool {

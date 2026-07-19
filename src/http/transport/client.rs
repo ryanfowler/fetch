@@ -71,6 +71,7 @@ pub(super) struct ClientConfig {
     pub(super) http3_cache: Option<Arc<Http3Cache>>,
     pub(super) learn_alt_svc: bool,
     pub(super) ech_hard_fail: bool,
+    pub(super) har: Option<crate::har::Recorder>,
 }
 
 pub(crate) struct ClientBuilder {
@@ -107,6 +108,7 @@ impl Client {
                 http3_cache: None,
                 learn_alt_svc: false,
                 ech_hard_fail: false,
+                har: None,
             },
         }
     }
@@ -181,6 +183,12 @@ impl Client {
         self.apply_session_cookies(&url, &mut headers);
         self.apply_proxy_authorization(&url, &mut headers)?;
         apply_host_header(&url, &mut headers)?;
+        let body = if let Some(recorder) = &self.config.har {
+            let capture = recorder.observe_request(method.clone(), url.clone(), headers.clone());
+            body.map(|body| body.with_har_capture(capture))
+        } else {
+            body
+        };
         let response = match version {
             None if (self.config.auto_http3.is_some()
                 || self.config.auto_http3_discovery
@@ -538,6 +546,11 @@ impl ClientBuilder {
         timing: crate::http::client::ConnectionTiming,
     ) -> Self {
         self.config.connection_timing = Some(timing);
+        self
+    }
+
+    pub(crate) fn har_recorder(mut self, recorder: crate::har::Recorder) -> Self {
+        self.config.har = Some(recorder);
         self
     }
 

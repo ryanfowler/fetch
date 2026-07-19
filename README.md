@@ -70,6 +70,10 @@ default, and binary responses are protected from accidental terminal output.
 See [Output Formatting](docs/output-formatting.md) for pager, color, binary,
 clipboard, and file behavior.
 
+Use `--har request.har` to record the final HTTP exchange as a HAR 1.2 sidecar
+without changing normal response output. HAR files can contain credentials,
+cookies, and bodies and should be treated as sensitive data.
+
 ## Documentation
 
 Start with the **[documentation index](docs/README.md)**, or jump directly to:
