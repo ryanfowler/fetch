@@ -57,7 +57,7 @@ rustls = { version = "=0.23.42", default-features = false, features = ["std", "a
 rustls-native-certs = "=0.8.4"
 rustls-platform-verifier = "=0.7.0"
 serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = { version = "=1.0.150", features = ["arbitrary_precision", "preserve_order"] }
+serde_json = { version = "=1.0.151", features = ["arbitrary_precision", "preserve_order"] }
 sha2 = "=0.11.0"
 shlex = "=2.0.1"
 socket2 = { version = "=0.6.5", features = ["all"] }
