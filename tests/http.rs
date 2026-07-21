@@ -1145,101 +1145,104 @@ fn compressed_sse_retry_drains_first_response_before_replay() {
         .expect("set compressed sse retry listener nonblocking");
     let url = format!("http://{}", listener.local_addr().expect("local addr"));
     let (outcome_tx, outcome_rx) = mpsc::channel();
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
     let join = thread::spawn(move || {
-        // Signal that the server thread has started and the listener is ready.
-        let _ = ready_tx.send(());
-        let result = (|| -> Result<Duration, String> {
-            let mut first_stream = accept_tcp_connection(
-                &listener,
-                Duration::from_secs(10),
-                "first compressed SSE request",
-            )?;
-            first_stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .map_err(|err| format!("set first read timeout: {err}"))?;
-            first_stream
-                .set_write_timeout(Some(Duration::from_secs(3)))
-                .map_err(|err| format!("set first write timeout: {err}"))?;
-            let reader_stream = first_stream
-                .try_clone()
-                .map_err(|err| format!("clone first compressed SSE stream: {err}"))?;
-            let mut reader = BufReader::new(reader_stream);
-            let first_req = read_request(&mut reader)
-                .ok_or_else(|| "read first compressed SSE request".to_string())?;
-            if first_req.header("accept-encoding") != "gzip, br, zstd" {
-                return Err(format!(
-                    "unexpected first Accept-Encoding: {:?}",
-                    first_req.header("accept-encoding")
-                ));
-            }
+        let mut first_response: Option<(std::net::TcpStream, Instant)> = None;
+        while matches!(shutdown_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(err) => {
+                    let _ = outcome_tx.send(Err(format!("accept compressed SSE request: {err}")));
+                    break;
+                }
+            };
+            let result = (|| -> Result<Option<Duration>, String> {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .map_err(|err| format!("set compressed SSE read timeout: {err}"))?;
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .map_err(|err| format!("set compressed SSE write timeout: {err}"))?;
+                let reader_stream = stream
+                    .try_clone()
+                    .map_err(|err| format!("clone compressed SSE stream: {err}"))?;
+                let mut reader = BufReader::new(reader_stream);
+                let Some(req) = read_request(&mut reader) else {
+                    // macOS can surface a stale loopback connection after an
+                    // ephemeral port is reused. Ignore it and keep accepting.
+                    return Ok(None);
+                };
+                let accept_encoding = req.header("accept-encoding");
 
-            write!(
-                first_stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n{:x}\r\n",
-                gzip_sse_body.len(),
-            )
-            .map_err(|err| format!("write first compressed SSE headers: {err}"))?;
-            first_stream
-                .write_all(&gzip_sse_body)
-                .and_then(|_| first_stream.write_all(b"\r\n"))
-                .and_then(|_| first_stream.flush())
-                .map_err(|err| format!("write first compressed SSE chunk: {err}"))?;
+                if !accept_encoding.is_empty() {
+                    if accept_encoding != "gzip, br, zstd" {
+                        return Err(format!(
+                            "unexpected first Accept-Encoding: {accept_encoding:?}"
+                        ));
+                    }
+                    if let Some((old_stream, _)) = first_response.take() {
+                        let _ = old_stream.shutdown(Shutdown::Both);
+                    }
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n{:x}\r\n",
+                        gzip_sse_body.len(),
+                    )
+                    .map_err(|err| format!("write first compressed SSE headers: {err}"))?;
+                    stream
+                        .write_all(&gzip_sse_body)
+                        .and_then(|_| stream.write_all(b"\r\n"))
+                        .and_then(|_| stream.flush())
+                        .map_err(|err| format!("write first compressed SSE chunk: {err}"))?;
+                    first_response = Some((stream, Instant::now()));
+                    return Ok(None);
+                }
 
-            let retry_started_at = Instant::now();
-            let mut retry_stream = accept_tcp_connection(
-                &listener,
-                Duration::from_secs(10),
-                "uncompressed SSE retry on a new connection",
-            )?;
-            let retry_elapsed = retry_started_at.elapsed();
-            let _ = first_stream.shutdown(Shutdown::Both);
-            retry_stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .map_err(|err| format!("set retry read timeout: {err}"))?;
-            retry_stream
-                .set_write_timeout(Some(Duration::from_secs(3)))
-                .map_err(|err| format!("set retry write timeout: {err}"))?;
-            let retry_reader_stream = retry_stream
-                .try_clone()
-                .map_err(|err| format!("clone uncompressed SSE retry stream: {err}"))?;
-            let mut retry_reader = BufReader::new(retry_reader_stream);
-            let retry_req = read_request(&mut retry_reader)
-                .ok_or_else(|| "read uncompressed SSE retry request".to_string())?;
-            if !retry_req.header("accept-encoding").is_empty() {
-                return Err(format!(
-                    "unexpected retry Accept-Encoding on new connection: {:?}",
-                    retry_req.header("accept-encoding")
-                ));
+                let (first_stream, retry_started_at) = first_response
+                    .take()
+                    .ok_or_else(|| "uncompressed SSE retry had no first response".to_string())?;
+                let retry_elapsed = retry_started_at.elapsed();
+                let _ = first_stream.shutdown(Shutdown::Both);
+                write_response(
+                    &mut stream,
+                    TestResponse::ok("data: uncompressed\n\n")
+                        .header("Content-Type", "text/event-stream")
+                        .header("Connection", "close"),
+                );
+                Ok(Some(retry_elapsed))
+            })();
+            match result {
+                Ok(Some(retry_elapsed)) => {
+                    let _ = outcome_tx.send(Ok(retry_elapsed));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    let _ = outcome_tx.send(Err(err));
+                }
             }
-            write_response(
-                &mut retry_stream,
-                TestResponse::ok("data: uncompressed\n\n")
-                    .header("Content-Type", "text/event-stream")
-                    .header("Connection", "close"),
-            );
-            let _ = retry_stream.shutdown(Shutdown::Both);
-            Ok(retry_elapsed)
-        })();
-        let _ = outcome_tx.send(result);
+        }
     });
 
-    // Wait for the server thread to enter its accept loop before connecting.
-    ready_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("compressed SSE retry server ready");
+    // This server remains available if the harness has to replay the complete
+    // fetch invocation after a transient macOS loopback error.
     let res = run_fetch(&[&url, "--format", "on"]);
+    let retry_outcome = outcome_rx.recv_timeout(Duration::from_secs(5));
+    let _ = shutdown_tx.send(());
+    join.join().unwrap();
+
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "event: message\ndata: uncompressed\n\n");
-    let retry_elapsed = outcome_rx
-        .recv_timeout(Duration::from_secs(5))
+    let retry_elapsed = retry_outcome
         .expect("compressed SSE retry server outcome")
         .expect("compressed SSE retry server error");
     assert!(
         retry_elapsed >= Duration::from_millis(100),
         "compressed SSE retry did not wait for the bounded first-response drain; elapsed {retry_elapsed:?}"
     );
-    join.join().unwrap();
 }
 
 #[test]
