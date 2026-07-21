@@ -58,21 +58,21 @@ command menu.
 
 ## Output
 
-Response bodies go to stdout; status, headers, timing, warnings, and errors go
-to stderr. This keeps pipelines clean:
+Response bodies go to stdout. Status, headers, timing, warnings, and errors go
+to stderr. This separation keeps pipelines clean:
 
 ```sh
 fetch example.com/api | jq .
 ```
 
-Terminal output is formatted automatically. Redirected output is unformatted by
-default, and binary responses are protected from accidental terminal output.
+By default, `fetch` formats terminal output and does not format redirected
+output. It blocks accidental binary output to a terminal.
 See [Output Formatting](docs/output-formatting.md) for pager, color, binary,
 clipboard, and file behavior.
 
 Use `--har request.har` to record the final HTTP exchange as a HAR 1.2 sidecar
 without changing normal response output. HAR files can contain credentials,
-cookies, and bodies and should be treated as sensitive data.
+cookies, and bodies. Treat HAR files as sensitive data.
 
 ## Documentation
 

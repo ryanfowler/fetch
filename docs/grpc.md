@@ -98,7 +98,7 @@ fetch --grpc --proto-file common.proto,service.proto \
 
 Use a pre-compiled descriptor set file. Useful when:
 
-- `protoc` isn't available at runtime
+- `protoc` is not available at run time
 - You want faster startup (no compilation)
 - Building CI/CD pipelines
 
@@ -380,17 +380,18 @@ apt install protobuf-compiler
 
 - Verify the URL path matches `package.Service/Method` exactly
 - Check that your proto file defines the service and method
-- Ensure all required imports are included via `--proto-import`
+- Include all necessary imports with `--proto-import`.
 
 ### "failed to parse JSON"
 
 - Verify JSON syntax is correct
 - Check field names match proto definitions (use snake_case)
-- Ensure types match (strings quoted, numbers not quoted)
+- Make sure that the types match. Put quotation marks around strings, but not
+  around numbers.
 
 ### Connection Errors
 
-- gRPC requires HTTP/2 - ensure server supports it
+- gRPC requires HTTP/2. Make sure that the server supports it.
 - Check port number (gRPC typically uses different ports than REST)
 - For TLS issues, try `--insecure` for testing
 
@@ -402,7 +403,9 @@ apt install protobuf-compiler
 
 ## Server Streaming
 
-`fetch` supports server-side streaming gRPC responses. Each response message is formatted and displayed as it arrives, following the same real-time streaming pattern used for SSE and NDJSON responses.
+`fetch` supports server-streaming gRPC responses. It formats and displays each
+response message when the message arrives. SSE and NDJSON responses use the
+same streaming pattern.
 
 ```sh
 fetch --grpc --proto-file service.proto \
@@ -422,7 +425,8 @@ If a server compresses individual response messages, `fetch` decompresses gzip-f
 
 `fetch` supports client-side streaming gRPC calls. When the proto schema indicates a method is client-streaming, multiple JSON objects in the request body are each converted to a separate protobuf message and sent as individual gRPC frames.
 
-Detection is automatic via the method descriptor in the proto schema — no additional flags are needed.
+`fetch` uses the method descriptor in the proto schema to detect client
+streaming. You do not need additional flags.
 
 ### Inline Data
 
@@ -444,7 +448,8 @@ fetch --grpc --proto-file service.proto \
 
 ### Streaming from Stdin
 
-Pipe data from stdin for real-time streaming — each JSON object is sent as soon as it is parsed:
+Pipe data from stdin for real-time streaming. `fetch` sends each JSON object
+when it completes parsing the object:
 
 ```sh
 cat messages.ndjson | fetch --grpc --proto-file service.proto \
@@ -453,18 +458,23 @@ cat messages.ndjson | fetch --grpc --proto-file service.proto \
 
 ## Bidirectional Streaming
 
-Bidirectional streaming is supported with the same mechanism as client streaming. When piping from stdin, request frames are sent incrementally while response frames are received and displayed concurrently:
+Bidirectional streaming uses the same mechanism as client streaming. When you
+pipe data from stdin, `fetch` sends request frames incrementally. At the same
+time, it receives and displays response frames:
 
 ```sh
 cat messages.ndjson | fetch --grpc --proto-file service.proto \
   -d @- https://localhost:50051/pkg.Service/BidiStream
 ```
 
-Both directions flow on the same HTTP/2 stream. The response is formatted and displayed as messages arrive, just like server streaming.
+Both directions use the same HTTP/2 stream. `fetch` formats and displays each
+response message when it arrives.
 
 ## Limitations
 
-- **Client/bidi streaming requires a proto schema**: The `--proto-file` or `--proto-desc` flag must be provided so `fetch` can detect that a method is client-streaming
+- **Client and bidirectional streaming require a proto schema**: Specify
+  `--proto-file` or `--proto-desc`. `fetch` uses the schema to identify a
+  client-streaming method.
 - **gRPC-Web**: Standard gRPC protocol only, not gRPC-Web
 
 ## See Also

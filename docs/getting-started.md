@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide will help you install `fetch` and make your first HTTP request.
+Use this guide to install `fetch` and make your first HTTP request.
 
 ## Installation
 
@@ -46,7 +46,7 @@ Make a GET request by providing a URL:
 fetch httpbin.org/json
 ```
 
-The response body is automatically formatted and syntax-highlighted:
+`fetch` automatically formats and highlights the response body:
 
 ```
 HTTP/2.0 200 OK
@@ -59,7 +59,7 @@ HTTP/2.0 200 OK
 }
 ```
 
-When no scheme is provided, `fetch` defaults to HTTPS:
+If you do not specify a scheme, `fetch` uses HTTPS:
 
 ```sh
 fetch example.com        # Uses https://example.com
@@ -74,7 +74,7 @@ fetch 192.168.1.1:8080   # Uses http://192.168.1.1:8080
 fetch 1.1.1.1            # Uses http://1.1.1.1
 ```
 
-You can always specify the scheme explicitly:
+Specify the scheme to override the default:
 
 ```sh
 fetch http://example.com   # Force HTTP
@@ -92,7 +92,8 @@ equivalent `http://` URL.
 1. **Status line** (stderr) - The HTTP version, status code, and status text
 2. **Response body** (stdout) - The response content, automatically formatted
 
-This separation means you can pipe the body to other tools or redirect it to a file without the status line getting in the way:
+As a result, you can pipe the body to other tools or redirect it to a file. The status
+line does not go to the pipe or file:
 
 ```sh
 # Save just the response body to a file
@@ -104,7 +105,8 @@ fetch httpbin.org/json | jq '.slideshow.title'
 
 ### Auto-formatting
 
-`fetch` automatically detects the content type and formats the response with syntax highlighting. Supported formats include:
+`fetch` detects the content type and formats the response. It supports these
+formats:
 
 - **JSON** - Pretty-printed with syntax highlighting
 - **XML / HTML** - Indented and highlighted
@@ -217,13 +219,18 @@ fetch -vvv httpbin.org/json
 < ...
 ```
 
-The `> `, `< `, and `* ` prefixes make the direction of data instantly clear: outgoing request lines, incoming response lines, and informational/connection details.
+The prefixes identify each type of output:
 
-This is useful for diagnosing latency issues, verifying TLS configuration, and understanding connection behavior.
+- `> ` identifies outgoing request lines.
+- `< ` identifies incoming response lines.
+- `* ` identifies connection information.
+
+Use this output to diagnose latency, verify the TLS configuration, and examine
+the connection.
 
 ### `--dry-run` - Preview Without Sending
 
-Preview the exact request that would be sent without actually making the HTTP call:
+Preview the request without sending it:
 
 ```sh
 fetch --dry-run -vv -j '{"hello":"world"}' httpbin.org/post
@@ -269,7 +276,7 @@ fetch -H "X-Custom: value" httpbin.org/get
 fetch -q name=test -q page=1 httpbin.org/get
 ```
 
-Query parameters are URL-encoded and appended to the URL automatically.
+`fetch` encodes the query parameters and appends them to the URL.
 
 ### Sending Form Data
 
@@ -311,12 +318,13 @@ output:
 fetch --har request.har httpbin.org/json
 ```
 
-HAR files can contain credentials, cookies, and bodies, so handle them as
+HAR files can contain credentials, cookies, and bodies. Treat HAR files as
 sensitive data.
 
 ### Viewing Images
 
-`fetch` can render images directly in terminals that support inline images (Kitty, iTerm2), with a block-character fallback for other terminals.
+`fetch` renders images directly in terminals that support inline images, such
+as Kitty and iTerm2. For other terminals, it uses block characters.
 
 ```sh
 fetch httpbin.org/image/png
@@ -326,7 +334,8 @@ See [Image Rendering](image-rendering.md) for details.
 
 ## Sessions
 
-Sessions let you persist cookies across multiple requests. This is useful for interacting with APIs that use cookie-based authentication:
+Sessions keep cookies for subsequent requests. Use sessions for APIs that use
+cookie authentication:
 
 ```sh
 # Log in - cookies are saved to the "myapi" session

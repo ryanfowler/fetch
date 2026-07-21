@@ -1,8 +1,8 @@
 # Updates
 
-`fetch` can update its own binary from the project's GitHub releases. Use
-`fetch --update` for an explicit update check, or set `auto-update` in the
-configuration file to run update checks in the background.
+`fetch` updates its binary from the project GitHub releases. Use
+`fetch --update` for an update check. To run update checks in the background,
+set `auto-update` in the configuration file.
 
 ## Manual Updates
 
@@ -64,9 +64,9 @@ Before replacing the executable, `fetch` downloads the matching
 downloaded artifact as it streams, and compares the two digests. A mismatch
 aborts the update before installation.
 
-The updater also bounds the release metadata, checksum file, artifact download,
-archive entry count, and unpacked data size, and refuses archive paths that
-would escape the temporary unpack directory.
+The updater limits the size of the release metadata, checksum file, artifact,
+and unpacked data. It also limits the number of archive entries. It rejects an
+archive path that is outside the temporary unpack directory.
 
 ## Permissions
 
@@ -103,8 +103,8 @@ auto-update = false
 values such as `30m`, `1.5h`, `4h`, and `1d`. `false`, `off`, `no`, `never`,
 and `0` disable automatic updates.
 
-Automatic updates run after configuration has been loaded and validated, and
-only for normal request/inspection commands. Metadata commands such as
+Automatic updates run after `fetch` loads and validates the configuration. They
+run only for normal request and inspection commands. Metadata commands such as
 `fetch --help`, `fetch --version`, and `fetch --buildinfo` do not start
 background updates.
 
@@ -114,10 +114,10 @@ When an automatic update is due, `fetch` starts a detached child process with:
 --update --timeout=300 --silent
 ```
 
-The parent command continues without waiting, and the child process has stdin,
-stdout, and stderr detached. The explicit config path from `--config` is passed
-to the child; otherwise the child uses normal config discovery. Background
-update failures are not reported by the parent command.
+The parent command continues without waiting. The child process has detached
+stdin, stdout, and stderr. If you specify `--config`, the child uses that
+configuration path. Otherwise, the child uses normal configuration discovery.
+The parent command does not report background update failures.
 
 ## Cache and Lock Files
 
@@ -140,9 +140,10 @@ Files in this directory include:
 Manual and automatic update attempts both refresh `metadata.json`, including
 `fetch --update --dry-run`.
 
-Explicit `fetch --update` waits for the update lock, up to the shorter of the
-request timeout and 30 seconds. Background auto-update checks use a nonblocking
-lock attempt; if another update is running, the background check is skipped.
+Explicit `fetch --update` waits for the update lock. The wait limit is the
+shorter of the request timeout and 30 seconds. Background update checks do not
+wait for the lock. If another update is in progress, `fetch` skips the
+background check.
 
 ## Proxy and Timeout Behavior
 

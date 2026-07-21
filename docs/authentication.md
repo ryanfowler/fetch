@@ -173,7 +173,7 @@ ca-cert = /path/to/api-ca.crt
 - Certificates and keys must be in PEM format
 - TLS requests reject a private key without a client certificate, including values from config files or `--from-curl`
 - Encrypted private keys are not supported
-- Combined PEM files should have the certificate before the key
+- In a combined PEM file, put the certificate before the key.
 
 ### Example: Self-Signed Certificates
 
@@ -232,10 +232,13 @@ If you need multiple authentication headers, use `-H` for additional headers.
 
 ## Security Considerations
 
-1. **Avoid embedding secrets in scripts** - Use environment variables or secure vaults
-2. **Protect configuration files** - Set appropriate file permissions (`chmod 600`)
-3. **Use HTTPS** - Never send credentials over unencrypted HTTP
-4. **Rotate credentials regularly** - Especially API keys and tokens
+1. **Do not put secrets in scripts.** Use environment variables or secure
+   vaults.
+2. **Protect configuration files.** Set applicable file permissions, such as
+   `chmod 600`.
+3. **Use HTTPS.** Do not send credentials over unencrypted HTTP.
+4. **Replace credentials regularly.** This is especially important for API keys
+   and tokens.
 
 ### Secure Credential Handling
 
@@ -257,7 +260,7 @@ fetch --bearer "$(cat /run/secrets/api-token)" example.com
 
 - Verify credentials are correct
 - Check if the authentication method matches what the server expects
-- Ensure tokens haven't expired
+- Make sure that the tokens are not expired.
 
 ### 403 Forbidden
 
@@ -266,15 +269,18 @@ fetch --bearer "$(cat /run/secrets/api-token)" example.com
 
 ### Certificate Errors with mTLS
 
-- Verify certificate and key match: `openssl x509 -noout -modulus -in cert.crt | openssl md5` should match `openssl rsa -noout -modulus -in key.key | openssl md5`
-- Check certificate expiration: `openssl x509 -noout -dates -in cert.crt`
-- Ensure the CA certificate is correct for the server
+- Make sure that the certificate and key match. The output of
+  `openssl x509 -noout -modulus -in cert.crt | openssl md5` must match the
+  output of `openssl rsa -noout -modulus -in key.key | openssl md5`.
+- Check the certificate expiration:
+  `openssl x509 -noout -dates -in cert.crt`.
+- Make sure that the CA certificate is correct for the server.
 
 ### AWS SigV4 Errors
 
 - Verify `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are set
 - Check the region and service name are correct
-- Ensure your credentials have the required IAM permissions
+- Make sure that your credentials have the necessary IAM permissions.
 - Verify system clock is accurate (signatures are time-sensitive)
 
 ## See Also

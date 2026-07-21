@@ -1,10 +1,11 @@
 # Request Bodies
 
-`fetch` provides multiple options for sending request bodies with different content types.
+`fetch` provides options to send request bodies with different content types.
 
 ## Overview
 
-Payload source options are **mutually exclusive** - you can only use one per request:
+Payload source options are **mutually exclusive**. Use only one source option in
+each request:
 
 | Option            | Content-Type                        | Use Case               |
 | ----------------- | ----------------------------------- | ---------------------- |
@@ -20,7 +21,8 @@ send a body with another method, such as `PUT`.
 
 ## Raw Data
 
-The `-d` or `--data` flag sends raw request body data. Content-Type is auto-detected when reading from files.
+The `-d` or `--data` option sends raw request body data. When it reads a file,
+`fetch` detects the Content-Type.
 
 ### Inline Data
 
@@ -44,8 +46,8 @@ cat data.json | fetch -d @- example.com/api
 
 ### Content-Type Detection
 
-When using `@filename`, the Content-Type is detected from the file extension.
-Multipart file parts use the same policy. Some examples are:
+With `@filename`, `fetch` detects the Content-Type from the file extension.
+Multipart file parts use the same policy. The table shows examples:
 
 | Extension        | Content-Type               |
 | ---------------- | -------------------------- |
@@ -148,7 +150,7 @@ fetch -f username=john -f password=secret example.com/login
 
 ### With Special Characters
 
-Values are automatically URL-encoded:
+`fetch` automatically URL-encodes the values:
 
 ```sh
 fetch -f "message=Hello World!" -f "email=user@example.com" example.com/contact
@@ -168,7 +170,8 @@ username=john&password=secret
 
 ## Multipart Forms
 
-The `-F` or `--multipart` flag sends multipart form data, typically used for file uploads.
+The `-F` or `--multipart` option sends multipart form data. Use this option for
+file uploads.
 
 ### Text Fields
 
@@ -185,7 +188,8 @@ fetch -F file=@document.pdf example.com/upload
 fetch -F avatar=@photo.jpg -F name=John example.com/profile
 ```
 
-When uploading a file by path, only the file's base name is sent in the multipart `filename` parameter.
+When you upload a file by path, `fetch` sends only the base name in the
+multipart `filename` parameter.
 
 ### Multiple Files
 
@@ -206,7 +210,7 @@ fetch \
 
 ### Home Directory Expansion
 
-The `~` is expanded to your home directory:
+`fetch` expands `~` to your home directory:
 
 ```sh
 fetch -F config=@~/config.json example.com/settings
@@ -233,7 +237,7 @@ fetch -j '{"name": "template"}' --edit example.com/api
 
 ### Editor Selection
 
-The editor is selected in this order:
+`fetch` selects the editor in this order:
 
 1. `VISUAL` environment variable
 2. `EDITOR` environment variable
@@ -272,9 +276,9 @@ fetch -d @~/Documents/data.txt -m PUT example.com
 
 ## Method Inference
 
-When a request body flag is provided without `--method`, `fetch` uses `POST`.
-An explicit method always wins, so use `-m PUT`, `-m PATCH`, or even `-m GET`
-when a body must be sent with a different method.
+If you do not specify `--method`, a request-body option sets the method to
+`POST`. An explicit method takes precedence. Use `-m PUT`, `-m PATCH`, or
+`-m GET` to send the body with a different method.
 
 ```sh
 # Inferred POST
@@ -286,7 +290,7 @@ fetch -m PUT -j '{"data": true}' example.com
 
 ## Large Files
 
-For large file uploads, consider:
+For large file uploads, use these settings:
 
 1. **Streaming**: `fetch` streams file content rather than loading it all into memory
 2. **Timeout**: Set appropriate timeouts with `--timeout`

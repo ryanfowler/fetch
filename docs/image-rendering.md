@@ -1,6 +1,6 @@
 # Image Rendering
 
-`fetch` can render images directly in your terminal when fetching image URLs.
+`fetch` renders images directly in the terminal.
 
 ## Image Control
 
@@ -32,17 +32,19 @@ These formats are decoded without external tools:
 
 ### With External Adapters
 
-When `--image external` is set, these additional formats are supported if you have the required tools installed:
+If you set `--image external`, `fetch` supports these additional formats when
+the necessary tools are installed:
 
 - **AVIF** - `.avif`
 - **HEIF/HEIC** - `.heif`, `.heic`
 - **GIF** - `.gif` (static frame)
 - **BMP** - `.bmp`
-- **And many more...**
+
+The installed adapters can support other formats.
 
 ## Terminal Protocols
 
-`fetch` automatically detects your terminal and uses the best available image protocol.
+`fetch` detects the terminal and selects the first applicable image protocol.
 
 ### Kitty Graphics Protocol
 
@@ -84,7 +86,8 @@ Fallback rendering using Unicode block characters (▀▄█). Works everywhere 
 
 ## External Adapters
 
-When `--image external` is enabled and built-in decoders can't handle an image format, `fetch` tries external tools in this order:
+If the built-in decoders do not support an image format, set `--image
+external`. `fetch` tries these external tools in the specified order:
 
 ### 1. VIPS (`vips`)
 
@@ -139,7 +142,8 @@ image = external
 
 ## Image Sizing
 
-Images are automatically resized to fit within 80% of the terminal height while maintaining aspect ratio. This ensures images don't overwhelm the terminal display.
+`fetch` resizes images to a maximum of 80% of the terminal height. It keeps the
+image aspect ratio.
 
 ## Examples
 
@@ -168,30 +172,34 @@ fetch --image off example.com/image.jpg
 1. **Check terminal support**: Not all terminals support inline images
 2. **Verify format**: Built-in decoders handle JPEG, PNG, TIFF, and WebP by default
 3. **Install adapters**: Install VIPS, ImageMagick, or FFmpeg and use `--image external` for more formats
-4. **Check terminal size**: Very small terminals may not render properly
+4. **Check the terminal size**: Increase the size if the image does not render.
 
 ### Poor Quality
 
-1. **Use a native protocol terminal**: Kitty, Ghostty, or iTerm2 provide best quality
-2. **Check image dimensions**: Very large images are resized
+1. **Use a native-protocol terminal**: Kitty, Ghostty, and iTerm2 give the
+   highest quality.
+2. **Check image dimensions**: `fetch` resizes large images.
 3. **Block character fallback**: Quality is limited with Unicode blocks
 
 ### Colors Look Wrong
 
-1. **Terminal color support**: Ensure your terminal supports 24-bit color
-2. **tmux/screen**: May reduce color depth
+1. **Terminal color support**: Make sure that the terminal supports 24-bit
+   color.
+2. **tmux or screen**: Test without the terminal multiplexer because it can
+   reduce the color depth.
 3. **Try default decoding**: `--image auto`
 
 ### Image Dimensions Too Large
 
-`fetch` limits images to 8192x8192 pixels maximum to prevent memory issues. Larger images will fail to decode with a "dimensions are too large" error.
+`fetch` limits images to 8192 x 8192 pixels to prevent memory problems. It
+reports a `dimensions are too large` error for larger images.
 
 ## Limitations
 
-- **Animated GIFs**: Only the first frame is displayed
-- **Maximum size**: 8192x8192 pixels
-- **Memory limit**: Images are loaded into memory for processing
-- **Terminal multiplexers**: tmux and screen may interfere with image protocols
+- **Animated GIFs**: `fetch` displays only the first frame.
+- **Maximum size**: The limit is 8192 x 8192 pixels.
+- **Memory limit**: `fetch` loads images into memory for processing.
+- **Terminal multiplexers**: tmux and screen can interfere with image protocols.
 
 ## See Also
 

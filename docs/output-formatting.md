@@ -141,7 +141,7 @@ available article metadata such as `title`, `byline`, `site_name`,
 resolved against that URL.
 
 If the response is already `text/markdown` or `text/x-markdown`, its Markdown
-body is used directly and only `url` is added as frontmatter.
+`fetch` uses the body directly and adds only `url` as frontmatter.
 
 Article extraction is a body transformation rather than terminal presentation:
 `--format`, `--color`, and `--pager` only control how the resulting Markdown is
@@ -183,7 +183,7 @@ fetch example.com/README.md
 Features:
 
 - Column alignment for readability
-- Vertical "record view" for wide data that doesn't fit terminal width
+- Vertical "record view" for data that does not fit the terminal width
 
 ```sh
 fetch example.com/data.csv
@@ -242,7 +242,7 @@ Without schema (generic parsing):
 3: "john@example.com"
 ```
 
-With schema (via `--proto-file` or `--proto-desc`):
+With a schema (with `--proto-file` or `--proto-desc`):
 
 ```json
 {
@@ -262,7 +262,7 @@ Features:
 
 - Streaming output as events arrive
 - SSE-shaped `event:` and `data:` output
-- JSON `data:` payloads are formatted and syntax-highlighted
+- `fetch` formats and highlights JSON `data:` payloads
 - Request timeouts still apply to long-running event streams
 
 ```sh
@@ -279,10 +279,12 @@ event: message
 data: { "text": "Hi there!", "user": "jane" }
 ```
 
-When color is enabled, `event` and `data` labels are highlighted, and JSON values
-inside `data:` use the same syntax highlighting as JSON responses. In automatic
-compression mode, compressed SSE responses are retried without `Accept-Encoding`
-so proxies and servers are less likely to buffer events before delivery.
+When color is enabled, `fetch` highlights `event` and `data` labels. It applies
+the JSON theme to JSON values inside `data:`. In automatic compression mode,
+`fetch` retries compressed SSE responses to `GET` and `HEAD` requests without
+`Accept-Encoding`. For other methods, it keeps the compressed response and gives
+a warning. For immediate SSE streaming with another method, use
+`--compress off`.
 
 ### NDJSON / JSON Lines
 
@@ -309,7 +311,8 @@ Output:
 
 **Content-Type**: `image/*`
 
-Images are rendered directly in the terminal. See [Image Rendering](image-rendering.md) for details.
+`fetch` renders images directly in the terminal. See [Image
+Rendering](image-rendering.md) for details.
 
 ## Output to File
 
@@ -321,9 +324,9 @@ Write response body to a file:
 fetch -o response.json example.com/api/data
 ```
 
-Formatting is disabled when writing to a file, but compression decoding is still
-enabled by default. If the response uses `Content-Encoding` for a `.gz`, `.br`,
-or `.zst` asset, use `--compress off` for byte-for-byte downloads.
+When writing to a file, `fetch` disables formatting. By default, it continues to
+decode compression. If the response uses `Content-Encoding` for a `.gz`, `.br`,
+or `.zst` asset, use `--compress off` for a byte-for-byte download.
 
 ### `-o -` (Stdout)
 
@@ -362,7 +365,9 @@ fetch -o output.json --clobber example.com/data
 
 ## Pager
 
-By default, when stdout is a terminal, `fetch` pipes response body output through a pager for easier navigation. Image responses bypass the pager so native terminal image protocols are interpreted by the terminal.
+By default, `fetch` sends response bodies to a pager when stdout is a terminal.
+Image responses bypass the pager. As a result, the terminal can interpret its native
+image protocols.
 
 ### Pager Mode
 
@@ -374,7 +379,7 @@ fetch --pager off example.com/large-response
 
 ### Pager Environment
 
-When paging is enabled, fetch uses `$PAGER` if it is set. Set `NO_PAGER` to
+When paging is enabled, `fetch` uses `$PAGER` if it is set. Set `NO_PAGER` to
 disable the default `auto` pager. If `$PAGER` is unset, fetch falls back to
 `less -FIRX`. When `$LESS` is set, fetch runs `less` without adding its default
 flags so your `LESS` options apply. `$PAGER` is split with POSIX shell-style
@@ -386,7 +391,7 @@ The fallback `less -FIRX` flags are:
 - `-F` - Quit if output fits on screen
 - `-I` - Case-insensitive search
 - `-R` - Handle ANSI colors
-- `-X` - Don't clear screen on exit
+- `-X` - Do not clear the screen on exit
 
 ## Binary Detection
 

@@ -28,8 +28,8 @@ UDP DNS queries advertise EDNS(0) and retry truncated responses over TCP.
 
 ### DNS over TCP
 
-Use the `tcp://` scheme for plain DNS over TCP. This avoids UDP truncation
-entirely because responses are streamed with a 2-byte length prefix.
+Use the `tcp://` scheme for plain DNS over TCP. TCP uses a 2-byte length prefix
+and prevents UDP truncation.
 
 ```sh
 fetch --dns-server tcp://1.1.1.1 example.com
@@ -39,8 +39,8 @@ fetch --dns-server tcp://1.1.1.1:53 example.com
 ### DNS over TLS (DoT)
 
 Use the `tls://` or `dot://` scheme for DNS over TLS. The default port is 853.
-Both IP addresses and hostnames are accepted; hostnames are resolved with the
-system resolver and used for TLS server name verification.
+You can specify an IP address or a hostname. The system resolver resolves
+hostnames. `fetch` uses the hostname to verify the TLS server name.
 
 ```sh
 fetch --dns-server tls://1.1.1.1 example.com
@@ -50,7 +50,8 @@ fetch --dns-server tls://dns.google:853 example.com
 
 ### DNS over QUIC (DoQ)
 
-Use the `quic://` or `doq://` scheme for DNS over QUIC. The default port is 853. Both IP addresses and hostnames are accepted.
+Use the `quic://` or `doq://` scheme for DNS over QUIC. The default port is 853.
+You can specify an IP address or a hostname.
 
 ```sh
 fetch --dns-server quic://1.1.1.1 example.com
@@ -83,9 +84,17 @@ fetch --inspect-dns example.com
 fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 ```
 
-Request-only CLI flags warn that no HTTP request will be sent and those flags have no effect when used with `--inspect-dns`; config-file defaults do not trigger this warning.
+Request-only CLI flags have no effect with `--inspect-dns`. They cause a warning
+that `fetch` does not send an HTTP request. Configuration-file defaults do not
+cause this warning.
 
-The output shows the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, address count, record count, lookup duration, and per-record TTLs. UDP DNS inspection advertises EDNS(0) and retries truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, `fetch` warns that the results are incomplete and exits with a non-zero status.
+The output identifies the resolver and shows available A, AAAA, CNAME, TXT, MX,
+NS, SOA, SRV, CAA, SVCB, and HTTPS records. It also shows each record TTL, the
+address and record counts, and the lookup duration.
+
+UDP inspection advertises EDNS(0). It retries a truncated UDP response with TCP.
+If the TCP retry fails, `fetch` warns that the results are incomplete and exits
+with a nonzero status.
 
 ### Configuration File
 
@@ -116,8 +125,8 @@ fetch --proxy http://proxy.example.com:8080 example.com
 fetch --proxy https://secure-proxy.example.com:8443 example.com
 ```
 
-HTTPS proxy TLS is configured separately from origin TLS. The proxy handshake
-uses platform verification, and origin `--ca-cert`, `--cert`/`--key`, and
+`fetch` configures HTTPS proxy TLS separately from origin TLS. The proxy
+handshake uses platform verification. Origin `--ca-cert`, `--cert`/`--key`, and
 `--insecure` settings do not apply to the proxy.
 
 ### SOCKS5 Proxy
@@ -145,10 +154,9 @@ export NO_PROXY="localhost,127.0.0.1,192.168.0.0/16,.internal.com"
 fetch example.com  # Uses proxy from environment
 ```
 
-Proxy variables also support lowercase forms: `http_proxy`, `https_proxy`,
-`all_proxy`, and `no_proxy`. Uppercase names are checked before lowercase names
-for each variable, except uppercase `HTTP_PROXY` is ignored when
-`REQUEST_METHOD` is set.
+Proxy variables also have lowercase forms: `http_proxy`, `https_proxy`,
+`all_proxy`, and `no_proxy`. `fetch` checks each uppercase name before its
+lowercase name. It ignores uppercase `HTTP_PROXY` if `REQUEST_METHOD` is set.
 
 Proxy precedence is: an explicit `--proxy` or configured `proxy = ...` value,
 then scheme-specific environment variables (`HTTP_PROXY` for HTTP requests and
@@ -171,7 +179,8 @@ proxy = socks5://internal-proxy:1080
 
 ### `--unix`
 
-Connect via Unix domain socket instead of TCP. Available on Unix-like systems only.
+Connect through a Unix domain socket instead of TCP. This option is available
+only on Unix-like systems.
 
 ### Docker API
 
@@ -187,7 +196,8 @@ fetch --unix /var/run/myservice.sock http://localhost/api/status
 fetch --unix ~/myapp.sock http://localhost/health
 ```
 
-**Note**: The hostname in the URL is ignored when using Unix sockets; the socket path determines the destination.
+With a Unix socket, the socket path sets the destination. `fetch` ignores the
+hostname in the URL.
 
 ## HTTP Versions
 
@@ -216,7 +226,7 @@ the same automatic direct HTTPS path. Prompt fresh HTTPS/SVCB results are tried
 before cached entries, while cached entries can race slower HTTPS-record
 discovery so a learned `Alt-Svc` alternative can be used on later requests.
 
-Setting `--http 1`, `--http 2`, or `--http 3` forces that protocol; it does not
+Setting `--http 1`, `--http 2`, or `--http 3` forces that protocol. It does not
 set a version cap. Use `--http 1` or `--http 2` to opt out of automatic HTTP/3.
 
 ### HTTP/1.1
@@ -267,7 +277,7 @@ By default, `fetch` negotiates the best available version:
    usable
 4. Races QUIC setup against TCP/TLS when a usable `h3` candidate is discovered
    before TCP/TLS wins
-5. Otherwise offers HTTP/2 via ALPN
+5. Otherwise, offers HTTP/2 with ALPN
 6. Falls back to HTTP/1.1 if needed
 
 ## TLS Configuration
@@ -335,7 +345,9 @@ Output includes:
 
 Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
 
-Request-only CLI flags (e.g. `--data`, `--timing`, `--grpc`) warn that no HTTP request will be sent and those flags have no effect when used with `--inspect-tls`; config-file defaults do not trigger this warning.
+Request-only CLI flags, such as `--data`, `--timing`, and `--grpc`, have no
+effect with `--inspect-tls`. They cause a warning that `fetch` does not send an
+HTTP request. Configuration-file defaults do not cause this warning.
 
 `--dns-server` applies to TLS inspection too, so certificate diagnostics can use
 the same UDP or DNS-over-HTTPS resolver override as normal requests. When
@@ -401,9 +413,10 @@ Compression modes:
 Output files receive decoded/decompressed bodies by default too. Use
 `--compress off` for byte-for-byte downloads of `.gz`, `.br`, or `.zst` assets.
 
-For SSE (`text/event-stream`) responses in `auto` mode, `fetch` retries without
-`Accept-Encoding` when the server replies with compressed content. This avoids
-common buffering behavior that prevents events from appearing as they arrive.
+For SSE (`text/event-stream`) responses in `auto` mode, `fetch` retries
+compressed responses to `GET` and `HEAD` requests without `Accept-Encoding`.
+For other methods, it keeps the compressed response and gives a warning. For
+immediate SSE streaming with another method, use `--compress off`.
 
 Using `off` is useful when:
 
@@ -495,14 +508,17 @@ streams.
 
 ### `--connect-timeout SECONDS`
 
-Set a timeout for just the connection phase (DNS resolution, TCP connect, TLS handshake):
+Set a timeout for the connection phase. This phase includes DNS resolution, the
+TCP connection, and the TLS handshake:
 
 ```sh
 fetch --connect-timeout 5 example.com
 fetch --connect-timeout 5 --timeout 30 example.com  # Both timeouts
 ```
 
-This is useful for fast-failing on unreachable hosts while allowing large responses to transfer slowly. The connect timeout is independent of `--timeout` — both can be set simultaneously, and `--timeout` still caps the entire request.
+Use this option to stop connection attempts to unreachable hosts quickly. A
+large response can continue to transfer after the connect timeout. You can set
+both timeout options. The `--timeout` value still limits the complete request.
 
 ### Configuration File
 
@@ -585,7 +601,7 @@ fetch --session staging https://staging.example.com/login
 
 ### Configuration File
 
-Set session names per-host so you don't need `--session` every time:
+Set session names for each host to omit `--session` from subsequent commands:
 
 ```ini
 # Global default session
@@ -611,7 +627,8 @@ Sessions are stored as JSON in the user's cache directory:
 - **Expired cookies**: Cookies with an explicit expiry in the past are filtered out on load.
 - **Session cookies** (no explicit expiry): Persist across invocations since the session is explicitly named.
 - **Cookie domain matching**: Delegated to the Rust cookie store, which implements RFC 6265 behavior.
-- **Atomic writes**: Session files are written atomically (temp file + rename) to avoid corruption.
+- **Atomic writes**: `fetch` writes a temporary file and then renames it. This
+  operation prevents file corruption.
 - **Name validation**: Only `[a-zA-Z0-9_-]` characters are allowed to prevent path traversal.
 
 ## Debugging Network Issues
@@ -626,25 +643,31 @@ fetch --har request.har https://api.example.com/users
 fetch -o response.json --har request.har https://api.example.com/users
 ```
 
-The destination is reserved before network I/O and atomically installed after
-the response completes. It honors `--clobber`. Redirect, retry, and
-authentication challenge exchanges are not included; only the final exchange
-is recorded. Captures larger than 16 MiB are counted but omitted from the HAR.
+`fetch` reserves the destination before network I/O. It installs the file
+atomically after the response. The operation obeys `--clobber`. The HAR records
+only the final exchange. It does not include redirect, retry, or authentication
+challenge exchanges. For captures larger than 16 MiB, it records the size but
+omits the content.
 
 HAR files may contain authorization headers, cookies, request bodies, and
 response bodies. Store and share them as sensitive data.
 
 ### Timing Waterfall
 
-`--timing` (or `-T`) displays a timing waterfall chart after the response, showing how time was spent across DNS resolution, TCP connection setup, TLS handshake, time to first byte, and body download:
+`--timing` (or `-T`) displays a timing waterfall chart after the response. The
+chart shows DNS resolution, TCP connection, TLS handshake, time to first byte,
+and body-download phases:
 
 ```sh
 fetch --timing https://example.com
 ```
 
-The chart adapts to the request: TLS is omitted for plaintext HTTP, HTTP/3 reports connection setup as QUIC, and connection phases are omitted when an existing pooled connection is reused. Combine with `-vvv` for both inline debug text and the waterfall summary.
+The chart omits TLS for plaintext HTTP. It shows the HTTP/3 connection phase as
+QUIC. If `fetch` reuses a pooled connection, the chart omits the connection
+phases. Combine this option with `-vvv` to show debug text and the waterfall
+summary.
 
-Can also be configured in the [configuration file](configuration.md):
+You can also enable the chart in the [configuration file](configuration.md):
 
 ```ini
 timing = true
