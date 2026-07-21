@@ -41,7 +41,7 @@ fetch -X DELETE example.com/resource/123
 
 ### `-H, --header NAME:VALUE`
 
-Set custom headers. Can be used multiple times.
+Set custom headers. Repeat this option to set multiple headers.
 
 ```sh
 fetch -H "Authorization: Bearer token" example.com
@@ -50,7 +50,8 @@ fetch -H "X-Custom: value" -H "Accept: application/json" example.com
 
 ### `-q, --query KEY=VALUE`
 
-Append query parameters to the URL. Can be used multiple times.
+Append query parameters to the URL. Repeat this option to append multiple
+parameters.
 
 ```sh
 fetch -q page=1 -q limit=50 example.com
@@ -58,10 +59,10 @@ fetch -q page=1 -q limit=50 example.com
 
 ## Request Body Options
 
-Payload source options are mutually exclusive - only one of `--data`, `--json`,
-`--xml`, `--form`, or `--multipart` can be used per request. These options, and
-`--edit`, default the request method to `POST` when `--method` is omitted; use
-`-m`/`--method` to send the body with another method.
+Payload source options are mutually exclusive. Use only one of `--data`,
+`--json`, `--xml`, `--form`, or `--multipart` in a request. These options and
+`--edit` set the default request method to `POST`. Use `-m` or `--method` to
+send the body with another method.
 
 ### `-d, --data [@]VALUE`
 
@@ -93,7 +94,7 @@ fetch -x @data.xml -m PUT example.com
 
 ### `-f, --form KEY=VALUE`
 
-Send a URL-encoded form body. Can be used multiple times.
+Send a URL-encoded form body. Repeat this option to send multiple fields.
 
 ```sh
 fetch -f username=john -f password=secret example.com/login
@@ -101,7 +102,8 @@ fetch -f username=john -f password=secret example.com/login
 
 ### `-F, --multipart NAME=[@]VALUE`
 
-Send a multipart form body. Use `@` prefix for file uploads. Can be used multiple times.
+Send a multipart form body. Use the `@` prefix for file uploads. Repeat this
+option to send multiple fields.
 
 ```sh
 fetch -F hello=world -F file=@document.pdf example.com/upload
@@ -109,7 +111,8 @@ fetch -F hello=world -F file=@document.pdf example.com/upload
 
 ### `-e, --edit`
 
-Open an editor to modify the request body before sending. Uses `VISUAL` or `EDITOR` environment variables.
+Open an editor to modify the request body before you send it. `fetch` uses the
+`VISUAL` or `EDITOR` environment variable.
 
 ```sh
 fetch --edit example.com
@@ -129,8 +132,9 @@ fetch --basic username:password example.com
 
 ### `--digest USER:PASS`
 
-HTTP Digest Authentication. Uses a challenge-response handshake to avoid sending credentials in plain text.
-Supports challenges without `qop` and challenges with `qop=auth`; unsupported digest parameters are reported as diagnostics.
+Use HTTP Digest Authentication. A challenge-response handshake prevents the
+transmission of credentials in plain text. `fetch` supports challenges without
+`qop` and challenges with `qop=auth`. It reports unsupported digest parameters.
 
 ```sh
 fetch --digest username:password example.com
@@ -146,7 +150,9 @@ fetch --bearer mysecrettoken example.com
 
 ### `--aws-sigv4 REGION/SERVICE`
 
-Sign requests with AWS Signature V4. Requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables. Temporary credentials can also set `AWS_SESSION_TOKEN`.
+Sign requests with AWS Signature V4. Set the `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` environment variables. For temporary credentials, also
+set `AWS_SESSION_TOKEN`.
 
 ```sh
 fetch --aws-sigv4 us-east-1/s3 s3.amazonaws.com/bucket/key
@@ -217,22 +223,24 @@ fetch -o output.json --clobber example.com/data
 Write a HAR 1.2 sidecar containing the final HTTP exchange while preserving the
 normal response output. The capture includes the effective request, finalized
 headers and streamed request body, decoded response body, remote IP, and timing
-information. Unary gRPC is supported; protobuf frames are stored as base64.
+information. Unary gRPC is supported. `fetch` stores protobuf frames as base64.
 
 ```sh
 fetch --har request.har https://api.example.com/users
 fetch -o response.json --har request.har https://api.example.com/users
 ```
 
-The destination is reserved before the request, is installed atomically after
-the response completes, and follows `--clobber`. `PATH` cannot be `-` or match
+`fetch` reserves the destination before the request and installs the file
+atomically after the response. The operation obeys `--clobber`. `PATH` cannot
+be `-` or match
 `--output`. WebSocket, inspection, gRPC discovery, and `--dry-run` modes are not
 supported. The initial HAR contains only the final exchange after redirects,
 retries, or authentication challenges.
 
-HAR files may contain credentials, cookies, request bodies, and response bodies.
-Treat them as sensitive data. Body capture is bounded at 16 MiB; larger bodies
-are counted completely but their text is omitted with a truncation comment.
+HAR files can contain credentials, cookies, request bodies, and response bodies.
+Treat HAR files as sensitive data. Body capture has a limit of 16 MiB. For a
+larger body, `fetch` records its size and replaces its text with a truncation
+comment.
 
 ### `--copy`
 
@@ -258,7 +266,7 @@ Do not print the response body. Useful for checking status codes, viewing header
 
 `--discard` still reads the response body to completion. Use `-m HEAD` when you want to ask the server to avoid transferring a response body.
 
-Cannot be combined with `--output`, `--remote-name`, or `--copy`.
+Do not use this option with `--output`, `--remote-name`, or `--copy`.
 
 ```sh
 fetch --discard example.com
@@ -293,7 +301,7 @@ to 16 MiB. The flag cannot be combined with gRPC, WebSocket, `--discard`,
 mode's HTML-oriented default.
 
 `--format`, `--color`, and `--pager` control terminal presentation of the
-generated Markdown; they do not disable article extraction. Output files and
+generated Markdown. They do not disable article extraction. Output files and
 non-formatted pipes receive raw, uncolored Markdown.
 
 ### `--format OPTION`
@@ -342,7 +350,7 @@ fetch --pager off example.com
 
 When paging is enabled, fetch uses `$PAGER` if it is set. Set `NO_PAGER` to
 disable the default `auto` pager. If `$PAGER` is unset, fetch falls back to
-`less -FIRX`; when `$LESS` is set, fetch runs `less` without adding its default
+`less -FIRX`. When `$LESS` is set, `fetch` runs `less` without adding its default
 flags so your `LESS` options apply. `$PAGER` is split with POSIX shell-style
 quoting, but fetch launches the pager directly and does not interpret shell
 operators such as pipes or redirects.
@@ -351,9 +359,12 @@ operators such as pipes or redirects.
 
 ### `-S, --session NAME`
 
-Use a named session for persistent cookie storage across invocations. Cookies set by servers are saved to disk and automatically sent on subsequent requests using the same session name.
+Use a named session to keep cookies for subsequent commands. `fetch` saves
+server cookies to disk. It sends the cookies in subsequent requests that use
+the same session name.
 
-Session names must contain only alphanumeric characters, hyphens, and underscores (`[a-zA-Z0-9_-]`).
+Use only alphanumeric characters, hyphens, and underscores in session names
+(`[a-zA-Z0-9_-]`).
 
 ```sh
 # First request — server sets cookies, they get saved
@@ -368,7 +379,8 @@ Session files are stored in the user's cache directory:
 - **Linux**: `~/.cache/fetch/sessions/<NAME>.json`
 - **macOS**: `~/Library/Caches/fetch/sessions/<NAME>.json`
 
-Can also be configured per-host in the [configuration file](configuration.md).
+You can also configure sessions for each host in the [configuration
+file](configuration.md).
 
 ## Network Options
 
@@ -384,7 +396,7 @@ fetch --connect-timeout 5 --timeout 30 example.com
 ### `-t, --timeout SECONDS`
 
 Request timeout in seconds. Accepts decimal values. The timeout covers the full
-request, including response body streaming; it is also enforced for SSE, NDJSON,
+request, including response body streaming. It also applies to SSE, NDJSON,
 and gRPC streams.
 
 ```sh
@@ -397,7 +409,7 @@ fetch --timeout 2.5 example.com
 Maximum automatic redirects. Default: `10`. Use `0` to disable.
 
 ```sh
-fetch --redirects 0 example.com   # Don't follow redirects
+fetch --redirects 0 example.com   # Do not follow redirects
 fetch --redirects 10 example.com
 ```
 
@@ -405,9 +417,12 @@ fetch --redirects 10 example.com
 
 Maximum number of retries for transient failures. Default: `0` (no retries).
 
-Retries occur on connection errors and retryable status codes (429, 502, 503, 504). Non-retryable errors (4xx, TLS certificate errors) are not retried. Uses exponential backoff with jitter between attempts.
+`fetch` retries connection errors and status codes 429, 502, 503, and 504. It
+does not retry other 4xx errors or TLS certificate errors. Between attempts, it
+uses exponential backoff with jitter.
 
-Only the final attempt's response body is written to stdout. Retry notifications are printed to stderr (suppressed with `--silent`).
+`fetch` writes only the final response body to stdout. It writes retry
+notifications to stderr. Use `--silent` to hide these notifications.
 
 ```sh
 fetch --retry 3 example.com
@@ -418,7 +433,11 @@ fetch --retry 2 --retry-delay 0.5 example.com
 
 Initial delay between retries in seconds. Default: `1`. Accepts decimal values.
 
-The actual delay uses exponential backoff (delay doubles each attempt) with ±25% jitter. The effective delay is capped at 30 seconds. If the server sends a `Retry-After` header, that value is used when it exceeds the computed delay, but it is also capped at 30 seconds. A warning is emitted when `Retry-After` is clamped unless `--silent` is enabled. An overall `--timeout` remains the final upper bound.
+The delay doubles after each attempt and includes ±25% jitter. The maximum delay
+is 30 seconds. If the server sends a larger `Retry-After` value, `fetch` uses
+that value up to 30 seconds. It gives a warning if it reduces `Retry-After` to
+30 seconds. Use `--silent` to hide this warning. The overall `--timeout` value
+continues to limit all attempts.
 
 ```sh
 fetch --retry 3 --retry-delay 2 example.com
@@ -448,7 +467,18 @@ fetch --dns-server https://1.1.1.1/dns-query example.com
 
 ### `--inspect-dns`
 
-Inspect DNS resolution for the URL hostname only (no HTTP request is made). Displays the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, along with per-record TTLs, address count, record count, and lookup duration. Supports all `--dns-server` transports. UDP DNS inspection advertises EDNS(0) and retries truncated UDP responses over TCP; if TCP fallback cannot complete the lookup, `fetch` warns that the results are incomplete and exits with a non-zero status. Request-only CLI flags warn that no HTTP request will be sent and those flags have no effect; config-file defaults do not trigger this warning.
+Inspect DNS resolution for the URL hostname. This operation does not make an
+HTTP request. The output identifies the resolver and shows available A, AAAA,
+CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records. It also shows each
+record TTL, the address and record counts, and the lookup duration.
+
+All `--dns-server` transports are supported. UDP inspection advertises EDNS(0).
+It retries a truncated UDP response with TCP. If the TCP retry fails, `fetch`
+warns that the results are incomplete and exits with a nonzero status.
+
+Request-only CLI flags have no effect with `--inspect-dns`. They cause a warning
+that `fetch` does not send an HTTP request. Configuration-file defaults do not
+cause this warning.
 
 ```sh
 fetch --inspect-dns example.com
@@ -508,11 +538,11 @@ fetch --min-tls 1.2 --max-tls 1.2 example.com
 
 Encrypted Client Hello mode. Values: `auto`, `on`, `off`. Default: `off`.
 
-- **`auto`** — Use ECH if the server advertises it via DNS HTTPS/SVCB records.
+- **`auto`** — Use ECH if the server advertises it in DNS HTTPS/SVCB records.
   Falls back to GREASE ECH when no real config is found. If the server
   rejects the offer, the connection proceeds gracefully.
-- **`on`** — Require ECH. Errors if the server doesn't advertise ECH in DNS,
-  and fails if the server rejects the offer.
+- **`on`** — Require ECH. `fetch` reports an error if the server does not
+  advertise ECH in DNS or rejects the offer.
 - **`off`** — Never use ECH.
 
 ECH requires TLS 1.3 and is incompatible with `--min-tls 1.2`.
@@ -526,7 +556,15 @@ See [Encrypted Client Hello](ech.md) for details.
 
 ### `--inspect-tls`
 
-Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. With `--http 3`, inspection uses a QUIC handshake and offers `h3` ALPN. Request-only CLI flags (e.g. `--data`, `--timing`, `--grpc`) warn that no HTTP request will be sent and those flags have no effect; config-file defaults do not trigger this warning.
+Inspect the TLS certificate chain with a TLS handshake. This operation does not
+make an HTTP request. The output shows the TLS version, cipher suite, ALPN
+protocol, certificate chain and expiry status, Subject Alternative Names
+(SANs), and OCSP staple status. Use an HTTPS URL. With `--http 3`, inspection
+uses a QUIC handshake and offers `h3` ALPN.
+
+Request-only CLI flags have no effect with `--inspect-tls`. They cause a warning
+that `fetch` does not send an HTTP request. Configuration-file defaults do not
+cause this warning.
 
 ```sh
 fetch --inspect-tls example.com
@@ -578,7 +616,7 @@ also use the normal ALPN path.
 a maximum version. `--http 2` with a plain `http://` URL is only supported for
 gRPC requests, where `fetch` uses h2c (HTTP/2 over cleartext) for local
 plaintext servers. Use `--http 1` or `--http 2` to opt out of automatic
-HTTP/3; forced `--http 3` remains strict and does not fall back to TCP.
+HTTP/3. Forced `--http 3` remains strict and does not fall back to TCP.
 
 ```sh
 fetch --http 1 example.com
@@ -602,9 +640,10 @@ Control response compression negotiation. Values: `auto`, `br`/`brotli`, `gzip`,
 Output files also receive decoded/decompressed bodies by default. Use
 `--compress off` for byte-for-byte downloads of `.gz`, `.br`, or `.zst` assets.
 
-In `auto` mode, compressed SSE (`text/event-stream`) responses are retried
-without `Accept-Encoding` so streaming events can be delivered promptly instead
-of being buffered by compression.
+In `auto` mode, `fetch` retries compressed SSE (`text/event-stream`) responses
+to `GET` and `HEAD` requests without `Accept-Encoding`. For other methods, it
+keeps the compressed response and gives a warning. For immediate SSE streaming
+with another method, use `--compress off`.
 
 ```sh
 fetch --compress br example.com
@@ -616,7 +655,7 @@ fetch --compress off example.com
 
 ### `-r, --range RANGE`
 
-Request specific byte ranges. Can be used multiple times.
+Request specific byte ranges. Repeat this option to request multiple ranges.
 
 ```sh
 fetch -r 0-1023 example.com/file.bin
@@ -627,7 +666,7 @@ fetch -r 0-499 -r 1000-1499 example.com/file.bin
 
 ### `-v, --verbose`
 
-Increase output verbosity. Can be stacked.
+Increase output verbosity. Repeat `v` to increase the level.
 
 - `-v` - Show response headers
 - `-vv` - Show request and response headers with `> ` / `< ` prefixes
@@ -642,7 +681,10 @@ fetch -vvv example.com
 
 ### `-T, --timing`
 
-Display a timing waterfall chart after the response. Shows DNS, TCP, TLS, TTFB, and body download phases as a proportional bar chart. HTTP/3 reports connection setup as QUIC. Works independently of verbosity. Phases that don't apply (e.g., TLS for plaintext HTTP or connection phases for reused connections) are omitted.
+Display a timing waterfall chart after the response. The proportional bars show
+DNS, TCP, TLS, time to first byte (TTFB), and body-download phases. HTTP/3 shows
+the connection phase as QUIC. The chart does not depend on the verbosity level.
+It omits phases that do not apply, such as TLS for plaintext HTTP.
 
 ```sh
 fetch --timing https://example.com
@@ -660,7 +702,7 @@ fetch -s example.com
 
 ### `--ignore-status`
 
-HTTP 4xx/5xx responses exit nonzero by default; use `--ignore-status` to keep
+HTTP 4xx/5xx responses exit nonzero by default. Use `--ignore-status` to keep
 the exit code at 0 when the request completes.
 
 ```sh
@@ -683,8 +725,8 @@ Use `--ws-interactive auto|on|off` to control the terminal prompt.
 Use `--ws-message-mode auto|text|binary` to control whether outgoing messages
 are sent as text or binary WebSocket frames.
 
-Piped text/auto input is line-delimited and capped at 16 MiB per line; use
-`--ws-message-mode binary` for larger raw streams.
+Piped text or auto input uses line delimiters and has a limit of 16 MiB for each
+line. Use `--ws-message-mode binary` for larger raw streams.
 
 Incoming WebSocket server frames and assembled messages are capped at 16 MiB.
 
@@ -746,7 +788,9 @@ Add import paths for proto compilation. Use with `--proto-file`.
 fetch --grpc --proto-file service.proto --proto-import ./proto localhost:50051/pkg.Svc/Method
 ```
 
-Plaintext servers are supported via `h2c` (HTTP/2 over cleartext) when using an `http://` URL with HTTP/2. This works for `--grpc` and reflection-based discovery (`--grpc-list`, `--grpc-describe`).
+For plaintext servers, use `h2c` (HTTP/2 over cleartext) with an `http://` URL
+and HTTP/2. You can use this configuration for `--grpc` and reflection-based
+discovery (`--grpc-list`, `--grpc-describe`).
 
 ## Configuration
 
@@ -764,7 +808,9 @@ fetch --config ~/.config/fetch/custom.conf example.com
 
 Execute a curl command using fetch. Parses a curl command string and translates its flags into the equivalent fetch options. The `curl` prefix is optional.
 
-Cannot be combined with other request-specifying flags (URL, `--method`, `--header`, `--data`, auth flags, etc.). Meta flags like `--dry-run`, `--color`, `--format`, `--pager`, and `--timing` can still be used.
+Do not use this option with other request options, such as a URL, `--method`,
+`--header`, `--data`, or authentication options. You can use it with metadata
+options such as `--dry-run`, `--color`, `--format`, `--pager`, and `--timing`.
 
 ```sh
 # Basic GET
@@ -804,7 +850,8 @@ fetch --from-curl 'https://example.com'
 
 **Notes:**
 
-- `-b`/`--cookie` only supports inline cookie strings (e.g., `-b 'name=value'`). Cookie jar files are not supported and will return an error.
+- `-b` and `--cookie` support only inline cookie strings, such as
+  `-b 'name=value'`. Cookie jar files cause an error.
 - A single `-d @filename` or `-d @-` body streams through fetch's native request body path. Composite data bodies and `--data-urlencode @filename` are materialized for curl compatibility and are capped at 16 MiB.
 - `--data-urlencode` supports `@filename` and `name@filename` forms for reading and URL-encoding file contents.
 - `-n`/`--netrc` is not supported. Use `--basic`, `--bearer`, or an explicit `Authorization` header instead.
@@ -817,7 +864,7 @@ Unknown curl flags return an error.
 ### `-h, --help`
 
 Print help information. Use `-v --help` or `--verbose --help` for the detailed,
-colorized CLI reference. Detailed help follows `--pager`; use `--pager off` to
+colorized CLI reference. Detailed help obeys `--pager`. Use `--pager off` to
 print directly and `--color off` to disable color.
 
 ### `-V, --version`
@@ -844,7 +891,7 @@ fetch --install-skill [agents|codex|claude|gemini|pi|all]
 fetch --uninstall-skill [agents|codex|claude|gemini|pi|all]
 ```
 
-`agents` is the default target. User scope is the default; use
+`agents` is the default target. User scope is the default. Use
 `--scope user|project` to select the destination scope. `--dry-run` previews
 changes, and `--force` permits replacing or removing a locally modified
 installation.

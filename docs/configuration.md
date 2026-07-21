@@ -29,13 +29,15 @@ lowest):
 3. **Global configuration** - Global settings in config file
 4. **Default values** - Built-in application defaults
 
-In short: scalar options override; list options merge global -> host -> CLI.
+In summary, scalar options override other scalar options. List options merge in
+this order: global, host, and CLI.
 Repeatable options such as `header`, `query`, and `ca-cert` are applied in this
 order: global config first, then the matched host section, then command-line
 flags.
 
-This allows you to set global defaults, override scalar values per-domain or
-per-command, and add shared list values without losing more specific entries.
+As a result, you can set global defaults and override scalar values for each domain or
+command. You can also add shared list values without removing more specific
+entries.
 
 ### File Structure
 
@@ -158,9 +160,9 @@ image = off
 Control piping response body output through a pager. `auto` uses the pager when
 stdout is a terminal, `on` forces pager use, and `off` disables the pager. When
 paging is enabled, fetch uses `$PAGER` if it is set. Set `NO_PAGER` to disable
-the default `auto` pager. If `$PAGER` is unset, fetch falls back to `less -FIRX`;
-when `$LESS` is set, fetch runs `less` without adding its default flags so your
-`LESS` options apply. `$PAGER` is split with POSIX shell-style quoting, but
+the default `auto` pager. If `$PAGER` is unset, `fetch` uses `less -FIRX`.
+If `$LESS` is set, `fetch` runs `less` without its default flags. Your `LESS`
+options still apply. `$PAGER` is split with POSIX shell-style quoting, but
 fetch launches the pager directly and does not interpret shell operators such as
 pipes or redirects.
 
@@ -230,7 +232,7 @@ verbosity = 3
 **Default**: `false`
 
 Sort displayed request and response headers alphabetically by name. This only
-changes verbose output; request headers are still sent in their normal order.
+changes verbose output. `fetch` sends request headers in their normal order.
 
 ```ini
 sort-headers = true
@@ -403,7 +405,7 @@ HTTPS-record discovery is too slow, fails, is unsupported by the OS resolver,
 or returns no usable `h3` record, HTTPS offers `h2` then `http/1.1` through
 ALPN. Proxy and Unix socket requests also use the normal ALPN path.
 
-Setting this option to `1`, `2`, or `3` forces that protocol; it does not set a
+Setting this option to `1`, `2`, or `3` forces that protocol. It does not set a
 version cap. Set `http = 1` or `http = 2` to opt out of automatic HTTP/3.
 Forced HTTP/2 with a plain `http://` URL is only supported for gRPC requests,
 where `fetch` uses h2c (HTTP/2 over cleartext).
@@ -499,7 +501,9 @@ insecure = false
 **Type**: File path
 **Default**: None
 
-Path to a client certificate file for mTLS authentication. The file should be in PEM format. If the file contains both the certificate and private key, no separate `key` option is needed.
+Specify the path to a client certificate file for mTLS authentication. Use PEM
+format. If the file contains the certificate and private key, you do not need a
+separate `key` option.
 
 ```ini
 # Client certificate for mTLS
@@ -514,7 +518,8 @@ cert = /path/to/client.pem
 **Type**: File path
 **Default**: None
 
-Path to a client private key file for mTLS authentication. The file should be in PEM format. Required if `cert` points to a certificate-only file.
+Specify the path to a client private key file for mTLS authentication. Use PEM
+format. This option is required if `cert` points to a certificate-only file.
 
 ```ini
 # Client private key for mTLS
@@ -535,12 +540,13 @@ key = /path/to/api-client.key
 ca-cert = /path/to/api-ca.crt
 ```
 
-**Notes:**
+**Operation:**
 
-- If `cert` is provided without `key`, the tool will attempt to read the private key from the certificate file (combined PEM format)
-- If the private key cannot be found, an error will be displayed
-- TLS requests reject `key` without `cert`
-- Encrypted private keys are not supported
+- If you specify `cert` without `key`, `fetch` reads the private key from the
+  certificate file.
+- If `fetch` does not find the private key, it reports an error.
+- TLS requests reject `key` without `cert`.
+- `fetch` does not support encrypted private keys.
 
 #### `compress`
 
@@ -568,8 +574,10 @@ Output files receive decoded/decompressed bodies by default too. Use
 `compress = off` or `--compress off` for byte-for-byte downloads of `.gz`,
 `.br`, or `.zst` assets.
 
-When `compress = auto`, compressed SSE (`text/event-stream`) responses are
-retried without `Accept-Encoding` so events can be displayed as they arrive.
+With `compress = auto`, `fetch` retries compressed SSE (`text/event-stream`)
+responses to `GET` and `HEAD` requests without `Accept-Encoding`. For other
+methods, it keeps the compressed response and gives a warning. For immediate
+SSE streaming with another method, set `compress = off`.
 
 ### Session Options
 
@@ -578,7 +586,10 @@ retried without `Accept-Encoding` so events can be displayed as they arrive.
 **Type**: String
 **Default**: None
 
-Set a named session for persistent cookie storage. Cookies set by servers are saved to disk and automatically sent on subsequent requests using the same session name. The name must contain only alphanumeric characters, hyphens, and underscores.
+Set a named session to keep cookies for subsequent commands. `fetch` saves
+server cookies to disk. It sends the cookies in subsequent requests that use
+the same session name. Use only alphanumeric characters, hyphens, and
+underscores in the name.
 
 ```ini
 # Global default session
@@ -601,7 +612,7 @@ CLI `--session` flag overrides the config value. See [CLI Reference](cli-referen
 **Type**: String (name:value format)
 **Repeatable**: Yes
 
-Set custom HTTP headers. Can be specified multiple times.
+Set custom HTTP headers. Repeat this option to set multiple headers.
 
 ```ini
 # Single header
@@ -618,7 +629,8 @@ header = User-Agent: MyApp/1.0
 **Type**: String (key=value format)
 **Repeatable**: Yes
 
-Append query parameters to requests. Can be specified multiple times.
+Append query parameters to requests. Repeat this option to append multiple
+parameters.
 
 ```ini
 # Single query parameter
@@ -648,7 +660,7 @@ ignore-status = false
 
 ## Host-Specific Configuration
 
-You can configure different settings for specific hosts or domains using sections:
+Use sections to configure different settings for specified hosts or domains:
 
 ```ini
 # Global settings apply to all requests
@@ -675,7 +687,7 @@ redirects = 0
 
 ### Wildcard Subdomain Matching
 
-You can use `[*.domain.com]` syntax to match any subdomain of a domain:
+Use the `[*.domain.com]` syntax to match all subdomains of a domain:
 
 ```ini
 # Match any subdomain of example.com
@@ -693,7 +705,7 @@ header = X-API-Key: admin-key
 
 **Matching rules:**
 
-- `*.example.com` matches `api.example.com`, `a.b.example.com`, etc.
+- `*.example.com` matches `api.example.com` and `a.b.example.com`.
 - `*.example.com` does **not** match `example.com` itself
 - Exact matches always take priority over wildcard matches
 - When multiple wildcards match, the most specific (longest suffix) wins
@@ -701,7 +713,8 @@ header = X-API-Key: admin-key
 
 ### Host Section Rules
 
-- Section names should be the exact hostname (without protocol or path), or a wildcard pattern like `*.domain.com`
+- Use the exact hostname, without the protocol or path, as the section name.
+  Alternatively, use a wildcard pattern such as `*.domain.com`.
 - Duplicate host section names are rejected. Names are compared case-insensitively after trimming, so `[API.example.com]` and `[api.example.com]` are duplicates.
 - Scalar host-specific settings override global settings
 - Scalar command-line flags override both global and host-specific settings
@@ -767,28 +780,29 @@ header = X-Company-ID: company-identifier
 
 ## Configuration File Validation
 
-`fetch` validates configuration files when loading them and will report errors:
+`fetch` validates configuration files when it loads them. It reports errors in
+this format:
 
 ```
 config file '/home/user/.config/fetch/config': line 15: invalid option: 'invalid-option'
 ```
 
-Validation errors may include:
+The tool reports these types of validation error:
 
 - Invalid option names
-- Invalid values for specific options (e.g., `color = invalid`)
+- Invalid values for specified options, such as `color = invalid`
 - Malformed key=value pairs
 - Empty host section names `[]`
 
 ## Best Practices
 
-1. **Use host-specific sections** for API keys and service-specific settings
-2. **Set reasonable timeouts** to avoid hanging requests
-3. **Use global settings** for common preferences like colors and formatting
-4. **Keep sensitive data secure** - configuration files may contain API keys
-5. **Test configurations** with dry-run mode: `fetch --dry-run example.com`
-6. **Use comments** to document complex configurations
-7. **Enable auto-update** for security and feature updates
+1. **Use host-specific sections** for API keys and service-specific settings.
+2. **Set applicable timeouts** to prevent requests from running too long.
+3. **Use global settings** for common preferences such as color and formatting.
+4. **Keep configuration files secure.** They can contain API keys.
+5. **Test configurations** with dry-run mode: `fetch --dry-run example.com`.
+6. **Use comments** to document complex configurations.
+7. **Enable automatic updates** to get security and feature updates.
 
 ## See Also
 

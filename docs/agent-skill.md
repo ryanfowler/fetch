@@ -45,7 +45,7 @@ fetch --install-skill pi --scope project
 | `gemini`           | `~/.gemini/skills/fetch`   | `.gemini/skills/fetch` |
 | `pi`               | `~/.pi/agent/skills/fetch` | `.pi/skills/fetch`     |
 
-`all` means the five locations in the table; it does not probe for or write to
+`all` means the five locations in the table. It does not probe for or write to
 other agent directories.
 
 ## Preview Changes
@@ -91,11 +91,11 @@ when you intend to remove a locally changed copy.
 
 The skill workflow:
 
-- operates only on the selected user or project destinations;
-- does not download files;
-- does not edit agent configuration files;
-- detects modified installations before replacement or removal; and
-- uses locked, atomic filesystem operations.
+- Operates only on the selected user or project destinations.
+- Does not download files.
+- Does not edit agent configuration files.
+- Detects modified installations before replacement or removal.
+- Uses locked, atomic file operations.
 
 ## See Also
 

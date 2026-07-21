@@ -31,7 +31,7 @@ fetch --ech off https://example.com
 
   ECH defaults to `off` rather than `auto` because `auto` requires an extra
   DNS SVCB query on every HTTPS request, which adds latency with no benefit
-  when the server doesn't support ECH. Use `--ech auto` or set `ech = auto`
+  if the server does not support ECH. Use `--ech auto` or set `ech = auto`
   in your config to enable opportunistic ECH.
 
 ## GREASE ECH

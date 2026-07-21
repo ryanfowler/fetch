@@ -32,16 +32,16 @@ fetch ws://api.example.com/upload -d @payload.bin --ws-message-mode binary
 
 ### Piped Input
 
-Pipe lines from stdin — each line is sent as a separate text message, including
-empty lines:
+Pipe lines from stdin. `fetch` sends each line as a separate text message. It
+also sends empty lines:
 
 ```sh
 echo "hello" | fetch ws://echo.websocket.events
 printf "msg1\nmsg2\n" | fetch ws://echo.websocket.events
 ```
 
-`fetch` connects before reading piped input, streams each line as it arrives, and
-continues printing server messages after stdin reaches EOF until the server
+`fetch` connects before it reads piped input. It streams each line as the line
+arrives. After stdin reaches EOF, it prints server messages until the server
 closes the connection.
 
 With `--ws-message-mode auto`, piped input is still line-delimited, but a line
@@ -50,10 +50,11 @@ binary`, piped input is streamed as raw byte chunks and newline bytes are
 preserved.
 
 Text and auto stdin modes cap each line at 16 MiB before a newline. Use
-`--ws-message-mode binary` for larger messages or raw byte streams that should
-not be line-delimited.
+`--ws-message-mode binary` for larger messages or raw byte streams without line
+delimiters.
 
-When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Use Ctrl+C or Ctrl+D to exit.
+If stdin, stdout, and stderr are terminals, `fetch` opens an interactive prompt.
+Type a message and press Enter to send it. Press Ctrl+C or Ctrl+D to exit.
 
 Control this behavior with `--ws-interactive`:
 
@@ -70,8 +71,11 @@ fetch ws://api.example.com/stream --ws-interactive off
 
 ## Output
 
-- **Text messages**: Written to stdout. JSON messages are automatically formatted when connected to a terminal.
-- **Binary messages**: Written as raw bytes to stdout when stdout is redirected or piped. When stdout is a terminal, binary-looking payloads are guarded with a warning instead of being printed.
+- **Text messages**: `fetch` writes text messages to stdout. On a terminal, it
+  automatically formats JSON messages.
+- **Binary messages**: `fetch` writes raw bytes if stdout is redirected or
+  piped. On a terminal, it gives a warning and does not print binary-looking
+  data.
 - **Formatting**: Use `--format on` to force JSON formatting, or `--format off` to disable it.
 
 Incoming server frames and assembled messages are capped at 16 MiB. Larger
@@ -99,7 +103,13 @@ fetch -vv ws://echo.websocket.events -d "hello"
 
 ## Authentication
 
-Header-based authentication options work with WebSocket connections; headers are sent during the HTTP upgrade handshake. URL credentials are converted to a Basic `Authorization` header and stripped from the handshake request, matching normal HTTP requests. Digest authentication (`--digest`) is not supported for WebSocket requests because it requires a challenge/response retry flow before the upgrade completes.
+Header-based authentication options work with WebSocket connections. `fetch`
+sends the headers during the HTTP upgrade handshake. It converts URL
+credentials to a Basic `Authorization` header and removes them from the
+handshake URL.
+
+WebSocket requests do not support Digest authentication (`--digest`). Digest
+authentication requires a challenge and a retry before the upgrade completes.
 
 ```sh
 fetch --bearer mytoken ws://api.example.com/ws
@@ -110,7 +120,7 @@ fetch -H "Authorization: Bearer mytoken" ws://api.example.com/ws
 
 ## Subprotocols
 
-Specify WebSocket subprotocols via the `Sec-WebSocket-Protocol` header:
+Specify WebSocket subprotocols with the `Sec-WebSocket-Protocol` header:
 
 ```sh
 fetch -H "Sec-WebSocket-Protocol: graphql-ws" wss://api.example.com/graphql
@@ -119,8 +129,8 @@ fetch -H "Sec-WebSocket-Protocol: graphql-ws" wss://api.example.com/graphql
 ## Network Options
 
 WebSocket connections honor `--dns-server` for direct TCP connections and for
-local target resolution through plain `socks5://` proxies. Use `socks5h://` when
-the SOCKS proxy should resolve the target hostname remotely.
+local target resolution through plain `socks5://` proxies. Use `socks5h://` to
+make the SOCKS proxy resolve the target hostname.
 
 ## Timeout
 
@@ -130,7 +140,10 @@ The `--timeout` flag applies to the WebSocket handshake only. The connection sta
 fetch --timeout 5 ws://api.example.com/ws
 ```
 
-Use `--connect-timeout` to bound WebSocket connection setup phases such as custom DNS resolution, TCP connect, proxy CONNECT or SOCKS negotiation, and TLS handshakes. When both timeout flags are set, the connect timeout is capped by the remaining `--timeout` budget:
+Use `--connect-timeout` to limit WebSocket connection setup. The limit applies
+to custom DNS resolution, the TCP connection, proxy CONNECT or SOCKS
+negotiation, and TLS handshakes. If both timeout flags are set, the remaining
+`--timeout` value limits the connect timeout:
 
 ```sh
 fetch --connect-timeout 2 --timeout 10 wss://api.example.com/ws
