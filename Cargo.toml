@@ -36,7 +36,7 @@ http = "=1.4.2"
 http-body = "=1.1.0"
 http-body-util = "=0.1.4"
 httpdate = "=1.0.3"
-hyper = { version = "=1.10.1", features = ["client", "http1", "http2"] }
+hyper = { version = "=1.11.0", features = ["client", "http1", "http2"] }
 hyper-util = { version = "=0.1.20", features = ["client-legacy", "client-proxy", "client-proxy-system", "http1", "http2", "tokio"] }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "webp"] }
 ipnet = "=2.12.0"
