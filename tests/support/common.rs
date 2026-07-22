@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use url::Url;
+use wait_timeout::ChildExt;
 
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
@@ -113,30 +114,41 @@ pub(crate) fn run_fetch_once(opts: FetchOpts, args: &[&str]) -> FetchOutput {
         let mut stdin = child.stdin.take().expect("child stdin");
         stdin.write_all(input.as_bytes()).expect("write stdin");
     }
-    let start = Instant::now();
-    loop {
-        if child.try_wait().expect("poll fetch").is_some() {
-            break;
-        }
-        if start.elapsed() > Duration::from_secs(15) {
-            let _ = child.kill();
-            let out = child.wait_with_output().expect("wait killed fetch");
-            return FetchOutput {
-                status: out.status,
-                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                stderr: format!(
-                    "{}\nfetch test harness timeout after 30s",
-                    String::from_utf8_lossy(&out.stderr)
-                ),
-            };
-        }
-        thread::sleep(Duration::from_millis(10));
+
+    // Drain both pipes while the child runs so a verbose command cannot block on
+    // a full pipe. wait_timeout avoids adding up to 10ms of polling latency to
+    // every short-lived CLI invocation in the integration suite.
+    let mut stdout = child.stdout.take().expect("child stdout");
+    let stdout_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).expect("read fetch stdout");
+        output
+    });
+    let mut stderr = child.stderr.take().expect("child stderr");
+    let stderr_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output).expect("read fetch stderr");
+        output
+    });
+
+    let timed_out = child
+        .wait_timeout(Duration::from_secs(15))
+        .expect("wait for fetch")
+        .is_none();
+    if timed_out {
+        let _ = child.kill();
     }
-    let out = child.wait_with_output().expect("wait fetch");
+    let status = child.wait().expect("wait fetch");
+    let stdout = stdout_reader.join().expect("join fetch stdout reader");
+    let stderr = stderr_reader.join().expect("join fetch stderr reader");
+    let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if timed_out {
+        stderr.push_str("\nfetch test harness timeout after 15s");
+    }
     FetchOutput {
-        status: out.status,
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        status,
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr,
     }
 }
 
@@ -286,17 +298,10 @@ pub(crate) fn wait_child(
     child: &mut std::process::Child,
     timeout: Duration,
 ) -> Option<std::io::Result<ExitStatus>> {
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(Ok(status)),
-            Ok(None) => {}
-            Err(err) => return Some(Err(err)),
-        }
-        if start.elapsed() > timeout {
-            return None;
-        }
-        thread::sleep(Duration::from_millis(10));
+    match child.wait_timeout(timeout) {
+        Ok(Some(status)) => Some(Ok(status)),
+        Ok(None) => None,
+        Err(err) => Some(Err(err)),
     }
 }
 
