@@ -30,14 +30,15 @@ Full CI-equivalent before PRs, shared transport/request/response changes, or unc
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features --lib --bins
-cargo test --locked --all-features --test cli --test formatting --test grpc --test http --test install --test network --test terminal --test update --test websocket
+cargo test --locked --all-features --test cli --test formatting --test grpc --test har --test http --test install --test network --test terminal --test update --test websocket -- --test-threads=2
 ```
 
 The integration test suite uses `TcpListener::bind("127.0.0.1:0")` and
-`UdpSocket::bind("127.0.0.1:0")` for all test servers, so tests are safe to run in
-parallel. If transient "Connection refused" errors occur from port reuse races, add
-`-- --test-threads=1` to force sequential execution. The `TestServer` and
-`H3TestServer` use `mpsc` channels instead of polling for request notification.
+`UdpSocket::bind("127.0.0.1:0")` for all test servers. CI uses two test threads to
+speed up the suite without overloading timing-sensitive socket tests. If transient
+"Connection refused" or connection-reset errors occur from port reuse races, use
+`-- --test-threads=1` to diagnose sequentially. The `TestServer` and `H3TestServer`
+use `mpsc` channels instead of polling for request notification.
 
 Docs-only changes: skip Cargo unless examples/generated CLI output changed; format changed docs only:
 

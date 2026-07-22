@@ -25,6 +25,9 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy,rustfmt
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
       - name: Rust format
         run: cargo fmt --check
 
@@ -51,6 +54,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
       - name: Install protoc (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -64,4 +70,4 @@ jobs:
         run: choco install protoc -y
 
       - name: Rust integration tests against Rust binary
-        run: cargo test --locked --all-features --test cli --test formatting --test grpc --test http --test install --test network --test terminal --test update --test websocket -- --test-threads=1
+        run: cargo test --locked --all-features --test cli --test formatting --test grpc --test har --test http --test install --test network --test terminal --test update --test websocket -- --test-threads=2

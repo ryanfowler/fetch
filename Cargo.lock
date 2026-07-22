@@ -785,6 +785,7 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "url",
+ "wait-timeout",
  "webpki-roots 1.0.9",
  "windows-sys 0.61.2",
  "zip",
