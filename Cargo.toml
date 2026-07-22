@@ -75,7 +75,7 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 zstd = "=0.13.3"
 
 [target.'cfg(unix)'.dependencies]
-libc = "=0.2.188"
+libc = "=0.2.189"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_Dns", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
