@@ -122,26 +122,55 @@ pub(crate) async fn resolve_host_with_doh_tls(
     doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<Vec<SocketAddr>, FetchError> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(vec![SocketAddr::new(ip, 0)]);
-    }
-    let Some(dns_server) = dns_server else {
-        return tokio::net::lookup_host((host, 0))
-            .await
-            .map(|addrs| addrs.collect())
-            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")));
-    };
+    resolve_host_with_doh_tls_using(
+        host,
+        dns_server,
+        doh_tls_config,
+        timeout,
+        |host| async move {
+            tokio::net::lookup_host((host, 0))
+                .await
+                .map(|addrs| addrs.collect())
+        },
+    )
+    .await
+}
 
-    let addrs = if is_doh_dns_server(dns_server) {
-        let shared_doh = shared_doh_resolver(dns_server, host, timeout, doh_tls_config.as_ref())?;
-        resolve_doh_ips(host, dns_server, Some(&shared_doh), timeout).await?
-    } else {
-        crate::dns::custom::lookup_ips(dns_server, host, timeout.remaining()?).await?
-    };
-    Ok(addrs
-        .into_iter()
-        .map(|addr| SocketAddr::new(addr, 0))
-        .collect())
+async fn resolve_host_with_doh_tls_using<F, Fut>(
+    host: &str,
+    dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
+    timeout: TimeoutBudget,
+    system_lookup: F,
+) -> Result<Vec<SocketAddr>, FetchError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
+    timeout
+        .run(async move {
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                return Ok(vec![SocketAddr::new(ip, 0)]);
+            }
+            let Some(dns_server) = dns_server else {
+                return system_lookup(host.to_owned())
+                    .await
+                    .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")));
+            };
+
+            let addrs = if is_doh_dns_server(dns_server) {
+                let shared_doh =
+                    shared_doh_resolver(dns_server, host, timeout, doh_tls_config.as_ref())?;
+                resolve_doh_ips(host, dns_server, Some(&shared_doh), timeout).await?
+            } else {
+                crate::dns::custom::lookup_ips(dns_server, host, timeout.remaining()?).await?
+            };
+            Ok(addrs
+                .into_iter()
+                .map(|addr| SocketAddr::new(addr, 0))
+                .collect())
+        })
+        .await
 }
 
 async fn resolve_host_family(
@@ -1407,6 +1436,22 @@ async fn timeout_fetch<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn system_host_resolution_honors_timeout_budget() {
+        let timeout = Duration::from_millis(10);
+        let err = resolve_host_with_doh_tls_using(
+            "example.com",
+            None,
+            None,
+            TimeoutBudget::new(Some(timeout)),
+            |_| std::future::pending::<std::io::Result<Vec<SocketAddr>>>(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "request timed out after 10ms");
+    }
 
     #[test]
     fn host_header_value_brackets_ipv6_literals() {
