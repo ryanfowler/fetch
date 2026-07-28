@@ -122,53 +122,47 @@ pub(crate) async fn resolve_host_with_doh_tls(
     doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<Vec<SocketAddr>, FetchError> {
-    resolve_host_with_doh_tls_using(
-        host,
-        dns_server,
-        doh_tls_config,
-        timeout,
-        |host| async move {
-            tokio::net::lookup_host((host, 0))
-                .await
-                .map(|addrs| addrs.collect())
-        },
-    )
-    .await
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, 0)]);
+    }
+    let Some(dns_server) = dns_server else {
+        return resolve_system_host_with(
+            host,
+            timeout,
+            Box::pin(async move {
+                tokio::net::lookup_host((host, 0))
+                    .await
+                    .map(|addrs| addrs.collect())
+            }),
+        )
+        .await;
+    };
+
+    let addrs = if is_doh_dns_server(dns_server) {
+        let shared_doh = shared_doh_resolver(dns_server, host, timeout, doh_tls_config.as_ref())?;
+        resolve_doh_ips(host, dns_server, Some(&shared_doh), timeout).await?
+    } else {
+        crate::dns::custom::lookup_ips(dns_server, host, timeout.remaining()?).await?
+    };
+    Ok(addrs
+        .into_iter()
+        .map(|addr| SocketAddr::new(addr, 0))
+        .collect())
 }
 
-async fn resolve_host_with_doh_tls_using<F, Fut>(
+type SystemLookupFuture<'a> =
+    Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>>;
+
+async fn resolve_system_host_with(
     host: &str,
-    dns_server: Option<&str>,
-    doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
-    system_lookup: F,
-) -> Result<Vec<SocketAddr>, FetchError>
-where
-    F: FnOnce(String) -> Fut,
-    Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
-{
+    system_lookup: SystemLookupFuture<'_>,
+) -> Result<Vec<SocketAddr>, FetchError> {
     timeout
         .run(async move {
-            if let Ok(ip) = host.parse::<IpAddr>() {
-                return Ok(vec![SocketAddr::new(ip, 0)]);
-            }
-            let Some(dns_server) = dns_server else {
-                return system_lookup(host.to_owned())
-                    .await
-                    .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")));
-            };
-
-            let addrs = if is_doh_dns_server(dns_server) {
-                let shared_doh =
-                    shared_doh_resolver(dns_server, host, timeout, doh_tls_config.as_ref())?;
-                resolve_doh_ips(host, dns_server, Some(&shared_doh), timeout).await?
-            } else {
-                crate::dns::custom::lookup_ips(dns_server, host, timeout.remaining()?).await?
-            };
-            Ok(addrs
-                .into_iter()
-                .map(|addr| SocketAddr::new(addr, 0))
-                .collect())
+            system_lookup
+                .await
+                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
         })
         .await
 }
@@ -1440,12 +1434,10 @@ mod tests {
     #[tokio::test]
     async fn system_host_resolution_honors_timeout_budget() {
         let timeout = Duration::from_millis(10);
-        let err = resolve_host_with_doh_tls_using(
+        let err = resolve_system_host_with(
             "example.com",
-            None,
-            None,
             TimeoutBudget::new(Some(timeout)),
-            |_| std::future::pending::<std::io::Result<Vec<SocketAddr>>>(),
+            Box::pin(std::future::pending::<std::io::Result<Vec<SocketAddr>>>()),
         )
         .await
         .unwrap_err();
