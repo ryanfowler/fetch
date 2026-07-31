@@ -3,6 +3,7 @@
 Applies to `src/http/` and its submodules.
 
 - Transport code owns DNS/TCP/TLS/QUIC setup. Reuse `src/net.rs` dialing, proxy, timeout, and address-racing helpers.
+- Keep the protocol-specific send futures heap-pinned in `Client::send`; inlining their large state machines can overflow the default Windows thread stack, especially for nested DoH requests.
 - Automatic HTTP/3 discovery applies only to eligible direct HTTPS requests. It must not delay normal TCP/TLS and must share the already-started connect-timeout budget.
 - Keep HTTP/3 cache entries bounded, origin/resolver scoped, authority-based, and expiring. Never learn Alt-Svc from insecure responses.
 - Retry protocol NACKs only when safe and when the request body is replayable.
