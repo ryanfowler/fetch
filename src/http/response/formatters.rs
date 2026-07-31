@@ -1,6 +1,9 @@
 use super::*;
 
-use super::stdout::{StdoutBody, response_header_content_type, response_header_content_type_label};
+use super::stdout::{
+    StdoutBody, TerminalOutputSafety, response_header_content_type,
+    response_header_content_type_label,
+};
 use super::stream::{MAX_BUFFERED_RESPONSE_BYTES, StdoutStreamFormatter, StreamedOutput};
 
 pub(super) fn should_stream_formatted_sse_stdout(
@@ -409,96 +412,85 @@ pub(super) fn format_stdout_bytes_with_terminal(
             bytes: bytes.to_vec(),
             content_type,
             content_type_label: response_header_content_type_label(headers),
+            terminal_output_safety: TerminalOutputSafety::Untrusted,
         });
     }
 
     let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
     let bytes = transcode_format_bytes(bytes, &charset, content_type);
-    let bytes = match content_type {
-        ContentType::Json => {
-            Ok(
-                format_printer_bytes(use_color, |out| json::format_json_to(&bytes, out))
-                    .unwrap_or_else(|_| bytes.to_vec()),
-            )
-        }
-        ContentType::Ndjson => {
-            Ok(
-                format_printer_bytes(use_color, |out| json::format_ndjson_to(&bytes, out))
-                    .unwrap_or_else(|_| bytes.to_vec()),
-            )
-        }
-        ContentType::Csv => Ok(format_printer_bytes(use_color, |out| {
-            csv::format_csv_to_with_terminal_cols(&bytes, out, terminal_cols)
-        })
-        .unwrap_or_else(|_| bytes.to_vec())),
-        ContentType::Xml => {
-            Ok(
-                format_printer_bytes(use_color, |out| xml::format_xml_to(&bytes, out))
-                    .unwrap_or_else(|_| bytes.to_vec()),
-            )
-        }
-        ContentType::Yaml => {
-            Ok(
-                format_printer_bytes(use_color, |out| yaml::format_yaml_to(&bytes, out))
-                    .unwrap_or_else(|_| bytes.to_vec()),
-            )
-        }
-        ContentType::Css => {
-            Ok(
-                format_printer_bytes(use_color, |out| css::format_css_to(&bytes, out))
-                    .unwrap_or_else(|_| bytes.to_vec()),
-            )
-        }
-        ContentType::Html => {
-            Ok(
-                format_printer_bytes(use_color, |out| html::format_html_to(&bytes, out))
-                    .unwrap_or_else(|_| bytes.to_vec()),
-            )
-        }
-        ContentType::Markdown => {
-            Ok(
-                format_printer_bytes(use_color, |out| markdown::format_markdown_to(&bytes, out))
-                    .unwrap_or_else(|_| bytes.to_vec()),
-            )
-        }
-        ContentType::MsgPack => {
-            Ok(
-                format_printer_bytes(use_color, |out| msgpack::format_msgpack_to(&bytes, out))
-                    .unwrap_or_else(|_| bytes.to_vec()),
-            )
-        }
+    let (bytes, terminal_output_safety) = match content_type {
+        ContentType::Json => formatted_or_raw(
+            format_printer_bytes(use_color, |out| json::format_json_to(&bytes, out)),
+            &bytes,
+        ),
+        ContentType::Ndjson => formatted_or_raw(
+            format_printer_bytes(use_color, |out| json::format_ndjson_to(&bytes, out)),
+            &bytes,
+        ),
+        ContentType::Csv => formatted_or_raw(
+            format_printer_bytes(use_color, |out| {
+                csv::format_csv_to_with_terminal_cols(&bytes, out, terminal_cols)
+            }),
+            &bytes,
+        ),
+        ContentType::Xml => formatted_or_raw(
+            format_printer_bytes(use_color, |out| xml::format_xml_to(&bytes, out)),
+            &bytes,
+        ),
+        ContentType::Yaml => formatted_or_raw(
+            format_printer_bytes(use_color, |out| yaml::format_yaml_to(&bytes, out)),
+            &bytes,
+        ),
+        ContentType::Css => formatted_or_raw(
+            format_printer_bytes(use_color, |out| css::format_css_to(&bytes, out)),
+            &bytes,
+        ),
+        ContentType::Html => formatted_or_raw(
+            format_printer_bytes(use_color, |out| html::format_html_to(&bytes, out)),
+            &bytes,
+        ),
+        ContentType::Markdown => formatted_or_raw(
+            format_printer_bytes(use_color, |out| markdown::format_markdown_to(&bytes, out)),
+            &bytes,
+        ),
+        ContentType::MsgPack => formatted_or_raw(
+            format_printer_bytes(use_color, |out| msgpack::format_msgpack_to(&bytes, out)),
+            &bytes,
+        ),
         ContentType::Protobuf => {
             if let Some(desc) = grpc_response_desc {
                 if let Ok(json_bytes) = proto::protobuf_to_json(&bytes, &desc) {
-                    Ok(format_printer_bytes(use_color, |out| {
+                    let formatted = format_printer_bytes(use_color, |out| {
                         json::format_json_to(&json_bytes, out)
-                    })
-                    .unwrap_or(json_bytes))
+                    });
+                    formatted_or_raw(formatted, &json_bytes)
                 } else {
-                    Ok(bytes.to_vec())
+                    (bytes.to_vec(), TerminalOutputSafety::Untrusted)
                 }
             } else {
-                Ok(protobuf::format_protobuf(&bytes)
-                    .map(|formatted| formatted.into_bytes())
-                    .unwrap_or_else(|_| bytes.to_vec()))
+                formatted_or_raw(
+                    protobuf::format_protobuf(&bytes).map(|formatted| formatted.into_bytes()),
+                    &bytes,
+                )
             }
         }
         ContentType::Image => {
             if cli.image.as_deref() == Some("off") {
-                Ok(bytes.to_vec())
+                (bytes.to_vec(), TerminalOutputSafety::Untrusted)
             } else {
                 let decode_mode = if cli.image.as_deref() == Some("external") {
                     crate::image::DecodeMode::External
                 } else {
                     crate::image::DecodeMode::BuiltIn
                 };
-                crate::image::render(&bytes, decode_mode)
-                    .map_err(|err| FetchError::Message(err.to_string()))
+                let rendered = crate::image::render(&bytes, decode_mode)
+                    .map_err(|err| FetchError::Message(err.to_string()))?;
+                (rendered, TerminalOutputSafety::Trusted)
             }
         }
         ContentType::Grpc => {
             let grpc_message_encoding = grpc_encoding::MessageEncoding::from_headers(headers);
-            if let Some(desc) = grpc_response_desc {
+            let formatted = if let Some(desc) = grpc_response_desc {
                 let mut out = core::Printer::new(use_color);
                 grpc_format::format_grpc_stream_with_descriptor_to(
                     &bytes,
@@ -507,24 +499,34 @@ pub(super) fn format_stdout_bytes_with_terminal(
                     &mut out,
                 )
                 .map(|()| out.into_bytes())
-                .map_err(|err| FetchError::Message(err.to_string()))
             } else {
                 grpc_format::format_grpc_stream(&bytes, &grpc_message_encoding)
                     .map(|formatted| formatted.into_bytes())
-                    .map_err(|err| FetchError::Message(err.to_string()))
             }
+            .map_err(|err| FetchError::Message(err.to_string()))?;
+            (formatted, TerminalOutputSafety::FormattedText)
         }
         ContentType::Sse => {
-            format_printer_bytes(use_color, |out| sse::format_event_stream_to(&bytes, out))
-                .map_err(|err| FetchError::Message(err.to_string()))
+            let formatted =
+                format_printer_bytes(use_color, |out| sse::format_event_stream_to(&bytes, out))
+                    .map_err(|err| FetchError::Message(err.to_string()))?;
+            (formatted, TerminalOutputSafety::FormattedText)
         }
-        _ => Ok(bytes.to_vec()),
-    }?;
+        _ => (bytes.to_vec(), TerminalOutputSafety::Untrusted),
+    };
     Ok(StdoutBody {
         bytes,
         content_type,
         content_type_label: response_header_content_type_label(headers),
+        terminal_output_safety,
     })
+}
+
+fn formatted_or_raw<E>(result: Result<Vec<u8>, E>, raw: &[u8]) -> (Vec<u8>, TerminalOutputSafety) {
+    match result {
+        Ok(formatted) => (formatted, TerminalOutputSafety::FormattedText),
+        Err(_) => (raw.to_vec(), TerminalOutputSafety::Untrusted),
+    }
 }
 
 fn format_printer_bytes<E>(

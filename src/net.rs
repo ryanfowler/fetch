@@ -59,12 +59,21 @@ struct SharedDohResolver {
 pub(crate) async fn dial_url(
     url: &Url,
     proxy: Option<&str>,
+    proxy_authorization: Option<&str>,
     dns_server: Option<&str>,
     doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
     if let Some(proxy) = proxy {
-        return dial_proxy(proxy, url, dns_server, doh_tls_config, timeout).await;
+        return dial_proxy_with_authorization(
+            proxy,
+            url,
+            dns_server,
+            doh_tls_config,
+            timeout,
+            proxy_authorization,
+        )
+        .await;
     }
     let stream = connect_tcp_with_doh_tls(url, dns_server, doh_tls_config, timeout).await?;
     Ok(Box::pin(stream))
@@ -997,10 +1006,29 @@ pub(crate) async fn dial_proxy(
     doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
+    dial_proxy_with_authorization(proxy, target, dns_server, doh_tls_config, timeout, None).await
+}
+
+async fn dial_proxy_with_authorization(
+    proxy: &str,
+    target: &Url,
+    dns_server: Option<&str>,
+    doh_tls_config: Option<rustls::ClientConfig>,
+    timeout: TimeoutBudget,
+    proxy_authorization: Option<&str>,
+) -> Result<DialStream, FetchError> {
     let proxy_url = parse_proxy_url(proxy)?;
     match proxy_url.scheme() {
         "http" | "https" => {
-            dial_http_proxy_tunnel(proxy, &proxy_url, target, timeout, None, None).await
+            dial_http_proxy_tunnel(
+                proxy,
+                &proxy_url,
+                target,
+                timeout,
+                None,
+                proxy_authorization.map(str::to_string),
+            )
+            .await
         }
         "socks5" | "socks5h" => {
             dial_socks5_proxy(&proxy_url, target, dns_server, doh_tls_config, timeout).await

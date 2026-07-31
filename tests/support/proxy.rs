@@ -136,6 +136,33 @@ pub(crate) fn start_http_connect_proxy(target_addr: String) -> (String, mpsc::Re
     (proxy_url, seen_rx)
 }
 
+pub(crate) fn start_authenticated_http_connect_proxy(
+    target_addr: String,
+    expected_authorization: &'static str,
+) -> (String, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind authenticated HTTP proxy");
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    let (seen_tx, seen_rx) = mpsc::channel();
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(conn) = conn else {
+                break;
+            };
+            let target_addr = target_addr.clone();
+            let seen_tx = seen_tx.clone();
+            thread::spawn(move || {
+                handle_http_connect_proxy_conn_with_auth(
+                    conn,
+                    &target_addr,
+                    seen_tx,
+                    Some(expected_authorization),
+                )
+            });
+        }
+    });
+    (proxy_url, seen_rx)
+}
+
 pub(crate) fn start_https_proxy(require_client_auth: bool) -> HttpsProxyTestServer {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let dir = TempDir::new().unwrap().keep();
@@ -274,9 +301,18 @@ pub(crate) fn start_stalling_proxy(scheme: &str) -> String {
 }
 
 pub(crate) fn handle_http_connect_proxy_conn(
+    conn: TcpStream,
+    target_addr: &str,
+    seen: mpsc::Sender<String>,
+) {
+    handle_http_connect_proxy_conn_with_auth(conn, target_addr, seen, None);
+}
+
+fn handle_http_connect_proxy_conn_with_auth(
     mut conn: TcpStream,
     target_addr: &str,
     seen: mpsc::Sender<String>,
+    expected_authorization: Option<&str>,
 ) {
     let mut reader = BufReader::new(conn.try_clone().expect("clone proxy stream"));
     let Some(req) = read_request(&mut reader) else {
@@ -286,6 +322,15 @@ pub(crate) fn handle_http_connect_proxy_conn(
         write_response(
             &mut conn,
             TestResponse::status(405, "Method Not Allowed", ""),
+        );
+        return;
+    }
+    if expected_authorization.is_some_and(|expected| req.header("proxy-authorization") != expected)
+    {
+        let _ = seen.send("missing proxy authorization".to_string());
+        write_response(
+            &mut conn,
+            TestResponse::status(407, "Proxy Authentication Required", ""),
         );
         return;
     }

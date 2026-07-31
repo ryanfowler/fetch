@@ -16,15 +16,15 @@ use support::common::{
 use support::dns::{start_udp_dns_server, start_unresponsive_udp_dns_server};
 use support::http::{TestResponse, TestServer, read_request, write_response};
 use support::proxy::{
-    assert_proxy_seen, assert_socks_seen, start_http_connect_proxy, start_socks5_proxy,
-    start_stalling_proxy,
+    assert_proxy_seen, assert_socks_seen, start_authenticated_http_connect_proxy,
+    start_http_connect_proxy, start_socks5_proxy, start_stalling_proxy,
 };
 #[cfg(unix)]
 use support::pty::{configure_pty_child, open_pty, start_pty_capture};
 use support::websocket::{
     read_ws_frame, read_ws_text, start_ws_echo_server, start_ws_hold_open_push_server,
     start_ws_multi_echo_server, start_ws_push_server, start_wss_echo_server,
-    write_ws_close_and_drain, ws_binary_frame, ws_text_frame,
+    write_ws_close_and_drain, ws_binary_frame, ws_close_frame_with_code, ws_text_frame,
 };
 use tempfile::TempDir;
 use url::Url;
@@ -109,6 +109,37 @@ fn start_ws_text_push_server(payload: Vec<u8>) -> String {
         }
         let _ = stream.write_all(&ws_text_frame(&payload));
         write_ws_close_and_drain(&mut stream, b"done");
+    });
+    url
+}
+
+fn start_ws_abnormal_close_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket close server");
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept websocket client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let req = read_request(&mut reader).expect("read websocket handshake");
+        let mut sha = Sha1::new();
+        sha.update(req.header("sec-websocket-key").as_bytes());
+        sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        let accept = base64::engine::general_purpose::STANDARD.encode(sha.finalize());
+        write!(
+            stream,
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        )
+        .unwrap();
+        stream
+            .write_all(&ws_close_frame_with_code(
+                1008,
+                b"policy\x1b]52;clipboard\x07",
+            ))
+            .unwrap();
+        let (opcode, _) = read_ws_frame(&mut stream).expect("client close response");
+        assert_eq!(opcode, 0x8);
     });
     url
 }
@@ -717,6 +748,17 @@ fn websocket_receives_json_text_binary_and_query_handshake() {
 }
 
 #[test]
+fn websocket_abnormal_close_fails_and_sanitizes_reason() {
+    let ws_url = start_ws_abnormal_close_server();
+    let res = run_fetch(&[&ws_url, "--ws-interactive", "off"]);
+
+    assert!(!res.status.success());
+    assert!(res.stderr.contains("WebSocket closed with code 1008"));
+    assert!(res.stderr.contains(r"policy\x1b]52;clipboard\x07"));
+    assert!(!res.stderr.contains('\x1b'));
+}
+
+#[test]
 fn websocket_wss_trusts_custom_ca_go_case() {
     let (wss, seen) = start_wss_echo_server(|req| {
         if req.header("host").starts_with("localhost:") {
@@ -817,6 +859,38 @@ fn websocket_custom_dns_and_proxy_cases() {
         "proxied websocket"
     );
     assert!(res.stdout.contains("echo: proxied websocket"));
+
+    let (auth_target_url, auth_seen_ws) = start_ws_echo_server(|_| Ok(()));
+    let auth_target_addr = url_host_port(&auth_target_url);
+    let (auth_proxy_url, auth_proxy_seen) = start_authenticated_http_connect_proxy(
+        auth_target_addr.clone(),
+        "Basic cHJveHktdXNlcjpwcm94eS1wYXNz",
+    );
+    let auth_proxy_url = auth_proxy_url.replacen("http://", "http://proxy-user:proxy-pass@", 1);
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: vec![
+                ("HTTP_PROXY".to_string(), auth_proxy_url),
+                ("NO_PROXY".to_string(), String::new()),
+            ],
+            ..FetchOpts::default()
+        },
+        &[
+            &auth_target_url,
+            "-d",
+            "authenticated proxy websocket",
+            "--format",
+            "off",
+            "--ws-interactive",
+            "off",
+        ],
+    );
+    assert_exit(&res, 0);
+    assert_proxy_seen(&auth_proxy_seen, &auth_target_addr);
+    assert_eq!(
+        auth_seen_ws.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "authenticated proxy websocket"
+    );
 
     let (socks_target_url, socks_seen_ws) = start_ws_echo_server(|_| Ok(()));
     let socks_target_addr = url_host_port(&socks_target_url);
@@ -1036,7 +1110,8 @@ fn websocket_dry_run_prints_effective_handshake_headers() {
     assert!(res.stdout.is_empty());
     assert!(res.stderr.contains("> GET /socket HTTP/1.1"));
     assert!(res.stderr.contains("> x-test: yes"));
-    assert!(res.stderr.contains("> authorization: Bearer token"));
+    assert!(res.stderr.contains("> authorization: [REDACTED]"));
+    assert!(!res.stderr.contains("Bearer token"));
     assert!(res.stderr.contains("> accept: application/json, */*;q=0.5"));
     assert!(res.stderr.contains("> user-agent: fetch/"));
 }
@@ -1089,6 +1164,39 @@ fn websocket_dry_run_does_not_read_stdin_body() {
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
     assert!(res.stderr.contains("> GET /socket HTTP/1.1"));
+}
+
+#[test]
+fn websocket_initial_stdin_read_exits_promptly_on_timeout() {
+    let (ws_url, shutdown, server) = start_ws_hold_open_push_server(b"connected");
+    let mut cmd = Command::new(fetch_bin());
+    cmd.args([
+        &ws_url,
+        "--ws-interactive",
+        "off",
+        "--timeout",
+        "0.1",
+        "-d",
+        "@-",
+    ]);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.env("HTTP_PROXY", "");
+    cmd.env("HTTPS_PROXY", "");
+    cmd.env("ALL_PROXY", "");
+    cmd.env("NO_PROXY", "*");
+
+    let mut child = cmd.spawn().expect("spawn websocket stdin timeout fetch");
+    let stdin = child.stdin.take().expect("child stdin");
+    let status = wait_child(&mut child, Duration::from_secs(2))
+        .expect("fetch remained alive after initial stdin timeout")
+        .expect("wait websocket stdin timeout fetch");
+    assert!(!status.success());
+
+    drop(stdin);
+    let _ = shutdown.send(());
+    server.join().expect("join hold-open websocket server");
 }
 
 #[cfg(unix)]

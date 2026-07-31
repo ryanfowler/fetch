@@ -328,8 +328,8 @@ pub(crate) fn read_ws_text(reader: &mut impl Read) -> String {
 }
 
 pub(crate) fn read_ws_text_frame(reader: &mut impl Read) -> Option<String> {
-    let (_opcode, payload) = read_ws_frame(reader)?;
-    Some(String::from_utf8_lossy(&payload).into_owned())
+    let (opcode, payload) = read_ws_frame(reader)?;
+    (opcode != 0x8).then(|| String::from_utf8_lossy(&payload).into_owned())
 }
 
 pub(crate) fn read_ws_frame(reader: &mut impl Read) -> Option<(u8, Vec<u8>)> {
@@ -366,15 +366,15 @@ pub(crate) fn read_ws_frame(reader: &mut impl Read) -> Option<(u8, Vec<u8>)> {
             *byte ^= mask[i % 4];
         }
     }
-    if opcode == 0x8 {
-        return None;
-    }
     Some((opcode, payload))
 }
 
 pub(crate) fn write_ws_close_and_drain<T: Read + Write>(stream: &mut T, reason: &[u8]) {
-    let _ = stream.write_all(&ws_close_frame(reason));
-    let _ = read_ws_text_frame(stream);
+    stream
+        .write_all(&ws_close_frame(reason))
+        .expect("write WebSocket close frame");
+    let (opcode, _payload) = read_ws_frame(stream).expect("client close response");
+    assert_eq!(opcode, 0x8, "client must respond with a close frame");
 }
 
 pub(crate) fn ws_text_frame(payload: &[u8]) -> Vec<u8> {
@@ -410,7 +410,11 @@ pub(crate) fn ws_binary_frame(payload: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) fn ws_close_frame(reason: &[u8]) -> Vec<u8> {
-    let mut payload = 1000_u16.to_be_bytes().to_vec();
+    ws_close_frame_with_code(1000, reason)
+}
+
+pub(crate) fn ws_close_frame_with_code(code: u16, reason: &[u8]) -> Vec<u8> {
+    let mut payload = code.to_be_bytes().to_vec();
     payload.extend_from_slice(reason);
     let mut out = vec![0x88, payload.len() as u8];
     out.extend(payload);

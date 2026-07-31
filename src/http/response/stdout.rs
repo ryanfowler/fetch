@@ -1,14 +1,30 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum TerminalOutputSafety {
+    Untrusted,
+    /// Text passed through a local formatter. Only local-style SGR sequences
+    /// are accepted; server-controlled OSC and other controls remain blocked.
+    FormattedText,
+    /// Fully generated terminal protocol output, currently image renderers.
+    Trusted,
+}
+
 pub(super) struct StdoutBody {
     pub(super) bytes: Vec<u8>,
     pub(super) content_type: ContentType,
     pub(super) content_type_label: String,
+    pub(super) terminal_output_safety: TerminalOutputSafety,
 }
 
 pub(super) fn write_stdout_bytes(cli: &Cli, body: &StdoutBody) -> Result<(), FetchError> {
     let stdout_is_terminal = core::stdio().stdout_is_terminal();
-    if should_warn_for_terminal_binary_stdout(cli, &body.bytes, stdout_is_terminal) {
+    let safe_for_terminal = match body.terminal_output_safety {
+        TerminalOutputSafety::Untrusted => core::bytes_appear_printable(&body.bytes),
+        TerminalOutputSafety::FormattedText => formatted_text_appears_terminal_safe(&body.bytes),
+        TerminalOutputSafety::Trusted => true,
+    };
+    if terminal_binary_stdout_guard_enabled(cli, stdout_is_terminal) && !safe_for_terminal {
         write_warning(cli, &binary_response_warning(&body.content_type_label));
         return Ok(());
     }
@@ -19,6 +35,33 @@ pub(super) fn write_stdout_bytes(cli: &Cli, body: &StdoutBody) -> Result<(), Fet
 
     core::write_stdout(&body.bytes)?;
     Ok(())
+}
+
+fn formatted_text_appears_terminal_safe(bytes: &[u8]) -> bool {
+    let mut plain = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\x1b' {
+            plain.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        if bytes.get(index + 1) != Some(&b'[') {
+            return false;
+        }
+        let mut end = index + 2;
+        while bytes
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_digit() || *byte == b';')
+        {
+            end += 1;
+        }
+        if bytes.get(end) != Some(&b'm') {
+            return false;
+        }
+        index = end + 1;
+    }
+    core::bytes_appear_printable(&plain)
 }
 
 pub(super) fn should_page_stdout(
@@ -98,6 +141,7 @@ pub(super) fn terminal_binary_stdout_guard_enabled(cli: &Cli, stdout_is_terminal
     stdout_is_terminal && cli.output.as_deref() != Some("-")
 }
 
+#[cfg(test)]
 pub(super) fn should_warn_for_terminal_binary_stdout(
     cli: &Cli,
     bytes: &[u8],
@@ -111,6 +155,18 @@ mod tests {
     use super::*;
 
     use clap::Parser;
+
+    #[test]
+    fn formatted_terminal_text_allows_sgr_but_rejects_server_controls() {
+        assert!(formatted_text_appears_terminal_safe(
+            b"\x1b[32mformatted\x1b[0m\r\n"
+        ));
+        assert!(!formatted_text_appears_terminal_safe(
+            b"formatted\x1b]52;c;clipboard\x07"
+        ));
+        assert!(!formatted_text_appears_terminal_safe(b"formatted\x1b[2J"));
+        assert!(!formatted_text_appears_terminal_safe(b"overwrite\rtext"));
+    }
 
     #[test]
     fn terminal_binary_stdout_guard_requires_terminal_and_allows_forced_stdout() {

@@ -424,7 +424,7 @@ async fn stream_response_to_stdout_with_binary_check(
     }
 
     let first_chunk = &first_chunk[..n];
-    if !is_printable(first_chunk) {
+    if !initial_stream_chunk_appears_printable(first_chunk) {
         write_warning(
             cli,
             &binary_response_warning(&response_header_content_type_label(response_headers)),
@@ -464,6 +464,11 @@ async fn stream_response_to_stdout_with_binary_check(
     }
 }
 
+fn initial_stream_chunk_appears_printable(bytes: &[u8]) -> bool {
+    let (complete, _carry) = split_incomplete_trailing_text(bytes);
+    is_printable(complete)
+}
+
 /// Like [`copy_async_reader_to_sink`] but checks every chunk with
 /// [`is_printable`] before writing.  If any chunk appears binary the
 /// function drains the remainder and sets `triggered` so the caller can
@@ -490,7 +495,8 @@ where
     // split multi-byte characters are classified on the combined bytes.
     let mut carry: Vec<u8> = Vec::with_capacity(4);
     if !prefix.is_empty() {
-        if !is_printable(prefix) {
+        let (complete, tail) = split_incomplete_trailing_text(prefix);
+        if !is_printable(complete) {
             *triggered = true;
             if let Some(capture) = capture.as_mut() {
                 capture.push(prefix);
@@ -501,7 +507,6 @@ where
             return Ok(written.saturating_add(drained));
         }
 
-        let (complete, tail) = split_incomplete_trailing_utf8(prefix);
         if !complete.is_empty()
             && write_stream_chunk(writer, complete, &mut capture, &mut written, broken_pipe).await?
                 == SinkWriteStatus::Closed
@@ -517,15 +522,12 @@ where
         let n = reader.read(&mut buf).await?;
         if n == 0 {
             if !carry.is_empty() {
-                // Flush an orphaned incomplete suffix. Writing it now
-                // preserves the original bytes; the classifier already
-                // approved the preceding chunk with this suffix present.
-                if write_stream_chunk(writer, &carry, &mut capture, &mut written, broken_pipe)
-                    .await?
-                    == SinkWriteStatus::Closed
-                {
-                    return Ok(written);
+                // An incomplete UTF-8 suffix or bare CR at EOF is unsafe.
+                *triggered = true;
+                if let Some(capture) = capture.as_mut() {
+                    capture.push(&carry);
                 }
+                written = written.saturating_add(i64::try_from(carry.len()).unwrap_or(i64::MAX));
                 carry.clear();
             }
             let _ = stream_sink_status(writer.flush().await, broken_pipe)?;
@@ -538,7 +540,10 @@ where
         combined.extend_from_slice(&carry);
         combined.extend_from_slice(&buf[..n]);
 
-        if !is_printable(&combined) {
+        // Classify only complete sequences. The trailing bytes remain
+        // undecided until the next read (or are rejected at EOF).
+        let (complete, tail) = split_incomplete_trailing_text(&combined);
+        if !is_printable(complete) {
             *triggered = true;
             if let Some(capture) = capture.as_mut() {
                 capture.push(&combined);
@@ -550,9 +555,8 @@ where
             return Ok(written.saturating_add(drained));
         }
 
-        // Classification passed.  Keep any trailing incomplete UTF-8
+        // Classification passed. Keep any trailing incomplete UTF-8 or CR
         // for the next chunk and write the complete portion now.
-        let (complete, tail) = split_incomplete_trailing_utf8(&combined);
         if !complete.is_empty()
             && write_stream_chunk(writer, complete, &mut capture, &mut written, broken_pipe).await?
                 == SinkWriteStatus::Closed
@@ -564,8 +568,22 @@ where
     }
 }
 
+/// Holds back bytes whose terminal-safety classification depends on the next
+/// read: either an incomplete UTF-8 sequence or a trailing carriage return
+/// that is safe only when followed by a newline.
+fn split_incomplete_trailing_text(bytes: &[u8]) -> (&[u8], &[u8]) {
+    let (complete, tail) = split_incomplete_trailing_utf8(bytes);
+    if tail.is_empty() && complete.ends_with(b"\r") {
+        return (
+            &complete[..complete.len() - 1],
+            &complete[complete.len() - 1..],
+        );
+    }
+    (complete, tail)
+}
+
 /// Splits `bytes` into a complete prefix and an incomplete trailing
-/// portion (at most 3 bytes).  The incomplete portion is the longest
+/// portion (at most 3 bytes). The incomplete portion is the longest
 /// suffix that by itself forms an invalid, truncated UTF-8 sequence.
 fn split_incomplete_trailing_utf8(bytes: &[u8]) -> (&[u8], &[u8]) {
     let len = bytes.len();
@@ -1056,6 +1074,14 @@ mod tests {
     }
 
     #[test]
+    fn initial_stream_chunk_defers_split_crlf_and_utf8_classification() {
+        assert!(initial_stream_chunk_appears_printable(b"line one\r"));
+        assert!(initial_stream_chunk_appears_printable(b"caf\xc3"));
+        assert!(!initial_stream_chunk_appears_printable(b"overwrite\rtext"));
+        assert!(!initial_stream_chunk_appears_printable(b"text\x1b[31m"));
+    }
+
+    #[test]
     fn trailing_utf8_detects_split_multibyte_characters() {
         // Complete sequences return no tail.
         assert_eq!(
@@ -1114,6 +1140,32 @@ mod tests {
         assert!(triggered, "guard must trigger on binary data after carry");
         assert_eq!(written, i64::try_from(prefix.len() + suffix.len()).unwrap());
         assert_eq!(writer.bytes, b"ok");
+    }
+
+    #[tokio::test]
+    async fn checked_copy_handles_crlf_split_after_initial_chunk() {
+        let prefix = b"line one\r";
+        let suffix = b"\nline two\r\n";
+        let mut body = prefix.to_vec();
+        body.extend_from_slice(suffix);
+        let mut reader: AsyncReadBox = Box::pin(std::io::Cursor::new(suffix));
+        let mut writer = RecordingAsyncWriter::default();
+        let mut triggered = false;
+
+        let written = copy_checked_async_reader_to_writer(
+            &mut reader,
+            &mut writer,
+            prefix,
+            None,
+            SinkBrokenPipePolicy::Propagate,
+            &mut triggered,
+        )
+        .await
+        .unwrap();
+
+        assert!(!triggered, "guard must allow CRLF split after prefix");
+        assert_eq!(written, i64::try_from(body.len()).unwrap());
+        assert_eq!(writer.bytes, body);
     }
 
     /// Valid UTF-8 text split between the initial prefix and the first
