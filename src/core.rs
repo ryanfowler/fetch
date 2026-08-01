@@ -170,50 +170,25 @@ pub fn write_stdout(bytes: impl AsRef<[u8]>) -> std::io::Result<StdoutWriteStatu
 }
 
 pub fn bytes_appear_printable(bytes: &[u8]) -> bool {
-    if bytes.contains(&0) {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        // Malformed UTF-8 can encode C1 terminal controls such as the 8-bit
+        // CSI byte (0x9b), so it is never safe for direct terminal output.
         return false;
-    }
+    };
+    terminal_text_controls_safe(text)
+}
 
-    let max_unsafe = (bytes.len() / 10).max(1);
-    let mut safe = 0usize;
-    let mut total = 0usize;
-    let mut remaining = bytes;
-    while !remaining.is_empty() {
-        match std::str::from_utf8(remaining) {
-            Ok(valid) => {
-                for ch in valid.chars() {
-                    total += 1;
-                    if ch.is_whitespace() || !ch.is_control() || ch == '\x1b' {
-                        safe += 1;
-                    }
-                }
-                break;
-            }
-            Err(err) => {
-                let valid_up_to = err.valid_up_to();
-                if valid_up_to > 0 {
-                    let valid = std::str::from_utf8(&remaining[..valid_up_to])
-                        .expect("valid prefix reported by utf8 error");
-                    for ch in valid.chars() {
-                        total += 1;
-                        if ch.is_whitespace() || !ch.is_control() || ch == '\x1b' {
-                            safe += 1;
-                        }
-                    }
-                }
-                if err.error_len().is_none() {
-                    break;
-                }
-                total += 1;
-                if total - safe > max_unsafe {
-                    return false;
-                }
-                remaining = &remaining[valid_up_to + err.error_len().unwrap()..];
-            }
+fn terminal_text_controls_safe(text: &str) -> bool {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\n' | '\t' => {}
+            ch if ch.is_control() => return false,
+            _ => {}
         }
     }
-
-    total == 0 || (safe as f64 / total as f64) >= 0.9
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -551,6 +526,24 @@ mod tests {
         assert!(!format_enabled(None, false));
         assert!(format_enabled(Some("auto"), true));
         assert!(!format_enabled(Some("auto"), false));
+    }
+
+    #[test]
+    fn printable_bytes_reject_terminal_escapes_and_incomplete_utf8() {
+        assert!(bytes_appear_printable(b"plain text\n"));
+        assert!(!bytes_appear_printable(b"\x1b[31m"));
+        assert!(!bytes_appear_printable(b"\x07"));
+        assert!(!bytes_appear_printable(b"\xf0\x9f\x98"));
+        let padded_escape = format!(
+            "{}\x1b]52;c;clipboard\x07{}",
+            "a".repeat(100),
+            "b".repeat(100)
+        );
+        assert!(!bytes_appear_printable(padded_escape.as_bytes()));
+        assert!(bytes_appear_printable(b"line one\r\nline two\r\n"));
+        assert!(!bytes_appear_printable(b"overwrite\rtext"));
+        let padded_c1 = [b"a".repeat(100), vec![0x9b, b'2', b'J']].concat();
+        assert!(!bytes_appear_printable(&padded_c1));
     }
 
     #[test]

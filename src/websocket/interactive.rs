@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::sync::mpsc;
 use std::thread;
@@ -6,88 +7,96 @@ use std::time::Duration;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+use unicode_width::UnicodeWidthChar;
 
 use crate::error::FetchError;
 use crate::format::json;
 
-use super::websocket_error;
+use super::{WebSocketMessageMode, close_outcome_result, outgoing_message, websocket_error};
 
 pub const PROMPT: &str = "❯ ";
 const MIN_ROWS: usize = 5;
 const READ_BUF_SIZE: usize = 256;
 const STDIN_CHAN_BUF: usize = 64;
 const MAX_MESSAGES: usize = 10_000;
+const MAX_HISTORY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ESCAPE_SEQUENCE_BYTES: usize = 1024;
+const MAX_PENDING_INPUT_BYTES: usize = MAX_ESCAPE_SEQUENCE_BYTES + READ_BUF_SIZE;
 const STATUS_GAP_ROWS: usize = 1;
 
 #[derive(Debug, Default)]
 pub struct LineEditor {
-    buf: Vec<char>,
-    pos: usize,
+    // A gap buffer: characters before the cursor and characters after it
+    // in reverse order. Common insertion, deletion, and cursor movement
+    // are O(1), including large pasted input.
+    left: Vec<char>,
+    right: Vec<char>,
+    byte_len: usize,
 }
 
 impl LineEditor {
     pub fn insert(&mut self, ch: char) {
-        self.buf.insert(self.pos, ch);
-        self.pos += 1;
+        self.left.push(ch);
+        self.byte_len += ch.len_utf8();
     }
 
     pub fn backspace(&mut self) -> bool {
-        if self.pos == 0 {
+        let Some(ch) = self.left.pop() else {
             return false;
-        }
-        self.pos -= 1;
-        self.buf.remove(self.pos);
+        };
+        self.byte_len -= ch.len_utf8();
         true
     }
 
     pub fn delete(&mut self) -> bool {
-        if self.pos >= self.buf.len() {
+        let Some(ch) = self.right.pop() else {
             return false;
-        }
-        self.buf.remove(self.pos);
+        };
+        self.byte_len -= ch.len_utf8();
         true
     }
 
     pub fn move_left(&mut self) -> bool {
-        if self.pos == 0 {
+        let Some(ch) = self.left.pop() else {
             return false;
-        }
-        self.pos -= 1;
+        };
+        self.right.push(ch);
         true
     }
 
     pub fn move_right(&mut self) -> bool {
-        if self.pos >= self.buf.len() {
+        let Some(ch) = self.right.pop() else {
             return false;
-        }
-        self.pos += 1;
+        };
+        self.left.push(ch);
         true
     }
 
     pub fn home(&mut self) {
-        self.pos = 0;
+        while let Some(ch) = self.left.pop() {
+            self.right.push(ch);
+        }
     }
 
     pub fn end(&mut self) {
-        self.pos = self.buf.len();
+        while let Some(ch) = self.right.pop() {
+            self.left.push(ch);
+        }
     }
 
     pub fn clear_line(&mut self) {
-        self.buf.clear();
-        self.pos = 0;
+        self.left.clear();
+        self.right.clear();
+        self.byte_len = 0;
     }
 
     pub fn delete_word(&mut self) {
-        if self.pos == 0 {
-            return;
+        while self.left.last() == Some(&' ') {
+            self.backspace();
         }
-        while self.pos > 0 && self.buf[self.pos - 1] == ' ' {
-            self.pos -= 1;
-            self.buf.remove(self.pos);
-        }
-        while self.pos > 0 && self.buf[self.pos - 1] != ' ' {
-            self.pos -= 1;
-            self.buf.remove(self.pos);
+        while self.left.last().is_some_and(|ch| *ch != ' ') {
+            self.backspace();
         }
     }
 
@@ -98,23 +107,28 @@ impl LineEditor {
     }
 
     pub fn text(&self) -> String {
-        self.buf.iter().collect()
+        self.left.iter().chain(self.right.iter().rev()).collect()
     }
 
     pub fn set_text(&mut self, text: &str) {
-        self.buf = text.chars().collect();
-        self.pos = self.buf.len();
+        self.left = text.chars().collect();
+        self.right.clear();
+        self.byte_len = text.len();
     }
 
     pub fn position(&self) -> usize {
-        self.pos
+        self.left.len()
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.byte_len
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageEntry {
     arrow: Option<&'static str>,
-    data: Option<Vec<u8>>,
+    data: Option<String>,
     binary_len: usize,
 }
 
@@ -122,7 +136,7 @@ impl MessageEntry {
     pub fn text(arrow: &'static str, data: impl Into<Vec<u8>>) -> Self {
         Self {
             arrow: Some(arrow),
-            data: Some(data.into()),
+            data: Some(String::from_utf8_lossy(&data.into()).into_owned()),
             binary_len: 0,
         }
     }
@@ -143,7 +157,8 @@ pub struct InteractiveMode {
     cols: usize,
     next_row: usize,
     status: String,
-    messages: Vec<MessageEntry>,
+    messages: VecDeque<MessageEntry>,
+    retained_message_bytes: usize,
     format_json: bool,
     color_json: bool,
 }
@@ -166,7 +181,8 @@ impl InteractiveMode {
             cols,
             next_row: 0,
             status: "connected".to_string(),
-            messages: Vec::new(),
+            messages: VecDeque::new(),
+            retained_message_bytes: 0,
             format_json,
             color_json,
         }
@@ -270,8 +286,7 @@ impl InteractiveMode {
     }
 
     pub fn render_binary_indicator<W: Write>(&mut self, out: &mut W, len: usize) -> io::Result<()> {
-        self.messages.push(MessageEntry::binary(len));
-        self.truncate_messages();
+        self.push_message(MessageEntry::binary(len));
         self.write_binary(out, len)?;
         self.draw_input_line(out)
     }
@@ -292,15 +307,27 @@ impl InteractiveMode {
     ) -> io::Result<(Vec<u8>, Vec<InputAction>)> {
         let mut actions = Vec::new();
         let mut index = 0;
+        let mut redraw = false;
+        let mut input_bytes = self.editor.byte_len();
         while index < buf.len() {
             let byte = buf[index];
 
             if byte == 0x1b {
                 let consumed = self.handle_escape(&buf[index..]);
                 if consumed == 0 {
+                    if buf.len() - index > MAX_ESCAPE_SEQUENCE_BYTES {
+                        self.status = "oversized terminal escape sequence discarded".to_string();
+                        self.draw_status(out)?;
+                        self.draw_input_line(out)?;
+                        return Ok((Vec::new(), actions));
+                    }
+                    if redraw {
+                        self.draw_input_line(out)?;
+                    }
                     return Ok((buf[index..].to_vec(), actions));
                 }
-                self.draw_input_line(out)?;
+                input_bytes = self.editor.byte_len();
+                redraw = true;
                 index += consumed;
                 continue;
             }
@@ -312,44 +339,35 @@ impl InteractiveMode {
                 }
                 0x0d => {
                     let text = self.editor.submit();
-                    self.draw_input_line(out)?;
-                    if !text.is_empty() {
-                        actions.push(InputAction::Send(text));
-                    }
+                    actions.push(InputAction::Send(text));
+                    input_bytes = 0;
+                    redraw = true;
                     index += 1;
                     continue;
                 }
                 0x7f | 0x08 => {
                     self.editor.backspace();
-                    self.draw_input_line(out)?;
+                    input_bytes = self.editor.byte_len();
+                    redraw = true;
                     index += 1;
                     continue;
                 }
-                0x01 => {
-                    self.editor.home();
-                    self.draw_input_line(out)?;
-                    index += 1;
-                    continue;
-                }
-                0x05 => {
-                    self.editor.end();
-                    self.draw_input_line(out)?;
-                    index += 1;
-                    continue;
-                }
+                0x01 => self.editor.home(),
+                0x05 => self.editor.end(),
                 0x15 => {
                     self.editor.clear_line();
-                    self.draw_input_line(out)?;
-                    index += 1;
-                    continue;
+                    input_bytes = 0;
                 }
                 0x17 => {
                     self.editor.delete_word();
-                    self.draw_input_line(out)?;
-                    index += 1;
-                    continue;
+                    input_bytes = self.editor.byte_len();
                 }
                 _ => {}
+            }
+            if matches!(byte, 0x01 | 0x05 | 0x15 | 0x17) {
+                redraw = true;
+                index += 1;
+                continue;
             }
 
             if byte >= 0x20 {
@@ -358,20 +376,35 @@ impl InteractiveMode {
                     continue;
                 };
                 if index + width > buf.len() {
+                    if redraw {
+                        self.draw_input_line(out)?;
+                    }
                     return Ok((buf[index..].to_vec(), actions));
                 }
                 let Ok(text) = std::str::from_utf8(&buf[index..index + width]) else {
                     index += 1;
                     continue;
                 };
+                if input_bytes + width > MAX_INPUT_BYTES {
+                    self.status = format!(
+                        "input exceeds maximum of {MAX_INPUT_BYTES} bytes; extra input rejected"
+                    );
+                    self.draw_status(out)?;
+                    index += width;
+                    continue;
+                }
                 let ch = text.chars().next().expect("non-empty UTF-8 sequence");
                 self.editor.insert(ch);
-                self.draw_input_line(out)?;
+                input_bytes += width;
+                redraw = true;
                 index += width;
                 continue;
             }
 
             index += 1;
+        }
+        if redraw {
+            self.draw_input_line(out)?;
         }
         Ok((Vec::new(), actions))
     }
@@ -451,11 +484,11 @@ impl InteractiveMode {
         let arrow = msg.arrow.unwrap_or("←");
         let prefix_width = display_width(&format!("{arrow} "));
         let width = self.cols.saturating_sub(prefix_width).max(1);
-        Ok(wrap_display_lines(&self.format_message(data)?, width).len())
+        Ok(wrap_display_lines(data, width).len())
     }
 
     pub fn format_message(&self, data: &[u8]) -> Result<String, FetchError> {
-        if self.format_json && serde_json::from_slice::<serde_json::Value>(data).is_ok() {
+        if self.format_json {
             let mut formatted = crate::core::Printer::new(self.color_json);
             if json::format_json_line_to(data, &mut formatted).is_ok() {
                 let formatted = formatted.into_bytes();
@@ -492,9 +525,13 @@ impl InteractiveMode {
         arrow: &'static str,
         data: &[u8],
     ) -> io::Result<()> {
-        self.messages.push(MessageEntry::text(arrow, data));
-        self.truncate_messages();
-        self.write_message(out, arrow, data)?;
+        let formatted = self.format_message(data).map_err(io::Error::other)?;
+        self.write_formatted_message(out, arrow, &formatted)?;
+        self.push_message(MessageEntry {
+            arrow: Some(arrow),
+            data: Some(formatted),
+            binary_len: 0,
+        });
         self.draw_input_line(out)
     }
 
@@ -517,14 +554,17 @@ impl InteractiveMode {
             start = index;
         }
 
-        let replay = self.messages[start..].to_vec();
-        for message in replay {
-            if let Some(data) = message.data {
-                self.write_message(out, message.arrow.unwrap_or("←"), &data)?;
+        // Temporarily move history out so replay can mutate screen state while
+        // iterating entries by reference, without cloning message payloads.
+        let messages = std::mem::take(&mut self.messages);
+        for message in messages.iter().skip(start) {
+            if let Some(data) = message.data.as_deref() {
+                self.write_formatted_message(out, message.arrow.unwrap_or("←"), data)?;
             } else {
                 self.write_binary(out, message.binary_len)?;
             }
         }
+        self.messages = messages;
         Ok(())
     }
 
@@ -551,60 +591,60 @@ impl InteractiveMode {
             return Ok(());
         }
         let input_row = self.rows - 1;
-        let text = self.editor.text();
-        let pos = self.editor.position();
         let available = self.cols.saturating_sub(display_width(PROMPT)).max(1);
-        let runes: Vec<char> = text.chars().collect();
+        // Bound work even when a paste contains millions of combining marks.
+        // Four code points per cell leaves room for ordinary grapheme clusters
+        // without allowing redraw cost to scale with the full editor buffer.
+        let max_visible_chars = available.saturating_mul(4).max(32);
 
-        let width_to_cursor = runes
-            .iter()
-            .take(pos)
-            .map(|ch| char_display_width(*ch).max(1))
-            .sum::<usize>();
-        let mut display_start = 0;
-        if width_to_cursor >= available {
-            let mut width = 0;
-            for index in (0..pos).rev() {
-                width += char_display_width(runes[index]).max(1);
-                if width >= available {
-                    display_start = index + 1;
-                    break;
-                }
+        let mut display_start = self.editor.left.len();
+        let mut width_before_cursor = 0;
+        for (seen, ch) in self.editor.left.iter().rev().enumerate() {
+            if seen >= max_visible_chars {
+                break;
             }
+            let width = char_display_width(*ch);
+            if width_before_cursor + width >= available && width > 0 {
+                break;
+            }
+            display_start -= 1;
+            width_before_cursor += width;
         }
-
-        let mut cursor_col = display_width(PROMPT);
-        for ch in runes.iter().take(pos).skip(display_start) {
-            cursor_col += char_display_width(*ch).max(1);
-        }
+        let cursor_col = display_width(PROMPT) + width_before_cursor;
 
         write!(out, "\x1b[{input_row};1H\x1b[2K")?;
         write!(out, "\x1b[1m{PROMPT}\x1b[0m")?;
 
         let mut displayed_width = 0;
-        for ch in runes.iter().skip(display_start) {
-            let char_width = char_display_width(*ch).max(1);
-            if displayed_width + char_width > available {
+        for (displayed_chars, ch) in self.editor.left[display_start..]
+            .iter()
+            .chain(self.editor.right.iter().rev())
+            .enumerate()
+        {
+            if displayed_chars >= max_visible_chars {
+                break;
+            }
+            let width = char_display_width(*ch);
+            if displayed_width + width > available {
                 break;
             }
             write!(out, "{ch}")?;
-            displayed_width += char_width;
+            displayed_width += width;
         }
 
         write!(out, "\x1b[{input_row};{}H", cursor_col + 1)
     }
 
-    fn write_message<W: Write>(
+    fn write_formatted_message<W: Write>(
         &mut self,
         out: &mut W,
         arrow: &'static str,
-        data: &[u8],
+        formatted: &str,
     ) -> io::Result<()> {
         let prefix = format!("{arrow} ");
         let continuation = "  ";
         let width = self.cols.saturating_sub(display_width(&prefix)).max(1);
-        let formatted = self.format_message(data).map_err(io::Error::other)?;
-        let lines = wrap_display_lines(&formatted, width);
+        let lines = wrap_display_lines(formatted, width);
         for (index, line) in lines.iter().enumerate() {
             self.write_physical_line(out)?;
             if index == 0 {
@@ -638,17 +678,33 @@ impl InteractiveMode {
         self.rows.saturating_sub(3 + STATUS_GAP_ROWS).max(1)
     }
 
-    fn truncate_messages(&mut self) {
-        if self.messages.len() > MAX_MESSAGES {
-            let keep_from = self.messages.len() - MAX_MESSAGES;
-            self.messages.drain(..keep_from);
+    fn push_message(&mut self, mut message: MessageEntry) {
+        let mut bytes = message.data.as_ref().map_or(0, String::len);
+        if bytes > MAX_HISTORY_BYTES {
+            message = MessageEntry::text(
+                message.arrow.unwrap_or("←"),
+                format!("[message omitted: {bytes} bytes exceeds history budget]"),
+            );
+            bytes = message.data.as_ref().map_or(0, String::len);
+        }
+        self.retained_message_bytes += bytes;
+        self.messages.push_back(message);
+        while self.messages.len() > MAX_MESSAGES || self.retained_message_bytes > MAX_HISTORY_BYTES
+        {
+            let Some(removed) = self.messages.pop_front() else {
+                break;
+            };
+            self.retained_message_bytes = self
+                .retained_message_bytes
+                .saturating_sub(removed.data.as_ref().map_or(0, String::len));
         }
     }
 }
 
-pub async fn run_terminal<S>(
+pub(super) async fn run_terminal<S>(
     stream: S,
     initial_message: Option<&[u8]>,
+    message_mode: WebSocketMessageMode,
     format_json: bool,
     color_json: bool,
     rows: usize,
@@ -672,8 +728,8 @@ where
     resize_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     resize_interval.tick().await;
 
-    if let Some(data) = initial_message.filter(|data| !data.is_empty()) {
-        if let Err(err) = send_text(&mut sink, data).await {
+    if let Some(data) = initial_message {
+        if let Err(err) = send_message(&mut sink, data, message_mode).await {
             teardown(&mut mode, &mut stdout)?;
             return Err(err);
         }
@@ -686,9 +742,26 @@ where
             raw = input_rx.recv() => {
                 let Some(raw) = raw else {
                     teardown(&mut mode, &mut stdout)?;
+                    graceful_close(&mut sink).await?;
                     return Ok(());
                 };
-                pending.extend_from_slice(&raw);
+                let raw = match raw {
+                    Ok(raw) => raw,
+                    Err(err) => {
+                        teardown(&mut mode, &mut stdout)?;
+                        let _ = graceful_close(&mut sink).await;
+                        return Err(err.into());
+                    }
+                };
+                if pending.len().saturating_add(raw.len()) > MAX_PENDING_INPUT_BYTES {
+                    pending.clear();
+                    mode.set_status(
+                        &mut stdout,
+                        "oversized incomplete terminal input discarded",
+                    )?;
+                } else {
+                    pending.extend_from_slice(&raw);
+                }
                 let (rest, actions) = mode.handle_input(&mut stdout, &pending)?;
                 pending = rest;
                 stdout.flush()?;
@@ -696,12 +769,12 @@ where
                     match action {
                         InputAction::Cancel => {
                             teardown(&mut mode, &mut stdout)?;
-                            let _ = sink.send(Message::Close(None)).await;
+                            graceful_close(&mut sink).await?;
                             return Ok(());
                         }
                         InputAction::Send(text) => {
                             let data = text.as_bytes().to_vec();
-                            match send_text(&mut sink, &data).await {
+                            match send_message(&mut sink, &data, message_mode).await {
                                 Ok(()) => mode.note_send_success(&mut stdout, &data)?,
                                 Err(err) => mode.note_send_failure(&mut stdout, &text, err)?,
                             }
@@ -718,9 +791,10 @@ where
                 match message.map_err(websocket_error)? {
                     Message::Text(text) => mode.render_received_message(&mut stdout, text.as_str().as_bytes())?,
                     Message::Binary(bytes) => mode.render_binary_indicator(&mut stdout, bytes.len())?,
-                    Message::Close(_) => {
+                    Message::Close(frame) => {
                         teardown(&mut mode, &mut stdout)?;
-                        return Ok(());
+                        sink.flush().await.map_err(websocket_error)?;
+                        return close_outcome_result(super::ReadOutcome::PeerClosed(frame));
                     }
                     Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
                 }
@@ -730,7 +804,7 @@ where
                 if let Some(size) = crate::core::terminal_size() {
                     if !InteractiveMode::is_screen_tall_enough(size.rows) {
                         teardown(&mut mode, &mut stdout)?;
-                        let _ = sink.send(Message::Close(None)).await;
+                        graceful_close(&mut sink).await?;
                         return Ok(());
                     }
                     if size.rows != mode.rows() || size.cols != mode.cols() {
@@ -743,18 +817,30 @@ where
     }
 }
 
-async fn send_text<S>(sink: &mut S, data: &[u8]) -> Result<(), FetchError>
+async fn send_message<S>(
+    sink: &mut S,
+    data: &[u8],
+    mode: WebSocketMessageMode,
+) -> Result<(), FetchError>
 where
     S: Sink<Message, Error = WsError> + Unpin,
 {
-    sink.send(Message::Text(
-        String::from_utf8_lossy(data).into_owned().into(),
-    ))
-    .await
-    .map_err(websocket_error)
+    sink.send(outgoing_message(data.to_vec(), mode)?)
+        .await
+        .map_err(websocket_error)
 }
 
-fn spawn_stdin_reader(tx: tokio_mpsc::Sender<Vec<u8>>) {
+async fn graceful_close<S>(sink: &mut S) -> Result<(), FetchError>
+where
+    S: Sink<Message, Error = WsError> + Unpin,
+{
+    sink.send(Message::Close(None))
+        .await
+        .map_err(websocket_error)?;
+    sink.flush().await.map_err(websocket_error)
+}
+
+fn spawn_stdin_reader(tx: tokio_mpsc::Sender<Result<Vec<u8>, io::Error>>) {
     thread::spawn(move || {
         let mut stdin = io::stdin();
         let mut buf = [0_u8; READ_BUF_SIZE];
@@ -762,18 +848,21 @@ fn spawn_stdin_reader(tx: tokio_mpsc::Sender<Vec<u8>>) {
             match stdin.read(&mut buf) {
                 Ok(0) => return,
                 Ok(n) => {
-                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                    if tx.blocking_send(Ok(buf[..n].to_vec())).is_err() {
                         return;
                     }
                 }
-                Err(_) => return,
+                Err(err) => {
+                    let _ = tx.blocking_send(Err(err));
+                    return;
+                }
             }
         }
     });
 }
 
 async fn detect_cursor_row_async<W: Write>(
-    input_rx: &mut tokio_mpsc::Receiver<Vec<u8>>,
+    input_rx: &mut tokio_mpsc::Receiver<Result<Vec<u8>, io::Error>>,
     out: &mut W,
 ) -> io::Result<(usize, Vec<u8>)> {
     write!(out, "\x1b[6n")?;
@@ -794,7 +883,7 @@ async fn detect_cursor_row_async<W: Write>(
                 let Some(raw) = raw else {
                     return Ok((1, captured));
                 };
-                captured.extend_from_slice(&raw);
+                captured.extend_from_slice(&raw?);
             }
             _ = &mut deadline => {
                 return Ok((1, captured));
@@ -1044,7 +1133,7 @@ pub fn wrap_display_lines(text: &str, width: usize) -> Vec<String> {
                 .chars()
                 .next()
                 .expect("index is inside string bounds");
-            let char_width = char_display_width(ch).max(1);
+            let char_width = char_display_width(ch);
             if line_width > 0 && line_width + char_width > width {
                 lines.push(std::mem::take(&mut line));
                 line_width = 0;
@@ -1069,7 +1158,7 @@ pub fn fit_display_width(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in text.chars() {
-        let char_width = char_display_width(ch).max(1);
+        let char_width = char_display_width(ch);
         if used + char_width > width {
             break;
         }
@@ -1091,7 +1180,7 @@ fn display_width(text: &str) -> usize {
             .chars()
             .next()
             .expect("index is inside string bounds");
-        width += char_display_width(ch).max(1);
+        width += char_display_width(ch);
         index += ch.len_utf8();
     }
     width
@@ -1112,27 +1201,7 @@ fn ansi_csi_sequence(text: &str, start: usize) -> Option<(&str, usize)> {
 }
 
 fn char_display_width(ch: char) -> usize {
-    if ch == '\n' || ch == '\r' {
-        return 0;
-    }
-    if is_wide(ch) { 2 } else { 1 }
-}
-
-fn is_wide(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x1100..=0x115f
-            | 0x2329..=0x232a
-            | 0x2e80..=0xa4cf
-            | 0xac00..=0xd7a3
-            | 0xf900..=0xfaff
-            | 0xfe10..=0xfe19
-            | 0xfe30..=0xfe6f
-            | 0xff00..=0xff60
-            | 0xffe0..=0xffe6
-            | 0x1f300..=0x1f64f
-            | 0x1f900..=0x1f9ff
-    )
+    UnicodeWidthChar::width(ch).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1255,6 +1324,20 @@ mod tests {
     }
 
     #[test]
+    fn test_line_editor_delete_updates_byte_length_before_replacement() {
+        let mut editor = LineEditor::default();
+        editor.set_text("aé");
+        assert_eq!(editor.byte_len(), 3);
+
+        editor.move_left();
+        assert!(editor.delete());
+        assert_eq!(editor.byte_len(), 1);
+        editor.insert('é');
+        assert_eq!(editor.byte_len(), 3);
+        assert_eq!(editor.text(), "aé");
+    }
+
+    #[test]
     fn test_line_editor_insert_middle() {
         let mut editor = LineEditor::default();
         editor.insert('a');
@@ -1304,6 +1387,114 @@ mod tests {
         assert_eq!(mode.handle_escape(&[0x1b]), 0);
         assert_eq!(mode.handle_escape(&[0x1b, b'[']), 0);
         assert_eq!(mode.handle_escape(&[0x1b, b'[', b'3']), 0);
+    }
+
+    #[test]
+    fn interactive_input_limit_handles_multibyte_boundary() {
+        let mut accepted = InteractiveMode::new(20, false);
+        accepted.editor.byte_len = MAX_INPUT_BYTES - 2;
+        let mut out = Vec::new();
+        let (pending, actions) = accepted.handle_input(&mut out, "é".as_bytes()).unwrap();
+        assert!(pending.is_empty());
+        assert!(actions.is_empty());
+        assert_eq!(accepted.editor.byte_len(), MAX_INPUT_BYTES);
+        assert_eq!(accepted.editor.text(), "é");
+
+        let mut rejected = InteractiveMode::new(20, false);
+        rejected.editor.byte_len = MAX_INPUT_BYTES - 1;
+        let (pending, actions) = rejected.handle_input(&mut out, "é".as_bytes()).unwrap();
+        assert!(pending.is_empty());
+        assert!(actions.is_empty());
+        assert!(rejected.editor.text().is_empty());
+        assert!(rejected.status.contains("extra input rejected"));
+    }
+
+    #[test]
+    fn interactive_history_enforces_byte_budget_and_placeholder() {
+        let mut mode = InteractiveMode::new(20, false);
+        mode.push_message(MessageEntry {
+            arrow: Some("←"),
+            data: Some("x".repeat(MAX_HISTORY_BYTES + 1)),
+            binary_len: 0,
+        });
+        assert_eq!(mode.messages.len(), 1);
+        assert!(
+            mode.messages[0]
+                .data
+                .as_deref()
+                .unwrap()
+                .contains("message omitted")
+        );
+        assert!(mode.retained_message_bytes <= MAX_HISTORY_BYTES);
+
+        let mut mode = InteractiveMode::new(20, false);
+        mode.push_message(MessageEntry {
+            arrow: Some("←"),
+            data: Some("a".repeat(3 * 1024 * 1024)),
+            binary_len: 0,
+        });
+        mode.push_message(MessageEntry {
+            arrow: Some("←"),
+            data: Some("b".repeat(2 * 1024 * 1024)),
+            binary_len: 0,
+        });
+        assert_eq!(mode.messages.len(), 1);
+        assert_eq!(mode.retained_message_bytes, 2 * 1024 * 1024);
+
+        mode.push_message(MessageEntry::binary(usize::MAX));
+        assert_eq!(mode.messages.len(), 2);
+        assert_eq!(mode.retained_message_bytes, 2 * 1024 * 1024);
+        assert!(mode.retained_message_bytes <= MAX_HISTORY_BYTES);
+    }
+
+    #[test]
+    fn oversized_incomplete_escape_sequence_is_discarded() {
+        let mut mode = InteractiveMode::new(20, false);
+        let mut out = Vec::new();
+        mode.setup_screen(&mut out, 8, 20, 1).unwrap();
+        out.clear();
+        let mut input = vec![0x1b, b'['];
+        input.extend(std::iter::repeat_n(b'1', MAX_ESCAPE_SEQUENCE_BYTES));
+
+        let (pending, actions) = mode.handle_input(&mut out, &input).unwrap();
+
+        assert!(pending.is_empty());
+        assert!(actions.is_empty());
+        assert_eq!(mode.status, "oversized terminal escape sequence discarded");
+    }
+
+    #[test]
+    fn completing_long_escape_preserves_following_input() {
+        let mut mode = InteractiveMode::new(20, false);
+        let mut out = Vec::new();
+        let mut first = vec![0x1b, b'['];
+        first.extend(std::iter::repeat_n(
+            b'1',
+            MAX_ESCAPE_SEQUENCE_BYTES - first.len(),
+        ));
+        let (mut pending, actions) = mode.handle_input(&mut out, &first).unwrap();
+        assert_eq!(pending.len(), MAX_ESCAPE_SEQUENCE_BYTES);
+        assert!(actions.is_empty());
+
+        let next = b"mhello";
+        assert!(pending.len() + next.len() <= MAX_PENDING_INPUT_BYTES);
+        pending.extend_from_slice(next);
+        let (pending, actions) = mode.handle_input(&mut out, &pending).unwrap();
+        assert!(pending.is_empty());
+        assert!(actions.is_empty());
+        assert_eq!(mode.editor.text(), "hello");
+    }
+
+    #[test]
+    fn input_redraw_is_bounded_for_many_zero_width_characters() {
+        let mut mode = InteractiveMode::new(20, false);
+        mode.rows = 8;
+        mode.editor.set_text(&"\u{301}".repeat(10_000));
+        let mut out = Vec::new();
+
+        mode.draw_input_line(&mut out).unwrap();
+
+        assert!(out.len() < 1024, "redraw output was {} bytes", out.len());
     }
 
     #[test]

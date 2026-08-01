@@ -965,6 +965,36 @@ fn configure_proxy(
     Ok(configure_proxy_configs(builder, proxy_configs))
 }
 
+pub(crate) struct EffectiveWebSocketProxy {
+    pub(crate) url: String,
+    pub(crate) authorization: Option<String>,
+}
+
+pub(crate) fn effective_proxy_for_websocket(
+    proxy: Option<&str>,
+    websocket_url: &Url,
+) -> Result<Option<EffectiveWebSocketProxy>, FetchError> {
+    let mut url = websocket_url.clone();
+    let scheme = match url.scheme() {
+        "ws" => "http",
+        "wss" => "https",
+        _ => return Ok(None),
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| FetchError::Message("invalid WebSocket URL scheme".to_string()))?;
+    let proxy_configs = proxy_configs(proxy)?;
+    proxy_configs
+        .iter()
+        .find_map(|candidate| candidate.selected_for_url(&url))
+        .map(|selected| {
+            Ok(EffectiveWebSocketProxy {
+                url: selected.url().to_string(),
+                authorization: selected.basic_auth()?,
+            })
+        })
+        .transpose()
+}
+
 pub(crate) fn effective_proxy_for_url(
     proxy: Option<&str>,
     version: Option<HttpVersion>,
@@ -1290,6 +1320,25 @@ mod tests {
 
     fn auto_http3_test_discovery_budget() -> Option<AutoHttp3DiscoveryBudget> {
         AutoHttp3DiscoveryBudget::new(TimeoutBudget::new(None))
+    }
+
+    #[test]
+    fn websocket_effective_proxy_preserves_authorization() {
+        let selected = effective_proxy_for_websocket(
+            Some("http://proxy-user:proxy-pass@proxy.example:8080"),
+            &Url::parse("wss://example.com/socket").unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            selected.url,
+            "http://proxy-user:proxy-pass@proxy.example:8080"
+        );
+        assert_eq!(
+            selected.authorization.as_deref(),
+            Some("Basic cHJveHktdXNlcjpwcm94eS1wYXNz")
+        );
     }
 
     #[test]

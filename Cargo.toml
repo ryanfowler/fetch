@@ -69,6 +69,7 @@ tokio-rustls = { version = "=0.26.4", default-features = false, features = ["aws
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tokio-util = { version = "=0.7.19", features = ["io"] }
 tower-service = "=0.3.3"
+unicode-width = "=0.2.2"
 url = "=2.5.8"
 webpki-roots = "=1.0.9"
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }

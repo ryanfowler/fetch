@@ -124,13 +124,16 @@ pub(crate) static FLAGS: &[FlagDef] = &[
         .with_ws_always(),
     FlagDef::new("--proto-desc", Some(FlagCategory::Request), |c| {
         c.proto_desc.is_some()
-    }),
+    })
+    .with_ws_always(),
     FlagDef::new("--proto-file", Some(FlagCategory::Request), |c| {
         !c.proto_files.is_empty()
-    }),
+    })
+    .with_ws_always(),
     FlagDef::new("--proto-import", Some(FlagCategory::Request), |c| {
         !c.proto_imports.is_empty()
-    }),
+    })
+    .with_ws_always(),
     FlagDef::new("--output", Some(FlagCategory::Request), |c| {
         c.output.is_some()
     })
@@ -181,18 +184,22 @@ pub(crate) static FLAGS: &[FlagDef] = &[
     FlagDef::new("--redirects", Some(FlagCategory::Request), |c| {
         c.redirects.is_some()
     })
-    .with_from_curl(),
+    .with_from_curl()
+    .with_ws_always(),
     FlagDef::new("--range", Some(FlagCategory::Request), |c| {
         !c.ranges.is_empty()
     })
-    .with_from_curl(),
+    .with_from_curl()
+    .with_ws_always(),
     FlagDef::new("--timing", Some(FlagCategory::Request), |c| c.timing),
     FlagDef::new("--proxy", Some(FlagCategory::Request), |c| {
         c.proxy.is_some()
     })
     .with_from_curl(),
     FlagDef::new("--discard", Some(FlagCategory::Request), |c| c.discard).with_ws_always(),
-    FlagDef::new("--unix", Some(FlagCategory::Request), |c| c.unix.is_some()).with_from_curl(),
+    FlagDef::new("--unix", Some(FlagCategory::Request), |c| c.unix.is_some())
+        .with_from_curl()
+        .with_ws_always(),
     // ── Auth ────────────────────────────────────────────────────────────
     FlagDef::new("--basic", Some(FlagCategory::Auth), |c| c.basic.is_some()).with_from_curl(),
     FlagDef::new("--bearer", Some(FlagCategory::Auth), |c| c.bearer.is_some()).with_from_curl(),
@@ -207,20 +214,23 @@ pub(crate) static FLAGS: &[FlagDef] = &[
     FlagDef::new("--article", Some(FlagCategory::Response), |c| c.article).with_ws_always(),
     FlagDef::new("--compress", Some(FlagCategory::Response), |c| {
         c.compress.is_some()
-    }),
-    FlagDef::new("--no-encode", Some(FlagCategory::Response), |c| c.no_encode),
+    })
+    .with_ws_always(),
+    FlagDef::new("--no-encode", Some(FlagCategory::Response), |c| c.no_encode).with_ws_always(),
     FlagDef::new("--format", Some(FlagCategory::Response), |c| {
         c.format.is_some()
     }),
     FlagDef::new("--image", Some(FlagCategory::Response), |c| {
         c.image.is_some()
-    }),
+    })
+    .with_ws_always(),
     FlagDef::new("--pager", Some(FlagCategory::Response), |c| {
         c.pager.is_some()
     }),
     FlagDef::new("--ignore-status", Some(FlagCategory::Response), |c| {
         c.ignore_status
-    }),
+    })
+    .with_ws_always(),
     FlagDef::new("--sort-headers", Some(FlagCategory::Response), |c| {
         c.sort_headers
     }),

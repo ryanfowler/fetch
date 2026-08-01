@@ -54,7 +54,9 @@ Text and auto stdin modes cap each line at 16 MiB before a newline. Use
 delimiters.
 
 If stdin, stdout, and stderr are terminals, `fetch` opens an interactive prompt.
-Type a message and press Enter to send it. Press Ctrl+C or Ctrl+D to exit.
+Type a message and press Enter to send it. Press Ctrl+C or Ctrl+D to exit. Prompt
+input is capped at 16 MiB. Interactive history is byte-bounded, so old messages
+are evicted rather than allowing server traffic to grow memory without limit.
 
 Control this behavior with `--ws-interactive`:
 
@@ -74,8 +76,10 @@ fetch ws://api.example.com/stream --ws-interactive off
 - **Text messages**: `fetch` writes text messages to stdout. On a terminal, it
   automatically formats JSON messages.
 - **Binary messages**: `fetch` writes raw bytes if stdout is redirected or
-  piped. On a terminal, it gives a warning and does not print binary-looking
-  data.
+  piped. It never writes binary frames directly to a terminal and gives a
+  warning instead.
+- **Terminal safety**: Unformatted server text is escaped before terminal
+  output so control sequences cannot be interpreted by the terminal.
 - **Formatting**: Use `--format on` to force JSON formatting, or `--format off` to disable it.
 
 Incoming server frames and assembled messages are capped at 16 MiB. Larger
@@ -100,6 +104,10 @@ fetch -v ws://echo.websocket.events -d "hello"
 # Show request and response headers with prefixes
 fetch -vv ws://echo.websocket.events -d "hello"
 ```
+
+Sensitive handshake headers such as `Authorization`, `Cookie`, `Set-Cookie`,
+`Proxy-Authorization`, and AWS session tokens are redacted in verbose and
+`--dry-run` output.
 
 ## Authentication
 
@@ -132,9 +140,16 @@ WebSocket connections honor `--dns-server` for direct TCP connections and for
 local target resolution through plain `socks5://` proxies. Use `socks5h://` to
 make the SOCKS proxy resolve the target hostname.
 
+When `--proxy` is absent, WebSocket dialing uses the same environment and system
+proxy selection as HTTP, including `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and
+`NO_PROXY`. `ws://` uses HTTP proxy selection and `wss://` uses HTTPS proxy
+selection.
+
 ## Timeout
 
-The `--timeout` flag applies to the WebSocket handshake only. The connection stays open until the server closes or stdin EOF:
+The `--timeout` flag applies to connection setup, the WebSocket handshake, and
+materializing an initial `-d`/`-j` message. The established connection stays
+open until the server closes or stdin EOF:
 
 ```sh
 fetch --timeout 5 ws://api.example.com/ws
@@ -152,8 +167,8 @@ fetch --connect-timeout 2 --timeout 10 wss://api.example.com/ws
 ## Limitations
 
 - WebSocket requires HTTP/1.1 for the upgrade handshake. Using `--http 2` or `--http 3` with WebSocket is not supported.
-- WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`, `--form`, `--multipart`, `--xml`, `--edit`, output-file/clipboard flags, or retry flags.
-- The pager is disabled for WebSocket output.
+- WebSocket (`ws://` / `wss://`) cannot be combined with HTTP/gRPC-only options, including `--grpc`, protobuf schema flags, `--form`, `--multipart`, `--xml`, `--edit`, `--unix`, redirects, ranges, compression/content-encoding options, image/status handling, output-file/clipboard flags, or retry flags.
+- The pager is disabled for WebSocket output; explicitly setting `--pager` produces a warning.
 
 ## See Also
 

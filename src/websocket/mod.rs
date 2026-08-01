@@ -22,6 +22,8 @@ use tokio_tungstenite::tungstenite::http::{
     Version as WsVersion,
 };
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{Connector, client_async_tls_with_config};
 use url::Url;
@@ -38,7 +40,7 @@ use crate::net::DialStream;
 
 pub mod interactive;
 
-const STDIN_MESSAGE_CHANNEL_CAPACITY: usize = 16;
+const STDIN_MESSAGE_CHANNEL_CAPACITY: usize = 1;
 const STDIN_BINARY_CHUNK_SIZE: usize = 16 * 1024;
 const STDIN_TEXT_MESSAGE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const WEBSOCKET_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -51,8 +53,15 @@ enum MessageOutput {
     Closed,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ReadOutcome {
+    Ended,
+    OutputClosed,
+    PeerClosed(Option<CloseFrame>),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WebSocketMessageMode {
+pub(super) enum WebSocketMessageMode {
     Auto,
     Text,
     Binary,
@@ -73,6 +82,9 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     if cli.timing {
         warnings.push("--timing is not supported for WebSocket connections".to_string());
     }
+    if cli.pager.is_some() {
+        warnings.push("--pager is not supported for WebSocket connections".to_string());
+    }
     write_warnings(cli, &warnings);
     let interactive = should_use_interactive(cli)?;
 
@@ -82,7 +94,9 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
         print_request_metadata(cli, method, &url, Some(request.headers()));
         return Ok(0);
     }
-    let initial_message = websocket_initial_message(cli)?;
+    // Keep the body descriptor until the handshake completes, so `-d @-`
+    // cannot consume stdin before the connection is established.
+    let initial_body = crate::http::request_body(cli)?;
     if cli.verbose >= 2 && !cli.silent {
         print_request_metadata(cli, method, &url, Some(request.headers()));
     }
@@ -112,39 +126,66 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
 
     print_response_metadata(cli, &response);
 
-    if interactive
-        && let Some(size) = core::terminal_size()
-        && interactive::InteractiveMode::is_screen_tall_enough(size.rows)
-    {
-        let stdio = core::stdio();
-        interactive::run_terminal(
-            stream,
-            initial_message.as_deref(),
-            should_format_for_interactive(cli),
-            stdio.stdout_color(cli.color.as_deref()),
-            size.rows,
-            size.cols,
-        )
+    // Use a detached OS thread rather than Tokio's blocking pool. A read from
+    // an open stdin pipe cannot be cancelled, and Tokio waits for its blocking
+    // pool during shutdown. Dropping this receiver on timeout lets the process
+    // exit without waiting for the reader thread.
+    let (initial_tx, initial_rx) = tokio::sync::oneshot::channel();
+    thread::spawn(move || {
+        let _ = initial_tx.send(websocket_initial_message(initial_body));
+    });
+    let initial_message = request_budget
+        .run(async move {
+            initial_rx.await.map_err(|_| {
+                FetchError::Runtime("WebSocket body reader stopped unexpectedly".to_string())
+            })?
+        })
         .await?;
-        return Ok(0);
+
+    if interactive {
+        match core::terminal_size() {
+            Some(size) if interactive::InteractiveMode::is_screen_tall_enough(size.rows) => {
+                let stdio = core::stdio();
+                interactive::run_terminal(
+                    stream,
+                    initial_message.as_deref(),
+                    message_mode(cli),
+                    should_format_for_interactive(cli),
+                    stdio.stdout_color(cli.color.as_deref()),
+                    size.rows,
+                    size.cols,
+                )
+                .await?;
+                return Ok(0);
+            }
+            _ if matches!(cli.ws_interactive.as_deref(), Some("on")) => {
+                return Err(
+                    "--ws-interactive on requires a terminal at least five rows tall".into(),
+                );
+            }
+            _ => {}
+        }
     }
 
     let (mut sender, mut receiver) = stream.split();
-    let send_messages =
-        send_noninteractive_messages(&mut sender, initial_message, message_mode(cli));
-    let receive_messages = read_messages(cli, &mut receiver);
-    tokio::pin!(send_messages);
-    tokio::pin!(receive_messages);
-    tokio::select! {
-        send_result = &mut send_messages => {
-            send_result?;
-            receive_messages.await?;
+    let outcome = {
+        let send_messages =
+            send_noninteractive_messages(&mut sender, initial_message, message_mode(cli));
+        let receive_messages = read_messages(cli, &mut receiver);
+        tokio::pin!(send_messages);
+        tokio::pin!(receive_messages);
+        tokio::select! {
+            send_result = &mut send_messages => {
+                send_result?;
+                receive_messages.await?
+            }
+            receive_result = &mut receive_messages => receive_result?,
         }
-        receive_result = &mut receive_messages => {
-            receive_result?;
-        }
+    };
+    if matches!(outcome, ReadOutcome::PeerClosed(_)) {
+        sender.flush().await.map_err(websocket_error)?;
     }
-    Ok(0)
+    close_outcome_result(outcome).map(|()| 0)
 }
 
 fn websocket_url(raw: &str) -> Result<Url, FetchError> {
@@ -215,6 +256,7 @@ fn websocket_config() -> WebSocketConfig {
     // Keep inbound message allocation policy owned by fetch instead of inheriting
     // dependency defaults. The limit matches non-interactive text stdin messages.
     WebSocketConfig::default()
+        .max_write_buffer_size(WEBSOCKET_MAX_MESSAGE_BYTES * 2)
         .max_frame_size(Some(WEBSOCKET_MAX_FRAME_BYTES))
         .max_message_size(Some(WEBSOCKET_MAX_MESSAGE_BYTES))
 }
@@ -224,9 +266,13 @@ async fn dial_websocket(
     url: &Url,
     timeout: TimeoutBudget,
 ) -> Result<DialStream, FetchError> {
+    let proxy = crate::http::client::effective_proxy_for_websocket(cli.proxy.as_deref(), url)?;
     Box::pin(crate::net::dial_url(
         url,
-        cli.proxy.as_deref(),
+        proxy.as_ref().map(|proxy| proxy.url.as_str()),
+        proxy
+            .as_ref()
+            .and_then(|proxy| proxy.authorization.as_deref()),
         cli.dns_server.as_deref(),
         websocket_doh_tls_config(cli)?,
         timeout,
@@ -312,11 +358,13 @@ fn interactive_for_mode(mode: Option<&str>, all_terms: bool) -> Result<bool, Fet
     }
 }
 
-fn websocket_initial_message(cli: &Cli) -> Result<Option<Vec<u8>>, FetchError> {
+fn websocket_initial_message(
+    body: crate::http::RequestBody,
+) -> Result<Option<Vec<u8>>, FetchError> {
     let limit_error =
         format!("WebSocket initial message exceeds maximum of {WEBSOCKET_MAX_MESSAGE_BYTES} bytes");
     Ok(crate::http::request_body_into_bytes_limited(
-        crate::http::request_body(cli)?,
+        body,
         WEBSOCKET_MAX_MESSAGE_BYTES,
         &limit_error,
     )?
@@ -350,7 +398,10 @@ where
     Ok(())
 }
 
-fn outgoing_message(bytes: Vec<u8>, mode: WebSocketMessageMode) -> Result<Message, FetchError> {
+pub(super) fn outgoing_message(
+    bytes: Vec<u8>,
+    mode: WebSocketMessageMode,
+) -> Result<Message, FetchError> {
     match mode {
         WebSocketMessageMode::Auto => match String::from_utf8(bytes) {
             Ok(text) => Ok(Message::Text(text.into())),
@@ -631,6 +682,7 @@ fn print_request_metadata(cli: &Cli, method: &str, url: &Url, headers: Option<&W
             sort_header_lines(&mut lines);
         }
         for (name, value) in lines {
+            let value = redact_header_value(&name, value);
             if debug {
                 printer.write_request_prefix();
             }
@@ -679,6 +731,7 @@ fn print_response_metadata(
         sort_header_lines(&mut lines);
     }
     for (name, value) in lines {
+        let value = redact_header_value(&name, value);
         if cli.verbose >= 2 {
             printer.write_response_prefix();
         }
@@ -704,6 +757,18 @@ fn header_lines(headers: &WsHeaderMap) -> Vec<(String, String)> {
     out
 }
 
+fn redact_header_value(name: &str, value: String) -> String {
+    match name {
+        "authorization"
+        | "cookie"
+        | "set-cookie"
+        | "proxy-authorization"
+        | "x-amz-security-token"
+        | "x-amz-credential" => "[REDACTED]".to_string(),
+        _ => value,
+    }
+}
+
 fn sort_header_lines(lines: &mut [(String, String)]) {
     lines.sort_by(
         |(left, _), (right, _)| match (left.starts_with(':'), right.starts_with(':')) {
@@ -725,7 +790,7 @@ fn ws_version_label(version: WsVersion) -> &'static str {
     }
 }
 
-async fn read_messages<S>(cli: &Cli, stream: &mut S) -> Result<(), FetchError>
+async fn read_messages<S>(cli: &Cli, stream: &mut S) -> Result<ReadOutcome, FetchError>
 where
     S: futures_util::Stream<Item = Result<Message, WsError>> + Unpin,
 {
@@ -736,19 +801,38 @@ where
                 if write_text_message(cli, text.as_str().as_bytes(), stdout_is_terminal)?
                     == MessageOutput::Closed
                 {
-                    return Ok(());
+                    return Ok(ReadOutcome::OutputClosed);
                 }
             }
             Message::Binary(bytes) => {
                 if write_binary_message(cli, &bytes, stdout_is_terminal)? == MessageOutput::Closed {
-                    return Ok(());
+                    return Ok(ReadOutcome::OutputClosed);
                 }
             }
-            Message::Close(_) => return Ok(()),
+            Message::Close(frame) => return Ok(ReadOutcome::PeerClosed(frame)),
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
-    Ok(())
+    Ok(ReadOutcome::Ended)
+}
+
+fn close_outcome_result(outcome: ReadOutcome) -> Result<(), FetchError> {
+    let ReadOutcome::PeerClosed(Some(frame)) = outcome else {
+        return Ok(());
+    };
+    if matches!(frame.code, CloseCode::Normal | CloseCode::Away) {
+        return Ok(());
+    }
+    let reason = interactive::sanitize_message_text(frame.reason.as_str());
+    let suffix = if reason.is_empty() {
+        String::new()
+    } else {
+        format!(": {reason}")
+    };
+    Err(FetchError::Runtime(format!(
+        "WebSocket closed with code {}{suffix}",
+        u16::from(frame.code)
+    )))
 }
 
 fn write_text_message(
@@ -764,6 +848,10 @@ fn write_text_message(
             return write_stdout_message(&mut stdout, &formatted.into_bytes(), false);
         }
     }
+    if stdout_is_terminal {
+        let sanitized = interactive::sanitize_message_text(&String::from_utf8_lossy(bytes));
+        return write_stdout_message(&mut stdout, sanitized.as_bytes(), true);
+    }
     write_stdout_message(&mut stdout, bytes, true)
 }
 
@@ -772,7 +860,7 @@ fn write_binary_message(
     bytes: &[u8],
     stdout_is_terminal: bool,
 ) -> Result<MessageOutput, FetchError> {
-    if should_warn_for_terminal_binary_message(bytes, stdout_is_terminal) {
+    if stdout_is_terminal {
         write_binary_terminal_warning(cli);
         return Ok(MessageOutput::Continue);
     }
@@ -782,8 +870,9 @@ fn write_binary_message(
     write_stdout_message(&mut stdout, bytes, false)
 }
 
-fn should_warn_for_terminal_binary_message(bytes: &[u8], stdout_is_terminal: bool) -> bool {
-    stdout_is_terminal && !core::bytes_appear_printable(bytes)
+#[cfg(test)]
+fn should_warn_for_terminal_binary_message(_bytes: &[u8], stdout_is_terminal: bool) -> bool {
+    stdout_is_terminal
 }
 
 fn write_stdout_message(
@@ -902,6 +991,10 @@ mod tests {
     fn websocket_config_sets_fetch_receive_limits() {
         let config = websocket_config();
 
+        assert_eq!(
+            config.max_write_buffer_size,
+            WEBSOCKET_MAX_MESSAGE_BYTES * 2
+        );
         assert_eq!(config.max_frame_size, Some(WEBSOCKET_MAX_FRAME_BYTES));
         assert_eq!(config.max_message_size, Some(WEBSOCKET_MAX_MESSAGE_BYTES));
     }
@@ -1145,6 +1238,39 @@ mod tests {
     }
 
     #[test]
+    fn websocket_close_outcome_rejects_abnormal_code_and_sanitizes_reason() {
+        let err = close_outcome_result(ReadOutcome::PeerClosed(Some(CloseFrame {
+            code: CloseCode::Policy,
+            reason: "bad\x1b]52;clipboard\x07".into(),
+        })))
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            r"WebSocket closed with code 1008: bad\x1b]52;clipboard\x07"
+        );
+        assert!(
+            close_outcome_result(ReadOutcome::PeerClosed(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "done".into(),
+            })))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn websocket_sensitive_headers_are_redacted() {
+        assert_eq!(
+            redact_header_value("authorization", "Bearer secret".to_string()),
+            "[REDACTED]"
+        );
+        assert_eq!(
+            redact_header_value("x-test", "visible".to_string()),
+            "visible"
+        );
+    }
+
+    #[test]
     fn websocket_message_mode_controls_outgoing_frame_type() {
         let auto_text = outgoing_message(b"hello".to_vec(), WebSocketMessageMode::Auto).unwrap();
         assert!(matches!(auto_text, Message::Text(_)));
@@ -1171,7 +1297,7 @@ mod tests {
         let body = format!("@{}", path.display());
         let cli = Cli::try_parse_from(["fetch", "-d", &body, "ws://example.com"]).unwrap();
 
-        let err = websocket_initial_message(&cli).unwrap_err();
+        let err = websocket_initial_message(crate::http::request_body(&cli).unwrap()).unwrap_err();
 
         assert_eq!(
             err.to_string(),
@@ -1231,10 +1357,7 @@ mod tests {
     fn websocket_binary_terminal_guard_matches_printable_policy() {
         assert!(should_warn_for_terminal_binary_message(b"abc\0def", true));
         assert!(!should_warn_for_terminal_binary_message(b"abc\0def", false));
-        assert!(!should_warn_for_terminal_binary_message(
-            b"plain text",
-            true
-        ));
+        assert!(should_warn_for_terminal_binary_message(b"plain text", true));
     }
 
     #[test]

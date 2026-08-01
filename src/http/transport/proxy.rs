@@ -216,6 +216,10 @@ impl Proxy {
         self.selected_for(url)
     }
 
+    pub(crate) fn url(&self) -> &str {
+        &self.url
+    }
+
     pub(crate) fn uses_local_target_dns(&self) -> bool {
         self.scheme().is_ok_and(|scheme| scheme == "socks5")
     }
@@ -263,7 +267,7 @@ impl Proxy {
         crate::net::parse_proxy_url(&self.url).map(|url| url.scheme().to_string())
     }
 
-    pub(super) fn basic_auth(&self) -> Result<Option<String>, FetchError> {
+    pub(crate) fn basic_auth(&self) -> Result<Option<String>, FetchError> {
         if let Some(auth) = &self.basic_auth {
             return auth
                 .to_str()

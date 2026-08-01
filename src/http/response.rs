@@ -20,7 +20,7 @@ use metadata::{
     body_duration, check_grpc_status, exit_code, finalize_streamed_response,
     handle_clipboard_outcome, print_response_metadata, print_timing,
 };
-use stdout::{StdoutBody, stdout_stream_target, write_stdout_bytes};
+use stdout::{StdoutBody, TerminalOutputSafety, stdout_stream_target, write_stdout_bytes};
 use stream::{
     read_decoded_article_body_limited, read_decoded_response_body_limited,
     stream_response_to_discard, stream_response_to_output, stream_response_to_stdout,
@@ -358,23 +358,25 @@ async fn finish_article_response(
             .map_err(|err| FetchError::Message(err.to_string()))?;
     } else {
         let stdout_is_terminal = core::stdio().stdout_is_terminal();
-        let rendered = if core::format_enabled(cli.format.as_deref(), stdout_is_terminal) {
-            let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
-            let mut out = core::Printer::new(use_color);
-            if markdown::format_markdown_to(&article, &mut out).is_ok() {
-                out.into_bytes()
+        let (rendered, terminal_output_safety) =
+            if core::format_enabled(cli.format.as_deref(), stdout_is_terminal) {
+                let use_color = core::color_enabled(cli.color.as_deref(), stdout_is_terminal);
+                let mut out = core::Printer::new(use_color);
+                if markdown::format_markdown_to(&article, &mut out).is_ok() {
+                    (out.into_bytes(), TerminalOutputSafety::FormattedText)
+                } else {
+                    (article.clone(), TerminalOutputSafety::Untrusted)
+                }
             } else {
-                article.clone()
-            }
-        } else {
-            article.clone()
-        };
+                (article.clone(), TerminalOutputSafety::Untrusted)
+            };
         write_stdout_bytes(
             cli,
             &StdoutBody {
                 bytes: rendered,
                 content_type: ContentType::Markdown,
                 content_type_label: "text/markdown; charset=utf-8".to_string(),
+                terminal_output_safety,
             },
         )?;
     }
