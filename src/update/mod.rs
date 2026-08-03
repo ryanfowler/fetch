@@ -35,7 +35,9 @@ pub async fn execute(cli: &Cli) -> Result<i32, FetchError> {
     )?
     .ok_or_else(|| FetchError::Message("unable to acquire update lock".to_string()))?;
     let result = update_inner(&client, cli.silent, cli.color.as_deref(), cli.dry_run).await;
-    record_last_attempt_time(&cache_dir);
+    if !cli.dry_run {
+        record_last_attempt_time(&cache_dir);
+    }
     result?;
     Ok(0)
 }
