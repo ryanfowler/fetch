@@ -22,10 +22,7 @@ pub(super) async fn lookup_https_records(
     let Some(server_addr) = resolv_conf_nameserver() else {
         return Ok(Vec::new());
     };
-    match super::lookup_udp_https_records(server_addr, host, timeout).await {
-        Ok(records) => Ok(records),
-        Err(_) => Ok(Vec::new()),
-    }
+    super::lookup_udp_https_records(server_addr, host, timeout).await
 }
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]

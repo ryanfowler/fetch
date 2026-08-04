@@ -217,7 +217,7 @@ async fn resolve_inspect_ech_mode(
         return super::ech::resolve_ech_mode(cli, &[]);
     }
 
-    let candidates = lookup_inspect_ech_candidates(cli, host, timeout).await;
+    let candidates = lookup_inspect_ech_candidates(cli, host, timeout).await?;
     let candidate_refs: Vec<&[u8]> = candidates.iter().map(|b| b.as_slice()).collect();
     super::ech::resolve_ech_mode(cli, &candidate_refs)
 }
@@ -228,7 +228,7 @@ async fn lookup_inspect_ech_candidates(
     cli: &Cli,
     host: &str,
     timeout: TimeoutBudget,
-) -> Vec<Vec<u8>> {
+) -> Result<Vec<Vec<u8>>, FetchError> {
     let resolver = cli
         .dns_server
         .as_deref()
@@ -236,28 +236,32 @@ async fn lookup_inspect_ech_candidates(
         .unwrap_or(HttpsRecordResolver::System);
 
     let ech_timeout = timeout
-        .remaining()
-        .ok()
-        .flatten()
+        .remaining()?
         .unwrap_or(std::time::Duration::from_secs(5));
-    let records = tokio::time::timeout(
-        ech_timeout,
-        crate::dns::svcb::lookup_https_records(resolver, host, Some(ech_timeout)),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or_default();
+    let records = match TimeoutBudget::new(Some(ech_timeout))
+        .run(crate::dns::svcb::lookup_https_records(
+            resolver,
+            host,
+            Some(ech_timeout),
+        ))
+        .await
+    {
+        Ok(records) => records,
+        Err(err) => {
+            super::ech::handle_ech_discovery_error(cli, err)?;
+            Vec::new()
+        }
+    };
 
     let mut usable: Vec<&crate::dns::svcb::SvcbRecord> = records
         .iter()
         .filter(|r| !r.is_alias_mode() && r.is_usable())
         .collect();
     usable.sort_by_key(|r| r.priority);
-    usable
+    Ok(usable
         .iter()
         .filter_map(|r| r.ech.as_ref().filter(|b| !b.is_empty()).cloned())
-        .collect()
+        .collect())
 }
 
 async fn inspect_quic(

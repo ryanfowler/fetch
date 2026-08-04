@@ -212,6 +212,35 @@ pub(crate) fn start_udp_dns_server_dropping_https(host: &'static str, ip: Ipv4Ad
     addr
 }
 
+pub(crate) fn start_udp_dns_server_with_failing_https(host: &'static str, ip: Ipv4Addr) -> String {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        let mut buf = [0u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            let mut response = if name == host && qtype == TYPE_A {
+                dns_response(
+                    &buf[..n],
+                    question_end,
+                    Some((TYPE_A, ip.octets().to_vec())),
+                )
+            } else {
+                dns_response(&buf[..n], question_end, None)
+            };
+            if name == host && qtype == TYPE_HTTPS {
+                // Return a response with a mismatched transaction ID so the
+                // resolver reports a protocol failure instead of no records.
+                response[0] ^= 1;
+            }
+            let _ = socket.send_to(&response, peer);
+        }
+    });
+    addr
+}
+
 pub(crate) fn start_udp_dns_server_with_delayed_resolution(
     host: &'static str,
     ip: Ipv4Addr,
