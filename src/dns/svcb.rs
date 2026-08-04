@@ -241,6 +241,15 @@ pub(crate) async fn lookup_https_records(
     host: &str,
     timeout: Option<Duration>,
 ) -> Result<Vec<SvcbRecord>, FetchError> {
+    lookup_https_records_with_doh_tls_config(resolver, host, timeout, None).await
+}
+
+pub(crate) async fn lookup_https_records_with_doh_tls_config(
+    resolver: HttpsRecordResolver<'_>,
+    host: &str,
+    timeout: Option<Duration>,
+    doh_tls_config: Option<rustls::ClientConfig>,
+) -> Result<Vec<SvcbRecord>, FetchError> {
     if let Ok(_ip) = host.parse::<IpAddr>() {
         return Ok(Vec::new());
     }
@@ -251,7 +260,7 @@ pub(crate) async fn lookup_https_records(
             let server_url = Url::parse(server).map_err(|err| {
                 FetchError::Message(format!("invalid dns-server '{server}': {err}"))
             })?;
-            lookup_doh_https_records(&server_url, host, timeout).await
+            lookup_doh_https_records(&server_url, host, timeout, doh_tls_config).await
         }
         HttpsRecordResolver::Custom(server) => {
             let server_addr = crate::dns::resolver::normalize_udp_dns_server(server)
@@ -271,9 +280,13 @@ async fn lookup_doh_https_records(
     server_url: &Url,
     host: &str,
     timeout: Option<Duration>,
+    doh_tls_config: Option<rustls::ClientConfig>,
 ) -> Result<Vec<SvcbRecord>, FetchError> {
-    let client = crate::dns::doh::client_with_budget(TimeoutBudget::new(timeout))
-        .map_err(|err| FetchError::Message(err.to_string()))?;
+    let client = crate::dns::doh::client_with_budget_and_tls_config(
+        TimeoutBudget::new(timeout),
+        doh_tls_config,
+    )
+    .map_err(|err| FetchError::Message(err.to_string()))?;
     let answers =
         crate::dns::doh::lookup_doh_records_with_client(&client, server_url, host, "HTTPS")
             .await

@@ -537,10 +537,11 @@ async fn lookup_ech_https_records(
         .map(HttpsRecordResolver::Custom)
         .unwrap_or(HttpsRecordResolver::System);
     match TimeoutBudget::new(Some(timeout))
-        .run(crate::dns::svcb::lookup_https_records(
+        .run(crate::dns::svcb::lookup_https_records_with_doh_tls_config(
             resolver,
             host,
             Some(timeout),
+            doh_tls_config_for_cli(cli)?,
         ))
         .await
     {
@@ -833,7 +834,12 @@ pub(crate) async fn resolve_websocket_ech_mode(
         .unwrap_or(crate::dns::svcb::HttpsRecordResolver::System);
     let records = tokio::time::timeout(
         ech_timeout,
-        crate::dns::svcb::lookup_https_records(resolver, host, Some(ech_timeout)),
+        crate::dns::svcb::lookup_https_records_with_doh_tls_config(
+            resolver,
+            host,
+            Some(ech_timeout),
+            doh_tls_config_for_cli(cli)?,
+        ),
     )
     .await
     .ok()
