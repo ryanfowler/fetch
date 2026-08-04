@@ -23,9 +23,17 @@ pub(super) fn render_to(inspection: &Inspection, out: &mut Printer) {
         version_label(inspection.version),
         &[Sequence::Bold, Sequence::Yellow],
     );
-    if let Some(cipher) = inspection.cipher_suite {
-        out.push_str(": ");
-        out.push_str(&cipher_suite_label(cipher));
+    out.push_str(": ");
+    match inspection.cipher_suite {
+        super::CipherSuiteStatus::Negotiated(cipher) => {
+            out.push_str(&cipher_suite_label(cipher));
+        }
+        super::CipherSuiteStatus::Unavailable => {
+            out.push_str("cipher suite unavailable");
+        }
+        super::CipherSuiteStatus::UnavailableForHttp3 => {
+            out.push_str("cipher suite unavailable for HTTP/3");
+        }
     }
     out.push('\n');
 

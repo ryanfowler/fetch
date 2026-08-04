@@ -337,7 +337,9 @@ fetch --inspect-tls example.com
 
 Output includes:
 
-- **TLS version and cipher suite** (e.g., TLS 1.3: TLS_AES_256_GCM_SHA384)
+- **TLS version and negotiated cipher suite** (for example, `TLS 1.3:
+TLS13_AES_256_GCM_SHA384`). HTTP/3 reports the cipher suite as unavailable
+  because the current QUIC integration does not expose it.
 - **ALPN negotiated protocol** (e.g., h2)
 - **Certificate chain** with tree visualization and expiry status
 - **Subject Alternative Names** (DNS names and IP addresses)
