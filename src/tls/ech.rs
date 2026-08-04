@@ -83,6 +83,28 @@ pub(crate) fn generate_ech_grease_config() -> EchGreaseConfig {
     EchGreaseConfig::new(suite, public_key)
 }
 
+/// Handle a failure to discover ECH configuration in DNS.
+///
+/// Required ECH reports the original discovery error. Automatic ECH keeps
+/// working with GREASE, but reports the discovery error at verbose level.
+pub(crate) fn handle_ech_discovery_error(cli: &Cli, err: FetchError) -> Result<(), FetchError> {
+    match cli.ech.as_deref() {
+        Some("on") => Err(err),
+        Some("auto") => {
+            if cli.verbose >= 3 && !cli.silent {
+                let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
+                core::write_warning_msg_no_flush(
+                    &mut printer,
+                    format!("ECH discovery failed: {err}; falling back to GREASE"),
+                );
+                core::flush_stderr(printer);
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Returns `true` if ECH is active (mode is `auto` or `on`).
 pub(crate) fn is_ech_active(cli: &Cli) -> bool {
     matches!(cli.ech.as_deref(), Some("auto" | "on"))

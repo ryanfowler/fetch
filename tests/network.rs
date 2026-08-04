@@ -13,8 +13,9 @@ use support::common::{
 use support::dns::{
     parse_dns_question, start_udp_dns_server, start_udp_dns_server_dropping_https,
     start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_delayed_https_and_resolution,
-    start_udp_dns_server_with_delayed_resolution, start_udp_dns_server_with_hosts,
-    start_udp_dns_server_with_https, start_udp_dns_server_with_https_target_dropping_target,
+    start_udp_dns_server_with_delayed_resolution, start_udp_dns_server_with_failing_https,
+    start_udp_dns_server_with_hosts, start_udp_dns_server_with_https,
+    start_udp_dns_server_with_https_target_dropping_target,
     start_udp_dns_server_with_https_targets_dropping_targets,
     start_udp_dns_server_with_toggleable_https, start_unresponsive_udp_dns_server,
 };
@@ -144,6 +145,83 @@ fn ech_on_still_overlaps_address_resolution_before_required_failure() {
         overlapped.load(Ordering::SeqCst),
         "A/AAAA resolution did not overlap the delayed required HTTPS lookup"
     );
+}
+
+#[test]
+fn ech_dns_discovery_failure_is_reported_and_auto_falls_back() {
+    let tls = start_tls_server(|_| TestResponse::ok("ECH discovery fallback"));
+    let port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let host = "fetch-ech-discovery-failure.test.";
+    let dns_addr = start_udp_dns_server_with_failing_https(host, Ipv4Addr::new(127, 0, 0, 1));
+    let url = format!("https://fetch-ech-discovery-failure.test:{port}/ech-discovery-failure");
+
+    let required = run_fetch(&[
+        "--inspect-tls",
+        "--insecure",
+        "--dns-server",
+        &dns_addr,
+        "--ech",
+        "on",
+        &url,
+    ]);
+    assert_exit(&required, 1);
+    assert!(
+        required.stderr.contains("mismatched DNS response ID"),
+        "{}",
+        required.stderr
+    );
+    assert!(!required.stderr.contains("does not advertise ECH"));
+
+    let inspected = run_fetch(&[
+        "--inspect-tls",
+        "--insecure",
+        "-vvv",
+        "--dns-server",
+        &dns_addr,
+        "--ech",
+        "auto",
+        &url,
+    ]);
+    assert_exit(&inspected, 0);
+    assert!(inspected.stderr.contains("ECH discovery failed"));
+    assert!(inspected.stderr.contains("GREASE"));
+
+    let requested = run_fetch(&[
+        "-vvv",
+        "--insecure",
+        "--dns-server",
+        &dns_addr,
+        "--ech",
+        "auto",
+        &url,
+    ]);
+    assert_exit(&requested, 0);
+    assert_eq!(requested.stdout, "ECH discovery fallback");
+    assert!(requested.stderr.contains("ECH discovery failed"));
+}
+
+#[test]
+fn ech_dns_timeout_is_reported_instead_of_no_configuration() {
+    let tls = start_tls_server(|_| TestResponse::ok("ECH timeout"));
+    let port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let host = "fetch-ech-discovery-timeout.test.";
+    let dns_addr = start_udp_dns_server_dropping_https(host, Ipv4Addr::new(127, 0, 0, 1));
+    let url = format!("https://fetch-ech-discovery-timeout.test:{port}/ech-timeout");
+
+    let result = run_fetch(&[
+        "--inspect-tls",
+        "--insecure",
+        "--dns-server",
+        &dns_addr,
+        "--ech",
+        "on",
+        "--connect-timeout",
+        "0.05",
+        &url,
+    ]);
+    assert_exit(&result, 1);
+    assert!(result.stderr.contains("timed out"), "{}", result.stderr);
+    assert!(!result.stderr.contains("does not advertise ECH"));
 }
 
 #[test]

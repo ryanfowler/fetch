@@ -288,9 +288,9 @@ async fn resolve_dns_for_client_inner(
                 .flatten()
                 .unwrap_or(Duration::from_secs(5));
             let https_records = if let Some(dns_server) = cli.dns_server.as_deref() {
-                lookup_ech_https_records(Some(dns_server), host, ech_timeout).await
+                lookup_ech_https_records(cli, Some(dns_server), host, ech_timeout).await?
             } else {
-                lookup_ech_https_records(None, host, ech_timeout).await
+                lookup_ech_https_records(cli, None, host, ech_timeout).await?
             };
             return Ok(ClientDnsDiscovery {
                 dns_resolution: None,
@@ -328,9 +328,9 @@ async fn resolve_dns_for_client_inner(
                 .unwrap_or(Duration::from_secs(5));
             let (addrs, https_records) = tokio::join!(
                 lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout),
-                lookup_ech_https_records(Some(dns_server), host, ech_timeout),
+                lookup_ech_https_records(cli, Some(dns_server), host, ech_timeout),
             );
-            (addrs?, https_records)
+            (addrs?, https_records?)
         } else if let Some(auto_http3_budget) = auto_http3_discovery {
             let https = spawn_auto_http3_https_records(
                 Some(dns_server.to_string()),
@@ -408,13 +408,15 @@ async fn resolve_dns_for_client_inner(
             .ok()
             .flatten()
             .unwrap_or(Duration::from_secs(5));
-        let (socket_addrs, https_records) =
-            tokio::join!(lookup, lookup_ech_https_records(None, host, ech_timeout),);
+        let (socket_addrs, https_records) = tokio::join!(
+            lookup,
+            lookup_ech_https_records(cli, None, host, ech_timeout),
+        );
         (
             socket_addrs
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
                 .collect::<Vec<_>>(),
-            https_records,
+            https_records?,
         )
     } else if let Some(auto_http3_budget) = auto_http3_discovery {
         let https = spawn_auto_http3_https_records(None, host.to_string(), Some(auto_http3_budget));
@@ -526,21 +528,28 @@ async fn lookup_auto_http3_https_records(
 }
 
 async fn lookup_ech_https_records(
+    cli: &Cli,
     dns_server: Option<&str>,
     host: &str,
     timeout: Duration,
-) -> Vec<SvcbRecord> {
+) -> Result<Vec<SvcbRecord>, FetchError> {
     let resolver = dns_server
         .map(HttpsRecordResolver::Custom)
         .unwrap_or(HttpsRecordResolver::System);
-    tokio::time::timeout(
-        timeout,
-        crate::dns::svcb::lookup_https_records(resolver, host, Some(timeout)),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or_default()
+    match TimeoutBudget::new(Some(timeout))
+        .run(crate::dns::svcb::lookup_https_records(
+            resolver,
+            host,
+            Some(timeout),
+        ))
+        .await
+    {
+        Ok(records) => Ok(records),
+        Err(err) => {
+            crate::tls::ech::handle_ech_discovery_error(cli, err)?;
+            Ok(Vec::new())
+        }
+    }
 }
 
 fn spawn_auto_http3_https_records(
