@@ -225,6 +225,44 @@ fn ech_dns_timeout_is_reported_instead_of_no_configuration() {
 }
 
 #[test]
+fn inspect_ech_discovery_uses_custom_doh_tls_config() {
+    let https_queries = Arc::new(AtomicUsize::new(0));
+    let seen_https_queries = Arc::clone(&https_queries);
+    let server = start_tls_server(move |req| {
+        if req.path == "/inspect-ech-doh" {
+            return TestResponse::ok("inspection target");
+        }
+        if req.path.contains("type=HTTPS") {
+            seen_https_queries.fetch_add(1, Ordering::SeqCst);
+        }
+        let body = if req.path.contains("type=A") {
+            r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#
+        } else {
+            r#"{"Status":0}"#
+        };
+        TestResponse::ok(body)
+            .header("Content-Type", "application/dns-json")
+            .header("Connection", "close")
+    });
+    let doh_url = format!("{}/dns-query", server.url);
+    let target_url = format!("{}/inspect-ech-doh", server.url);
+
+    let result = run_fetch(&[
+        "--inspect-tls",
+        "--ech",
+        "auto",
+        "--ca-cert",
+        server.ca_cert_path.to_str().unwrap(),
+        "--dns-server",
+        &doh_url,
+        &target_url,
+    ]);
+
+    assert_exit(&result, 0);
+    assert_eq!(https_queries.load(Ordering::SeqCst), 1, "{}", result.stderr);
+}
+
+#[test]
 fn connect_timeout_is_shared_between_preresolved_dns_and_tls() {
     let tls = start_h2_tls_server_with_accept_delay(
         |_| TestResponse::ok("too late"),

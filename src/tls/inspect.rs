@@ -238,11 +238,13 @@ async fn lookup_inspect_ech_candidates(
     let ech_timeout = timeout
         .remaining()?
         .unwrap_or(std::time::Duration::from_secs(5));
+    let doh_tls_config = crate::http::client::doh_tls_config_for_cli(cli)?;
     let records = match TimeoutBudget::new(Some(ech_timeout))
-        .run(crate::dns::svcb::lookup_https_records(
+        .run(crate::dns::svcb::lookup_https_records_with_doh_tls_config(
             resolver,
             host,
             Some(ech_timeout),
+            doh_tls_config,
         ))
         .await
     {
