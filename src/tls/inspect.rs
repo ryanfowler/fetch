@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,7 +10,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, ProtocolVersion, SignatureScheme, SupportedCipherSuite};
 use tokio_rustls::TlsConnector;
-use url::Url;
+use url::{Host, Url};
 
 use crate::cli::{Cli, HttpVersion};
 use crate::core;
@@ -94,19 +94,17 @@ fn tls_url(raw: &str) -> Result<Url, FetchError> {
         };
     }
 
-    let host = raw.split('/').next().unwrap_or(raw);
-    let host = host.split('@').next_back().unwrap_or(host);
-    let host = host.trim_matches(['[', ']']);
-    let host = host.split(':').next().unwrap_or(host);
-    if host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false)
-    {
+    let url = Url::parse(&format!("https://{raw}"))?;
+    let is_loopback = match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback() || ip.to_ipv4().is_some_and(|ip| ip.is_loopback()),
+        None => false,
+    };
+    if is_loopback {
         return Err("--inspect-tls requires an HTTPS URL".into());
     }
-    Url::parse(&format!("https://{raw}")).map_err(Into::into)
+    Ok(url)
 }
 
 async fn inspect(
@@ -671,6 +669,7 @@ mod tests {
     use clap::Parser;
     use quinn::crypto::rustls::QuicServerConfig;
     use sha1::{Digest as _, Sha1};
+    use std::net::IpAddr;
 
     const TEST_QUIC_CERT_PEM: &[u8] = br#"-----BEGIN CERTIFICATE-----
 MIICzTCCAbWgAwIBAgIJALgQEfpjYIDxMA0GCSqGSIb3DQEBCwUAMBYxFDASBgNV
@@ -846,6 +845,29 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         let url = tls_url("example.com/path").unwrap();
 
         assert_eq!(url.as_str(), "https://example.com/path");
+    }
+
+    #[test]
+    fn tls_url_rejects_schemeless_loopback_addresses() {
+        for raw in ["[::1]", "[::1]:443", "[::ffff:127.0.0.1]"] {
+            let err = tls_url(raw).unwrap_err();
+
+            assert_eq!(err.to_string(), "--inspect-tls requires an HTTPS URL");
+        }
+    }
+
+    #[test]
+    fn tls_url_preserves_schemeless_host_port_userinfo_and_ipv6() {
+        for (raw, expected) in [
+            ("example.com:8443", "https://example.com:8443/"),
+            (
+                "user:pass@example.com:8443",
+                "https://user:pass@example.com:8443/",
+            ),
+            ("[2001:db8::1]:8443", "https://[2001:db8::1]:8443/"),
+        ] {
+            assert_eq!(tls_url(raw).unwrap().as_str(), expected);
+        }
     }
 
     #[test]
