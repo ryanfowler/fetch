@@ -386,9 +386,10 @@ async fn inspect_quic_addr(
         verified,
     );
 
+    // Do not wait for the peer to acknowledge the close. A diagnostic command
+    // must return a successful inspection within its connection timeout.
     connection.close(0_u32.into(), b"");
     endpoint.close(0_u32.into(), b"");
-    endpoint.wait_idle().await;
 
     Ok(Inspection {
         version: Some(ProtocolVersion::TLSv1_3),
@@ -1338,9 +1339,10 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         let addr = endpoint.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let incoming = endpoint.accept().await.expect("incoming QUIC connection");
-            let connection = incoming.await.expect("accepted QUIC connection");
-            connection.closed().await;
-            endpoint.close(0_u32.into(), b"");
+            let _connection = incoming.await.expect("accepted QUIC connection");
+            // Keep the peer open and do not acknowledge the client's close.
+            // This verifies inspection does not wait for graceful QUIC cleanup.
+            std::future::pending::<()>().await;
         });
 
         let raw_url = format!("https://{addr}");
@@ -1356,13 +1358,17 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         let url = tls_url(&raw_url).unwrap();
         assert!(ignored_inspection_flags(&cli).is_empty());
 
-        let inspection = inspect(
-            &cli,
-            &url,
-            Some(HttpVersion::Http3),
-            TimeoutBudget::new(None),
+        let inspection = tokio::time::timeout(
+            Duration::from_secs(1),
+            inspect(
+                &cli,
+                &url,
+                Some(HttpVersion::Http3),
+                TimeoutBudget::new(None),
+            ),
         )
         .await
+        .expect("QUIC inspection waited for peer cleanup")
         .unwrap();
 
         assert_eq!(inspection.alpn.as_deref(), Some("h3"));
@@ -1373,7 +1379,8 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
                 .iter()
                 .any(|cert| cert.display_name() == "quic-server")
         );
-        assert!(server.await.is_ok());
+        server.abort();
+        assert!(server.await.is_err());
     }
 
     fn test_tcp_server_config() -> rustls::ServerConfig {
