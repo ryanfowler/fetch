@@ -450,7 +450,7 @@ fn build_client_config(
     let provider = rustls::crypto::CryptoProvider::get_default()
         .cloned()
         .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
-    let versions_builder = rustls::ClientConfig::builder_with_provider(provider);
+    let versions_builder = rustls::ClientConfig::builder_with_provider(provider.clone());
     let versions = inspection_protocol_versions(cli)?;
     let builder = if let Some(ech_mode) = ech_mode {
         if !versions
@@ -483,7 +483,12 @@ fn build_client_config(
     let builder = if cli.insecure {
         builder
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification { ocsp_capture }))
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {
+                ocsp_capture,
+                supported_schemes: provider
+                    .signature_verification_algorithms
+                    .supported_schemes(),
+            }))
     } else {
         let verifier = WebPkiServerVerifier::builder(Arc::new(root_store(ca_certs, native_roots)?))
             .build()
@@ -624,6 +629,7 @@ impl ServerCertVerifier for CapturingServerVerifier {
 #[derive(Debug)]
 struct NoCertificateVerification {
     ocsp_capture: OcspCapture,
+    supported_schemes: Vec<SignatureScheme>,
 }
 
 impl ServerCertVerifier for NoCertificateVerification {
@@ -658,17 +664,7 @@ impl ServerCertVerifier for NoCertificateVerification {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-        ]
+        self.supported_schemes.clone()
     }
 }
 
