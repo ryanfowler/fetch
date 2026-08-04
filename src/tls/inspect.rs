@@ -1078,6 +1078,81 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     }
 
     #[test]
+    fn verified_display_chain_does_not_guess_between_same_subject_roots() {
+        let not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(24_000);
+        let peer_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(21_000);
+        let first_root = chain_test_cert(
+            9,
+            "First CA",
+            b"root-subject",
+            b"root-subject",
+            b"first-root-spki",
+            not_after,
+        );
+        let second_root = chain_test_cert(
+            10,
+            "Second CA",
+            b"root-subject",
+            b"root-subject",
+            b"second-root-spki",
+            not_after,
+        );
+        let peer = chain_test_cert(
+            1,
+            "test-server",
+            b"leaf-subject",
+            b"root-subject",
+            b"leaf-spki",
+            peer_not_after,
+        );
+
+        let chain = certificate_chain_for_display(vec![peer], &[first_root, second_root], true);
+
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].display_name(), "test-server");
+    }
+
+    #[test]
+    fn verified_display_chain_appends_matching_root_when_identity_is_unambiguous() {
+        let not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(24_000);
+        let peer_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(21_000);
+        let mut other_root = chain_test_cert(
+            9,
+            "Other CA",
+            b"root-subject",
+            b"root-subject",
+            b"other-root-spki",
+            not_after,
+        );
+        other_root.subject_key_id = Some(b"other-key".to_vec());
+        let mut selected_root = chain_test_cert(
+            10,
+            "Selected CA",
+            b"root-subject",
+            b"root-subject",
+            b"selected-root-spki",
+            not_after,
+        );
+        selected_root.subject_key_id = Some(b"selected-key".to_vec());
+        let mut peer = chain_test_cert(
+            1,
+            "test-server",
+            b"leaf-subject",
+            b"root-subject",
+            b"leaf-spki",
+            peer_not_after,
+        );
+        peer.authority_key_id = Some(b"selected-key".to_vec());
+
+        let chain =
+            certificate_chain_for_display(vec![peer], &[other_root, selected_root.clone()], true);
+
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[1].raw, selected_root.raw);
+        assert_eq!(chain[1].display_name(), "Selected CA");
+    }
+
+    #[test]
     fn insecure_display_chain_keeps_peer_chain_without_trusted_root() {
         let root_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(24_000);
         let peer_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(21_000);

@@ -295,9 +295,10 @@ pub(super) fn certificate_chain_for_display(
         return peer_chain;
     }
 
-    if let Some(root) = trusted_roots
-        .iter()
-        .find(|root| issued_by_trusted_root(&last, root))
+    // The platform verifier reports whether validation succeeded, but does not
+    // expose the trust anchor that it selected. Do not guess when the local
+    // root metadata leaves more than one possible anchor.
+    if let Some(root) = unique_issued_by_trusted_root(&last, trusted_roots)
         && !peer_chain.iter().any(|cert| cert.raw == root.raw)
     {
         peer_chain.push(root.clone());
@@ -313,6 +314,21 @@ fn same_trust_anchor_identity(cert: &ParsedCert, root: &ParsedCert) -> bool {
         && cert.spki_der == root.spki_der
 }
 
+fn unique_issued_by_trusted_root<'a>(
+    cert: &ParsedCert,
+    trusted_roots: &'a [ParsedCert],
+) -> Option<&'a ParsedCert> {
+    let mut matches = trusted_roots
+        .iter()
+        .filter(|root| issued_by_trusted_root(cert, root));
+    let root = matches.next()?;
+    if matches.next().is_some() {
+        None
+    } else {
+        Some(root)
+    }
+}
+
 fn issued_by_trusted_root(cert: &ParsedCert, root: &ParsedCert) -> bool {
     if cert.issuer_der.is_empty()
         || root.subject_der.is_empty()
@@ -323,6 +339,8 @@ fn issued_by_trusted_root(cert: &ParsedCert, root: &ParsedCert) -> bool {
 
     match (&cert.authority_key_id, &root.subject_key_id) {
         (Some(authority), Some(subject)) => authority == subject,
+        // Missing key identifiers cannot rule out a candidate. The caller
+        // requires a unique candidate before displaying a trust root.
         _ => true,
     }
 }
