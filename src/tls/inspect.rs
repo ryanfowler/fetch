@@ -670,6 +670,7 @@ mod tests {
     use super::*;
     use clap::Parser;
     use quinn::crypto::rustls::QuicServerConfig;
+    use sha1::{Digest as _, Sha1};
 
     const TEST_QUIC_CERT_PEM: &[u8] = br#"-----BEGIN CERTIFICATE-----
 MIICzTCCAbWgAwIBAgIJALgQEfpjYIDxMA0GCSqGSIb3DQEBCwUAMBYxFDASBgNV
@@ -944,7 +945,10 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             not_after: None,
             issuer_der: Vec::new(),
             subject_der: Vec::new(),
+            subject_name_der: Vec::new(),
             spki_der: Vec::new(),
+            subject_public_key: Vec::new(),
+            serial_number: Vec::new(),
             subject_key_id: None,
             authority_key_id: None,
             subject: "CN=example.com, O=Example Inc".to_string(),
@@ -1111,7 +1115,10 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
                 not_after: Some(time::OffsetDateTime::now_utc() + time::Duration::hours(1)),
                 issuer_der: Vec::new(),
                 subject_der: Vec::new(),
+                subject_name_der: Vec::new(),
                 spki_der: Vec::new(),
+                subject_public_key: Vec::new(),
+                serial_number: Vec::new(),
                 subject_key_id: None,
                 authority_key_id: None,
                 subject: "CN=example.com".to_string(),
@@ -1162,7 +1169,10 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
                 not_after: Some(time::OffsetDateTime::now_utc() + time::Duration::hours(1)),
                 issuer_der: Vec::new(),
                 subject_der: Vec::new(),
+                subject_name_der: Vec::new(),
                 spki_der: Vec::new(),
+                subject_public_key: Vec::new(),
+                serial_number: Vec::new(),
                 subject_key_id: None,
                 authority_key_id: None,
                 subject: "CN=example.com".to_string(),
@@ -1189,26 +1199,67 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             (0x82, OcspStatus::Unknown),
         ] {
             let response = test_ocsp_response(tag);
-            assert_eq!(parse_ocsp_status(&response), Some(want), "tag {tag:#x}");
+            assert_eq!(
+                parse_ocsp_status(&response, None, None),
+                Some(want),
+                "tag {tag:#x}"
+            );
         }
 
-        assert_eq!(parse_ocsp_status(&der_seq(&[der(0x0a, &[1])])), None);
-        assert_eq!(parse_ocsp_status(b"not der"), None);
+        assert_eq!(
+            parse_ocsp_status(&der_seq(&[der(0x0a, &[1])]), None, None),
+            None
+        );
+        assert_eq!(parse_ocsp_status(b"not der", None, None), None);
+    }
+
+    #[test]
+    fn parse_ocsp_status_matches_leaf_cert_id_across_all_entries() {
+        let cert = ParsedCert::parse(
+            &super::super::pem_certificates(TEST_QUIC_CERT_PEM)
+                .unwrap()
+                .remove(0),
+        )
+        .unwrap();
+        let matching_cert_id = test_ocsp_cert_id(&cert, &cert);
+        let unrelated_cert_id = der_seq(&[
+            der_seq(&[der(0x06, &[0x2b, 0x0e, 0x03, 0x02, 0x1a]), der(0x05, &[])]),
+            der(0x04, &[9; 20]),
+            der(0x04, &[8; 20]),
+            der(0x02, &[7]),
+        ]);
+        let response = test_ocsp_response_entries(vec![
+            (unrelated_cert_id.clone(), 0xa1),
+            (matching_cert_id, 0x80),
+        ]);
+        let no_match_response = test_ocsp_response_entries(vec![(unrelated_cert_id, 0x80)]);
+
+        assert_eq!(
+            parse_ocsp_status(&response, Some(&cert), Some(&cert)),
+            Some(OcspStatus::Good)
+        );
+        assert_eq!(
+            parse_ocsp_status(&no_match_response, Some(&cert), Some(&cert)),
+            None
+        );
     }
 
     #[test]
     fn render_ocsp_status_matches_go_stapled_status_line() {
         let mut out = Printer::new(false);
-        render_ocsp_status(&mut out, &test_ocsp_response(0x80));
+        render_ocsp_status(&mut out, &test_ocsp_response(0x80), None, None);
 
-        assert_eq!(out.into_string().unwrap(), "* OCSP: good (stapled)\n");
+        assert_eq!(
+            out.into_string().unwrap(),
+            "* OCSP: good (stapled, unverified)\n"
+        );
 
         let mut out = Printer::new(false);
-        render_ocsp_status(&mut out, b"malformed");
+        render_ocsp_status(&mut out, b"malformed", None, None);
         assert!(out.bytes().is_empty());
 
         let mut out = Printer::new(true);
-        render_ocsp_status(&mut out, &test_ocsp_response(0x80));
+        render_ocsp_status(&mut out, &test_ocsp_response(0x80), None, None);
         assert!(out.into_string().unwrap().contains("\x1b[32mgood\x1b[0m"));
     }
 
@@ -1447,9 +1498,17 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             der(0x04, &[2]),
             der(0x02, &[1]),
         ]);
-        let single_response =
-            der_seq(&[cert_id, der(status_tag, &[]), der(0x18, b"20250101000000Z")]);
-        let responses = der_seq(&[single_response]);
+        test_ocsp_response_entries(vec![(cert_id, status_tag)])
+    }
+
+    fn test_ocsp_response_entries(entries: Vec<(Vec<u8>, u8)>) -> Vec<u8> {
+        let singles = entries
+            .into_iter()
+            .map(|(cert_id, status_tag)| {
+                der_seq(&[cert_id, der(status_tag, &[]), der(0x18, b"20250101000000Z")])
+            })
+            .collect::<Vec<_>>();
+        let responses = der_seq(&singles);
         let tbs_response_data =
             der_seq(&[der(0xa1, &[]), der(0x18, b"20250101000000Z"), responses]);
         let basic_response = der_seq(&[tbs_response_data, der_seq(&[]), der(0x03, &[0])]);
@@ -1461,6 +1520,15 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             der(0x04, &basic_response),
         ]);
         der_seq(&[der(0x0a, &[0]), der(0xa0, &response_bytes)])
+    }
+
+    fn test_ocsp_cert_id(leaf: &ParsedCert, issuer: &ParsedCert) -> Vec<u8> {
+        der_seq(&[
+            der_seq(&[der(0x06, &[0x2b, 0x0e, 0x03, 0x02, 0x1a]), der(0x05, &[])]),
+            der(0x04, &Sha1::digest(&issuer.subject_name_der)),
+            der(0x04, &Sha1::digest(&issuer.subject_public_key)),
+            der(0x02, &leaf.serial_number),
+        ])
     }
 
     fn der_seq(parts: &[Vec<u8>]) -> Vec<u8> {
@@ -1508,7 +1576,10 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             not_after: Some(not_after),
             issuer_der: issuer_der.to_vec(),
             subject_der: subject_der.to_vec(),
+            subject_name_der: Vec::new(),
             spki_der: spki_der.to_vec(),
+            subject_public_key: Vec::new(),
+            serial_number: vec![raw],
             subject_key_id: None,
             authority_key_id: None,
             subject: format!("CN={common_name}"),

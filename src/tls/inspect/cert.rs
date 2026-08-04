@@ -1,6 +1,9 @@
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
+use sha1::Sha1;
+use sha2::{Digest as _, Sha256};
+
 use crate::error::FetchError;
 
 use super::der::DerReader;
@@ -12,7 +15,11 @@ pub(super) enum OcspStatus {
     Unknown,
 }
 
-pub(super) fn parse_ocsp_status(raw: &[u8]) -> Option<OcspStatus> {
+pub(super) fn parse_ocsp_status(
+    raw: &[u8],
+    leaf: Option<&ParsedCert>,
+    issuer: Option<&ParsedCert>,
+) -> Option<OcspStatus> {
     if raw.is_empty() {
         return None;
     }
@@ -49,10 +56,14 @@ pub(super) fn parse_ocsp_status(raw: &[u8]) -> Option<OcspStatus> {
     if basic_response.tag != 0x04 {
         return None;
     }
-    parse_basic_ocsp_response_status(basic_response.value)
+    parse_basic_ocsp_response_status(basic_response.value, leaf, issuer)
 }
 
-fn parse_basic_ocsp_response_status(raw: &[u8]) -> Option<OcspStatus> {
+fn parse_basic_ocsp_response_status(
+    raw: &[u8],
+    leaf: Option<&ParsedCert>,
+    issuer: Option<&ParsedCert>,
+) -> Option<OcspStatus> {
     let mut top = DerReader::new(raw);
     let basic = top.read_tlv()?;
     if basic.tag != 0x30 {
@@ -81,21 +92,98 @@ fn parse_basic_ocsp_response_status(raw: &[u8]) -> Option<OcspStatus> {
     if responses.tag != 0x30 {
         return None;
     }
+
+    let matching = leaf.zip(issuer);
+    let mut fallback = None;
     let mut responses = DerReader::new(responses.value);
-    let single = responses.read_tlv()?;
-    if single.tag != 0x30 {
-        return None;
+    while let Some(single) = responses.read_tlv() {
+        if single.tag != 0x30 {
+            continue;
+        }
+        let mut single = DerReader::new(single.value);
+        let Some(cert_id) = single.read_tlv() else {
+            continue;
+        };
+        let Some(status) = single.read_tlv().and_then(parse_ocsp_cert_status) else {
+            continue;
+        };
+
+        if let Some((leaf, issuer)) = matching {
+            if ocsp_cert_id_matches(cert_id.raw, leaf, issuer) {
+                return Some(status);
+            }
+        } else if fallback.is_none() {
+            fallback = Some(status);
+        }
     }
 
-    let mut single = DerReader::new(single.value);
-    single.read_tlv()?; // certID
-    let status = single.read_tlv()?;
+    // Without both certificates there is no possible certificate match. The
+    // embedded status is still useful for diagnostics, but it is unverified.
+    fallback
+}
+
+fn parse_ocsp_cert_status(status: super::der::Tlv<'_>) -> Option<OcspStatus> {
     match status.tag {
         0x80 | 0xa0 => Some(OcspStatus::Good),
         0x81 | 0xa1 => Some(OcspStatus::Revoked),
         0x82 | 0xa2 => Some(OcspStatus::Unknown),
         _ => None,
     }
+}
+
+fn ocsp_cert_id_matches(raw: &[u8], leaf: &ParsedCert, issuer: &ParsedCert) -> bool {
+    let mut reader = DerReader::new(raw);
+    let Some(cert_id) = reader.read_tlv() else {
+        return false;
+    };
+    if cert_id.tag != 0x30 {
+        return false;
+    }
+    let mut cert_id = DerReader::new(cert_id.value);
+    let Some(hash_algorithm) = cert_id.read_tlv() else {
+        return false;
+    };
+    let Some(name_hash) = cert_id.read_tlv() else {
+        return false;
+    };
+    let Some(key_hash) = cert_id.read_tlv() else {
+        return false;
+    };
+    let Some(serial) = cert_id.read_tlv() else {
+        return false;
+    };
+    if hash_algorithm.tag != 0x30
+        || name_hash.tag != 0x04
+        || key_hash.tag != 0x04
+        || serial.tag != 0x02
+    {
+        return false;
+    }
+
+    let mut algorithm = DerReader::new(hash_algorithm.value);
+    let Some(algorithm_oid) = algorithm.read_tlv() else {
+        return false;
+    };
+    if algorithm_oid.tag != 0x06 {
+        return false;
+    }
+    let (expected_name_hash, expected_key_hash): (Vec<u8>, Vec<u8>) = match algorithm_oid.value {
+        // id-sha1
+        [0x2b, 0x0e, 0x03, 0x02, 0x1a] => (
+            Sha1::digest(&issuer.subject_name_der).to_vec(),
+            Sha1::digest(&issuer.subject_public_key).to_vec(),
+        ),
+        // id-sha256
+        [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01] => (
+            Sha256::digest(&issuer.subject_name_der).to_vec(),
+            Sha256::digest(&issuer.subject_public_key).to_vec(),
+        ),
+        _ => return false,
+    };
+
+    name_hash.value == expected_name_hash
+        && key_hash.value == expected_key_hash
+        && serial.value == leaf.serial_number.as_slice()
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -108,7 +196,10 @@ pub(super) struct ParsedCert {
     pub(super) not_after: Option<time::OffsetDateTime>,
     pub(super) issuer_der: Vec<u8>,
     pub(super) subject_der: Vec<u8>,
+    pub(super) subject_name_der: Vec<u8>,
     pub(super) spki_der: Vec<u8>,
+    pub(super) subject_public_key: Vec<u8>,
+    pub(super) serial_number: Vec<u8>,
     pub(super) subject_key_id: Option<Vec<u8>>,
     pub(super) authority_key_id: Option<Vec<u8>>,
     pub(super) subject: String,
@@ -129,7 +220,10 @@ impl ParsedCert {
             not_after: fields.not_after,
             issuer_der: fields.issuer_der,
             subject_der: fields.subject_der,
+            subject_name_der: fields.subject_name_der,
             spki_der: fields.spki_der,
+            subject_public_key: fields.subject_public_key,
+            serial_number: fields.serial_number,
             subject_key_id: fields.subject_key_id,
             authority_key_id: fields.authority_key_id,
             subject: fields.subject.display,
@@ -259,7 +353,10 @@ struct TbsFields<'a> {
     ip_addresses: Vec<IpAddr>,
     issuer_der: Vec<u8>,
     subject_der: Vec<u8>,
+    subject_name_der: Vec<u8>,
     spki_der: Vec<u8>,
+    subject_public_key: Vec<u8>,
+    serial_number: Vec<u8>,
     subject_key_id: Option<Vec<u8>>,
     authority_key_id: Option<Vec<u8>>,
     extensions: Option<&'a [u8]>,
@@ -271,7 +368,7 @@ impl<'a> TbsFields<'a> {
         if reader.peek_tag()? == 0xa0 {
             reader.read_tlv()?;
         }
-        reader.read_tlv()?; // serial
+        let serial = reader.read_tlv()?;
         reader.read_tlv()?; // signature
         let issuer = reader.read_tlv()?;
         let validity = reader.read_tlv()?;
@@ -279,6 +376,7 @@ impl<'a> TbsFields<'a> {
         let subject_tlv = reader.read_tlv()?;
         let subject = parse_name(subject_tlv.value);
         let spki = reader.read_tlv()?;
+        let subject_public_key = parse_subject_public_key(spki.value).unwrap_or_default();
 
         let mut extensions = None;
         while !reader.is_empty() {
@@ -295,7 +393,10 @@ impl<'a> TbsFields<'a> {
             ip_addresses: Vec::new(),
             issuer_der: issuer.value.to_vec(),
             subject_der: subject_tlv.value.to_vec(),
+            subject_name_der: subject_tlv.raw.to_vec(),
             spki_der: spki.raw.to_vec(),
+            subject_public_key,
+            serial_number: serial.value.to_vec(),
             subject_key_id: None,
             authority_key_id: None,
             extensions,
@@ -424,6 +525,16 @@ fn parse_extensions(extensions: Option<&[u8]>, fields: &mut TbsFields<'_>) {
             _ => {}
         }
     }
+}
+
+fn parse_subject_public_key(spki: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = DerReader::new(spki);
+    reader.read_tlv()?; // algorithm
+    let key = reader.read_tlv()?;
+    if key.tag != 0x03 || key.value.first()? != &0 {
+        return None;
+    }
+    Some(key.value[1..].to_vec())
 }
 
 fn parse_subject_key_identifier(octets: &[u8]) -> Option<Vec<u8>> {

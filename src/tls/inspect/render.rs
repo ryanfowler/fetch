@@ -52,7 +52,12 @@ pub(super) fn render_to(inspection: &Inspection, out: &mut Printer) {
         render_cert_chain(out, &inspection.chain);
         render_sans(out, &inspection.chain[0]);
     }
-    render_ocsp_status(out, &inspection.ocsp_response);
+    render_ocsp_status(
+        out,
+        &inspection.ocsp_response,
+        inspection.chain.first(),
+        inspection.chain.get(1),
+    );
 }
 
 fn render_ech_status(out: &mut Printer, status: rustls::client::EchStatus) {
@@ -98,14 +103,19 @@ fn render_sans(out: &mut Printer, cert: &ParsedCert) {
     out.push('\n');
 }
 
-pub(super) fn render_ocsp_status(out: &mut Printer, raw_ocsp: &[u8]) {
-    let Some(status) = parse_ocsp_status(raw_ocsp) else {
+pub(super) fn render_ocsp_status(
+    out: &mut Printer,
+    raw_ocsp: &[u8],
+    leaf: Option<&ParsedCert>,
+    issuer: Option<&ParsedCert>,
+) {
+    let Some(status) = parse_ocsp_status(raw_ocsp, leaf, issuer) else {
         return;
     };
     out.write_info_prefix();
     out.push_str("OCSP: ");
     out.write_styled(ocsp_status_label(status), &[ocsp_status_color(status)]);
-    out.push_str(" (stapled)\n");
+    out.push_str(" (stapled, unverified)\n");
 }
 
 fn ocsp_status_label(status: OcspStatus) -> &'static str {

@@ -343,7 +343,9 @@ TLS13_AES_256_GCM_SHA384`). HTTP/3 reports the cipher suite as unavailable
 - **ALPN negotiated protocol** (e.g., h2)
 - **Certificate chain** with tree visualization and expiry status
 - **Subject Alternative Names** (DNS names and IP addresses)
-- **OCSP staple status** (good, revoked, or unknown)
+- **OCSP staple status** (good, revoked, or unknown). The embedded status is
+  labeled unverified; TLS inspection does not validate its signature or
+  freshness.
 
 Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
 
