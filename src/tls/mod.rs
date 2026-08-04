@@ -151,7 +151,11 @@ pub fn rustls_platform_client_config_with_options(
     let builder = if insecure {
         builder
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {
+                supported_schemes: provider
+                    .signature_verification_algorithms
+                    .supported_schemes(),
+            }))
     } else {
         let extra_roots = custom_ca_certificates(ca_cert_paths)?;
         let verifier = if extra_roots.is_empty() {
@@ -413,7 +417,9 @@ fn first_private_key(data: &[u8]) -> Result<Option<PrivateKeyDer<'static>>, Fetc
 }
 
 #[derive(Debug)]
-struct NoCertificateVerification;
+struct NoCertificateVerification {
+    supported_schemes: Vec<SignatureScheme>,
+}
 
 impl ServerCertVerifier for NoCertificateVerification {
     fn verify_server_cert(
@@ -446,17 +452,7 @@ impl ServerCertVerifier for NoCertificateVerification {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::ED25519,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::RSA_PKCS1_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA384,
-            SignatureScheme::RSA_PKCS1_SHA512,
-        ]
+        self.supported_schemes.clone()
     }
 }
 
@@ -526,6 +522,20 @@ mod tests {
         file.write_all(contents).unwrap();
         let path = file.path().to_string_lossy().into_owned();
         (file, path)
+    }
+
+    #[test]
+    fn insecure_verifier_uses_all_provider_signature_schemes() {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let supported_schemes = provider
+            .signature_verification_algorithms
+            .supported_schemes();
+        let verifier = NoCertificateVerification {
+            supported_schemes: supported_schemes.clone(),
+        };
+
+        assert!(supported_schemes.contains(&SignatureScheme::ECDSA_NISTP521_SHA512));
+        assert_eq!(verifier.supported_verify_schemes(), supported_schemes);
     }
 
     #[test]
