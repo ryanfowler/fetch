@@ -563,7 +563,6 @@ fn alpn_protocols(http_version: Option<HttpVersion>) -> &'static [&'static str] 
 pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     let mut ignored = Vec::new();
     crate::inspection::append_shared_ignored_request_flags(cli, &mut ignored);
-    crate::inspection::append_shared_ignored_http_version_flags(cli, &mut ignored);
     crate::inspection::append_shared_ignored_auth_flags(cli, &mut ignored);
     crate::inspection::append_shared_ignored_response_flags(cli, &mut ignored);
     ignored
@@ -863,6 +862,20 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         let url = tls_url("example.com/path").unwrap();
 
         assert_eq!(url.as_str(), "https://example.com/path");
+    }
+
+    #[test]
+    fn http_version_flags_are_not_ignored_for_tls_inspection() {
+        let cli = Cli::try_parse_from([
+            "fetch",
+            "--inspect-tls",
+            "--http",
+            "3",
+            "https://example.com",
+        ])
+        .unwrap();
+
+        assert!(ignored_inspection_flags(&cli).is_empty());
     }
 
     #[test]
@@ -1345,6 +1358,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         ])
         .unwrap();
         let url = tls_url(&raw_url).unwrap();
+        assert!(ignored_inspection_flags(&cli).is_empty());
 
         let inspection = inspect(
             &cli,
