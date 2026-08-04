@@ -117,6 +117,20 @@ pub fn rustls_platform_client_config() -> Result<rustls::ClientConfig, FetchErro
     rustls_platform_client_config_with_options(&[], None, None, false, None, None, None)
 }
 
+pub(crate) fn rustls_platform_verifier(
+    ca_cert_paths: &[String],
+    provider: Arc<rustls::crypto::CryptoProvider>,
+) -> Result<rustls_platform_verifier::Verifier, FetchError> {
+    let extra_roots = custom_ca_certificates(ca_cert_paths)?;
+    let verifier = if extra_roots.is_empty() {
+        rustls_platform_verifier::Verifier::new(provider)
+    } else {
+        rustls_platform_verifier::Verifier::new_with_extra_roots(extra_roots, provider)
+    }
+    .map_err(|err| FetchError::Message(err.to_string()))?;
+    Ok(verifier)
+}
+
 pub fn rustls_platform_client_config_with_options(
     ca_cert_paths: &[String],
     cert_path: Option<&str>,
@@ -157,13 +171,7 @@ pub fn rustls_platform_client_config_with_options(
                     .supported_schemes(),
             }))
     } else {
-        let extra_roots = custom_ca_certificates(ca_cert_paths)?;
-        let verifier = if extra_roots.is_empty() {
-            rustls_platform_verifier::Verifier::new(provider)
-        } else {
-            rustls_platform_verifier::Verifier::new_with_extra_roots(extra_roots, provider)
-        }
-        .map_err(|err| FetchError::Message(err.to_string()))?;
+        let verifier = rustls_platform_verifier(ca_cert_paths, provider)?;
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))

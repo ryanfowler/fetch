@@ -6,12 +6,9 @@ use std::time::{Duration, Instant};
 use quinn::crypto::rustls::{HandshakeData, QuicClientConfig};
 use rustls::client::EchMode;
 use rustls::client::EchStatus;
-use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{
-    DigitallySignedStruct, ProtocolVersion, RootCertStore, SignatureScheme, SupportedCipherSuite,
-};
+use rustls::{DigitallySignedStruct, ProtocolVersion, SignatureScheme, SupportedCipherSuite};
 use tokio_rustls::TlsConnector;
 use url::Url;
 
@@ -139,13 +136,7 @@ async fn inspect_tcp(
     let native_roots = load_native_root_certs();
     let trusted_roots = trusted_root_certs(&ca_certs, &native_roots);
     let ocsp_capture = OcspCapture::default();
-    let mut config = build_client_config(
-        cli,
-        &ca_certs,
-        &native_roots,
-        ocsp_capture.clone(),
-        ech_mode,
-    )?;
+    let mut config = build_client_config(cli, ocsp_capture.clone(), ech_mode)?;
     config.alpn_protocols = alpn_protocols(http_version)
         .iter()
         .map(|protocol| protocol.as_bytes().to_vec())
@@ -305,8 +296,7 @@ async fn inspect_quic(
         .into_iter()
         .map(|addr| {
             let ocsp_capture = OcspCapture::default();
-            let mut config =
-                build_client_config(cli, &ca_certs, &native_roots, ocsp_capture.clone(), None)?;
+            let mut config = build_client_config(cli, ocsp_capture.clone(), None)?;
             config.alpn_protocols = alpn_protocols(Some(HttpVersion::Http3))
                 .iter()
                 .map(|protocol| protocol.as_bytes().to_vec())
@@ -452,8 +442,6 @@ fn go_style_tls_inspect_error(err: impl fmt::Display) -> FetchError {
 
 fn build_client_config(
     cli: &Cli,
-    ca_certs: &[ParsedCert],
-    native_roots: &[ParsedCert],
     ocsp_capture: OcspCapture,
     ech_mode: Option<EchMode>,
 ) -> Result<rustls::ClientConfig, FetchError> {
@@ -502,13 +490,11 @@ fn build_client_config(
                     .supported_schemes(),
             }))
     } else {
-        let verifier = WebPkiServerVerifier::builder(Arc::new(root_store(ca_certs, native_roots)?))
-            .build()
-            .map_err(|err| FetchError::Message(err.to_string()))?;
+        let verifier = super::rustls_platform_verifier(&cli.ca_cert, provider)?;
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(CapturingServerVerifier {
-                inner: verifier,
+                inner: Arc::new(verifier),
                 ocsp_capture,
             }))
     };
@@ -549,24 +535,6 @@ fn ensure_quic_protocol_versions(cli: &Cli) -> Result<(), FetchError> {
     } else {
         Err("HTTP/3 TLS inspection requires TLS 1.3".into())
     }
-}
-
-fn root_store(
-    ca_certs: &[ParsedCert],
-    native_roots: &[ParsedCert],
-) -> Result<RootCertStore, FetchError> {
-    let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let _ = roots.add_parsable_certificates(
-        native_roots
-            .iter()
-            .map(|cert| CertificateDer::from(cert.raw.clone())),
-    );
-    for cert in ca_certs {
-        roots
-            .add(CertificateDer::from(cert.raw.clone()))
-            .map_err(|err| FetchError::Message(format!("invalid CA certificate: {err}")))?;
-    }
-    Ok(roots)
 }
 
 fn alpn_protocols(http_version: Option<HttpVersion>) -> &'static [&'static str] {
@@ -1347,7 +1315,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             .into_iter()
             .map(|addr| {
                 let capture = OcspCapture::default();
-                let mut config = build_client_config(&cli, &[], &[], capture.clone(), None)?;
+                let mut config = build_client_config(&cli, capture.clone(), None)?;
                 config.alpn_protocols = vec![b"h3".to_vec()];
                 Ok((addr, quic_client_config(config)?, capture))
             })

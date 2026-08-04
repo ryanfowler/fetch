@@ -1925,6 +1925,21 @@ fn tls_certificate_validation_inspection_and_bounds_cases() {
     ]);
     assert_exit(&res, 0);
 
+    let res = run_fetch(&["--inspect-tls", &tls.url]);
+    assert_exit(&res, 1);
+    assert!(res.stderr.contains("certificate"));
+
+    let res = run_fetch(&[
+        "--inspect-tls",
+        "--ca-cert",
+        tls.ca_cert_path.to_str().unwrap(),
+        &tls.url,
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stdout.is_empty());
+    assert!(res.stderr.contains("TLS"));
+    assert!(res.stderr.contains("Certificate") || res.stderr.contains("certificate"));
+
     let res = run_fetch(&["--inspect-tls", "--insecure", &tls.url]);
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
