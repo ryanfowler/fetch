@@ -557,10 +557,12 @@ See [Encrypted Client Hello](ech.md) for details.
 ### `--inspect-tls`
 
 Inspect the TLS certificate chain with a TLS handshake. This operation does not
-make an HTTP request. The output shows the TLS version, cipher suite, ALPN
-protocol, certificate chain and expiry status, Subject Alternative Names
-(SANs), and OCSP staple status. Use an HTTPS URL. With `--http 3`, inspection
-uses a QUIC handshake and offers `h3` ALPN.
+make an HTTP request. The output shows the TLS version, negotiated cipher
+suite, ALPN protocol, certificate chain and expiry status, Subject Alternative
+Names (SANs), and OCSP staple status. Use an HTTPS URL. With `--http 3`,
+inspection uses a QUIC handshake and offers `h3` ALPN. The current QUIC
+integration does not expose the negotiated TLS cipher suite, so HTTP/3 output
+reports it as unavailable.
 
 Request-only CLI flags have no effect with `--inspect-tls`. They cause a warning
 that `fetch` does not send an HTTP request. Configuration-file defaults do not

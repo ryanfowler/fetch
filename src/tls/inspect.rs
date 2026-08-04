@@ -191,7 +191,10 @@ async fn inspect_tcp(
 
     Ok(Inspection {
         version: conn.protocol_version(),
-        cipher_suite: conn.negotiated_cipher_suite(),
+        cipher_suite: conn
+            .negotiated_cipher_suite()
+            .map(CipherSuiteStatus::Negotiated)
+            .unwrap_or(CipherSuiteStatus::Unavailable),
         alpn: conn
             .alpn_protocol()
             .map(|protocol| String::from_utf8_lossy(protocol).into_owned()),
@@ -399,7 +402,9 @@ async fn inspect_quic_addr(
 
     Ok(Inspection {
         version: Some(ProtocolVersion::TLSv1_3),
-        cipher_suite: None,
+        // Quinn 0.11 exposes QUIC handshake ALPN and peer identity, but not
+        // the rustls cipher suite selected by the TLS handshake.
+        cipher_suite: CipherSuiteStatus::UnavailableForHttp3,
         alpn,
         ech_status: EchStatus::NotOffered,
         chain,
@@ -580,10 +585,17 @@ pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     ignored
 }
 
+#[derive(Clone, Copy)]
+enum CipherSuiteStatus {
+    Negotiated(SupportedCipherSuite),
+    Unavailable,
+    UnavailableForHttp3,
+}
+
 #[derive(Clone)]
 struct Inspection {
     version: Option<ProtocolVersion>,
-    cipher_suite: Option<SupportedCipherSuite>,
+    cipher_suite: CipherSuiteStatus,
     alpn: Option<String>,
     ech_status: EchStatus,
     chain: Vec<ParsedCert>,
@@ -1114,10 +1126,12 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     }
 
     #[test]
-    fn render_contains_tls_alpn_chain_and_sans() {
+    fn render_tcp_contains_tls_alpn_chain_sans_and_cipher_suite() {
         let inspection = Inspection {
             version: Some(ProtocolVersion::TLSv1_3),
-            cipher_suite: None,
+            cipher_suite: CipherSuiteStatus::Negotiated(
+                rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
+            ),
             alpn: Some("h2".to_string()),
             ech_status: EchStatus::NotOffered,
             chain: vec![ParsedCert {
@@ -1139,17 +1153,36 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
 
         let out = render(&inspection);
 
-        assert!(out.contains("TLS 1.3"));
+        assert!(out.contains("TLS 1.3: TLS13_AES_256_GCM_SHA384"));
         assert!(out.contains("ALPN: h2"));
         assert!(out.contains("Certificate chain"));
         assert!(out.contains("SANs: example.com, 127.0.0.1"));
     }
 
     #[test]
+    fn render_quic_reports_unavailable_cipher_suite() {
+        let inspection = Inspection {
+            version: Some(ProtocolVersion::TLSv1_3),
+            cipher_suite: CipherSuiteStatus::UnavailableForHttp3,
+            alpn: Some("h3".to_string()),
+            ech_status: EchStatus::NotOffered,
+            chain: Vec::new(),
+            ocsp_response: Vec::new(),
+        };
+
+        assert_eq!(
+            render(&inspection),
+            "* TLS 1.3: cipher suite unavailable for HTTP/3\n* ALPN: h3\n"
+        );
+    }
+
+    #[test]
     fn render_with_color_colors_tls_metadata_like_go() {
         let inspection = Inspection {
             version: Some(ProtocolVersion::TLSv1_3),
-            cipher_suite: None,
+            cipher_suite: CipherSuiteStatus::Negotiated(
+                rustls::crypto::aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
+            ),
             alpn: Some("h2".to_string()),
             ech_status: EchStatus::NotOffered,
             chain: vec![ParsedCert {
@@ -1249,6 +1282,10 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         .unwrap();
 
         assert!(inspection.version.is_some());
+        assert!(matches!(
+            inspection.cipher_suite,
+            CipherSuiteStatus::Negotiated(_)
+        ));
         assert_eq!(inspection.alpn.as_deref(), Some("h2"));
         assert!(
             inspection
@@ -1379,6 +1416,10 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
 
         assert_eq!(inspection.alpn.as_deref(), Some("h3"));
         assert_eq!(inspection.version, Some(ProtocolVersion::TLSv1_3));
+        assert!(matches!(
+            inspection.cipher_suite,
+            CipherSuiteStatus::UnavailableForHttp3
+        ));
         assert!(
             inspection
                 .chain
