@@ -20,6 +20,8 @@ const DNS_TYPE_AAAA: u16 = wire::TYPE_AAAA;
 const DNS_CLASS_IN: u16 = wire::CLASS_IN;
 const DOH_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
 const DOH_RESPONSE_LIMIT_ERROR: &str = "DoH response exceeded maximum allowed size of 1 MiB";
+const DOH_ERROR_EXCERPT_MAX_BYTES: usize = 4 * 1024;
+const DOH_ERROR_TRUNCATION_SUFFIX: &str = "... [truncated]";
 const APPLICATION_DNS_MESSAGE: &str = "application/dns-message";
 const APPLICATION_DNS_JSON: &str = "application/dns-json";
 
@@ -417,13 +419,39 @@ fn doh_status_error(response: &DohResponseBody) -> DnsError {
     if let Ok(err_response) = serde_json::from_slice::<DohErrorResponse>(response.body())
         && let Some(message) = err_response.error.filter(|message| !message.is_empty())
     {
-        return DnsError(format!("{}: {message}", status.as_u16()));
+        return DnsError(format!(
+            "{}: {}",
+            status.as_u16(),
+            doh_error_excerpt(&message),
+        ));
     }
-    DnsError(format!(
-        "{}: {}",
-        status.as_u16(),
-        String::from_utf8_lossy(response.body())
-    ))
+    let body = String::from_utf8_lossy(response.body());
+    DnsError(format!("{}: {}", status.as_u16(), doh_error_excerpt(&body),))
+}
+
+fn doh_error_excerpt(body: &str) -> String {
+    let suffix_len = DOH_ERROR_TRUNCATION_SUFFIX.len();
+    let content_limit = DOH_ERROR_EXCERPT_MAX_BYTES.saturating_sub(suffix_len);
+    let content = truncate_utf8(body, content_limit);
+    let truncated = content.len() < body.len();
+
+    let mut excerpt = String::with_capacity(content.len() + if truncated { suffix_len } else { 0 });
+    excerpt.push_str(content);
+    if truncated {
+        excerpt.push_str(DOH_ERROR_TRUNCATION_SUFFIX);
+    }
+    core::escape_terminal_text(&excerpt)
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn is_dns_message_response(response: &DohResponseBody) -> bool {
@@ -1120,6 +1148,43 @@ mod tests {
         assert_eq!(records[0].ip.to_string(), "127.0.0.1");
         assert_eq!(records[0].ttl, Some(123));
         task.abort();
+    }
+
+    #[test]
+    fn doh_status_error_truncates_oversized_json_message() {
+        let message = "x".repeat(DOH_ERROR_EXCERPT_MAX_BYTES + 1);
+        let body = format!(r#"{{"error":"{message}"}}"#);
+        let response = DohResponseBody {
+            status: StatusCode::BAD_REQUEST,
+            headers: HeaderMap::new(),
+            body: Bytes::from(body),
+        };
+
+        let error = doh_status_error(&response).to_string();
+        let excerpt = error.strip_prefix("400: ").unwrap();
+
+        assert_eq!(excerpt.len(), DOH_ERROR_EXCERPT_MAX_BYTES);
+        assert!(excerpt.ends_with(DOH_ERROR_TRUNCATION_SUFFIX));
+        assert_eq!(
+            excerpt.trim_end_matches(DOH_ERROR_TRUNCATION_SUFFIX).len(),
+            DOH_ERROR_EXCERPT_MAX_BYTES - DOH_ERROR_TRUNCATION_SUFFIX.len()
+        );
+    }
+
+    #[test]
+    fn doh_status_error_escapes_control_characters() {
+        let response = DohResponseBody {
+            status: StatusCode::BAD_REQUEST,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(br#"{"error":"bad \u001b[2J\r\nforged"}"#),
+        };
+
+        let error = doh_status_error(&response).to_string();
+
+        assert_eq!(error, r"400: bad \u001b[2J\r\nforged");
+        assert!(!error.contains('\x1b'));
+        assert!(!error.contains('\r'));
+        assert!(!error.contains('\n'));
     }
 
     #[tokio::test]
