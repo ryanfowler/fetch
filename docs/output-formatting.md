@@ -125,8 +125,8 @@ fetch example.com
 
 #### Convert readable HTML to Markdown
 
-Use `--article` to extract the main readable content from an HTML response with
-Legible and convert that extracted HTML to Markdown with htmd:
+Use `--article` to extract the main readable content from an HTML response and
+convert it to Markdown with Legible:
 
 ```sh
 fetch --article example.com/post

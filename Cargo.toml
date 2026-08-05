@@ -31,7 +31,6 @@ h2 = "=0.4.15"
 h3 = "=0.0.8"
 h3-quinn = "=0.0.10"
 hmac = "=0.13.0"
-htmd = "=0.5.5"
 http = "=1.5.0"
 http-body = "=1.1.0"
 http-body-util = "=0.1.4"
@@ -40,7 +39,7 @@ hyper = { version = "=1.11.0", features = ["client", "http1", "http2"] }
 hyper-util = { version = "=0.1.20", features = ["client-legacy", "client-proxy", "client-proxy-system", "http1", "http2", "tokio"] }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "tiff", "webp"] }
 ipnet = "=2.12.1"
-legible = "=0.4.3"
+legible = "=0.5.0"
 md-5 = "=0.11.0"
 memchr = "=2.8.3"
 mime = "=0.3.17"
