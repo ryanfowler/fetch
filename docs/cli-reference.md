@@ -468,11 +468,14 @@ fetch --dns-server https://1.1.1.1/dns-query example.com
 ### `--inspect-dns`
 
 Inspect DNS resolution for the URL hostname. This operation does not make an
-HTTP request. The output identifies the resolver and shows available A, AAAA,
-CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records. It also shows each
-record TTL, the address and record counts, and the lookup duration.
+HTTP request. Without `--dns-server`, `fetch` uses the platform resolver API.
+This path reports only A and AAAA addresses, and the platform API does not
+provide record TTLs. The output identifies the resolver, the address and
+record counts, and the lookup duration.
 
-All `--dns-server` transports are supported. UDP inspection advertises EDNS(0).
+With an explicit `--dns-server`, the output can include A, AAAA, CNAME, TXT, MX,
+NS, SOA, SRV, CAA, SVCB, and HTTPS records with their TTLs. All `--dns-server`
+transports are supported. UDP inspection advertises EDNS(0).
 It retries a truncated UDP response with TCP. If the TCP retry fails, `fetch`
 warns that the results are incomplete and exits with a nonzero status.
 

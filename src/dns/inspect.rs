@@ -654,10 +654,7 @@ fn records_from_wire_response(
 
 async fn resolver_target(dns_server: Option<&str>) -> Result<ResolverTarget, FetchError> {
     match dns_server {
-        None => Ok(resolver_target_from_resolv_conf(
-            None,
-            std::fs::read_to_string("/etc/resolv.conf").ok().as_deref(),
-        )),
+        None => Ok(default_resolver_target()),
         Some(server) => match crate::dns::custom::parse_dns_server(server)? {
             crate::dns::custom::ParsedDnsServer::Udp(addr) => Ok(ResolverTarget::Udp {
                 label: format!("udp {addr}"),
@@ -699,45 +696,10 @@ async fn resolver_target(dns_server: Option<&str>) -> Result<ResolverTarget, Fet
     }
 }
 
-fn resolver_target_from_resolv_conf(
-    explicit: Option<&str>,
-    resolv_conf: Option<&str>,
-) -> ResolverTarget {
-    if let Some(server) = explicit {
-        // Only reachable via `parse_dns_server`, which already guarantees a valid address.
-        let addr = server
-            .parse()
-            .expect("valid SocketAddr from parse_dns_server");
-        return ResolverTarget::Udp {
-            label: format!("udp {server}"),
-            addr,
-        };
-    }
-
-    if let Some(raw) = resolv_conf {
-        for line in raw.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-                continue;
-            }
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.len() >= 2 && fields[0] == "nameserver" {
-                let addr_str = if fields[1].contains(':') && !fields[1].starts_with('[') {
-                    format!("[{}]:53", fields[1])
-                } else {
-                    format!("{}:53", fields[1])
-                };
-                let addr = addr_str.parse().expect("valid SocketAddr from resolv.conf");
-                return ResolverTarget::Udp {
-                    label: format!("system ({addr_str})"),
-                    addr,
-                };
-            }
-        }
-    }
-
+fn default_resolver_target() -> ResolverTarget {
     ResolverTarget::Default {
-        label: "system resolver".to_string(),
+        // The platform resolver API returns addresses, not arbitrary DNS records.
+        label: "platform resolver (A/AAAA only)".to_string(),
     }
 }
 
@@ -1088,14 +1050,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_lookup_uses_default_resolver_when_no_system_dns_server_discovered() {
-        let target = resolver_target_from_resolv_conf(None, Some("# no nameservers\n"));
+    async fn test_default_inspection_uses_platform_resolver() {
+        let target = resolver_target(None).await.unwrap();
+
         assert_eq!(
             target,
             ResolverTarget::Default {
-                label: "system resolver".to_string()
+                label: "platform resolver (A/AAAA only)".to_string()
             }
         );
+        assert!(!target.label().contains("resolv.conf"));
+        assert!(!target.label().contains("127.0.0.1"));
+
         let records = records_from_ip_addrs([
             "192.0.2.44".parse().unwrap(),
             "2001:db8::44".parse().unwrap(),
@@ -1106,14 +1072,6 @@ mod tests {
         assert_eq!(records[1].typ, "AAAA");
         assert_eq!(records[1].value, "2001:db8::44");
         assert!(!records[1].has_ttl);
-    }
-
-    #[test]
-    fn test_resolver_target_does_not_default_to_loopback() {
-        let target = resolver_target_from_resolv_conf(None, Some("# no nameservers\n"));
-
-        assert!(matches!(target, ResolverTarget::Default { .. }));
-        assert!(!target.label().contains("127.0.0.1"));
     }
 
     #[test]
