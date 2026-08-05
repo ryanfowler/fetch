@@ -178,6 +178,35 @@ pub fn bytes_appear_printable(bytes: &[u8]) -> bool {
     terminal_text_controls_safe(text)
 }
 
+/// Escape control characters before writing untrusted text to a terminal.
+///
+/// Safe text is returned unchanged. Newlines and other control characters are
+/// represented as printable escapes so that untrusted text cannot add output
+/// lines or start a terminal control sequence.
+pub fn escape_terminal_text(text: &str) -> String {
+    let mut escaped = None;
+    for (index, ch) in text.char_indices() {
+        if ch.is_control() {
+            let out = escaped.get_or_insert_with(|| {
+                let mut out = String::with_capacity(text.len());
+                out.push_str(&text[..index]);
+                out
+            });
+            match ch {
+                '\u{08}' => out.push_str(r"\b"),
+                '\u{0c}' => out.push_str(r"\f"),
+                '\n' => out.push_str(r"\n"),
+                '\r' => out.push_str(r"\r"),
+                '\t' => out.push_str(r"\t"),
+                ch => out.push_str(&format!(r"\u{:04x}", ch as u32)),
+            }
+        } else if let Some(out) = escaped.as_mut() {
+            out.push(ch);
+        }
+    }
+    escaped.unwrap_or_else(|| text.to_string())
+}
+
 fn terminal_text_controls_safe(text: &str) -> bool {
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -526,6 +555,21 @@ mod tests {
         assert!(!format_enabled(None, false));
         assert!(format_enabled(Some("auto"), true));
         assert!(!format_enabled(Some("auto"), false));
+    }
+
+    #[test]
+    fn escape_terminal_text_preserves_safe_text_and_escapes_controls() {
+        let cases = [
+            ("plain text", "plain text"),
+            ("line\nfeed", r"line\nfeed"),
+            ("carriage\rreturn", r"carriage\rreturn"),
+            ("escape\x1b[2J", r"escape\u001b[2J"),
+            ("multiple\x01\x7f", r"multiple\u0001\u007f"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(escape_terminal_text(input), expected);
+        }
     }
 
     #[test]
