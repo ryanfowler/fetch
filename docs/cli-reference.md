@@ -280,7 +280,7 @@ fetch -m HEAD example.com                   # Avoid body transfer when supported
 ### `--article`
 
 Convert an HTML response to Markdown by extracting its main readable content
-with Legible and converting the extracted HTML with htmd.
+with Legible.
 If the response is already `text/markdown` or `text/x-markdown`, its body is
 used directly. HTML output begins with YAML frontmatter containing the title,
 byline, site name, published time, language, direction, text length, excerpt,

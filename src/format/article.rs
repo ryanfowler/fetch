@@ -6,9 +6,8 @@ pub fn extract_markdown(html: &str, url: &str) -> Result<Vec<u8>, String> {
     let options = Options::new().max_elems_to_parse(MAX_ARTICLE_ELEMENTS);
     let article = legible::parse(html, Some(url), Some(options))
         .map_err(|err| format!("failed to extract readable article: {err}"))?;
-    let markdown = htmd::convert(&article.content)
-        .map_err(|err| format!("failed to convert extracted article to Markdown: {err}"))?;
-    Ok(render_document(&article, url, &markdown).into_bytes())
+    let markdown = &article.markdown_content;
+    Ok(render_document(&article, url, markdown).into_bytes())
 }
 
 pub fn add_url_frontmatter(markdown: &str, url: &str) -> Vec<u8> {
@@ -114,6 +113,7 @@ mod tests {
             lang: None,
             content: String::new(),
             text_content: String::new(),
+            markdown_content: String::new(),
             length: 0,
             excerpt: None,
             site_name: None,
