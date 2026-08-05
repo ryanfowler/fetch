@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::IpAddr;
 
 pub(crate) const TYPE_A: u16 = 1;
 pub(crate) const TYPE_NS: u16 = 2;
@@ -45,6 +46,183 @@ pub(crate) struct ResourceRecord<'a> {
     pub(crate) ttl: u32,
     pub(crate) data_offset: usize,
     pub(crate) data: &'a [u8],
+}
+
+pub(crate) enum DecodedRdata<'a> {
+    Address(IpAddr),
+    Name(String),
+    Text(String),
+    Mx {
+        preference: u16,
+        exchange: String,
+    },
+    Soa {
+        ns: String,
+        mailbox: String,
+        serial: u32,
+        refresh: u32,
+        retry: u32,
+        expire: u32,
+        minimum: u32,
+    },
+    Srv {
+        priority: u16,
+        weight: u16,
+        port: u16,
+        target: String,
+    },
+    Raw(&'a [u8]),
+}
+
+pub(crate) fn decode_rdata<'a>(
+    packet: &'a [u8],
+    typ: u16,
+    offset: usize,
+    len: usize,
+) -> Result<DecodedRdata<'a>, WireError> {
+    let end = offset
+        .checked_add(len)
+        .filter(|&end| end <= packet.len())
+        .ok_or_else(|| WireError("short DNS resource".to_string()))?;
+    let raw = &packet[offset..end];
+    let mut reader = RdataReader {
+        packet,
+        pos: offset,
+        end,
+    };
+
+    match typ {
+        TYPE_A if len == 4 => Ok(DecodedRdata::Address(IpAddr::from([
+            raw[0], raw[1], raw[2], raw[3],
+        ]))),
+        TYPE_A => Err(malformed_rdata(typ)),
+        TYPE_AAAA if len == 16 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(raw);
+            Ok(DecodedRdata::Address(IpAddr::from(octets)))
+        }
+        TYPE_AAAA => Err(malformed_rdata(typ)),
+        TYPE_CNAME | TYPE_NS => {
+            let name = reader.read_name()?;
+            reader.finish(typ)?;
+            Ok(DecodedRdata::Name(name))
+        }
+        TYPE_TXT => Ok(DecodedRdata::Text(parse_txt_rdata(raw, typ)?)),
+        TYPE_MX => {
+            let preference = reader.read_u16()?;
+            let exchange = reader.read_name()?;
+            reader.finish(typ)?;
+            Ok(DecodedRdata::Mx {
+                preference,
+                exchange,
+            })
+        }
+        TYPE_SOA => {
+            let ns = reader.read_name()?;
+            let mailbox = reader.read_name()?;
+            let serial = reader.read_u32()?;
+            let refresh = reader.read_u32()?;
+            let retry = reader.read_u32()?;
+            let expire = reader.read_u32()?;
+            let minimum = reader.read_u32()?;
+            reader.finish(typ)?;
+            Ok(DecodedRdata::Soa {
+                ns,
+                mailbox,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum,
+            })
+        }
+        TYPE_SRV => {
+            let priority = reader.read_u16()?;
+            let weight = reader.read_u16()?;
+            let port = reader.read_u16()?;
+            let target = reader.read_name()?;
+            reader.finish(typ)?;
+            Ok(DecodedRdata::Srv {
+                priority,
+                weight,
+                port,
+                target,
+            })
+        }
+        TYPE_CAA if len >= 2 && usize::from(raw[1]) <= len - 2 => Ok(DecodedRdata::Raw(raw)),
+        TYPE_CAA => Err(malformed_rdata(typ)),
+        TYPE_SVCB | TYPE_HTTPS if crate::dns::svcb::parse_rdata(raw).is_some() => {
+            Ok(DecodedRdata::Raw(raw))
+        }
+        TYPE_SVCB | TYPE_HTTPS => Err(malformed_rdata(typ)),
+        _ => Ok(DecodedRdata::Raw(raw)),
+    }
+}
+
+struct RdataReader<'a> {
+    packet: &'a [u8],
+    pos: usize,
+    end: usize,
+}
+
+impl RdataReader<'_> {
+    fn read_u16(&mut self) -> Result<u16, WireError> {
+        let bytes = self.read_bytes(2)?;
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, WireError> {
+        let bytes = self.read_bytes(4)?;
+        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_name(&mut self) -> Result<String, WireError> {
+        let (name, next) = read_name_bounded(self.packet, self.pos, self.end)?;
+        self.pos = next;
+        Ok(name)
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&[u8], WireError> {
+        let end = self
+            .pos
+            .checked_add(len)
+            .filter(|&end| end <= self.end)
+            .ok_or_else(|| WireError("short DNS RDATA".to_string()))?;
+        let bytes = &self.packet[self.pos..end];
+        self.pos = end;
+        Ok(bytes)
+    }
+
+    fn finish(&self, typ: u16) -> Result<(), WireError> {
+        if self.pos == self.end {
+            Ok(())
+        } else {
+            Err(malformed_rdata(typ))
+        }
+    }
+}
+
+fn malformed_rdata(typ: u16) -> WireError {
+    WireError(format!("malformed DNS RDATA for type {typ}"))
+}
+
+fn parse_txt_rdata(raw: &[u8], typ: u16) -> Result<String, WireError> {
+    if raw.is_empty() {
+        return Err(malformed_rdata(typ));
+    }
+    let mut parts = Vec::new();
+    let mut offset = 0;
+    while offset < raw.len() {
+        let len = usize::from(raw[offset]);
+        offset += 1;
+        let end = offset
+            .checked_add(len)
+            .filter(|&end| end <= raw.len())
+            .ok_or_else(|| malformed_rdata(typ))?;
+        parts.push(String::from_utf8_lossy(&raw[offset..end]).into_owned());
+        offset = end;
+    }
+    Ok(parts.join(" "))
 }
 
 pub(crate) fn build_query(id: u16, host: &str, dns_type: u16) -> Result<Vec<u8>, WireError> {
@@ -175,10 +353,11 @@ fn parse_response_inner<'a>(
             {
                 continue;
             }
-            let (target, next) = read_name(raw, record.data_offset)?;
-            if next != record.data_offset + record.data.len() {
-                return Err(WireError("invalid DNS CNAME resource".to_string()));
-            }
+            let (target, _) = read_name_bounded(
+                raw,
+                record.data_offset,
+                record.data_offset + record.data.len(),
+            )?;
             if !reachable.iter().any(|name| names_equal(name, &target)) {
                 reachable.push(target);
                 changed = true;
@@ -198,6 +377,17 @@ pub(crate) fn names_equal(left: &str, right: &str) -> bool {
 }
 
 pub(crate) fn read_name(packet: &[u8], offset: usize) -> Result<(String, usize), WireError> {
+    read_name_bounded(packet, offset, packet.len())
+}
+
+fn read_name_bounded(
+    packet: &[u8],
+    offset: usize,
+    end: usize,
+) -> Result<(String, usize), WireError> {
+    if offset > end || end > packet.len() {
+        return Err(WireError("short DNS name".to_string()));
+    }
     let mut labels = Vec::new();
     let mut pos = offset;
     let mut next = offset;
@@ -205,12 +395,12 @@ pub(crate) fn read_name(packet: &[u8], offset: usize) -> Result<(String, usize),
     let mut jumps = 0usize;
 
     loop {
-        if pos >= packet.len() {
+        if pos >= packet.len() || (!jumped && pos >= end) {
             return Err(WireError("short DNS name".to_string()));
         }
         let len = packet[pos];
         if len & 0xc0 == 0xc0 {
-            if pos + 1 >= packet.len() {
+            if pos + 1 >= end {
                 return Err(WireError("short DNS name pointer".to_string()));
             }
             let pointer = usize::from(u16::from_be_bytes([len & 0x3f, packet[pos + 1]]));
@@ -236,7 +426,7 @@ pub(crate) fn read_name(packet: &[u8], offset: usize) -> Result<(String, usize),
             break;
         }
         let len = usize::from(len);
-        if pos + len > packet.len() {
+        if pos + len > end {
             return Err(WireError("short DNS name label".to_string()));
         }
         labels.push(String::from_utf8_lossy(&packet[pos..pos + len]).into_owned());
@@ -321,6 +511,85 @@ mod tests {
         response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
         let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
         assert_eq!(err.to_string(), "mismatched DNS response question");
+    }
+
+    #[test]
+    fn malformed_rdata_cannot_consume_adjacent_record() {
+        let cases = [
+            (TYPE_CNAME, vec![3, b'x']),
+            (TYPE_NS, vec![3, b'x']),
+            (TYPE_MX, vec![0, 10, 3, b'm']),
+            (TYPE_SRV, vec![0, 1, 0, 2, 0, 3, 3, b's']),
+            (TYPE_SOA, vec![1, b'n']),
+            (TYPE_TXT, vec![3, b't']),
+        ];
+
+        for (typ, malformed) in cases {
+            let query = build_query(0x1234, "example.com", typ).unwrap();
+            let (_, question_end) = read_name(&query, 12).unwrap();
+            let mut response = Vec::new();
+            response.extend_from_slice(&0x1234u16.to_be_bytes());
+            response.extend_from_slice(&0x8180u16.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&2u16.to_be_bytes());
+            response.extend_from_slice(&[0, 0, 0, 0]);
+            response.extend_from_slice(&query[12..question_end + 4]);
+            let adjacent = match typ {
+                TYPE_CNAME | TYPE_NS => vec![0],
+                TYPE_MX => vec![0, 10, 0],
+                TYPE_SRV => vec![0, 1, 0, 2, 0, 3, 0],
+                TYPE_SOA => {
+                    let mut data = vec![0, 0];
+                    data.extend_from_slice(&[0; 20]);
+                    data
+                }
+                TYPE_TXT => vec![0],
+                _ => unreachable!(),
+            };
+            for data in [malformed, adjacent] {
+                response.extend_from_slice(&[0xc0, 0x0c]);
+                response.extend_from_slice(&typ.to_be_bytes());
+                response.extend_from_slice(&CLASS_IN.to_be_bytes());
+                response.extend_from_slice(&30u32.to_be_bytes());
+                response.extend_from_slice(&(data.len() as u16).to_be_bytes());
+                response.extend_from_slice(&data);
+            }
+
+            let records = parse_response_without_id(&response, "example.com", typ, CLASS_IN);
+            if matches!(typ, TYPE_CNAME) {
+                assert!(records.is_err(), "malformed {typ} RDATA was accepted");
+                continue;
+            }
+            let records = records.unwrap();
+            assert_eq!(records.len(), 2);
+            assert!(
+                decode_rdata(
+                    &response,
+                    records[0].typ,
+                    records[0].data_offset,
+                    records[0].data.len()
+                )
+                .is_err(),
+                "malformed {typ} RDATA was accepted"
+            );
+            assert!(
+                decode_rdata(
+                    &response,
+                    records[1].typ,
+                    records[1].data_offset,
+                    records[1].data.len()
+                )
+                .is_ok(),
+                "adjacent {typ} RDATA was rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_rdata_decoder_rejects_extra_bytes_after_name() {
+        let raw = [0, 0, 0xc0, 0x0c];
+
+        assert!(decode_rdata(&raw, TYPE_CNAME, 0, raw.len()).is_err());
     }
 
     #[test]
