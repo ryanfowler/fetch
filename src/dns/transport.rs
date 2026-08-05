@@ -29,6 +29,11 @@ pub(crate) async fn query_udp(
     query: &[u8],
     timeout: Duration,
 ) -> Result<Vec<u8>, DnsTransportError> {
+    let socket = udp_socket(server_addr).await?;
+    query_udp_on_socket(&socket, query, timeout).await
+}
+
+pub(crate) async fn udp_socket(server_addr: SocketAddr) -> Result<UdpSocket, DnsTransportError> {
     let socket = UdpSocket::bind(if server_addr.is_ipv6() {
         "[::]:0"
     } else {
@@ -37,6 +42,14 @@ pub(crate) async fn query_udp(
     .await
     .map_err(transport_error)?;
     socket.connect(server_addr).await.map_err(transport_error)?;
+    Ok(socket)
+}
+
+pub(crate) async fn query_udp_on_socket(
+    socket: &UdpSocket,
+    query: &[u8],
+    timeout: Duration,
+) -> Result<Vec<u8>, DnsTransportError> {
     socket.send(query).await.map_err(transport_error)?;
 
     let mut buf = vec![0u8; 4096];
