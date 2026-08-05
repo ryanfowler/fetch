@@ -88,9 +88,12 @@ Request-only CLI flags have no effect with `--inspect-dns`. They cause a warning
 that `fetch` does not send an HTTP request. Configuration-file defaults do not
 cause this warning.
 
-The output identifies the resolver and shows available A, AAAA, CNAME, TXT, MX,
-NS, SOA, SRV, CAA, SVCB, and HTTPS records. It also shows each record TTL, the
-address and record counts, and the lookup duration.
+Without `--dns-server`, `fetch` uses the platform resolver API. This default
+path reports only A and AAAA addresses, and the platform API does not provide
+record TTLs. With an explicit `--dns-server`, inspection can show A, AAAA,
+CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records with their TTLs. The
+output identifies the resolver, the address and record counts, and the lookup
+duration.
 
 UDP inspection advertises EDNS(0). It retries a truncated UDP response with TCP.
 If the TCP retry fails, `fetch` warns that the results are incomplete and exits
