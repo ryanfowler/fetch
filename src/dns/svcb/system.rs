@@ -219,17 +219,20 @@ fn poll_timeout_ms(deadline: Option<Instant>) -> Option<libc::c_int> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn resolv_conf_nameserver() -> Option<std::net::SocketAddr> {
     let resolv_conf = std::fs::read_to_string("/etc/resolv.conf").ok()?;
-    for line in resolv_conf.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        let fields = line.split_whitespace().collect::<Vec<_>>();
-        if fields.len() < 2 || fields[0] != "nameserver" {
-            continue;
+    parse_resolv_conf_nameserver(&resolv_conf)
+}
+
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn parse_resolv_conf_nameserver(contents: &str) -> Option<std::net::SocketAddr> {
+    contents.lines().find_map(|line| {
+        let line = line.split('#').next()?.trim();
+        let mut fields = line.split_whitespace();
+        if fields.next()? != "nameserver" {
+            return None;
         }
-        if let Ok(ip) = fields[1].parse::<std::net::IpAddr>() {
-            return Some(std::net::SocketAddr::new(ip, 53));
-        }
-    }
-    None
+        let ip = fields.next()?.parse::<std::net::IpAddr>().ok()?;
+        Some(std::net::SocketAddr::new(ip, 53))
+    })
 }
 
 #[cfg(windows)]
@@ -475,6 +478,14 @@ mod tests {
         out.extend_from_slice(&3_u16.to_be_bytes());
         out.extend_from_slice(&[2, b'h', b'3']);
         out
+    }
+
+    #[test]
+    fn skips_malformed_nameserver_and_uses_following_valid_server() {
+        let nameserver =
+            parse_resolv_conf_nameserver("nameserver not-an-address\nnameserver 127.0.0.1\n");
+
+        assert_eq!(nameserver, Some("127.0.0.1:53".parse().unwrap()));
     }
 
     #[test]
