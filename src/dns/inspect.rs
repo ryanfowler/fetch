@@ -106,6 +106,11 @@ struct QueryError {
     message: String,
 }
 
+struct QueryFailure {
+    query_type: QueryType,
+    error: QueryError,
+}
+
 impl QueryError {
     fn other(err: impl ToString) -> Self {
         Self {
@@ -392,8 +397,8 @@ async fn lookup(
         .run(async { Ok::<_, FetchError>(join_all(futures).await) })
         .await?;
 
-    let mut first_err = None;
-    let mut truncated_types = Vec::new();
+    let mut first_err: Option<String> = None;
+    let mut failures = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     for (query_type, result) in results {
         match result {
@@ -411,35 +416,47 @@ async fn lookup(
                     records.push(record);
                 }
             }
-            Err(err) if err.kind == QueryErrorKind::Truncated => {
-                truncated_types.push(query_type.label);
+            Err(err) => {
                 if first_err.is_none() {
-                    first_err = Some(err);
+                    first_err = Some(err.message.clone());
                 }
+                failures.push(QueryFailure {
+                    query_type,
+                    error: err,
+                });
             }
-            Err(err) if first_err.is_none() => {
-                first_err = Some(err);
-            }
-            Err(_) => {}
         }
     }
     out.duration = start.elapsed();
 
+    let truncated_types: Vec<_> = failures
+        .iter()
+        .filter(|failure| failure.error.kind == QueryErrorKind::Truncated)
+        .map(|failure| failure.query_type.label)
+        .collect();
     if !truncated_types.is_empty() {
         out.warnings.push(truncated_warning(&truncated_types));
-        out.exit_code = 1;
-        return Ok(out);
     }
-    if record_count(&out) > 0 {
+    let other_failures: Vec<_> = failures
+        .iter()
+        .filter(|failure| failure.error.kind != QueryErrorKind::Truncated)
+        .collect();
+    if !other_failures.is_empty() {
+        out.warnings.push(partial_failure_warning(&other_failures));
+    }
+    if !failures.is_empty() {
+        out.exit_code = 1;
+    }
+
+    // Preserve the existing truncated-response behavior even when no complete
+    // record was returned. Other failures remain fatal when they leave no
+    // records to render.
+    if record_count(&out) > 0 || !truncated_types.is_empty() {
         return Ok(out);
     }
     let host = core::escape_terminal_text(host);
     if let Some(err) = first_err {
-        return Err(format!(
-            "lookup {host}: {}",
-            core::escape_terminal_text(&err.message)
-        )
-        .into());
+        return Err(format!("lookup {host}: {}", core::escape_terminal_text(&err)).into());
     }
     Err(format!("lookup {host}: no DNS records found").into())
 }
@@ -720,6 +737,21 @@ fn truncated_warning(types: &[&'static str]) -> String {
     )
 }
 
+fn partial_failure_warning(failures: &[&QueryFailure]) -> String {
+    let details = failures
+        .iter()
+        .map(|failure| {
+            format!(
+                "{} ({})",
+                failure.query_type.label,
+                core::escape_terminal_text(&failure.error.message)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("DNS queries for {details} failed; results are incomplete")
+}
+
 pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     let mut ignored = Vec::new();
     crate::inspection::append_shared_ignored_request_flags(cli, &mut ignored);
@@ -855,6 +887,44 @@ mod tests {
         for want in wants {
             assert!(out.contains(&want), "output missing {want:?}:\n{out}");
         }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_inspect_doh_partial_failure_preserves_records_and_exits_nonzero() {
+        let (server_url, task) = start_test_server(|request| {
+            match request
+                .uri()
+                .query()
+                .unwrap_or_default()
+                .split('&')
+                .find_map(|part| part.strip_prefix("type="))
+                .unwrap_or_default()
+            {
+                "A" => http::Response::new(
+                    r#"{"Status":0,"Answer":[{"type":1,"data":"192.0.2.1","TTL":60}]}"#.to_string(),
+                ),
+                "AAAA" => http::Response::new(r#"{"Status":3}"#.to_string()),
+                _ => http::Response::new(r#"{"Status":0}"#.to_string()),
+            }
+        })
+        .await;
+
+        let (out, code) = inspect_with_code(
+            &Url::parse("https://example.com").unwrap(),
+            Some(server_url.as_str()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(code, 1);
+        assert!(out.contains("192.0.2.1 (TTL 1m)"));
+        assert!(
+            out.contains("warning: DNS queries for AAAA"),
+            "output: {out}"
+        );
+        assert!(out.contains("NXDomain"), "output: {out}");
+        assert!(out.contains("results are incomplete"), "output: {out}");
         task.abort();
     }
 

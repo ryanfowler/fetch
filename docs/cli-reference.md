@@ -476,8 +476,9 @@ record counts, and the lookup duration.
 With an explicit `--dns-server`, the output can include A, AAAA, CNAME, TXT, MX,
 NS, SOA, SRV, CAA, SVCB, and HTTPS records with their TTLs. All `--dns-server`
 transports are supported. UDP inspection advertises EDNS(0).
-It retries a truncated UDP response with TCP. If the TCP retry fails, `fetch`
-warns that the results are incomplete and exits with a nonzero status.
+It retries a truncated UDP response with TCP. If the TCP retry fails, or any
+other record-type query fails, `fetch` preserves successful records, warns that
+the results are incomplete, and exits with a nonzero status.
 
 Request-only CLI flags have no effect with `--inspect-dns`. They cause a warning
 that `fetch` does not send an HTTP request. Configuration-file defaults do not
