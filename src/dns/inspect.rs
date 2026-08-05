@@ -359,49 +359,26 @@ async fn lookup(
         ),
         _ => None,
     };
-    // Each record type query opens its own TCP/TLS/QUIC connection,
-    // unlike the resolver module's `lookup_tcp_addr`/`lookup_tls`/
-    // `lookup_quic` which batch A+AAAA over one shared connection.
-    // Keeping per-type queries independent here trades some connection
-    // overhead for simpler per-type error handling and record merging.
-    let futures = INSPECT_TYPES.iter().copied().map(|query_type| {
-        let client = doh_client.as_ref();
-        let target = target.clone();
-        async move {
-            let result = match (target, client) {
-                (ResolverTarget::Doh { url, .. }, Some(client)) => {
-                    lookup_doh_records(client, &url, host, query_type).await
-                }
-                (ResolverTarget::Udp { addr, .. }, _) => {
-                    lookup_udp_records(addr, host, query_type, timeout).await
-                }
-                (ResolverTarget::Tcp { addr, .. }, _) => {
-                    lookup_tcp_records(addr, host, query_type, timeout).await
-                }
-                (
-                    ResolverTarget::Tls {
-                        server_name, addrs, ..
-                    },
-                    _,
-                ) => lookup_tls_records(&server_name, &addrs, host, query_type, timeout).await,
-                (
-                    ResolverTarget::Quic {
-                        server_name, addrs, ..
-                    },
-                    _,
-                ) => lookup_quic_records(&server_name, &addrs, host, query_type, timeout).await,
-                (ResolverTarget::Default { .. }, _) => {
-                    unreachable!("default resolver handled earlier")
-                }
-                (ResolverTarget::Doh { .. }, None) => {
-                    unreachable!("DoH client initialized above")
-                }
-            };
-            (query_type, result)
-        }
-    });
     let results = timeout
-        .run(async { Ok::<_, FetchError>(join_all(futures).await) })
+        .run(async {
+            let results = match target {
+                // DoH already reuses its client, while the other inspection
+                // transports are explicitly grouped by connection below.
+                ResolverTarget::Doh { url, .. } => {
+                    lookup_doh_all(doh_client.as_ref().expect("DoH client"), &url, host).await
+                }
+                ResolverTarget::Udp { addr, .. } => lookup_udp_all(addr, host, timeout).await,
+                ResolverTarget::Tcp { addr, .. } => lookup_tcp_all(addr, host, timeout).await,
+                ResolverTarget::Tls {
+                    server_name, addrs, ..
+                } => lookup_tls_all(&server_name, &addrs, host, timeout, false).await,
+                ResolverTarget::Quic {
+                    server_name, addrs, ..
+                } => lookup_quic_all(&server_name, &addrs, host, timeout, false).await,
+                ResolverTarget::Default { .. } => unreachable!("default resolver handled earlier"),
+            };
+            Ok::<_, FetchError>(results)
+        })
         .await?;
 
     let mut first_err: Option<String> = None;
@@ -497,7 +474,44 @@ async fn lookup_doh_records(
         .collect())
 }
 
-async fn lookup_udp_records(
+type QueryResult = (QueryType, Result<Vec<Record>, QueryError>);
+
+async fn lookup_doh_all(
+    client: &crate::dns::doh::DohClient,
+    server_url: &Url,
+    host: &str,
+) -> Vec<QueryResult> {
+    join_all(INSPECT_TYPES.iter().copied().map(|query_type| async move {
+        (
+            query_type,
+            lookup_doh_records(client, server_url, host, query_type).await,
+        )
+    }))
+    .await
+}
+
+async fn lookup_udp_all(
+    server_addr: SocketAddr,
+    host: &str,
+    timeout: TimeoutBudget,
+) -> Vec<QueryResult> {
+    let socket = match crate::dns::transport::udp_socket(server_addr).await {
+        Ok(socket) => socket,
+        Err(err) => return failed_query_results(err),
+    };
+
+    let mut results = Vec::with_capacity(INSPECT_TYPES.len());
+    for query_type in INSPECT_TYPES.iter().copied() {
+        results.push((
+            query_type,
+            lookup_udp_record(&socket, server_addr, host, query_type, timeout).await,
+        ));
+    }
+    results
+}
+
+async fn lookup_udp_record(
+    socket: &tokio::net::UdpSocket,
     server_addr: SocketAddr,
     host: &str,
     query_type: QueryType,
@@ -506,7 +520,7 @@ async fn lookup_udp_records(
     let id = dns_query_id();
     let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
     let udp_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
-    let mut response = crate::dns::transport::query_udp(server_addr, &raw, udp_timeout)
+    let mut response = crate::dns::transport::query_udp_on_socket(socket, &raw, udp_timeout)
         .await
         .map_err(QueryError::other)?;
     let raw_records =
@@ -524,64 +538,74 @@ async fn lookup_udp_records(
     records_from_wire_response(&response, raw_records)
 }
 
-/// Query a single record type over a fresh TCP connection.
-///
-/// Each call opens a new connection so that per-type error handling and
-/// record merging stay independent. The resolver module's `lookup_tcp_addr`
-/// batches A+AAAA over one connection, but the inspection path avoids that
-/// complexity because it queries 11 distinct record types concurrently.
-async fn lookup_tcp_records(
-    addr: SocketAddr,
-    host: &str,
-    query_type: QueryType,
-    timeout: TimeoutBudget,
-) -> Result<Vec<Record>, QueryError> {
-    let id = dns_query_id();
-    let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
-    let connect_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
-    let mut stream = crate::dns::transport::tcp_connection(&addr, connect_timeout)
-        .await
-        .map_err(QueryError::other)?;
-    let query_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
-    let response = tokio::time::timeout(query_timeout, async {
-        crate::dns::transport::write_framed_query(&mut stream, &raw)
-            .await
-            .map_err(QueryError::other)?;
-        crate::dns::transport::read_framed_response(&mut stream)
-            .await
-            .map_err(QueryError::other)
-    })
-    .await
-    .map_err(|_| QueryError::other("DNS lookup timed out"))??;
-    inspect_records_from_response(&response, id, host, query_type.dns_type)
+async fn lookup_tcp_all(addr: SocketAddr, host: &str, timeout: TimeoutBudget) -> Vec<QueryResult> {
+    let connect_timeout = match timeout.remaining() {
+        Ok(remaining) => udp_dns_timeout(remaining),
+        Err(err) => return failed_query_results(err),
+    };
+    let mut stream = match crate::dns::transport::tcp_connection(&addr, connect_timeout).await {
+        Ok(stream) => stream,
+        Err(err) => return failed_query_results(err),
+    };
+    lookup_stream_all(&mut stream, host, timeout).await
 }
 
-/// Query a single record type over a fresh TCP+TLS connection.
-///
-/// Each call opens a new connection so that per-type error handling and
-/// record merging stay independent. The resolver module's `lookup_tls` batches
-/// A+AAAA over one connection, but the inspection path avoids that complexity
-/// because it queries 11 distinct record types concurrently.
-async fn lookup_tls_records(
+async fn lookup_tls_all(
     server_name: &ServerName<'static>,
     addrs: &[SocketAddr],
     host: &str,
-    query_type: QueryType,
     timeout: TimeoutBudget,
-) -> Result<Vec<Record>, QueryError> {
-    let id = dns_query_id();
-    let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
-    let connect_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
+    insecure: bool,
+) -> Vec<QueryResult> {
+    let connect_timeout = match timeout.remaining() {
+        Ok(remaining) => udp_dns_timeout(remaining),
+        Err(err) => return failed_query_results(err),
+    };
     let mut stream =
-        crate::dns::transport::tls_connection(server_name, addrs, connect_timeout, false)
+        match crate::dns::transport::tls_connection(server_name, addrs, connect_timeout, insecure)
             .await
-            .map_err(QueryError::other)?;
+        {
+            Ok(stream) => stream,
+            Err(err) => return failed_query_results(err),
+        };
+    lookup_stream_all(&mut stream, host, timeout).await
+}
+
+async fn lookup_stream_all<S>(
+    stream: &mut S,
+    host: &str,
+    timeout: TimeoutBudget,
+) -> Vec<QueryResult>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut results = Vec::with_capacity(INSPECT_TYPES.len());
+    for query_type in INSPECT_TYPES.iter().copied() {
+        results.push((
+            query_type,
+            lookup_stream_record(stream, host, query_type, timeout).await,
+        ));
+    }
+    results
+}
+
+async fn lookup_stream_record<S>(
+    stream: &mut S,
+    host: &str,
+    query_type: QueryType,
+    timeout: TimeoutBudget,
+) -> Result<Vec<Record>, QueryError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let id = dns_query_id();
+    let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
     let query_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
     let response = tokio::time::timeout(query_timeout, async {
-        crate::dns::transport::write_framed_query(&mut stream, &raw)
+        crate::dns::transport::write_framed_query(stream, &raw)
             .await
             .map_err(QueryError::other)?;
-        crate::dns::transport::read_framed_response(&mut stream)
+        crate::dns::transport::read_framed_response(stream)
             .await
             .map_err(QueryError::other)
     })
@@ -590,15 +614,39 @@ async fn lookup_tls_records(
     inspect_records_from_response(&response, id, host, query_type.dns_type)
 }
 
-/// Query a single record type over a fresh QUIC connection.
-///
-/// Each call opens a new connection so that per-type error handling and
-/// record merging stay independent. The resolver module's `lookup_quic` batches
-/// A+AAAA over one connection, but the inspection path avoids that complexity
-/// because it queries 11 distinct record types concurrently.
-async fn lookup_quic_records(
+async fn lookup_quic_all(
     server_name: &ServerName<'static>,
     addrs: &[SocketAddr],
+    host: &str,
+    timeout: TimeoutBudget,
+    insecure: bool,
+) -> Vec<QueryResult> {
+    let connect_timeout = match timeout.remaining() {
+        Ok(remaining) => udp_dns_timeout(remaining),
+        Err(err) => return failed_query_results(err),
+    };
+    let connection =
+        match crate::dns::transport::quic_connection(server_name, addrs, connect_timeout, insecure)
+            .await
+        {
+            Ok(connection) => connection,
+            Err(err) => return failed_query_results(err),
+        };
+
+    join_all(INSPECT_TYPES.iter().copied().map(|query_type| {
+        let connection = connection.clone();
+        async move {
+            (
+                query_type,
+                lookup_quic_record(&connection, host, query_type, timeout).await,
+            )
+        }
+    }))
+    .await
+}
+
+async fn lookup_quic_record(
+    connection: &quinn::Connection,
     host: &str,
     query_type: QueryType,
     timeout: TimeoutBudget,
@@ -610,15 +658,10 @@ async fn lookup_quic_records(
         query_type.dns_type,
     )
     .map_err(QueryError::other)?;
-    let connect_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
-    let connection =
-        crate::dns::transport::quic_connection(server_name, addrs, connect_timeout, false)
-            .await
-            .map_err(QueryError::other)?;
     let query_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
     let response = tokio::time::timeout(
         query_timeout,
-        crate::dns::transport::quic_query(&connection, &raw),
+        crate::dns::transport::quic_query(connection, &raw),
     )
     .await
     .map_err(|_| QueryError::other("DNS lookup timed out"))?
@@ -629,6 +672,15 @@ async fn lookup_quic_records(
         host,
         query_type.dns_type,
     )
+}
+
+fn failed_query_results(error: impl ToString) -> Vec<QueryResult> {
+    let error = error.to_string();
+    INSPECT_TYPES
+        .iter()
+        .copied()
+        .map(|query_type| (query_type, Err(QueryError::other(&error))))
+        .collect()
 }
 
 fn inspect_records_from_response(
@@ -1134,11 +1186,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_lookup_stream_all_reuses_one_connection_in_query_order() {
+        let (mut client, mut server) = tokio::io::duplex(16 * 1024);
+        let server_task = tokio::spawn(async move {
+            let mut query_types = Vec::with_capacity(INSPECT_TYPES.len());
+            for _ in INSPECT_TYPES {
+                let query = crate::dns::transport::read_framed_response(&mut server)
+                    .await
+                    .unwrap();
+                query_types.push(read_question_type(&query).unwrap());
+                let response = inspect_response_header(&query, 0x8180, false);
+                crate::dns::transport::write_framed_query(&mut server, &response)
+                    .await
+                    .unwrap();
+            }
+            query_types
+        });
+
+        let results = lookup_stream_all(&mut client, "example.com", TimeoutBudget::new(None)).await;
+        let query_types = server_task.await.unwrap();
+
+        assert_eq!(results.len(), INSPECT_TYPES.len());
+        assert_eq!(
+            query_types,
+            INSPECT_TYPES
+                .iter()
+                .map(|query_type| query_type.dns_type)
+                .collect::<Vec<_>>()
+        );
+        assert!(results.iter().all(|(_, result)| result.is_ok()));
+    }
+
+    #[tokio::test]
+    async fn test_lookup_tls_all_reuses_one_handshake() {
+        let (addr, handshakes, server_task) = start_counting_tls_server().await;
+        let server_name = ServerName::IpAddress("127.0.0.1".parse::<IpAddr>().unwrap().into());
+        let results = lookup_tls_all(
+            &server_name,
+            &[addr],
+            "example.com",
+            TimeoutBudget::new(Some(Duration::from_secs(2))),
+            true,
+        )
+        .await;
+
+        assert_eq!(results.len(), INSPECT_TYPES.len());
+        assert!(results.iter().all(|(_, result)| result.is_ok()));
+        assert_eq!(handshakes.load(Ordering::SeqCst), 1);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_lookup_quic_all_reuses_one_connection() {
+        let (addr, connections, server_task) = start_counting_quic_server().await;
+        let server_name = ServerName::IpAddress("127.0.0.1".parse::<IpAddr>().unwrap().into());
+        let results = lookup_quic_all(
+            &server_name,
+            &[addr],
+            "example.com",
+            TimeoutBudget::new(Some(Duration::from_secs(2))),
+            true,
+        )
+        .await;
+
+        assert_eq!(results.len(), INSPECT_TYPES.len());
+        assert!(results.iter().all(|(_, result)| result.is_ok()));
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn test_lookup_udp_records_returns_ttl() {
         let (addr_str, stop) = start_udp_server();
         let addr: SocketAddr = addr_str.parse().unwrap();
 
-        let records = lookup_udp_records(
+        let socket = crate::dns::transport::udp_socket(addr).await.unwrap();
+        let records = lookup_udp_record(
+            &socket,
             addr,
             "example.com",
             QueryType {
@@ -1515,6 +1639,100 @@ mod tests {
             !ignored.contains(&"--dns-server"),
             "--dns-server must not be in ignored flags for --inspect-dns: {ignored:?}"
         );
+    }
+
+    async fn start_counting_tls_server()
+    -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let cert_der = cert.cert.der().clone();
+        let key_der = rustls::pki_types::PrivateKeyDer::from(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
+        );
+        let tls_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handshakes = Arc::new(AtomicUsize::new(0));
+        let seen_handshakes = handshakes.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                let seen_handshakes = seen_handshakes.clone();
+                tokio::spawn(async move {
+                    let Ok(mut stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    seen_handshakes.fetch_add(1, Ordering::SeqCst);
+                    while let Ok(query) =
+                        crate::dns::transport::read_framed_response(&mut stream).await
+                    {
+                        let response = inspect_response_header(&query, 0x8180, false);
+                        if crate::dns::transport::write_framed_query(&mut stream, &response)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, handshakes, task)
+    }
+
+    async fn start_counting_quic_server()
+    -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let cert_der = cert.cert.der().clone();
+        let key_der = rustls::pki_types::PrivateKeyDer::from(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
+        );
+        let mut tls_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+        tls_config.alpn_protocols = vec![b"doq".to_vec()];
+        let quic_config = quinn::crypto::rustls::QuicServerConfig::try_from(tls_config).unwrap();
+        let endpoint = quinn::Endpoint::server(
+            quinn::ServerConfig::with_crypto(Arc::new(quic_config)),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+        let addr = endpoint.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let seen_connections = connections.clone();
+        let task = tokio::spawn(async move {
+            while let Some(incoming) = endpoint.accept().await {
+                let seen_connections = seen_connections.clone();
+                tokio::spawn(async move {
+                    let Ok(connection) = incoming.await else {
+                        return;
+                    };
+                    seen_connections.fetch_add(1, Ordering::SeqCst);
+                    while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                        let Ok(query) =
+                            crate::dns::transport::read_framed_response(&mut recv).await
+                        else {
+                            continue;
+                        };
+                        let response = inspect_response_header(&query, 0x8180, false);
+                        if crate::dns::transport::write_framed_query(&mut send, &response)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if send.finish().is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, connections, task)
     }
 
     fn start_udp_server() -> (String, impl FnOnce()) {
