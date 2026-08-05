@@ -96,8 +96,9 @@ output identifies the resolver, the address and record counts, and the lookup
 duration.
 
 UDP inspection advertises EDNS(0). It retries a truncated UDP response with TCP.
-If the TCP retry fails, `fetch` warns that the results are incomplete and exits
-with a nonzero status.
+If the TCP retry fails, or any other record-type query fails, `fetch` preserves
+successful records, warns that the results are incomplete, and exits with a
+nonzero status.
 
 ### Configuration File
 
