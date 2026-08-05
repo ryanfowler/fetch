@@ -165,6 +165,11 @@ impl InspectionOutput {
     }
 }
 
+struct ResolverConfig {
+    label: String,
+    server: Option<crate::dns::custom::ParsedDnsServer>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ResolverTarget {
     Default {
@@ -299,18 +304,20 @@ async fn inspect_result(
         .host_str()
         .filter(|host| !host.is_empty())
         .ok_or_else(|| FetchError::Message("--inspect-dns requires a hostname".to_string()))?;
-    let target = resolver_target(dns_server).await?;
-    let start = Instant::now();
+    let resolver = resolver_config(dns_server)?;
 
     if let Ok(ip) = host.parse::<IpAddr>() {
+        let start = Instant::now();
         return Ok(InspectionOutput::IpLiteral {
             host: host.to_string(),
             ip,
-            resolver: target.label().to_string(),
+            resolver: resolver.label().to_string(),
             duration: start.elapsed(),
         });
     }
 
+    let target = resolver.resolve().await?;
+    let start = Instant::now();
     let result = lookup(host, target, start, timeout).await?;
     Ok(InspectionOutput::Lookup(result))
 }
@@ -669,54 +676,28 @@ fn records_from_wire_response(
     Ok(records)
 }
 
-async fn resolver_target(dns_server: Option<&str>) -> Result<ResolverTarget, FetchError> {
-    match dns_server {
-        None => Ok(default_resolver_target()),
-        Some(server) => match crate::dns::custom::parse_dns_server(server)? {
-            crate::dns::custom::ParsedDnsServer::Udp(addr) => Ok(ResolverTarget::Udp {
-                label: format!("udp {addr}"),
-                addr,
-            }),
-            crate::dns::custom::ParsedDnsServer::Tcp(addr) => Ok(ResolverTarget::Tcp {
-                label: format!("tcp {addr}"),
-                addr,
-            }),
-            crate::dns::custom::ParsedDnsServer::Tls {
-                server_name,
-                host,
-                port,
-            } => {
-                let addrs = crate::dns::custom::resolve_server_host(&host, port, None).await?;
-                Ok(ResolverTarget::Tls {
-                    label: format!("tls {host}:{port}"),
-                    server_name,
-                    addrs,
-                })
-            }
-            crate::dns::custom::ParsedDnsServer::Quic {
-                server_name,
-                host,
-                port,
-            } => {
-                let addrs = crate::dns::custom::resolve_server_host(&host, port, None).await?;
-                Ok(ResolverTarget::Quic {
-                    label: format!("quic {host}:{port}"),
-                    server_name,
-                    addrs,
-                })
-            }
-            crate::dns::custom::ParsedDnsServer::Doh(url) => Ok(ResolverTarget::Doh {
-                label: url.to_string(),
-                url,
-            }),
-        },
-    }
+fn resolver_config(dns_server: Option<&str>) -> Result<ResolverConfig, FetchError> {
+    let server = dns_server
+        .map(crate::dns::custom::parse_dns_server)
+        .transpose()?;
+    let label = server
+        .as_ref()
+        .map(resolver_label)
+        .unwrap_or_else(|| "platform resolver (A/AAAA only)".to_string());
+    Ok(ResolverConfig { label, server })
 }
 
-fn default_resolver_target() -> ResolverTarget {
-    ResolverTarget::Default {
-        // The platform resolver API returns addresses, not arbitrary DNS records.
-        label: "platform resolver (A/AAAA only)".to_string(),
+fn resolver_label(server: &crate::dns::custom::ParsedDnsServer) -> String {
+    match server {
+        crate::dns::custom::ParsedDnsServer::Udp(addr) => format!("udp {addr}"),
+        crate::dns::custom::ParsedDnsServer::Tcp(addr) => format!("tcp {addr}"),
+        crate::dns::custom::ParsedDnsServer::Tls { host, port, .. } => {
+            format!("tls {host}:{port}")
+        }
+        crate::dns::custom::ParsedDnsServer::Quic { host, port, .. } => {
+            format!("quic {host}:{port}")
+        }
+        crate::dns::custom::ParsedDnsServer::Doh(url) => url.to_string(),
     }
 }
 
@@ -763,6 +744,52 @@ pub(crate) fn ignored_inspection_flags(cli: &Cli) -> Vec<&'static str> {
     crate::inspection::append_shared_ignored_tls_flags(cli, &mut ignored);
     crate::inspection::append_shared_ignored_response_flags(cli, &mut ignored);
     ignored
+}
+
+impl ResolverConfig {
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    async fn resolve(self) -> Result<ResolverTarget, FetchError> {
+        let Self { label, server } = self;
+        match server {
+            None => Ok(ResolverTarget::Default { label }),
+            Some(crate::dns::custom::ParsedDnsServer::Udp(addr)) => {
+                Ok(ResolverTarget::Udp { label, addr })
+            }
+            Some(crate::dns::custom::ParsedDnsServer::Tcp(addr)) => {
+                Ok(ResolverTarget::Tcp { label, addr })
+            }
+            Some(crate::dns::custom::ParsedDnsServer::Tls {
+                server_name,
+                host,
+                port,
+            }) => {
+                let addrs = crate::dns::custom::resolve_server_host(&host, port, None).await?;
+                Ok(ResolverTarget::Tls {
+                    label,
+                    server_name,
+                    addrs,
+                })
+            }
+            Some(crate::dns::custom::ParsedDnsServer::Quic {
+                server_name,
+                host,
+                port,
+            }) => {
+                let addrs = crate::dns::custom::resolve_server_host(&host, port, None).await?;
+                Ok(ResolverTarget::Quic {
+                    label,
+                    server_name,
+                    addrs,
+                })
+            }
+            Some(crate::dns::custom::ParsedDnsServer::Doh(url)) => {
+                Ok(ResolverTarget::Doh { label, url })
+            }
+        }
+    }
 }
 
 impl ResolverTarget {
@@ -969,6 +996,57 @@ mod tests {
         assert!(out.contains("* Duration:"));
     }
 
+    #[tokio::test]
+    async fn test_resolver_config_resolves_ip_literal_encrypted_dns_endpoints() {
+        let dot = resolver_config(Some("dot://127.0.0.1:8853"))
+            .unwrap()
+            .resolve()
+            .await
+            .unwrap();
+        assert!(matches!(
+            dot,
+            ResolverTarget::Tls { addrs, .. }
+                if addrs == ["127.0.0.1:8853".parse::<SocketAddr>().unwrap()]
+        ));
+
+        let doq = resolver_config(Some("doq://127.0.0.1:8853"))
+            .unwrap()
+            .resolve()
+            .await
+            .unwrap();
+        assert!(matches!(
+            doq,
+            ResolverTarget::Quic { addrs, .. }
+                if addrs == ["127.0.0.1:8853".parse::<SocketAddr>().unwrap()]
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_inspect_ip_literal_does_not_resolve_dot_server_hostname() {
+        let out = inspect(
+            &Url::parse("http://127.0.0.1").unwrap(),
+            Some("dot://unresolvable-dot-server.invalid"),
+        )
+        .await
+        .unwrap();
+
+        assert!(out.contains("IP literal: 127.0.0.1 (no DNS query needed)"));
+        assert!(out.contains("Resolver: tls unresolvable-dot-server.invalid:853"));
+    }
+
+    #[tokio::test]
+    async fn test_inspect_ip_literal_does_not_resolve_doq_server_hostname() {
+        let out = inspect(
+            &Url::parse("http://127.0.0.1").unwrap(),
+            Some("doq://unresolvable-doq-server.invalid"),
+        )
+        .await
+        .unwrap();
+
+        assert!(out.contains("IP literal: 127.0.0.1 (no DNS query needed)"));
+        assert!(out.contains("Resolver: quic unresolvable-doq-server.invalid:853"));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_lookup_queries_record_types_concurrently() {
         let active = Arc::new(AtomicUsize::new(0));
@@ -1121,7 +1199,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_inspection_uses_platform_resolver() {
-        let target = resolver_target(None).await.unwrap();
+        let target = resolver_config(None).unwrap().resolve().await.unwrap();
 
         assert_eq!(
             target,
