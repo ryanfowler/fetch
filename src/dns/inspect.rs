@@ -391,8 +391,11 @@ async fn lookup(
                     let key = format!("{}\0{}", record.typ, record.value);
                     let records = out.records.entry(record.typ.clone()).or_default();
                     if let Some(idx) = seen.get(&key).copied() {
-                        if record.ttl < records[idx].ttl {
+                        if record.has_ttl
+                            && (!records[idx].has_ttl || record.ttl < records[idx].ttl)
+                        {
                             records[idx].ttl = record.ttl;
+                            records[idx].has_ttl = true;
                         }
                         continue;
                     }
@@ -468,7 +471,7 @@ async fn lookup_doh_records(
                 typ: typ.to_string(),
                 value: normalize_doh_value(answer.answer_type, &answer.data),
                 ttl: answer.ttl.unwrap_or_default(),
-                has_ttl: true,
+                has_ttl: answer.ttl.is_some(),
             }
         })
         .collect())
@@ -966,6 +969,44 @@ mod tests {
         for want in wants {
             assert!(out.contains(&want), "output missing {want:?}:\n{out}");
         }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_inspect_doh_preserves_missing_zero_and_nonzero_ttls() {
+        let (server_url, task) = start_test_server(|request| {
+            let query_type = request
+                .uri()
+                .query()
+                .unwrap_or_default()
+                .split('&')
+                .find_map(|part| part.strip_prefix("type="))
+                .unwrap_or_default();
+            if query_type == "A" {
+                return http::Response::new(
+                    r#"{"Status":0,"Answer":[
+                        {"type":1,"data":"192.0.2.1"},
+                        {"type":1,"data":"192.0.2.2","TTL":0},
+                        {"type":1,"data":"192.0.2.3","TTL":60}
+                    ]}"#
+                    .to_string(),
+                );
+            }
+            http::Response::new(r#"{"Status":0}"#.to_string())
+        })
+        .await;
+
+        let out = inspect(
+            &Url::parse("https://example.com").unwrap(),
+            Some(server_url.as_str()),
+        )
+        .await
+        .unwrap();
+
+        assert!(out.contains("192.0.2.1\n"), "output: {out}");
+        assert!(!out.contains("192.0.2.1 (TTL"), "output: {out}");
+        assert!(out.contains("192.0.2.2 (TTL 0s)"), "output: {out}");
+        assert!(out.contains("192.0.2.3 (TTL 1m)"), "output: {out}");
         task.abort();
     }
 
