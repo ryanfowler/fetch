@@ -86,11 +86,13 @@ fn write_dns_title(out: &mut Printer, host: &str, resolver: &str) {
     out.write_info_prefix();
     out.write_styled("DNS lookup", &[Sequence::Bold, Sequence::Cyan]);
     out.push_str(": ");
-    out.write_styled(host, &[Sequence::Bold]);
+    let host = core::escape_terminal_text(host);
+    out.write_styled(&host, &[Sequence::Bold]);
     out.push_str("\n");
     out.write_info_prefix();
     out.push_str("Resolver: ");
-    out.write_styled(resolver, &[Sequence::Italic]);
+    let resolver = core::escape_terminal_text(resolver);
+    out.write_styled(&resolver, &[Sequence::Italic]);
     out.push_str("\n");
     out.write_info_prefix();
     out.push_str("\n");
@@ -133,7 +135,8 @@ fn render_section(out: &mut Printer, name: &str, records: Option<&Vec<Record>>) 
         };
         out.write_info_prefix();
         out.push_str(&format!("{marker} "));
-        out.write_styled(&record.value, &[Sequence::Green]);
+        let value = core::escape_terminal_text(&record.value);
+        out.write_styled(&value, &[Sequence::Green]);
         if record.has_ttl {
             out.push_str(" ");
             out.write_styled(

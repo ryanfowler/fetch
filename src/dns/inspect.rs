@@ -433,8 +433,13 @@ async fn lookup(
     if record_count(&out) > 0 {
         return Ok(out);
     }
+    let host = core::escape_terminal_text(host);
     if let Some(err) = first_err {
-        return Err(format!("lookup {host}: {}", err.message).into());
+        return Err(format!(
+            "lookup {host}: {}",
+            core::escape_terminal_text(&err.message)
+        )
+        .into());
     }
     Err(format!("lookup {host}: no DNS records found").into())
 }
@@ -892,6 +897,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_inspect_doh_escapes_txt_control_sequences() {
+        let (server_url, task) = start_test_server(|request| {
+            if request
+                .uri()
+                .query()
+                .unwrap_or_default()
+                .contains("type=TXT")
+            {
+                return http::Response::new(
+                    r#"{"Status":0,"Answer":[{"type":16,"data":"txt \u001b[2J\r\nforged","TTL":60}]}"#
+                        .to_string(),
+                );
+            }
+            http::Response::new(r#"{"Status":0}"#.to_string())
+        })
+        .await;
+
+        let out = inspect(
+            &Url::parse("https://example.com").unwrap(),
+            Some(server_url.as_str()),
+        )
+        .await
+        .unwrap();
+
+        assert!(out.contains(r"txt \u001b[2J\r\nforged (TTL 1m)"));
+        assert!(!out.contains("txt \x1b[2J"));
+        assert!(!out.contains("forged\r\n"));
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn test_inspect_ip_literal_skips_lookup() {
         let out = inspect(&Url::parse("http://127.0.0.1").unwrap(), None)
             .await
@@ -1103,6 +1139,33 @@ mod tests {
     }
 
     #[test]
+    fn test_render_escapes_untrusted_dns_text() {
+        let out = render(&Inspection {
+            host: "example.com\r\nforged\x1b[2J".to_string(),
+            resolver: "system\r\nforged\x1b]52;c;clipboard\x07".to_string(),
+            records: HashMap::from([(
+                "TXT".to_string(),
+                vec![Record {
+                    typ: "TXT".to_string(),
+                    value: "txt\x1b[2J\r\nforged".to_string(),
+                    ttl: 60,
+                    has_ttl: true,
+                }],
+            )]),
+            warnings: Vec::new(),
+            duration: Duration::ZERO,
+            exit_code: 0,
+        });
+
+        assert!(out.contains(r"example.com\r\nforged\u001b[2J"));
+        assert!(out.contains(r"system\r\nforged\u001b]52;c;clipboard\u0007"));
+        assert!(out.contains(r"txt\u001b[2J\r\nforged (TTL 1m)"));
+        assert!(!out.contains("\x1b[2J"));
+        assert!(!out.contains("\x1b]52;c;clipboard"));
+        assert!(!out.contains("txt\x1b"));
+    }
+
+    #[test]
     fn test_render_colors_dns_output_like_go() {
         let out = render_with_color(
             &Inspection {
@@ -1211,6 +1274,29 @@ mod tests {
         );
 
         assert_eq!(got, r#"0 issue "letsencrypt.org""#);
+    }
+
+    #[tokio::test]
+    async fn test_inspect_doh_error_escapes_response_excerpt() {
+        let (server_url, task) = start_test_server(|_| {
+            http::Response::builder()
+                .status(400)
+                .body(r#"{"error":"bad \u001b[2J\r\nforged"}"#.to_string())
+                .unwrap()
+        })
+        .await;
+
+        let err = inspect(
+            &Url::parse("https://missing.example").unwrap(),
+            Some(server_url.as_str()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains(r"400: bad \u001b[2J\r\nforged"));
+        assert!(!err.to_string().contains("\x1b[2J"));
+        assert!(!err.to_string().contains("bad \r\nforged"));
+        task.abort();
     }
 
     #[tokio::test]
