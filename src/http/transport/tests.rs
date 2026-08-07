@@ -1,5 +1,5 @@
 use super::body::H3UploadTask;
-use super::client::replace_headers;
+use super::client::{replace_headers, should_send_auto_http3};
 use super::h3::{
     auto_http3_hint_addrs, http3_endpoint_local_addr, race_primary_fallback,
     spawn_auto_http3_origin_addrs, take_finished_auto_http3_origin_addrs,
@@ -74,6 +74,16 @@ fn http3_client_endpoint_defaults_to_dual_stack_bind() {
 
     let explicit = http3_endpoint_local_addr(Some(IpAddr::V4(Ipv4Addr::LOCALHOST)));
     assert_eq!(explicit.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+}
+
+#[test]
+fn ech_hard_fail_forces_tcp_despite_auto_http3_discovery() {
+    let url = Url::parse("https://example.com/").unwrap();
+    let mut builder = Client::builder().auto_http3_discovery();
+    assert!(should_send_auto_http3(&builder.config, &url));
+
+    builder = builder.ech_hard_fail(true);
+    assert!(!should_send_auto_http3(&builder.config, &url));
 }
 
 fn https_record(priority: u16, target: &str, alpn: &[&str], port: Option<u16>) -> SvcbRecord {

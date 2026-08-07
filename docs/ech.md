@@ -25,7 +25,9 @@ fetch --ech off https://example.com
   recommended mode for general use.
 
 - **`on`** — Require ECH. Errors if the server does not advertise ECH in DNS,
-  and fails if the server rejects the offer.
+  and fails if the server rejects the offer. This mode cannot be used with
+  explicit HTTP/3 because fetch cannot verify ECH acceptance on QUIC
+  connections. Automatic protocol selection uses TCP when this mode is active.
 
 - **`off`** — Never use ECH (the default).
 

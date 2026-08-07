@@ -2258,6 +2258,26 @@ fn ech_rejected_for_plain_http() {
 }
 
 #[test]
+fn ech_on_rejects_explicit_http3() {
+    let res = run_fetch(&[
+        "--ech",
+        "on",
+        "--http",
+        "3",
+        "https://ech-http3-reject.invalid",
+    ]);
+
+    assert_exit(&res, 1);
+    assert!(
+        res.stderr.contains(
+            "--ech on cannot be used with HTTP/3 because ECH acceptance cannot be verified"
+        ),
+        "expected ECH HTTP/3 error, got:\n{}",
+        res.stderr
+    );
+}
+
+#[test]
 fn ech_allowed_for_https() {
     // --ech auto on https:// with a self-signed server should proceed past
     // scheme validation (the actual error should be about the certificate,

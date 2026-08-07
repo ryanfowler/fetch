@@ -106,7 +106,7 @@ async fn execute_inner(cli: &Cli) -> Result<i32, FetchError> {
     apply_query(&mut url, &cli.query);
     client::validate_proxy_for_http_version(cli.proxy.as_deref(), http_version)?;
     validate_http_version_options(http_version, &url, cli.grpc, cli.unix.as_deref())?;
-    validate_ech_for_url(cli, &url)?;
+    validate_ech_for_url(cli, &url, http_version)?;
     let grpc_schema = if cli.grpc {
         proto::load_local_schema(cli)?
     } else {

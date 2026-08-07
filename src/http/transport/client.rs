@@ -193,11 +193,7 @@ impl Client {
         // one on the heap so nested clients such as DoH do not exhaust Windows'
         // default thread stack while polling a request.
         let response = match version {
-            None if (self.config.auto_http3.is_some()
-                || self.config.auto_http3_discovery
-                || self.config.http3_cache.is_some())
-                && url.scheme() == "https" =>
-            {
+            None if should_send_auto_http3(&self.config, &url) => {
                 Box::pin(self.send_auto_http3(method, url.clone(), headers, body, body_deadline))
                     .await
             }
@@ -405,6 +401,14 @@ impl Client {
             },
         })
     }
+}
+
+pub(super) fn should_send_auto_http3(config: &ClientConfig, url: &Url) -> bool {
+    !config.ech_hard_fail
+        && (config.auto_http3.is_some()
+            || config.auto_http3_discovery
+            || config.http3_cache.is_some())
+        && url.scheme() == "https"
 }
 
 impl ClientBuilder {
