@@ -54,6 +54,10 @@ pub(super) fn render_to(inspection: &Inspection, out: &mut Printer) {
         render_cert_chain(out, &inspection.chain);
         render_sans(out, &inspection.chain[0]);
     }
+    if inspection.trust_anchor_details_unavailable {
+        out.write_info_prefix();
+        out.push_str("Trust anchor: platform-selected, details unavailable\n");
+    }
     render_ocsp_status(
         out,
         &inspection.ocsp_response,
@@ -77,7 +81,7 @@ fn render_ech_status(out: &mut Printer, status: rustls::client::EchStatus) {
 
 fn render_cert_chain(out: &mut Printer, chain: &[ParsedCert]) {
     out.write_info_prefix();
-    out.write_styled("Certificate chain", &[Sequence::Bold]);
+    out.write_styled("Peer certificate chain", &[Sequence::Bold]);
     out.push_str(":\n");
     for (index, cert) in chain.iter().enumerate() {
         out.write_info_prefix();

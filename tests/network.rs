@@ -1939,13 +1939,18 @@ fn tls_certificate_validation_inspection_and_bounds_cases() {
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
     assert!(res.stderr.contains("TLS"));
-    assert!(res.stderr.contains("Certificate") || res.stderr.contains("certificate"));
+    assert!(res.stderr.contains("Peer certificate chain"));
+    assert!(
+        res.stderr
+            .contains("Trust anchor: platform-selected, details unavailable")
+    );
 
     let res = run_fetch(&["--inspect-tls", "--insecure", &tls.url]);
     assert_exit(&res, 0);
     assert!(res.stdout.is_empty());
     assert!(res.stderr.contains("TLS"));
-    assert!(res.stderr.contains("Certificate") || res.stderr.contains("certificate"));
+    assert!(res.stderr.contains("Peer certificate chain"));
+    assert!(!res.stderr.contains("Trust anchor:"));
 
     let res = run_fetch(&[
         "--inspect-tls",

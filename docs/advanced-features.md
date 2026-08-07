@@ -333,7 +333,7 @@ Use cases:
 
 ### TLS Certificate Inspection
 
-`--inspect-tls` performs a TLS handshake only (no HTTP request is made) and provides a focused view of the TLS certificate chain, useful as a standalone diagnostic tool:
+`--inspect-tls` performs a TLS handshake only (no HTTP request is made) and provides a focused view of the peer-provided TLS certificates, useful as a standalone diagnostic tool:
 
 ```sh
 fetch --inspect-tls example.com
@@ -345,7 +345,10 @@ Output includes:
 TLS13_AES_256_GCM_SHA384`). HTTP/3 reports the cipher suite as unavailable
   because the current QUIC integration does not expose it.
 - **ALPN negotiated protocol** (e.g., h2)
-- **Certificate chain** with tree visualization and expiry status
+- **Peer certificate chain** with tree visualization and expiry status
+- **Trust anchor status**. For verified connections, the platform verifier does
+  not expose the selected anchor. The output reports that its details are
+  unavailable instead of inferring a root from certificate metadata.
 - **Subject Alternative Names** (DNS names and IP addresses)
 - **OCSP staple status** (good, revoked, or unknown). The embedded status is
   labeled unverified; TLS inspection does not validate its signature or

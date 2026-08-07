@@ -24,10 +24,7 @@ mod cert;
 mod der;
 mod render;
 
-use cert::{
-    OcspCapture, ParsedCert, certificate_chain_for_display, load_ca_certs, load_native_root_certs,
-    trusted_root_certs,
-};
+use cert::{OcspCapture, ParsedCert};
 use render::render_to;
 
 #[cfg(test)]
@@ -130,9 +127,6 @@ async fn inspect_tcp(
     // Resolve ECH configuration from DNS.
     let ech_mode = resolve_inspect_ech_mode(cli, &host, timeout).await?;
 
-    let ca_certs = load_ca_certs(&cli.ca_cert)?;
-    let native_roots = load_native_root_certs();
-    let trusted_roots = trusted_root_certs(&ca_certs, &native_roots);
     let ocsp_capture = OcspCapture::default();
     let mut config = build_client_config(cli, ocsp_capture.clone(), ech_mode)?;
     config.alpn_protocols = alpn_protocols(http_version)
@@ -176,8 +170,6 @@ async fn inspect_tcp(
                 .filter_map(|cert| ParsedCert::parse(cert.as_ref())),
         );
     }
-    let chain = certificate_chain_for_display(peer_chain, &trusted_roots, !cli.insecure);
-
     Ok(Inspection {
         version: conn.protocol_version(),
         cipher_suite: conn
@@ -188,7 +180,8 @@ async fn inspect_tcp(
             .alpn_protocol()
             .map(|protocol| String::from_utf8_lossy(protocol).into_owned()),
         ech_status,
-        chain,
+        chain: peer_chain,
+        trust_anchor_details_unavailable: !cli.insecure,
         ocsp_response: ocsp_capture.get(),
     })
 }
@@ -285,9 +278,6 @@ async fn inspect_quic(
     .collect();
     let addrs = crate::net::interleave_socket_addrs(addrs)?;
 
-    let ca_certs = load_ca_certs(&cli.ca_cert)?;
-    let native_roots = load_native_root_certs();
-    let trusted_roots = trusted_root_certs(&ca_certs, &native_roots);
     // Each raced connection needs its own capture: a handshake completing after
     // the winner must not overwrite the winner's stapled OCSP response.
     let connections = addrs
@@ -303,7 +293,7 @@ async fn inspect_quic(
         })
         .collect::<Result<Vec<_>, FetchError>>()?;
 
-    race_quic_inspections(connections, host, trusted_roots, !cli.insecure, timeout).await
+    race_quic_inspections(connections, host, !cli.insecure, timeout).await
 }
 
 type QuicInspectionConnection = (SocketAddr, quinn::ClientConfig, OcspCapture);
@@ -311,7 +301,6 @@ type QuicInspectionConnection = (SocketAddr, quinn::ClientConfig, OcspCapture);
 async fn race_quic_inspections(
     connections: Vec<QuicInspectionConnection>,
     host: String,
-    trusted_roots: Vec<ParsedCert>,
     verified: bool,
     timeout: TimeoutBudget,
 ) -> Result<Inspection, FetchError> {
@@ -325,7 +314,6 @@ async fn race_quic_inspections(
                 addr,
                 host.clone(),
                 quic_config,
-                trusted_roots.clone(),
                 verified,
                 ocsp_capture,
                 timeout,
@@ -350,7 +338,6 @@ async fn inspect_quic_addr(
     addr: SocketAddr,
     host: String,
     quic_config: quinn::ClientConfig,
-    trusted_roots: Vec<ParsedCert>,
     verified: bool,
     ocsp_capture: OcspCapture,
     timeout: TimeoutBudget,
@@ -377,11 +364,7 @@ async fn inspect_quic_addr(
         })
         .await?;
     let alpn = quic_alpn(&connection);
-    let chain = certificate_chain_for_display(
-        quic_peer_certificates(&connection),
-        &trusted_roots,
-        verified,
-    );
+    let chain = quic_peer_certificates(&connection);
 
     // Do not wait for the peer to acknowledge the close. A diagnostic command
     // must return a successful inspection within its connection timeout.
@@ -396,6 +379,7 @@ async fn inspect_quic_addr(
         alpn,
         ech_status: EchStatus::NotOffered,
         chain,
+        trust_anchor_details_unavailable: verified,
         ocsp_response: ocsp_capture.get(),
     })
 }
@@ -560,6 +544,7 @@ struct Inspection {
     alpn: Option<String>,
     ech_status: EchStatus,
     chain: Vec<ParsedCert>,
+    trust_anchor_details_unavailable: bool,
     ocsp_response: Vec<u8>,
 }
 
@@ -612,6 +597,10 @@ impl fmt::Debug for Inspection {
             .field("version", &self.version)
             .field("alpn", &self.alpn)
             .field("chain_len", &self.chain.len())
+            .field(
+                "trust_anchor_details_unavailable",
+                &self.trust_anchor_details_unavailable,
+            )
             .finish()
     }
 }
@@ -933,211 +922,57 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     }
 
     #[test]
-    fn verified_display_chain_replaces_cross_signed_peer_root() {
-        let root_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(24_000);
-        let peer_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(21_000);
-        let mut root = chain_test_cert(
-            9,
-            "GTS Root R4",
-            b"root-subject",
-            b"root-subject",
-            b"root-spki",
-            root_not_after,
-        );
-        root.subject_key_id = Some(b"root-key".to_vec());
-        let mut peer_cross_signed_root = chain_test_cert(
-            3,
-            "GTS Root R4",
-            b"root-subject",
-            b"legacy-root-subject",
-            b"root-spki",
-            peer_not_after,
-        );
-        peer_cross_signed_root.subject_key_id = Some(b"root-key".to_vec());
-        peer_cross_signed_root.authority_key_id = Some(b"legacy-key".to_vec());
-
-        let chain = certificate_chain_for_display(
-            vec![
-                {
-                    let mut cert = chain_test_cert(
-                        1,
-                        "example.com",
-                        b"leaf-subject",
-                        b"intermediate-subject",
-                        b"leaf-spki",
-                        peer_not_after,
-                    );
-                    cert.authority_key_id = Some(b"intermediate-key".to_vec());
-                    cert
-                },
-                {
-                    let mut cert = chain_test_cert(
-                        2,
-                        "WE1",
-                        b"intermediate-subject",
-                        b"root-subject",
-                        b"intermediate-spki",
-                        peer_not_after,
-                    );
-                    cert.subject_key_id = Some(b"intermediate-key".to_vec());
-                    cert.authority_key_id = Some(b"root-key".to_vec());
-                    cert
-                },
-                peer_cross_signed_root,
-            ],
-            &[root],
-            true,
-        );
-
-        assert_eq!(chain.len(), 3);
-        assert_eq!(chain[2].raw, vec![9]);
-        assert_eq!(chain[2].not_after, Some(root_not_after));
-    }
-
-    #[test]
-    fn verified_display_chain_appends_omitted_trusted_root() {
-        let root_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(24_000);
-        let peer_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(21_000);
-        let mut root = chain_test_cert(
-            9,
-            "Test CA",
-            b"root-subject",
-            b"root-subject",
-            b"root-spki",
-            root_not_after,
-        );
-        root.subject_key_id = Some(b"root-key".to_vec());
-
-        let chain = certificate_chain_for_display(
-            vec![{
-                let mut cert = chain_test_cert(
-                    1,
-                    "test-server",
-                    b"leaf-subject",
-                    b"root-subject",
-                    b"leaf-spki",
-                    peer_not_after,
-                );
-                cert.authority_key_id = Some(b"root-key".to_vec());
-                cert
-            }],
-            &[root],
-            true,
-        );
-
-        assert_eq!(chain.len(), 2);
-        assert_eq!(chain[1].display_name(), "Test CA");
-        assert_eq!(chain[1].not_after, Some(root_not_after));
-    }
-
-    #[test]
-    fn verified_display_chain_does_not_guess_between_same_subject_roots() {
+    fn verified_display_does_not_infer_a_root_from_colliding_metadata() {
         let not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(24_000);
-        let peer_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(21_000);
-        let first_root = chain_test_cert(
-            9,
-            "First CA",
-            b"root-subject",
-            b"root-subject",
-            b"first-root-spki",
-            not_after,
-        );
-        let second_root = chain_test_cert(
-            10,
-            "Second CA",
-            b"root-subject",
-            b"root-subject",
-            b"second-root-spki",
-            not_after,
-        );
-        let peer = chain_test_cert(
-            1,
-            "test-server",
-            b"leaf-subject",
-            b"root-subject",
-            b"leaf-spki",
-            peer_not_after,
-        );
-
-        let chain = certificate_chain_for_display(vec![peer], &[first_root, second_root], true);
-
-        assert_eq!(chain.len(), 1);
-        assert_eq!(chain[0].display_name(), "test-server");
-    }
-
-    #[test]
-    fn verified_display_chain_appends_matching_root_when_identity_is_unambiguous() {
-        let not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(24_000);
-        let peer_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(21_000);
-        let mut other_root = chain_test_cert(
-            9,
-            "Other CA",
-            b"root-subject",
-            b"root-subject",
-            b"other-root-spki",
-            not_after,
-        );
-        other_root.subject_key_id = Some(b"other-key".to_vec());
-        let mut selected_root = chain_test_cert(
-            10,
-            "Selected CA",
-            b"root-subject",
-            b"root-subject",
-            b"selected-root-spki",
-            not_after,
-        );
-        selected_root.subject_key_id = Some(b"selected-key".to_vec());
         let mut peer = chain_test_cert(
             1,
             "test-server",
             b"leaf-subject",
-            b"root-subject",
+            b"colliding-root-subject",
             b"leaf-spki",
-            peer_not_after,
+            not_after,
         );
-        peer.authority_key_id = Some(b"selected-key".to_vec());
-
-        let chain =
-            certificate_chain_for_display(vec![peer], &[other_root, selected_root.clone()], true);
-
-        assert_eq!(chain.len(), 2);
-        assert_eq!(chain[1].raw, selected_root.raw);
-        assert_eq!(chain[1].display_name(), "Selected CA");
-    }
-
-    #[test]
-    fn insecure_display_chain_keeps_peer_chain_without_trusted_root() {
-        let root_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(24_000);
-        let peer_not_after = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(21_000);
-        let mut root = chain_test_cert(
-            9,
-            "Test CA",
-            b"root-subject",
-            b"root-subject",
-            b"root-spki",
-            root_not_after,
+        peer.authority_key_id = Some(b"colliding-key-id".to_vec());
+        let mut first_candidate = chain_test_cert(
+            2,
+            "First CA",
+            b"colliding-root-subject",
+            b"colliding-root-subject",
+            b"first-root-spki",
+            not_after,
         );
-        root.subject_key_id = Some(b"root-key".to_vec());
-
-        let chain = certificate_chain_for_display(
-            vec![{
-                let mut cert = chain_test_cert(
-                    1,
-                    "test-server",
-                    b"leaf-subject",
-                    b"root-subject",
-                    b"leaf-spki",
-                    peer_not_after,
-                );
-                cert.authority_key_id = Some(b"root-key".to_vec());
-                cert
-            }],
-            &[root],
-            false,
+        first_candidate.subject_key_id = Some(b"colliding-key-id".to_vec());
+        let mut second_candidate = chain_test_cert(
+            3,
+            "Second CA",
+            b"colliding-root-subject",
+            b"colliding-root-subject",
+            b"second-root-spki",
+            not_after,
         );
+        second_candidate.subject_key_id = Some(b"colliding-key-id".to_vec());
+        assert_eq!(peer.issuer_der, first_candidate.subject_der);
+        assert_eq!(peer.issuer_der, second_candidate.subject_der);
+        assert_eq!(peer.authority_key_id, first_candidate.subject_key_id);
+        assert_eq!(peer.authority_key_id, second_candidate.subject_key_id);
 
-        assert_eq!(chain.len(), 1);
-        assert_eq!(chain[0].display_name(), "test-server");
+        let inspection = Inspection {
+            version: Some(ProtocolVersion::TLSv1_3),
+            cipher_suite: CipherSuiteStatus::Unavailable,
+            alpn: None,
+            ech_status: EchStatus::NotOffered,
+            chain: vec![peer],
+            trust_anchor_details_unavailable: true,
+            ocsp_response: Vec::new(),
+        };
+
+        let out = render(&inspection);
+
+        assert!(out.contains("Peer certificate chain"));
+        assert_eq!(out.matches("└─").count(), 1);
+        assert!(!out.contains("First CA"));
+        assert!(!out.contains("Second CA"));
+        assert!(out.contains("Trust anchor: platform-selected, details unavailable"));
     }
 
     #[test]
@@ -1173,6 +1008,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
                 authority_key_id: None,
                 subject: "CN=example.com".to_string(),
             }],
+            trust_anchor_details_unavailable: false,
             ocsp_response: Vec::new(),
         };
 
@@ -1180,7 +1016,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
 
         assert!(out.contains("TLS 1.3: TLS13_AES_256_GCM_SHA384"));
         assert!(out.contains("ALPN: h2"));
-        assert!(out.contains("Certificate chain"));
+        assert!(out.contains("Peer certificate chain"));
         assert!(out.contains("SANs: example.com, 127.0.0.1"));
     }
 
@@ -1208,6 +1044,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
                 authority_key_id: None,
                 subject: String::new(),
             }],
+            trust_anchor_details_unavailable: false,
             ocsp_response: Vec::new(),
         };
 
@@ -1230,6 +1067,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             alpn: Some("h3".to_string()),
             ech_status: EchStatus::NotOffered,
             chain: Vec::new(),
+            trust_anchor_details_unavailable: false,
             ocsp_response: Vec::new(),
         };
 
@@ -1265,6 +1103,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
                 authority_key_id: None,
                 subject: "CN=example.com".to_string(),
             }],
+            trust_anchor_details_unavailable: false,
             ocsp_response: Vec::new(),
         };
 
@@ -1272,7 +1111,7 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
 
         assert!(out.contains("\x1b[1m\x1b[33mTLS 1.3\x1b[0m"));
         assert!(out.contains("ALPN: \x1b[3mh2\x1b[0m"));
-        assert!(out.contains("\x1b[1mCertificate chain\x1b[0m"));
+        assert!(out.contains("\x1b[1mPeer certificate chain\x1b[0m"));
         assert!(out.contains("\x1b[2m└─ \x1b[0m"));
         assert!(out.contains("\x1b[1mexample.com\x1b[0m"));
         assert!(out.contains("\x1b[31mexpires in <1 day\x1b[0m"));
@@ -1466,7 +1305,6 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
             race_quic_inspections(
                 connections,
                 "localhost".to_string(),
-                Vec::new(),
                 false,
                 TimeoutBudget::new(None),
             ),
