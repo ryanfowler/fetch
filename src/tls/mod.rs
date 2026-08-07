@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use rustls::client::EchMode;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::WebPkiSupportedAlgorithms;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme, SupportedProtocolVersion};
 
@@ -165,11 +166,9 @@ pub fn rustls_platform_client_config_with_options(
     let builder = if insecure {
         builder
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {
-                supported_schemes: provider
-                    .signature_verification_algorithms
-                    .supported_schemes(),
-            }))
+            .with_custom_certificate_verifier(Arc::new(InsecureServerVerifier::new(
+                provider.signature_verification_algorithms,
+            )))
     } else {
         let verifier = rustls_platform_verifier(ca_cert_paths, provider)?;
         builder
@@ -424,12 +423,21 @@ fn first_private_key(data: &[u8]) -> Result<Option<PrivateKeyDer<'static>>, Fetc
     Ok(None)
 }
 
+/// Accepts any server certificate chain while preserving TLS handshake integrity.
 #[derive(Debug)]
-struct NoCertificateVerification {
-    supported_schemes: Vec<SignatureScheme>,
+pub(crate) struct InsecureServerVerifier {
+    supported_algorithms: WebPkiSupportedAlgorithms,
 }
 
-impl ServerCertVerifier for NoCertificateVerification {
+impl InsecureServerVerifier {
+    pub(crate) fn new(supported_algorithms: WebPkiSupportedAlgorithms) -> Self {
+        Self {
+            supported_algorithms,
+        }
+    }
+}
+
+impl ServerCertVerifier for InsecureServerVerifier {
     fn verify_server_cert(
         &self,
         _end_entity: &CertificateDer<'_>,
@@ -443,24 +451,24 @@ impl ServerCertVerifier for NoCertificateVerification {
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.supported_algorithms)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.supported_algorithms)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.supported_schemes.clone()
+        self.supported_algorithms.supported_schemes()
     }
 }
 
@@ -538,9 +546,7 @@ mod tests {
         let supported_schemes = provider
             .signature_verification_algorithms
             .supported_schemes();
-        let verifier = NoCertificateVerification {
-            supported_schemes: supported_schemes.clone(),
-        };
+        let verifier = InsecureServerVerifier::new(provider.signature_verification_algorithms);
 
         assert!(supported_schemes.contains(&SignatureScheme::ECDSA_NISTP521_SHA512));
         assert_eq!(verifier.supported_verify_schemes(), supported_schemes);

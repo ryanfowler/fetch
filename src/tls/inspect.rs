@@ -478,24 +478,19 @@ fn build_client_config(
             .with_protocol_versions(&versions)
             .map_err(|_| FetchError::Message("invalid TLS versions".to_string()))?
     };
-    let builder = if cli.insecure {
-        builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification {
-                ocsp_capture,
-                supported_schemes: provider
-                    .signature_verification_algorithms
-                    .supported_schemes(),
-            }))
+    let verifier: Arc<dyn ServerCertVerifier> = if cli.insecure {
+        Arc::new(super::InsecureServerVerifier::new(
+            provider.signature_verification_algorithms,
+        ))
     } else {
-        let verifier = super::rustls_platform_verifier(&cli.ca_cert, provider)?;
-        builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(CapturingServerVerifier {
-                inner: Arc::new(verifier),
-                ocsp_capture,
-            }))
+        Arc::new(super::rustls_platform_verifier(&cli.ca_cert, provider)?)
     };
+    let builder = builder
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(CapturingServerVerifier {
+            inner: verifier,
+            ocsp_capture,
+        }));
 
     if let Some((certs, key)) = super::rustls_client_auth(cli.cert.as_deref(), cli.key.as_deref())?
     {
@@ -608,48 +603,6 @@ impl ServerCertVerifier for CapturingServerVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         self.inner.supported_verify_schemes()
-    }
-}
-
-#[derive(Debug)]
-struct NoCertificateVerification {
-    ocsp_capture: OcspCapture,
-    supported_schemes: Vec<SignatureScheme>,
-}
-
-impl ServerCertVerifier for NoCertificateVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<ServerCertVerified, rustls::Error> {
-        self.ocsp_capture.set(ocsp_response);
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.supported_schemes.clone()
     }
 }
 
