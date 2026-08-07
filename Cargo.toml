@@ -18,7 +18,7 @@ strip = true
 [dependencies]
 anyhow = "=1.0.104"
 async-compression = { version = "=0.4.43", features = ["brotli", "gzip", "tokio", "zstd"] }
-base64 = "=0.23.0"
+base64 = "=0.23.1"
 brotli = "=8.0.4"
 bytes = "=1.12.1"
 clap = { version = "=4.6.5", features = ["derive"] }
