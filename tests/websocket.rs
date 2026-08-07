@@ -13,7 +13,10 @@ use support::common::{
     FetchOpts, FetchOutput, assert_exit, fetch_bin, run_fetch, run_fetch_once, run_fetch_opts,
     start_read_capture, url_host_port, wait_child,
 };
-use support::dns::{start_udp_dns_server, start_unresponsive_udp_dns_server};
+use support::dns::{
+    start_udp_dns_server, start_udp_dns_server_with_failing_https,
+    start_unresponsive_udp_dns_server,
+};
 use support::http::{TestResponse, TestServer, read_request, write_response};
 use support::proxy::{
     assert_proxy_seen, assert_socks_seen, start_authenticated_http_connect_proxy,
@@ -1280,6 +1283,54 @@ fn ech_rejected_for_plain_ws() {
         "expected WS ECH conflict error, got:\n{}",
         res.stderr
     );
+}
+
+#[test]
+fn websocket_ech_discovery_uses_http_error_policy() {
+    let (wss, _seen) = start_wss_echo_server(|_| Ok(()));
+    let host = "fetch-websocket-ech-failure.test.";
+    let dns_addr = start_udp_dns_server_with_failing_https(host, Ipv4Addr::new(127, 0, 0, 1));
+    let url = wss
+        .url
+        .replace("localhost", "fetch-websocket-ech-failure.test");
+
+    let required = run_fetch(&[
+        &url,
+        "--insecure",
+        "--dns-server",
+        &dns_addr,
+        "--ech",
+        "on",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&required, 1);
+    assert!(
+        required.stderr.contains("mismatched DNS response ID"),
+        "{}",
+        required.stderr
+    );
+    assert!(!required.stderr.contains("does not advertise ECH"));
+
+    let automatic = run_fetch(&[
+        &url,
+        "--insecure",
+        "--dns-server",
+        &dns_addr,
+        "--ech",
+        "auto",
+        "-vvv",
+        "-d",
+        "ech fallback",
+        "--format",
+        "off",
+        "--ws-interactive",
+        "off",
+    ]);
+    assert_exit(&automatic, 0);
+    assert!(automatic.stdout.contains("echo: ech fallback"));
+    assert!(automatic.stderr.contains("ECH discovery failed"));
+    assert!(automatic.stderr.contains("falling back to GREASE"));
 }
 
 #[test]
