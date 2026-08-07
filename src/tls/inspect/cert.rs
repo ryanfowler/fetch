@@ -4,8 +4,6 @@ use std::sync::{Arc, Mutex};
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256};
 
-use crate::error::FetchError;
-
 use super::der::DerReader;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -239,129 +237,6 @@ impl ParsedCert {
             _ => self.subject.clone(),
         }
     }
-}
-
-pub(super) fn load_native_root_certs() -> Vec<ParsedCert> {
-    // Native roots give us the full certificate metadata that rustls' webpki
-    // trust anchors intentionally omit, including NotAfter for display.
-    rustls_native_certs::load_native_certs()
-        .certs
-        .into_iter()
-        .filter_map(|cert| ParsedCert::parse(cert.as_ref()))
-        .collect()
-}
-
-pub(super) fn trusted_root_certs(
-    ca_certs: &[ParsedCert],
-    native_roots: &[ParsedCert],
-) -> Vec<ParsedCert> {
-    let mut roots = Vec::new();
-    for cert in ca_certs.iter().chain(native_roots) {
-        if !roots.iter().any(|existing: &ParsedCert| {
-            (!existing.raw.is_empty() && existing.raw == cert.raw)
-                || (!existing.subject_der.is_empty()
-                    && existing.subject_der == cert.subject_der
-                    && !existing.spki_der.is_empty()
-                    && existing.spki_der == cert.spki_der)
-        }) {
-            roots.push(cert.clone());
-        }
-    }
-    roots
-}
-
-pub(super) fn certificate_chain_for_display(
-    mut peer_chain: Vec<ParsedCert>,
-    trusted_roots: &[ParsedCert],
-    verified: bool,
-) -> Vec<ParsedCert> {
-    if !verified || peer_chain.is_empty() {
-        return peer_chain;
-    }
-
-    let Some(last) = peer_chain.last().cloned() else {
-        return peer_chain;
-    };
-
-    if let Some(root) = trusted_roots
-        .iter()
-        .find(|root| same_trust_anchor_identity(&last, root))
-    {
-        if last.raw != root.raw
-            && let Some(last) = peer_chain.last_mut()
-        {
-            *last = root.clone();
-        }
-        return peer_chain;
-    }
-
-    // The platform verifier reports whether validation succeeded, but does not
-    // expose the trust anchor that it selected. Do not guess when the local
-    // root metadata leaves more than one possible anchor.
-    if let Some(root) = unique_issued_by_trusted_root(&last, trusted_roots)
-        && !peer_chain.iter().any(|cert| cert.raw == root.raw)
-    {
-        peer_chain.push(root.clone());
-    }
-
-    peer_chain
-}
-
-fn same_trust_anchor_identity(cert: &ParsedCert, root: &ParsedCert) -> bool {
-    !cert.subject_der.is_empty()
-        && cert.subject_der == root.subject_der
-        && !cert.spki_der.is_empty()
-        && cert.spki_der == root.spki_der
-}
-
-fn unique_issued_by_trusted_root<'a>(
-    cert: &ParsedCert,
-    trusted_roots: &'a [ParsedCert],
-) -> Option<&'a ParsedCert> {
-    let mut matches = trusted_roots
-        .iter()
-        .filter(|root| issued_by_trusted_root(cert, root));
-    let root = matches.next()?;
-    if matches.next().is_some() {
-        None
-    } else {
-        Some(root)
-    }
-}
-
-fn issued_by_trusted_root(cert: &ParsedCert, root: &ParsedCert) -> bool {
-    if cert.issuer_der.is_empty()
-        || root.subject_der.is_empty()
-        || cert.issuer_der != root.subject_der
-    {
-        return false;
-    }
-
-    match (&cert.authority_key_id, &root.subject_key_id) {
-        (Some(authority), Some(subject)) => authority == subject,
-        // Missing key identifiers cannot rule out a candidate. The caller
-        // requires a unique candidate before displaying a trust root.
-        _ => true,
-    }
-}
-
-pub(super) fn load_ca_certs(paths: &[String]) -> Result<Vec<ParsedCert>, FetchError> {
-    let mut certs = Vec::new();
-    for path in paths {
-        let data = super::super::read_pem_file(path)?;
-        let blocks = super::super::pem_certificates(&data).map_err(|err| {
-            FetchError::Message(format!("invalid CA certificate '{path}': {err}"))
-        })?;
-        if blocks.is_empty() {
-            return Err(format!("invalid CA certificate '{path}': no certificates found").into());
-        }
-        for block in blocks {
-            let parsed = ParsedCert::parse(&block)
-                .ok_or_else(|| FetchError::Message(format!("invalid CA certificate '{path}'")))?;
-            certs.push(parsed);
-        }
-    }
-    Ok(certs)
 }
 
 struct TbsFields<'a> {
