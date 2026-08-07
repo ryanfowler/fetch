@@ -7,6 +7,9 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
+use rustls::pki_types::SubjectPublicKeyInfoDer;
+use rustls::sign::{CertifiedKey, Signer, SigningKey, SingleCertAndKey};
+use rustls::{SignatureAlgorithm, SignatureScheme};
 use tempfile::TempDir;
 
 use super::http::{TestRequest, TestResponse, read_request, write_response};
@@ -97,6 +100,107 @@ pub(crate) fn start_tls_server(
                         let resp = handler(req);
                         let tls = reader.into_inner();
                         write_response(tls, resp);
+                    });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    TlsTestServer {
+        url,
+        ca_cert_path,
+        shutdown: Some(tx),
+        join: Some(join),
+    }
+}
+
+#[derive(Debug)]
+struct InvalidSignatureKey {
+    inner: Arc<dyn SigningKey>,
+}
+
+impl SigningKey for InvalidSignatureKey {
+    fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
+        self.inner
+            .choose_scheme(offered)
+            .map(|inner| Box::new(InvalidSigner { inner }) as Box<dyn Signer>)
+    }
+
+    fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
+        self.inner.public_key()
+    }
+
+    fn algorithm(&self) -> SignatureAlgorithm {
+        self.inner.algorithm()
+    }
+}
+
+#[derive(Debug)]
+struct InvalidSigner {
+    inner: Box<dyn Signer>,
+}
+
+impl Signer for InvalidSigner {
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
+        let mut signature = self.inner.sign(message)?;
+        signature[0] ^= 1;
+        Ok(signature)
+    }
+
+    fn scheme(&self) -> SignatureScheme {
+        self.inner.scheme()
+    }
+}
+
+pub(crate) fn start_invalid_certificate_verify_server() -> TlsTestServer {
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
+    let certified =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string(), "localhost".to_string()])
+            .unwrap();
+    let dir = TempDir::new().unwrap().keep();
+    let ca_cert_path = dir.join("ca.pem");
+    fs::write(&ca_cert_path, certified.cert.pem()).unwrap();
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certified.signing_key.serialize_der()),
+    );
+    let signing_key = provider.key_provider.load_private_key(key_der).unwrap();
+    let certified_key = CertifiedKey::new(
+        vec![certified.cert.der().clone()],
+        Arc::new(InvalidSignatureKey { inner: signing_key }),
+    );
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)));
+    let config = Arc::new(config);
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind invalid signature TLS server");
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("https://localhost:{port}");
+    let (tx, rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        loop {
+            if rx.try_recv().is_ok() {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let config = Arc::clone(&config);
+                    thread::spawn(move || {
+                        let Ok(conn) = rustls::ServerConnection::new(config) else {
+                            return;
+                        };
+                        let mut tls = rustls::StreamOwned::new(conn, stream);
+                        let mut reader = BufReader::new(&mut tls);
+                        let Some(_) = read_request(&mut reader) else {
+                            return;
+                        };
+                        let tls = reader.into_inner();
+                        write_response(tls, TestResponse::ok("invalid signature accepted"));
                     });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {

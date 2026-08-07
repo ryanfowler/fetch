@@ -29,7 +29,8 @@ use support::proxy::{
     start_stalling_proxy,
 };
 use support::tls::{
-    start_h2_tls_server, start_h2_tls_server_with_accept_delay, start_mtls_server, start_tls_server,
+    start_h2_tls_server, start_h2_tls_server_with_accept_delay,
+    start_invalid_certificate_verify_server, start_mtls_server, start_tls_server,
 };
 use tempfile::TempDir;
 use url::Url;
@@ -2021,6 +2022,34 @@ fn tls_certificate_validation_inspection_and_bounds_cases() {
     let res = run_fetch(&["--inspect-tls", "--timing", "--insecure", &tls.url]);
     assert_exit(&res, 0);
     assert!(res.stderr.contains("timing") || res.stderr.contains("TLS"));
+}
+
+#[test]
+fn insecure_rejects_invalid_certificate_verify_signatures() {
+    let tls = start_invalid_certificate_verify_server();
+
+    for version in ["1.2", "1.3"] {
+        let res = run_fetch(&[
+            "--insecure",
+            "--min-tls",
+            version,
+            "--max-tls",
+            version,
+            &tls.url,
+        ]);
+        assert_exit(&res, 1);
+
+        let res = run_fetch(&[
+            "--inspect-tls",
+            "--insecure",
+            "--min-tls",
+            version,
+            "--max-tls",
+            version,
+            &tls.url,
+        ]);
+        assert_exit(&res, 1);
+    }
 }
 
 #[test]
