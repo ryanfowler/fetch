@@ -1232,6 +1232,44 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     }
 
     #[test]
+    fn render_escapes_untrusted_tls_diagnostic_text() {
+        let inspection = Inspection {
+            version: Some(ProtocolVersion::TLSv1_3),
+            cipher_suite: CipherSuiteStatus::Unavailable,
+            alpn: Some("h2\x1b]0;owned\x07".to_string()),
+            ech_status: EchStatus::NotOffered,
+            chain: vec![ParsedCert {
+                raw: vec![1],
+                common_name: Some("cn\x1b\n\r\x07\u{202e}.example".to_string()),
+                organization: None,
+                dns_names: vec!["dns\u{85}\u{7f}\u{2066}\\name".to_string()],
+                ip_addresses: Vec::new(),
+                not_after: None,
+                issuer_der: Vec::new(),
+                subject_der: Vec::new(),
+                subject_name_der: Vec::new(),
+                spki_der: Vec::new(),
+                subject_public_key: Vec::new(),
+                serial_number: Vec::new(),
+                subject_key_id: None,
+                authority_key_id: None,
+                subject: String::new(),
+            }],
+            ocsp_response: Vec::new(),
+        };
+
+        let out = render(&inspection);
+
+        assert!(out.contains("ALPN: h2\\x1b]0;owned\\x07"));
+        assert!(out.contains("cn\\x1b\\n\\r\\x07\\u{202e}.example"));
+        assert!(out.contains("SANs: dns\\u{85}\\x7f\\u{2066}\\\\name"));
+        assert!(!out.contains('\x1b'));
+        assert!(!out.contains('\r'));
+        assert!(!out.contains('\x07'));
+        assert!(!out.contains('\u{202e}'));
+    }
+
+    #[test]
     fn render_quic_reports_unavailable_cipher_suite() {
         let inspection = Inspection {
             version: Some(ProtocolVersion::TLSv1_3),

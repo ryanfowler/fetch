@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use rustls::{ProtocolVersion, SupportedCipherSuite};
 
 use crate::core::{Printer, Sequence};
@@ -40,7 +42,7 @@ pub(super) fn render_to(inspection: &Inspection, out: &mut Printer) {
     if let Some(alpn) = &inspection.alpn {
         out.write_info_prefix();
         out.push_str("ALPN: ");
-        out.write_styled(alpn, &[Sequence::Italic]);
+        out.write_styled(&escape_untrusted_tls_text(alpn), &[Sequence::Italic]);
         out.push('\n');
     }
 
@@ -81,7 +83,10 @@ fn render_cert_chain(out: &mut Printer, chain: &[ParsedCert]) {
         out.write_info_prefix();
         out.push_str(&"   ".repeat(index));
         out.write_styled("└─ ", &[Sequence::Dim]);
-        out.write_styled(&cert.display_name(), &[Sequence::Bold]);
+        out.write_styled(
+            &escape_untrusted_tls_text(&cert.display_name()),
+            &[Sequence::Bold],
+        );
         let (expiry_text, expiry_color) = cert_expiry_info_and_color(cert.not_after);
         out.push_str(" (");
         out.write_styled(&expiry_text, &[expiry_color]);
@@ -99,8 +104,40 @@ fn render_sans(out: &mut Printer, cert: &ParsedCert) {
     out.push_str("\n");
     out.write_info_prefix();
     out.push_str("SANs: ");
-    out.write_styled(&sans.join(", "), &[Sequence::Italic]);
+    out.write_styled(
+        &escape_untrusted_tls_text(&sans.join(", ")),
+        &[Sequence::Italic],
+    );
     out.push('\n');
+}
+
+/// Escape remotely supplied TLS text before writing it to diagnostics.
+///
+/// Backslashes are also escaped so that the output cannot imitate an escape
+/// added by this function.
+fn escape_untrusted_tls_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\u{00}'..='\u{1f}' | '\u{7f}' => {
+                write!(escaped, "\\x{:02x}", ch as u32).expect("writing to a String cannot fail");
+            }
+            '\u{80}'..='\u{9f}'
+            | '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => {
+                write!(escaped, "\\u{{{:x}}}", ch as u32).expect("writing to a String cannot fail");
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 pub(super) fn render_ocsp_status(
