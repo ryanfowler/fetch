@@ -150,13 +150,21 @@ pub(super) fn render_ocsp_status(
     leaf: Option<&ParsedCert>,
     issuer: Option<&ParsedCert>,
 ) {
-    let Some(status) = parse_ocsp_status(raw_ocsp, leaf, issuer) else {
+    if raw_ocsp.is_empty() {
         return;
-    };
+    }
+
+    let status = leaf
+        .zip(issuer)
+        .and_then(|(leaf, issuer)| parse_ocsp_status(raw_ocsp, leaf, issuer));
     out.write_info_prefix();
-    out.push_str("OCSP: ");
-    out.write_styled(ocsp_status_label(status), &[ocsp_status_color(status)]);
-    out.push_str(" (stapled, unverified)\n");
+    if let Some(status) = status {
+        out.push_str("OCSP: ");
+        out.push_str(ocsp_status_label(status));
+        out.push_str(" (stapled, unverified)\n");
+    } else {
+        out.push_str("OCSP staple present (unverified)\n");
+    }
 }
 
 fn ocsp_status_label(status: OcspStatus) -> &'static str {
@@ -164,14 +172,6 @@ fn ocsp_status_label(status: OcspStatus) -> &'static str {
         OcspStatus::Good => "good",
         OcspStatus::Revoked => "revoked",
         OcspStatus::Unknown => "unknown",
-    }
-}
-
-fn ocsp_status_color(status: OcspStatus) -> Sequence {
-    match status {
-        OcspStatus::Good => Sequence::Green,
-        OcspStatus::Revoked => Sequence::Red,
-        OcspStatus::Unknown => Sequence::Yellow,
     }
 }
 

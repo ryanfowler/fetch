@@ -15,8 +15,8 @@ pub(super) enum OcspStatus {
 
 pub(super) fn parse_ocsp_status(
     raw: &[u8],
-    leaf: Option<&ParsedCert>,
-    issuer: Option<&ParsedCert>,
+    leaf: &ParsedCert,
+    issuer: &ParsedCert,
 ) -> Option<OcspStatus> {
     if raw.is_empty() {
         return None;
@@ -59,8 +59,8 @@ pub(super) fn parse_ocsp_status(
 
 fn parse_basic_ocsp_response_status(
     raw: &[u8],
-    leaf: Option<&ParsedCert>,
-    issuer: Option<&ParsedCert>,
+    leaf: &ParsedCert,
+    issuer: &ParsedCert,
 ) -> Option<OcspStatus> {
     let mut top = DerReader::new(raw);
     let basic = top.read_tlv()?;
@@ -91,8 +91,6 @@ fn parse_basic_ocsp_response_status(
         return None;
     }
 
-    let matching = leaf.zip(issuer);
-    let mut fallback = None;
     let mut responses = DerReader::new(responses.value);
     while let Some(single) = responses.read_tlv() {
         if single.tag != 0x30 {
@@ -106,18 +104,12 @@ fn parse_basic_ocsp_response_status(
             continue;
         };
 
-        if let Some((leaf, issuer)) = matching {
-            if ocsp_cert_id_matches(cert_id.raw, leaf, issuer) {
-                return Some(status);
-            }
-        } else if fallback.is_none() {
-            fallback = Some(status);
+        if ocsp_cert_id_matches(cert_id.raw, leaf, issuer) {
+            return Some(status);
         }
     }
 
-    // Without both certificates there is no possible certificate match. The
-    // embedded status is still useful for diagnostics, but it is unverified.
-    fallback
+    None
 }
 
 fn parse_ocsp_cert_status(status: super::der::Tlv<'_>) -> Option<OcspStatus> {
