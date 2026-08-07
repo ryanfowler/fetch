@@ -1119,25 +1119,32 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
     }
 
     #[test]
-    fn parse_ocsp_status_reads_basic_response_statuses() {
+    fn parse_ocsp_status_reads_matching_basic_response_statuses() {
+        let cert = ParsedCert::parse(
+            &super::super::pem_certificates(TEST_QUIC_CERT_PEM)
+                .unwrap()
+                .remove(0),
+        )
+        .unwrap();
         for (tag, want) in [
             (0x80, OcspStatus::Good),
             (0xa1, OcspStatus::Revoked),
             (0x82, OcspStatus::Unknown),
         ] {
-            let response = test_ocsp_response(tag);
+            let cert_id = test_ocsp_cert_id(&cert, &cert);
+            let response = test_ocsp_response_entries(vec![(cert_id, tag)]);
             assert_eq!(
-                parse_ocsp_status(&response, None, None),
+                parse_ocsp_status(&response, &cert, &cert),
                 Some(want),
                 "tag {tag:#x}"
             );
         }
 
         assert_eq!(
-            parse_ocsp_status(&der_seq(&[der(0x0a, &[1])]), None, None),
+            parse_ocsp_status(&der_seq(&[der(0x0a, &[1])]), &cert, &cert),
             None
         );
-        assert_eq!(parse_ocsp_status(b"not der", None, None), None);
+        assert_eq!(parse_ocsp_status(b"not der", &cert, &cert), None);
     }
 
     #[test]
@@ -1162,32 +1169,73 @@ TQt+xSSOMTZFrHhhVqsL9JQlHg==
         let no_match_response = test_ocsp_response_entries(vec![(unrelated_cert_id, 0x80)]);
 
         assert_eq!(
-            parse_ocsp_status(&response, Some(&cert), Some(&cert)),
+            parse_ocsp_status(&response, &cert, &cert),
             Some(OcspStatus::Good)
         );
-        assert_eq!(
-            parse_ocsp_status(&no_match_response, Some(&cert), Some(&cert)),
-            None
-        );
+        assert_eq!(parse_ocsp_status(&no_match_response, &cert, &cert), None);
     }
 
     #[test]
-    fn render_ocsp_status_matches_go_stapled_status_line() {
-        let mut out = Printer::new(false);
-        render_ocsp_status(&mut out, &test_ocsp_response(0x80), None, None);
+    fn render_ocsp_status_is_neutral_for_unverified_matching_response() {
+        let cert = ParsedCert::parse(
+            &super::super::pem_certificates(TEST_QUIC_CERT_PEM)
+                .unwrap()
+                .remove(0),
+        )
+        .unwrap();
+        let cert_id = test_ocsp_cert_id(&cert, &cert);
+        let response = test_ocsp_response_entries(vec![(cert_id, 0x80)]);
 
+        let mut out = Printer::new(false);
+        render_ocsp_status(&mut out, &response, Some(&cert), Some(&cert));
         assert_eq!(
             out.into_string().unwrap(),
             "* OCSP: good (stapled, unverified)\n"
         );
 
-        let mut out = Printer::new(false);
-        render_ocsp_status(&mut out, b"malformed", None, None);
-        assert!(out.bytes().is_empty());
+        let mut out = Printer::new(true);
+        render_ocsp_status(&mut out, &response, Some(&cert), Some(&cert));
+        let rendered = out.into_string().unwrap();
+        assert!(rendered.contains("OCSP: good (stapled, unverified)"));
+        assert!(!rendered.contains("\x1b[32m"));
+        assert!(!rendered.contains("\x1b[31m"));
+        assert!(!rendered.contains("\x1b[33m"));
+    }
+
+    #[test]
+    fn render_ocsp_status_hides_status_for_unrelated_response() {
+        let cert = ParsedCert::parse(
+            &super::super::pem_certificates(TEST_QUIC_CERT_PEM)
+                .unwrap()
+                .remove(0),
+        )
+        .unwrap();
+        let unrelated_cert_id = der_seq(&[
+            der_seq(&[der(0x06, &[0x2b, 0x0e, 0x03, 0x02, 0x1a]), der(0x05, &[])]),
+            der(0x04, &[9; 20]),
+            der(0x04, &[8; 20]),
+            der(0x02, &[7]),
+        ]);
+        let response = test_ocsp_response_entries(vec![(unrelated_cert_id, 0xa1)]);
 
         let mut out = Printer::new(true);
+        render_ocsp_status(&mut out, &response, Some(&cert), Some(&cert));
+        let rendered = out.into_string().unwrap();
+
+        assert!(rendered.contains("OCSP staple present (unverified)"));
+        assert!(!rendered.contains("revoked"));
+        assert!(!rendered.contains("\x1b[31m"));
+    }
+
+    #[test]
+    fn render_ocsp_status_hides_status_without_issuer() {
+        let mut out = Printer::new(true);
         render_ocsp_status(&mut out, &test_ocsp_response(0x80), None, None);
-        assert!(out.into_string().unwrap().contains("\x1b[32mgood\x1b[0m"));
+        let rendered = out.into_string().unwrap();
+
+        assert!(rendered.contains("OCSP staple present (unverified)"));
+        assert!(!rendered.contains("good"));
+        assert!(!rendered.contains("\x1b[32m"));
     }
 
     #[tokio::test]

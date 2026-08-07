@@ -564,8 +564,9 @@ See [Encrypted Client Hello](ech.md) for details.
 Inspect the TLS certificate chain with a TLS handshake. This operation does not
 make an HTTP request. The output shows the TLS version, negotiated cipher
 suite, ALPN protocol, certificate chain and expiry status, Subject Alternative
-Names (SANs), and the unverified embedded status from an OCSP staple. Use
-an HTTPS URL. With `--http 3`,
+Names (SANs), and OCSP staple presence. It shows an embedded OCSP status only
+when the response CertID matches the inspected leaf certificate. Use an HTTPS
+URL. With `--http 3`,
 inspection uses a QUIC handshake and offers `h3` ALPN. The current QUIC
 integration does not expose the negotiated TLS cipher suite, so HTTP/3 output
 reports it as unavailable.
