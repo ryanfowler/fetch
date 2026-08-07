@@ -282,15 +282,10 @@ async fn resolve_dns_for_client_inner(
     // through a proxy; auto_http3_allowed already blocks that path.
     if effective_proxy.is_some_and(|proxy| !proxy.uses_local_target_dns()) {
         if need_ech_svcb {
-            let ech_timeout = timeout
-                .remaining()
-                .ok()
-                .flatten()
-                .unwrap_or(Duration::from_secs(5));
             let https_records = if let Some(dns_server) = cli.dns_server.as_deref() {
-                lookup_ech_https_records(cli, Some(dns_server), host, ech_timeout).await?
+                lookup_ech_https_records(cli, Some(dns_server), host, timeout).await?
             } else {
-                lookup_ech_https_records(cli, None, host, ech_timeout).await?
+                lookup_ech_https_records(cli, None, host, timeout).await?
             };
             return Ok(ClientDnsDiscovery {
                 dns_resolution: None,
@@ -321,14 +316,9 @@ async fn resolve_dns_for_client_inner(
         let (addrs, https_records) = if need_ech_svcb {
             // ECH requires HTTPS records; don't use the abort-early auto-H3
             // pattern which may discard them before the SVCB query finishes.
-            let ech_timeout = timeout
-                .remaining()
-                .ok()
-                .flatten()
-                .unwrap_or(Duration::from_secs(5));
             let (addrs, https_records) = tokio::join!(
                 lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout),
-                lookup_ech_https_records(cli, Some(dns_server), host, ech_timeout),
+                lookup_ech_https_records(cli, Some(dns_server), host, timeout),
             );
             (addrs?, https_records?)
         } else if let Some(auto_http3_budget) = auto_http3_discovery {
@@ -403,15 +393,8 @@ async fn resolve_dns_for_client_inner(
     let (socket_addrs, https_records) = if need_ech_svcb {
         // ECH requires HTTPS records; await the SVCB query properly instead
         // of using the abort-early auto-H3 pattern.
-        let ech_timeout = timeout
-            .remaining()
-            .ok()
-            .flatten()
-            .unwrap_or(Duration::from_secs(5));
-        let (socket_addrs, https_records) = tokio::join!(
-            lookup,
-            lookup_ech_https_records(cli, None, host, ech_timeout),
-        );
+        let (socket_addrs, https_records) =
+            tokio::join!(lookup, lookup_ech_https_records(cli, None, host, timeout),);
         (
             socket_addrs
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?
@@ -531,16 +514,17 @@ async fn lookup_ech_https_records(
     cli: &Cli,
     dns_server: Option<&str>,
     host: &str,
-    timeout: Duration,
+    timeout: TimeoutBudget,
 ) -> Result<Vec<SvcbRecord>, FetchError> {
+    let ech_timeout = timeout.remaining()?.unwrap_or(Duration::from_secs(5));
     let resolver = dns_server
         .map(HttpsRecordResolver::Custom)
         .unwrap_or(HttpsRecordResolver::System);
-    match TimeoutBudget::new(Some(timeout))
+    match TimeoutBudget::new(Some(ech_timeout))
         .run(crate::dns::svcb::lookup_https_records_with_doh_tls_config(
             resolver,
             host,
-            Some(timeout),
+            Some(ech_timeout),
             doh_tls_config_for_cli(cli)?,
         ))
         .await
@@ -822,29 +806,7 @@ pub(crate) async fn resolve_websocket_ech_mode(
     if host.parse::<IpAddr>().is_ok() {
         return Ok(None);
     }
-    let ech_timeout = timeout
-        .remaining()
-        .ok()
-        .flatten()
-        .unwrap_or(Duration::from_secs(5));
-    let resolver = cli
-        .dns_server
-        .as_deref()
-        .map(crate::dns::svcb::HttpsRecordResolver::Custom)
-        .unwrap_or(crate::dns::svcb::HttpsRecordResolver::System);
-    let records = tokio::time::timeout(
-        ech_timeout,
-        crate::dns::svcb::lookup_https_records_with_doh_tls_config(
-            resolver,
-            host,
-            Some(ech_timeout),
-            doh_tls_config_for_cli(cli)?,
-        ),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or_default();
+    let records = lookup_ech_https_records(cli, cli.dns_server.as_deref(), host, timeout).await?;
     let candidates = ech_candidates_from_records(&records);
     crate::tls::ech::resolve_ech_mode(cli, &candidates)
 }
@@ -1708,6 +1670,50 @@ mod tests {
         let mut record = https_record(priority, ".", &["h2"], None);
         record.ech = ech.map(|b| b.to_vec());
         record
+    }
+
+    #[tokio::test]
+    async fn http_ech_discovery_propagates_exhausted_budget() {
+        let cli =
+            Cli::try_parse_from(["fetch", "--ech", "on", "https://ech-timeout.invalid"]).unwrap();
+        let timeout = TimeoutBudget::started_at(
+            Some(Duration::from_millis(1)),
+            Instant::now() - Duration::from_millis(10),
+        );
+
+        let err = resolve_dns_for_client_inner(
+            &cli,
+            &Url::parse("https://ech-timeout.invalid").unwrap(),
+            timeout,
+            Some(EffectiveProxy {
+                uses_local_target_dns: false,
+            }),
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "request timed out after 1ms");
+    }
+
+    #[tokio::test]
+    async fn websocket_ech_discovery_propagates_exhausted_budget() {
+        let cli = Cli::try_parse_from(["fetch", "--ech", "on", "wss://ech-timeout.invalid/socket"])
+            .unwrap();
+        let timeout = TimeoutBudget::started_at(
+            Some(Duration::from_millis(1)),
+            Instant::now() - Duration::from_millis(10),
+        );
+
+        let err = resolve_websocket_ech_mode(
+            &cli,
+            &Url::parse("wss://ech-timeout.invalid/socket").unwrap(),
+            timeout,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "request timed out after 1ms");
     }
 
     #[test]
