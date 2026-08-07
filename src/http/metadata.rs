@@ -227,9 +227,18 @@ pub(super) fn validate_http_version_options(
     }
 }
 
-pub(crate) fn validate_ech_for_url(cli: &Cli, url: &Url) -> Result<(), FetchError> {
+pub(crate) fn validate_ech_for_url(
+    cli: &Cli,
+    url: &Url,
+    version: Option<HttpVersion>,
+) -> Result<(), FetchError> {
     if url.scheme() != "https" && matches!(cli.ech.as_deref(), Some("auto" | "on")) {
         return Err("--ech requires an https:// URL".into());
+    }
+    if matches!(cli.ech.as_deref(), Some("on")) && matches!(version, Some(HttpVersion::Http3)) {
+        return Err(
+            "--ech on cannot be used with HTTP/3 because ECH acceptance cannot be verified".into(),
+        );
     }
     Ok(())
 }
@@ -799,6 +808,21 @@ mod tests {
         let err =
             validate_http_version_options(Some(HttpVersion::Http3), &url, false, None).unwrap_err();
         assert_eq!(err.to_string(), "http3: unsupported protocol scheme: http");
+    }
+
+    #[test]
+    fn ech_on_rejects_explicit_http3() {
+        let cli =
+            Cli::try_parse_from(["fetch", "--ech", "on", "--http", "3", "https://example.com"])
+                .unwrap();
+        let url = Url::parse("https://example.com/").unwrap();
+
+        let err = validate_ech_for_url(&cli, &url, Some(HttpVersion::Http3)).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "--ech on cannot be used with HTTP/3 because ECH acceptance cannot be verified"
+        );
     }
 
     #[test]

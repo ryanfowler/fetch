@@ -546,7 +546,8 @@ Encrypted Client Hello mode. Values: `auto`, `on`, `off`. Default: `off`.
   Falls back to GREASE ECH when no real config is found. If the server
   rejects the offer, the connection proceeds gracefully.
 - **`on`** — Require ECH. `fetch` reports an error if the server does not
-  advertise ECH in DNS or rejects the offer.
+  advertise ECH in DNS or rejects the offer. This mode cannot be combined with
+  explicit HTTP/3. Automatic protocol selection uses TCP.
 - **`off`** — Never use ECH.
 
 ECH requires TLS 1.3 and is incompatible with `--min-tls 1.2`.
