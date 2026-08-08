@@ -451,7 +451,8 @@ DNS over QUIC (DoQ), and DNS-over-HTTPS (DoH) for requests and DNS/TLS
 inspection. Bare `IP[:PORT]` values use UDP DNS, which advertises EDNS(0) and
 retries truncated responses over TCP. DoH URLs are queried with RFC 8484
 wire-format requests, with Google-style JSON DoH retained as a compatibility
-fallback.
+fallback. A DoH transaction has a five-second timeout when no request or
+connection timeout applies. An applicable user-set timeout takes precedence.
 
 ```sh
 fetch --dns-server 8.8.8.8 example.com

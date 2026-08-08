@@ -9,7 +9,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::core;
-use crate::dns::util::{dns_query_id, resolve_address_families};
+use crate::dns::util::{dns_query_id, dns_transaction_budget, resolve_address_families};
 use crate::dns::wire;
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
@@ -103,6 +103,7 @@ pub(crate) fn client_with_budget_and_tls_config(
     budget: TimeoutBudget,
     tls_config: Option<rustls::ClientConfig>,
 ) -> Result<DohClient, DnsError> {
+    let budget = dns_transaction_budget(budget);
     let tls_config = match tls_config {
         Some(config) => config,
         None => {
@@ -812,6 +813,31 @@ mod tests {
         )
     }
 
+    async fn start_stalling_response_server(
+        send_partial_body: bool,
+    ) -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            if send_partial_body {
+                let Some(_) = read_wire_test_request(&mut stream).await else {
+                    return;
+                };
+                let _ = stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\ncontent-type: application/dns-message\r\nconnection: close\r\n\r\n\0",
+                    )
+                    .await;
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        (
+            Url::parse(&format!("http://{addr}/dns-query")).unwrap(),
+            task,
+        )
+    }
+
     async fn start_delayed_415_fallback_server(
         post_delay: Duration,
     ) -> (Url, tokio::task::JoinHandle<()>) {
@@ -1300,6 +1326,40 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(400),
             "lookup took {elapsed:?}, expected parallel A/AAAA queries near {delay:?}"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_doh_default_timeout_covers_response_headers() {
+        let (url, task) = start_stalling_response_server(false).await;
+        let start = Instant::now();
+
+        let err = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "request timed out after 5s");
+        assert!(
+            start.elapsed() < Duration::from_secs(7),
+            "DoH response headers exceeded the default timeout"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_doh_default_timeout_covers_slow_body() {
+        let (url, task) = start_stalling_response_server(true).await;
+        let start = Instant::now();
+
+        let err = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "request timed out after 5s");
+        assert!(
+            start.elapsed() < Duration::from_secs(7),
+            "DoH response body exceeded the default timeout"
         );
         task.abort();
     }
