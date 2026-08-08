@@ -20,9 +20,11 @@ fetch --ech off https://example.com
 ## Modes
 
 - **`auto`** — Use ECH if the server advertises it in DNS. Falls back to
-  GREASE ECH when no real config is found. If the server rejects the offer,
-  the connection proceeds (outer ClientHello fallback). This is the
-  recommended mode for general use.
+  GREASE ECH when an authenticated lookup completes without a real config.
+  An authenticated DNS transport, server, or response failure stops the
+  connection to prevent downgrade. If the server rejects the ECH offer, the
+  connection proceeds (outer ClientHello fallback). This is the recommended
+  mode for general use.
 
 - **`on`** — Require ECH. Errors if the server does not advertise ECH in DNS,
   and fails if the server rejects the offer. This mode cannot be used with

@@ -25,6 +25,12 @@ impl fmt::Display for ResolverError {
 
 impl std::error::Error for ResolverError {}
 
+impl ResolverError {
+    pub(crate) fn is_nxdomain(&self) -> bool {
+        self.0 == "no such host: NXDomain"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsRecord {
     pub ip: IpAddr,

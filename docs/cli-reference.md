@@ -543,8 +543,10 @@ fetch --min-tls 1.2 --max-tls 1.2 example.com
 Encrypted Client Hello mode. Values: `auto`, `on`, `off`. Default: `off`.
 
 - **`auto`** — Use ECH if the server advertises it in DNS HTTPS/SVCB records.
-  Falls back to GREASE ECH when no real config is found. If the server
-  rejects the offer, the connection proceeds gracefully.
+  Falls back to GREASE ECH when an authenticated lookup completes without a
+  real config. An authenticated DNS lookup failure stops the connection to
+  prevent downgrade. If the server rejects the offer, the connection proceeds
+  gracefully.
 - **`on`** — Require ECH. `fetch` reports an error if the server does not
   advertise ECH in DNS or rejects the offer. This mode cannot be combined with
   explicit HTTP/3. Automatic protocol selection uses TCP.
@@ -617,9 +619,11 @@ opportunistic and does not delay the normal address lookup or TCP/TLS setup:
 `fetch` starts
 TCP/TLS as soon as normal DNS produces a usable address, while a usable `h3`
 record discovered before TCP/TLS wins races QUIC setup against it. The request
-is sent once on the winning transport. If HTTPS-record discovery is too slow,
-fails, is unsupported by the OS resolver, or returns no usable `h3` record,
-HTTPS offers `h2` then `http/1.1` through ALPN. Proxy and Unix socket requests
+is sent once on the winning transport. System, UDP, TCP, and plaintext HTTP
+DNS can fall back after an HTTPS-record lookup failure. A transport, server,
+or malformed-response failure from certificate-verified DoH, DoT, or DoQ
+stops the connection to prevent protocol downgrade. Authenticated NODATA and
+NXDOMAIN results can use the normal ALPN path. Proxy and Unix socket requests
 also use the normal ALPN path.
 
 `--http 1`, `--http 2`, and `--http 3` force that protocol instead of setting

@@ -31,7 +31,7 @@ pub(super) async fn lookup_https_records(
         None,
     )
     .await?;
-    Ok(super::svcb_records_from_query(records))
+    super::svcb_records_from_query(records)
 }
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]

@@ -217,10 +217,12 @@ platform resolver, matching normal address lookup. HTTPS-record discovery and no
 run in parallel. `fetch` starts the TCP/TLS path as soon as normal DNS produces
 a usable address, and a usable `h3` candidate that is discovered before TCP/TLS
 wins races QUIC setup against it. The request is sent once on the winning
-transport. If HTTPS-record discovery is too slow, fails, is unsupported by the
-OS resolver, or returns no usable `h3` record, HTTPS uses the normal ALPN path
-and offers `h2` then `http/1.1`. Proxy and Unix socket requests also use the
-normal ALPN path.
+transport. With system, UDP, TCP, or plaintext HTTP DNS, a slow or failed
+HTTPS-record lookup uses the normal ALPN path. With certificate-verified DoH,
+DoT, or DoQ, a transport, server, or malformed-response failure stops the
+connection to prevent protocol downgrade. An authenticated NODATA or NXDOMAIN
+result can use the normal ALPN path. Proxy and Unix socket requests also use
+the normal ALPN path.
 
 `fetch` also remembers recent HTTP/3 alternatives learned from HTTPS/SVCB
 records and `Alt-Svc: h3=...` response headers in a bounded per-origin cache

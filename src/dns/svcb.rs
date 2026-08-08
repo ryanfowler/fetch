@@ -261,7 +261,7 @@ pub(crate) async fn lookup_https_records_with_doh_tls_config(
                 doh_tls_config,
             )
             .await?;
-            Ok(svcb_records_from_query(records))
+            svcb_records_from_query(records)
         }
         HttpsRecordResolver::System => {
             system::lookup_https_records(host, TimeoutBudget::new(timeout)).await
@@ -271,19 +271,22 @@ pub(crate) async fn lookup_https_records_with_doh_tls_config(
 
 pub(super) fn svcb_records_from_query(
     records: Vec<crate::dns::custom::DnsQueryRecord>,
-) -> Vec<SvcbRecord> {
+) -> Result<Vec<SvcbRecord>, FetchError> {
     records
         .into_iter()
         .filter(|record| record.typ == DNS_TYPE_HTTPS)
-        .filter_map(|record| {
+        .map(|record| {
             let raw = match record.data {
-                DnsRecordData::Wire(raw) => Some(raw),
-                DnsRecordData::Text(text) => parse_generic_rdata(&text),
-            }?;
-            parse_rdata(&raw).map(|mut parsed| {
-                parsed.ttl = record.ttl;
-                parsed
-            })
+                DnsRecordData::Wire(raw) => raw,
+                DnsRecordData::Text(text) => parse_generic_rdata(&text).ok_or_else(|| {
+                    FetchError::Runtime("malformed HTTPS DNS record data".to_string())
+                })?,
+            };
+            let mut parsed = parse_rdata(&raw).ok_or_else(|| {
+                FetchError::Runtime("malformed HTTPS DNS record data".to_string())
+            })?;
+            parsed.ttl = record.ttl;
+            Ok(parsed)
         })
         .collect()
 }
@@ -494,6 +497,17 @@ mod tests {
         assert_eq!(parse_rdata(&bad_port), None);
     }
 
+    #[test]
+    fn malformed_https_record_rejects_the_lookup() {
+        let result = svcb_records_from_query(vec![crate::dns::custom::DnsQueryRecord {
+            typ: DNS_TYPE_HTTPS,
+            ttl: Some(60),
+            data: DnsRecordData::Wire(vec![0, 1]),
+        }]);
+
+        assert!(result.unwrap_err().to_string().contains("malformed HTTPS"));
+    }
+
     #[tokio::test]
     async fn custom_tcp_lookup_returns_https_records() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -549,6 +563,46 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].port, Some(8443));
         assert_eq!(records[0].ttl, Some(30));
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn custom_tcp_nxdomain_is_a_completed_empty_lookup() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut len = [0u8; 2];
+            stream.read_exact(&mut len).unwrap();
+            let mut query = vec![0u8; usize::from(u16::from_be_bytes(len))];
+            stream.read_exact(&mut query).unwrap();
+            let question_end = query
+                .iter()
+                .enumerate()
+                .skip(12)
+                .find_map(|(index, byte)| (*byte == 0).then_some(index + 5))
+                .unwrap();
+            let mut response = Vec::new();
+            response.extend_from_slice(&query[..2]);
+            response.extend_from_slice(&0x8183u16.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&0u32.to_be_bytes());
+            response.extend_from_slice(&query[12..question_end]);
+            stream
+                .write_all(&(response.len() as u16).to_be_bytes())
+                .unwrap();
+            stream.write_all(&response).unwrap();
+        });
+
+        let records = lookup_https_records(
+            HttpsRecordResolver::Custom(&format!("tcp://{addr}")),
+            "missing.example",
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert!(records.is_empty());
         handle.join().unwrap();
     }
 
