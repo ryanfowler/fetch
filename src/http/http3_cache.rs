@@ -14,7 +14,7 @@ use url::Url;
 use crate::dns::svcb::SvcbRecord;
 use crate::fileutil::FileLock;
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 const MAX_CANDIDATES_PER_ORIGIN: usize = 4;
 const MAX_SHARDS: usize = 1024;
 const MAX_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
@@ -822,6 +822,23 @@ mod tests {
         assert_eq!(key.resolver_key, "system");
     }
 
+    #[test]
+    fn rejects_cache_entries_from_before_doh_age_handling() {
+        let dir = TempDir::new().unwrap();
+        let cache = Http3Cache::with_dir(dir.path().to_path_buf());
+        let (key, path) = cache.key_and_path(&test_url(), None).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = ShardFile {
+            version: 1,
+            origin: key.origin.clone(),
+            resolver_key: key.resolver_key.clone(),
+            candidates: Vec::new(),
+        };
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        assert!(cache.read_valid_shard(&path, &key).is_none());
+    }
+
     #[tokio::test]
     async fn stores_https_records_per_origin_shard() {
         let dir = TempDir::new().unwrap();
@@ -853,6 +870,17 @@ mod tests {
         let cache = Http3Cache::with_dir(dir.path().to_path_buf());
         cache
             .store_https_records(&test_url(), None, &[record(".", Some(9443), None)])
+            .await;
+
+        assert!(cache.candidates(&test_url(), None).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn does_not_cache_expired_https_records() {
+        let dir = TempDir::new().unwrap();
+        let cache = Http3Cache::with_dir(dir.path().to_path_buf());
+        cache
+            .store_https_records(&test_url(), None, &[record(".", Some(9443), Some(0))])
             .await;
 
         assert!(cache.candidates(&test_url(), None).await.is_empty());

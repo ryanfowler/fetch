@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
+use http::header::{ACCEPT, AGE, CONTENT_LENGTH, CONTENT_TYPE, USER_AGENT};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use serde::Deserialize;
 use url::Url;
@@ -186,8 +186,12 @@ async fn lookup_doh_wire_records_with_client(
         return Err(WireDohError::Fallback);
     }
 
+    let age = doh_response_age(response.headers());
     match doh_records_from_wire_response(response.body(), id, host, dns_type) {
-        Ok(records) => Ok(records),
+        Ok(mut records) => {
+            subtract_age_from_ttls(&mut records, age);
+            Ok(records)
+        }
         Err(err) if is_dns_message_response(&response) || is_dns_wire_error(&err) => {
             Err(WireDohError::Fatal(err))
         }
@@ -215,7 +219,9 @@ async fn lookup_doh_json_records_with_client(
         return Err(doh_status_error(&response));
     }
 
-    doh_records_from_json_response(response.body(), host)
+    let mut records = doh_records_from_json_response(response.body(), host)?;
+    subtract_age_from_ttls(&mut records, doh_response_age(response.headers()));
+    Ok(records)
 }
 
 impl DohClient {
@@ -346,6 +352,29 @@ fn doh_records_from_json_response(
             ttl: answer.ttl,
         })
         .collect())
+}
+
+fn doh_response_age(headers: &HeaderMap) -> u32 {
+    let Some(value) = headers.get_all(AGE).iter().next() else {
+        return 0;
+    };
+    // RFC 9111 requires recipients to use the first member when a broken
+    // sender generates a list-based Age field.
+    let first = value.as_bytes().split(|byte| *byte == b',').next().unwrap();
+    let first = first.trim_ascii();
+    if first.is_empty() || first.iter().any(|byte| !byte.is_ascii_digit()) {
+        return 0;
+    }
+    first.iter().fold(0_u32, |age, byte| {
+        age.saturating_mul(10)
+            .saturating_add(u32::from(byte - b'0'))
+    })
+}
+
+fn subtract_age_from_ttls(records: &mut [DohRecord], age: u32) {
+    for record in records {
+        record.ttl = record.ttl.map(|ttl| ttl.saturating_sub(age));
+    }
 }
 
 fn ip_records(records: Vec<DohRecord>, answer_type: u16) -> Result<Vec<DnsRecord>, DnsError> {
@@ -657,10 +686,18 @@ mod tests {
                     let (parts, body) = response.into_parts();
                     let status = parts.status.as_u16();
                     let reason = parts.status.canonical_reason().unwrap_or("");
-                    let raw = format!(
-                        "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+                    let mut raw = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n",
                         body.len()
                     );
+                    for (name, value) in &parts.headers {
+                        raw.push_str(name.as_str());
+                        raw.push_str(": ");
+                        raw.push_str(value.to_str().unwrap());
+                        raw.push_str("\r\n");
+                    }
+                    raw.push_str("\r\n");
+                    raw.push_str(&body);
                     let _ = stream.write_all(raw.as_bytes()).await;
                 });
             }
@@ -1298,11 +1335,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lookup_doh_type_returns_ttl() {
+    async fn lookup_doh_type_subtracts_age_from_json_ttl() {
         let (url, task) = start_test_server(|_| {
-            http::Response::new(
-                r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"127.0.0.1","TTL":123}]}"#.to_string(),
-            )
+            http::Response::builder()
+                .header(AGE, "23")
+                .body(
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"127.0.0.1","TTL":123}]}"#
+                        .to_string(),
+                )
+                .unwrap()
         })
         .await;
 
@@ -1312,8 +1353,55 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].ip.to_string(), "127.0.0.1");
-        assert_eq!(records[0].ttl, Some(123));
+        assert_eq!(records[0].ttl, Some(100));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_doh_records_saturates_wire_https_ttl_at_zero() {
+        let (url, task) = start_wire_test_server(|request| {
+            let body = wire_response(&request.body, vec![(wire::TYPE_HTTPS, 20, vec![0, 1, 0])]);
+            http::Response::builder()
+                .header(CONTENT_TYPE, APPLICATION_DNS_MESSAGE)
+                .header(AGE, "30")
+                .body(body)
+                .unwrap()
+        })
+        .await;
+        let client = client(None).unwrap();
+
+        let records = lookup_doh_records_with_client(&client, &url, "example.com", "HTTPS")
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].ttl, Some(0));
+        task.abort();
+    }
+
+    #[test]
+    fn doh_age_parsing_is_conservative_and_saturating() {
+        for (value, expected) in [
+            (None, 0),
+            (Some("0"), 0),
+            (Some("123"), 123),
+            (Some(" 12"), 12),
+            (Some("12, 13"), 12),
+            (Some(""), 0),
+            (Some("not-a-number"), 0),
+            (Some("999999999999999999999999"), u32::MAX),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some(value) = value {
+                headers.insert(AGE, HeaderValue::from_str(value).unwrap());
+            }
+            assert_eq!(doh_response_age(&headers), expected, "Age: {value:?}");
+        }
+
+        let mut repeated = HeaderMap::new();
+        repeated.append(AGE, HeaderValue::from_static("7"));
+        repeated.append(AGE, HeaderValue::from_static("9"));
+        assert_eq!(doh_response_age(&repeated), 7);
     }
 
     #[test]
