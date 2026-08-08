@@ -498,7 +498,7 @@ async fn lookup_udp_all(
     host: &str,
     timeout: TimeoutBudget,
 ) -> Vec<QueryResult> {
-    let socket = match crate::dns::transport::udp_socket(server_addr).await {
+    let socket = match crate::dns::transport::udp_socket(server_addr, timeout).await {
         Ok(socket) => socket,
         Err(err) => return failed_query_results(err),
     };
@@ -520,14 +520,13 @@ async fn lookup_udp_record(
     query_type: QueryType,
     timeout: TimeoutBudget,
 ) -> Result<Vec<Record>, QueryError> {
+    let timeout = crate::dns::util::dns_transaction_budget(timeout);
     let id = dns_query_id();
     let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
     let matcher = wire::ResponseMatcher::new(id, host, query_type.dns_type, DNS_CLASS_IN);
-    let udp_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
-    let mut response =
-        crate::dns::transport::query_udp_on_socket(socket, &raw, &matcher, udp_timeout)
-            .await
-            .map_err(QueryError::other)?;
+    let mut response = crate::dns::transport::query_udp_on_socket(socket, &raw, &matcher, timeout)
+        .await
+        .map_err(QueryError::other)?;
     let raw_records =
         match wire::parse_response(&response, id, host, query_type.dns_type, DNS_CLASS_IN) {
             Ok(records) => records,
@@ -1345,7 +1344,12 @@ mod tests {
         let (addr_str, stop) = start_udp_server();
         let addr: SocketAddr = addr_str.parse().unwrap();
 
-        let socket = crate::dns::transport::udp_socket(addr).await.unwrap();
+        let socket = crate::dns::transport::udp_socket(
+            addr,
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
+        )
+        .await
+        .unwrap();
         let records = lookup_udp_record(
             &socket,
             addr,
