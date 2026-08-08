@@ -31,6 +31,13 @@ pub struct DnsRecord {
     pub ttl: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WireDnsRecord {
+    pub(crate) typ: u16,
+    pub(crate) ttl: u32,
+    pub(crate) data: Vec<u8>,
+}
+
 pub async fn lookup_udp(
     server_addr: &str,
     host: &str,
@@ -74,19 +81,29 @@ async fn lookup_udp_type_with_budget(
     dns_type: u16,
     budget: TimeoutBudget,
 ) -> Result<Vec<DnsRecord>, ResolverError> {
+    let records = query_udp_type(server_addr, host, dns_type, budget).await?;
+    Ok(ip_records(records, dns_type))
+}
+
+pub(crate) async fn query_udp_type(
+    server_addr: &SocketAddr,
+    host: &str,
+    dns_type: u16,
+    budget: TimeoutBudget,
+) -> Result<Vec<WireDnsRecord>, ResolverError> {
     let id = dns_query_id();
     let raw = wire::build_query(id, host, dns_type).map_err(resolver_error)?;
     let timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
     let response = crate::dns::transport::query_udp(*server_addr, &raw, timeout)
         .await
         .map_err(resolver_error)?;
-    match dns_records_from_response(&response, id, host, dns_type) {
+    match wire_records_from_response(&response, id, host, dns_type) {
         Ok(records) => Ok(records),
         Err(err) if err.is_truncated() => {
             let response = crate::dns::transport::query_tcp(*server_addr, &raw, budget)
                 .await
                 .map_err(resolver_error)?;
-            dns_records_from_response(&response, id, host, dns_type).map_err(resolver_error)
+            wire_records_from_response(&response, id, host, dns_type).map_err(resolver_error)
         }
         Err(err) => Err(resolver_error(err)),
     }
@@ -159,12 +176,21 @@ pub(crate) async fn lookup_tcp_type(
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![DnsRecord { ip, ttl: None }]);
     }
-    let budget = TimeoutBudget::new(Some(timeout));
+    let records = query_tcp_type(addr, host, dns_type, TimeoutBudget::new(Some(timeout))).await?;
+    Ok(ip_records(records, dns_type))
+}
+
+pub(crate) async fn query_tcp_type(
+    addr: &SocketAddr,
+    host: &str,
+    dns_type: u16,
+    budget: TimeoutBudget,
+) -> Result<Vec<WireDnsRecord>, ResolverError> {
     let connect_timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
     let mut stream = crate::dns::transport::tcp_connection(addr, connect_timeout)
         .await
         .map_err(resolver_error)?;
-    lookup_stream_type(&mut stream, host, dns_type, budget).await
+    query_stream_type(&mut stream, host, dns_type, budget).await
 }
 
 pub(crate) async fn lookup_tls_type(
@@ -178,13 +204,32 @@ pub(crate) async fn lookup_tls_type(
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![DnsRecord { ip, ttl: None }]);
     }
-    let budget = TimeoutBudget::new(Some(timeout));
+    let records = query_tls_type(
+        server_name,
+        server_addrs,
+        host,
+        dns_type,
+        TimeoutBudget::new(Some(timeout)),
+        insecure,
+    )
+    .await?;
+    Ok(ip_records(records, dns_type))
+}
+
+pub(crate) async fn query_tls_type(
+    server_name: &ServerName<'static>,
+    server_addrs: &[SocketAddr],
+    host: &str,
+    dns_type: u16,
+    budget: TimeoutBudget,
+    insecure: bool,
+) -> Result<Vec<WireDnsRecord>, ResolverError> {
     let connect_timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
     let mut stream =
         crate::dns::transport::tls_connection(server_name, server_addrs, connect_timeout, insecure)
             .await
             .map_err(resolver_error)?;
-    lookup_stream_type(&mut stream, host, dns_type, budget).await
+    query_stream_type(&mut stream, host, dns_type, budget).await
 }
 
 pub(crate) async fn lookup_quic_type(
@@ -198,7 +243,26 @@ pub(crate) async fn lookup_quic_type(
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![DnsRecord { ip, ttl: None }]);
     }
-    let budget = TimeoutBudget::new(Some(timeout));
+    let records = query_quic_type(
+        server_name,
+        server_addrs,
+        host,
+        dns_type,
+        TimeoutBudget::new(Some(timeout)),
+        insecure,
+    )
+    .await?;
+    Ok(ip_records(records, dns_type))
+}
+
+pub(crate) async fn query_quic_type(
+    server_name: &ServerName<'static>,
+    server_addrs: &[SocketAddr],
+    host: &str,
+    dns_type: u16,
+    budget: TimeoutBudget,
+    insecure: bool,
+) -> Result<Vec<WireDnsRecord>, ResolverError> {
     let connect_timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
     let connection = crate::dns::transport::quic_connection(
         server_name,
@@ -216,15 +280,15 @@ pub(crate) async fn lookup_quic_type(
             .map_err(resolver_error)
     })
     .await?;
-    dns_records_from_response(&response, DOQ_MESSAGE_ID, host, dns_type).map_err(resolver_error)
+    wire_records_from_response(&response, DOQ_MESSAGE_ID, host, dns_type).map_err(resolver_error)
 }
 
-async fn lookup_stream_type<S: AsyncRead + AsyncWrite + Unpin>(
+async fn query_stream_type<S: AsyncRead + AsyncWrite + Unpin>(
     stream: &mut S,
     host: &str,
     dns_type: u16,
     budget: TimeoutBudget,
-) -> Result<Vec<DnsRecord>, ResolverError> {
+) -> Result<Vec<WireDnsRecord>, ResolverError> {
     let id = dns_query_id();
     let query = wire::build_query(id, host, dns_type).map_err(resolver_error)?;
     let timeout = budget.remaining().map_err(resolver_error)?;
@@ -240,7 +304,7 @@ async fn lookup_stream_type<S: AsyncRead + AsyncWrite + Unpin>(
     if response.len() < 2 {
         return Err(ResolverError("short DNS response".to_string()));
     }
-    dns_records_from_response(&response, id, host, dns_type).map_err(resolver_error)
+    wire_records_from_response(&response, id, host, dns_type).map_err(resolver_error)
 }
 
 async fn run_stream_lookup<S: AsyncRead + AsyncWrite + Unpin>(
@@ -412,20 +476,40 @@ fn dns_records_from_response(
     expected_name: &str,
     expected_type: u16,
 ) -> Result<Vec<DnsRecord>, wire::WireError> {
-    let records =
-        wire::parse_response(raw, expected_id, expected_name, expected_type, DNS_CLASS_IN)?;
+    Ok(ip_records(
+        wire_records_from_response(raw, expected_id, expected_name, expected_type)?,
+        expected_type,
+    ))
+}
 
-    Ok(records
+fn wire_records_from_response(
+    raw: &[u8],
+    expected_id: u16,
+    expected_name: &str,
+    expected_type: u16,
+) -> Result<Vec<WireDnsRecord>, wire::WireError> {
+    Ok(
+        wire::parse_response(raw, expected_id, expected_name, expected_type, DNS_CLASS_IN)?
+            .into_iter()
+            .filter(|record| record.typ == expected_type && record.class == DNS_CLASS_IN)
+            .map(|record| WireDnsRecord {
+                typ: record.typ,
+                ttl: record.ttl,
+                data: record.data.to_vec(),
+            })
+            .collect(),
+    )
+}
+
+fn ip_records(records: Vec<WireDnsRecord>, expected_type: u16) -> Vec<DnsRecord> {
+    records
         .into_iter()
         .filter(|record| record.typ == expected_type)
         .filter_map(ip_record)
-        .collect())
+        .collect()
 }
 
-fn ip_record(record: wire::ResourceRecord<'_>) -> Option<DnsRecord> {
-    if record.class != DNS_CLASS_IN {
-        return None;
-    }
+fn ip_record(record: WireDnsRecord) -> Option<DnsRecord> {
     let ip = match (record.typ, record.data.len()) {
         (DNS_TYPE_A, 4) => IpAddr::from([
             record.data[0],
@@ -435,7 +519,7 @@ fn ip_record(record: wire::ResourceRecord<'_>) -> Option<DnsRecord> {
         ]),
         (DNS_TYPE_AAAA, 16) => {
             let mut octets = [0u8; 16];
-            octets.copy_from_slice(record.data);
+            octets.copy_from_slice(&record.data);
             IpAddr::from(octets)
         }
         _ => return None,
@@ -1068,6 +1152,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn arbitrary_type_query_works_over_tcp_dot_and_doq() {
+        let budget = || TimeoutBudget::new(Some(Duration::from_secs(2)));
+
+        let (tcp_addr, stop_tcp) = start_tcp_server(DnsServerMode::Success);
+        let tcp = query_tcp_type(&tcp_addr, "example.com", wire::TYPE_HTTPS, budget())
+            .await
+            .unwrap();
+        assert_https_wire_record(&tcp);
+        stop_tcp();
+
+        let server_name = ServerName::IpAddress("127.0.0.1".parse::<IpAddr>().unwrap().into());
+        let (dot_addr, stop_dot) = start_tls_server().await;
+        let dot = query_tls_type(
+            &server_name,
+            &[dot_addr],
+            "example.com",
+            wire::TYPE_HTTPS,
+            budget(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_https_wire_record(&dot);
+        stop_dot();
+
+        let (doq_addr, stop_doq) = start_quic_server().await;
+        let doq = query_quic_type(
+            &server_name,
+            &[doq_addr],
+            "example.com",
+            wire::TYPE_HTTPS,
+            budget(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_https_wire_record(&doq);
+        stop_doq();
+    }
+
+    fn assert_https_wire_record(records: &[WireDnsRecord]) {
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].typ, wire::TYPE_HTTPS);
+        assert_eq!(records[0].ttl, 44);
+        assert_eq!(
+            crate::dns::svcb::parse_rdata(&records[0].data)
+                .unwrap()
+                .port,
+            Some(8443)
+        );
+    }
+
+    #[tokio::test]
     async fn lookup_tcp_rejects_short_framed_response() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1219,8 +1356,10 @@ mod tests {
         response.extend_from_slice(&query[0..2]);
         match mode {
             DnsServerMode::Success => {
-                let answer_count =
-                    u16::from(query_type == DNS_TYPE_A || query_type == DNS_TYPE_AAAA);
+                let answer_count = u16::from(matches!(
+                    query_type,
+                    DNS_TYPE_A | DNS_TYPE_AAAA | wire::TYPE_HTTPS
+                ));
                 response.extend_from_slice(&0x8180u16.to_be_bytes());
                 response.extend_from_slice(&1u16.to_be_bytes());
                 response.extend_from_slice(&answer_count.to_be_bytes());
@@ -1243,6 +1382,9 @@ mod tests {
                     43,
                     &std::net::Ipv6Addr::LOCALHOST.octets(),
                 ),
+                wire::TYPE_HTTPS => {
+                    write_answer(&mut response, wire::TYPE_HTTPS, 44, &test_https_rdata())
+                }
                 _ => {}
             }
         }
@@ -1285,6 +1427,17 @@ mod tests {
             raw.extend_from_slice(label.as_bytes());
         }
         raw.push(0);
+    }
+
+    fn test_https_rdata() -> Vec<u8> {
+        let mut data = vec![0, 1, 0];
+        data.extend_from_slice(&1u16.to_be_bytes());
+        data.extend_from_slice(&3u16.to_be_bytes());
+        data.extend_from_slice(&[2, b'h', b'3']);
+        data.extend_from_slice(&3u16.to_be_bytes());
+        data.extend_from_slice(&2u16.to_be_bytes());
+        data.extend_from_slice(&8443u16.to_be_bytes());
+        data
     }
 
     fn write_answer(response: &mut Vec<u8>, dns_type: u16, ttl: u32, data: &[u8]) {

@@ -4,6 +4,7 @@ use std::time::Duration;
 use rustls::pki_types::ServerName;
 use url::Url;
 
+use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
 
 const DEFAULT_DNS_PORT: u16 = 53;
@@ -25,6 +26,19 @@ pub(crate) enum ParsedDnsServer {
         port: u16,
     },
     Doh(Url),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DnsRecordData {
+    Wire(Vec<u8>),
+    Text(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DnsQueryRecord {
+    pub(crate) typ: u16,
+    pub(crate) ttl: Option<u32>,
+    pub(crate) data: DnsRecordData,
 }
 
 pub(crate) fn parse_dns_server(value: &str) -> Result<ParsedDnsServer, FetchError> {
@@ -160,6 +174,78 @@ pub(crate) async fn resolve_server_host(
         )));
     }
     Ok(addrs)
+}
+
+pub(crate) async fn query_type(
+    server: &ParsedDnsServer,
+    host: &str,
+    dns_type: u16,
+    dns_type_name: &str,
+    budget: TimeoutBudget,
+    doh_tls_config: Option<rustls::ClientConfig>,
+) -> Result<Vec<DnsQueryRecord>, FetchError> {
+    let wire_records = match server {
+        ParsedDnsServer::Udp(addr) => {
+            crate::dns::resolver::query_udp_type(addr, host, dns_type, budget).await
+        }
+        ParsedDnsServer::Tcp(addr) => {
+            crate::dns::resolver::query_tcp_type(addr, host, dns_type, budget).await
+        }
+        ParsedDnsServer::Tls {
+            server_name,
+            host: server_host,
+            port,
+        } => {
+            let addrs = resolve_server_host(server_host, *port, budget.remaining()?).await?;
+            crate::dns::resolver::query_tls_type(server_name, &addrs, host, dns_type, budget, false)
+                .await
+        }
+        ParsedDnsServer::Quic {
+            server_name,
+            host: server_host,
+            port,
+        } => {
+            let addrs = resolve_server_host(server_host, *port, budget.remaining()?).await?;
+            crate::dns::resolver::query_quic_type(
+                server_name,
+                &addrs,
+                host,
+                dns_type,
+                budget,
+                false,
+            )
+            .await
+        }
+        ParsedDnsServer::Doh(url) => {
+            let client = crate::dns::doh::client_with_budget_and_tls_config(budget, doh_tls_config)
+                .map_err(|err| FetchError::Message(err.to_string()))?;
+            let answers =
+                crate::dns::doh::lookup_doh_records_with_client(&client, url, host, dns_type_name)
+                    .await
+                    .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?;
+            return Ok(answers
+                .into_iter()
+                .map(|answer| DnsQueryRecord {
+                    typ: answer.answer_type,
+                    ttl: answer.ttl,
+                    data: DnsRecordData::Text(answer.data),
+                })
+                .collect());
+        }
+    };
+
+    wire_records
+        .map(|records| {
+            records
+                .into_iter()
+                .map(|record| DnsQueryRecord {
+                    typ: record.typ,
+                    ttl: Some(record.ttl),
+                    data: DnsRecordData::Wire(record.data),
+                })
+                .collect()
+        })
+        .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
 }
 
 pub(crate) async fn lookup_ips(

@@ -22,7 +22,16 @@ pub(super) async fn lookup_https_records(
     let Some(server_addr) = resolv_conf_nameserver() else {
         return Ok(Vec::new());
     };
-    super::lookup_udp_https_records(server_addr, host, timeout).await
+    let records = crate::dns::custom::query_type(
+        &crate::dns::custom::ParsedDnsServer::Udp(server_addr),
+        host,
+        crate::dns::wire::TYPE_HTTPS,
+        "HTTPS",
+        timeout,
+        None,
+    )
+    .await?;
+    Ok(super::svcb_records_from_query(records))
 }
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]
