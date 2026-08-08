@@ -1645,6 +1645,32 @@ mod tests {
     }
 
     #[test]
+    fn test_platform_records_deduplicate_addresses_in_first_seen_order() {
+        let records = records_from_ip_addrs([
+            "2001:db8::2".parse().unwrap(),
+            "192.0.2.2".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+            "192.0.2.2".parse().unwrap(),
+            "192.0.2.1".parse().unwrap(),
+            "2001:db8::2".parse().unwrap(),
+        ]);
+
+        let actual: Vec<_> = records
+            .iter()
+            .map(|record| (record.typ.as_str(), record.value.as_str()))
+            .collect();
+        assert_eq!(
+            actual,
+            [
+                ("AAAA", "2001:db8::2"),
+                ("A", "192.0.2.2"),
+                ("AAAA", "2001:db8::1"),
+                ("A", "192.0.2.1"),
+            ]
+        );
+    }
+
+    #[test]
     fn test_render_shows_unavailable_ttl_per_record() {
         let out = render(&Inspection {
             host: "example.com".to_string(),
