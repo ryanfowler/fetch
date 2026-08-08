@@ -10,6 +10,7 @@ use base64::Engine;
 mod system;
 
 const DNS_TYPE_HTTPS: u16 = wire::TYPE_HTTPS;
+const MAX_ALIAS_CHAIN_DEPTH: usize = 8;
 const KEY_MANDATORY: u16 = 0;
 const KEY_ALPN: u16 = 1;
 const KEY_NO_DEFAULT_ALPN: u16 = 2;
@@ -67,6 +68,16 @@ struct SvcParam {
 pub(crate) enum HttpsRecordResolver<'a> {
     Custom(&'a str),
     System,
+}
+
+/// The result of RFC 9460 service binding resolution.
+///
+/// `fallback_target` is the effective name to resolve with A/AAAA when the
+/// final name has no usable ServiceMode records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HttpsLookup {
+    pub(crate) records: Vec<SvcbRecord>,
+    pub(crate) fallback_target: String,
 }
 
 pub(crate) fn parse_rdata(raw: &[u8]) -> Option<SvcbRecord> {
@@ -236,7 +247,7 @@ pub(crate) async fn lookup_https_records(
     resolver: HttpsRecordResolver<'_>,
     host: &str,
     timeout: Option<Duration>,
-) -> Result<Vec<SvcbRecord>, FetchError> {
+) -> Result<HttpsLookup, FetchError> {
     lookup_https_records_with_doh_tls_config(resolver, host, timeout, None).await
 }
 
@@ -245,28 +256,98 @@ pub(crate) async fn lookup_https_records_with_doh_tls_config(
     host: &str,
     timeout: Option<Duration>,
     doh_tls_config: Option<rustls::ClientConfig>,
-) -> Result<Vec<SvcbRecord>, FetchError> {
-    if let Ok(_ip) = host.parse::<IpAddr>() {
-        return Ok(Vec::new());
+) -> Result<HttpsLookup, FetchError> {
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(HttpsLookup {
+            records: Vec::new(),
+            fallback_target: host.to_string(),
+        });
     }
-    match resolver {
-        HttpsRecordResolver::Custom(server) => {
-            let server = crate::dns::custom::parse_dns_server(server)?;
-            let records = crate::dns::custom::query_type(
-                &server,
-                host,
-                DNS_TYPE_HTTPS,
-                "HTTPS",
-                TimeoutBudget::new(timeout),
-                doh_tls_config,
-            )
-            .await?;
-            svcb_records_from_query(records)
+
+    let budget = TimeoutBudget::new(timeout);
+    let custom_server = match resolver {
+        HttpsRecordResolver::Custom(server) => Some(crate::dns::custom::parse_dns_server(server)?),
+        HttpsRecordResolver::System => None,
+    };
+    let original = canonical_host(host);
+    let mut current = original.clone();
+    let mut visited = std::collections::HashSet::new();
+    let mut alias_ttl = None;
+
+    for depth in 0..=MAX_ALIAS_CHAIN_DEPTH {
+        if !visited.insert(current.clone()) {
+            return Ok(HttpsLookup {
+                records: Vec::new(),
+                fallback_target: original,
+            });
         }
-        HttpsRecordResolver::System => {
-            system::lookup_https_records(host, TimeoutBudget::new(timeout)).await
+
+        let mut records = match &custom_server {
+            Some(server) => {
+                let records = crate::dns::custom::query_type(
+                    server,
+                    &current,
+                    DNS_TYPE_HTTPS,
+                    "HTTPS",
+                    budget,
+                    doh_tls_config.clone(),
+                )
+                .await?;
+                svcb_records_from_query(records)?
+            }
+            None => system::lookup_https_records(&current, budget).await?,
+        };
+
+        let aliases = records
+            .iter()
+            .filter(|record| record.is_alias_mode())
+            .collect::<Vec<_>>();
+        if aliases.is_empty() {
+            for record in &mut records {
+                if let Some(limit) = alias_ttl {
+                    record.ttl = record.ttl.map(|ttl| ttl.min(limit));
+                }
+                if record.target == "." {
+                    record.target = dns_name(&current);
+                }
+            }
+            return Ok(HttpsLookup {
+                records,
+                fallback_target: current,
+            });
         }
+        if depth == MAX_ALIAS_CHAIN_DEPTH {
+            return Ok(HttpsLookup {
+                records: Vec::new(),
+                fallback_target: original,
+            });
+        }
+
+        // RFC 9460 section 2.4.2 requires ServiceMode records to be ignored
+        // when AliasMode records are present. Multiple AliasMode records are
+        // discouraged, but clients select one rather than rejecting the set.
+        let alias = aliases[rand::random_range(0..aliases.len())];
+        let target = canonical_host(&alias.target);
+        if target.is_empty() || target == "." {
+            return Err(FetchError::Runtime(
+                "invalid HTTPS DNS AliasMode target".to_string(),
+            ));
+        }
+        if let Some(ttl) = alias.ttl {
+            alias_ttl = Some(alias_ttl.map_or(ttl, |limit: u32| limit.min(ttl)));
+        }
+        current = target;
     }
+
+    unreachable!("alias depth is bounded by the loop")
+}
+
+fn canonical_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn dns_name(host: &str) -> String {
+    format!("{}.", host.trim_end_matches('.'))
 }
 
 pub(super) fn svcb_records_from_query(
@@ -399,7 +480,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, UdpSocket};
     use std::thread;
 
     use super::*;
@@ -430,6 +511,58 @@ mod tests {
             out.extend_from_slice(&param);
         }
         out
+    }
+
+    type AliasAnswers = Vec<(String, Vec<(u32, Vec<u8>)>)>;
+
+    fn start_udp_alias_server(
+        answers: AliasAnswers,
+    ) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let addr = socket.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let mut raw = [0u8; 2048];
+            for (expected_name, records) in answers {
+                let (len, peer) = socket.recv_from(&mut raw).unwrap();
+                let query = &raw[..len];
+                let mut offset = 12;
+                let mut labels = Vec::new();
+                while query[offset] != 0 {
+                    let label_len = usize::from(query[offset]);
+                    offset += 1;
+                    labels.push(std::str::from_utf8(&query[offset..offset + label_len]).unwrap());
+                    offset += label_len;
+                }
+                offset += 1;
+                assert_eq!(labels.join("."), expected_name);
+                assert_eq!(
+                    u16::from_be_bytes([query[offset], query[offset + 1]]),
+                    DNS_TYPE_HTTPS
+                );
+                let question_end = offset + 4;
+
+                let mut response = Vec::new();
+                response.extend_from_slice(&query[..2]);
+                response.extend_from_slice(&0x8180u16.to_be_bytes());
+                response.extend_from_slice(&1u16.to_be_bytes());
+                response.extend_from_slice(&(records.len() as u16).to_be_bytes());
+                response.extend_from_slice(&0u32.to_be_bytes());
+                response.extend_from_slice(&query[12..question_end]);
+                for (ttl, rdata) in records {
+                    response.extend_from_slice(&[0xc0, 0x0c]);
+                    response.extend_from_slice(&DNS_TYPE_HTTPS.to_be_bytes());
+                    response.extend_from_slice(&wire::CLASS_IN.to_be_bytes());
+                    response.extend_from_slice(&ttl.to_be_bytes());
+                    response.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+                    response.extend_from_slice(&rdata);
+                }
+                socket.send_to(&response, peer).unwrap();
+            }
+        });
+        (addr, handle)
     }
 
     #[test]
@@ -560,10 +693,218 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].port, Some(8443));
-        assert_eq!(records[0].ttl, Some(30));
+        assert_eq!(records.records.len(), 1);
+        assert_eq!(records.records[0].port, Some(8443));
+        assert_eq!(records.records[0].ttl, Some(30));
         handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn follows_alias_mode_and_returns_final_service_records() {
+        let (addr, server) = start_udp_alias_server(vec![
+            (
+                "example.com".to_string(),
+                vec![(20, record(0, &["svc", "example"], Vec::new()))],
+            ),
+            (
+                "svc.example".to_string(),
+                vec![(60, record(1, &[], vec![param(KEY_ALPN, &[2, b'h', b'3'])]))],
+            ),
+        ]);
+
+        let lookup = lookup_https_records(
+            HttpsRecordResolver::Custom(&addr.to_string()),
+            "EXAMPLE.com.",
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(lookup.fallback_target, "svc.example");
+        assert_eq!(lookup.records.len(), 1);
+        assert_eq!(lookup.records[0].target, "svc.example.");
+        assert_eq!(lookup.records[0].ttl, Some(20));
+        assert!(!lookup.records[0].is_alias_mode());
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn alias_target_nodata_returns_the_effective_fallback_target() {
+        let (addr, server) = start_udp_alias_server(vec![
+            (
+                "example.com".to_string(),
+                vec![(60, record(0, &["fallback", "example"], Vec::new()))],
+            ),
+            ("fallback.example".to_string(), Vec::new()),
+        ]);
+
+        let lookup = lookup_https_records(
+            HttpsRecordResolver::Custom(&addr.to_string()),
+            "example.com",
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert!(lookup.records.is_empty());
+        assert_eq!(lookup.fallback_target, "fallback.example");
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn alias_queries_share_the_remaining_timeout() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = socket.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut raw = [0u8; 2048];
+            let (len, peer) = socket.recv_from(&mut raw).unwrap();
+            let query = &raw[..len];
+            let question_end = query[12..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|offset| offset + 17)
+                .unwrap();
+            let alias = record(0, &["slow", "example"], Vec::new());
+            let mut response = Vec::new();
+            response.extend_from_slice(&query[..2]);
+            response.extend_from_slice(&0x8180u16.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&0u32.to_be_bytes());
+            response.extend_from_slice(&query[12..question_end]);
+            response.extend_from_slice(&[0xc0, 0x0c]);
+            response.extend_from_slice(&DNS_TYPE_HTTPS.to_be_bytes());
+            response.extend_from_slice(&wire::CLASS_IN.to_be_bytes());
+            response.extend_from_slice(&60u32.to_be_bytes());
+            response.extend_from_slice(&(alias.len() as u16).to_be_bytes());
+            response.extend_from_slice(&alias);
+            socket.send_to(&response, peer).unwrap();
+
+            let _ = socket.recv_from(&mut raw).unwrap();
+            thread::sleep(Duration::from_millis(100));
+        });
+        let started = std::time::Instant::now();
+
+        let err = lookup_https_records(
+            HttpsRecordResolver::Custom(&addr.to_string()),
+            "example.com",
+            Some(Duration::from_millis(30)),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_millis(90));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn alias_mode_loops_fall_back_to_the_original_name() {
+        let (addr, server) = start_udp_alias_server(vec![
+            (
+                "a.example".to_string(),
+                vec![(60, record(0, &["b", "example"], Vec::new()))],
+            ),
+            (
+                "b.example".to_string(),
+                vec![(60, record(0, &["A", "example"], Vec::new()))],
+            ),
+        ]);
+
+        let lookup = lookup_https_records(
+            HttpsRecordResolver::Custom(&addr.to_string()),
+            "a.example",
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert!(lookup.records.is_empty());
+        assert_eq!(lookup.fallback_target, "a.example");
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_mode_rrset_ignores_service_records_and_follows_alias() {
+        let (addr, server) = start_udp_alias_server(vec![
+            (
+                "example.com".to_string(),
+                vec![
+                    (60, record(1, &[], vec![param(KEY_ALPN, &[2, b'h', b'3'])])),
+                    (60, record(0, &["alias", "example"], Vec::new())),
+                ],
+            ),
+            (
+                "alias.example".to_string(),
+                vec![(30, record(1, &[], vec![param(KEY_ALPN, &[2, b'h', b'2'])]))],
+            ),
+        ]);
+
+        let lookup = lookup_https_records(
+            HttpsRecordResolver::Custom(&addr.to_string()),
+            "example.com",
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(lookup.fallback_target, "alias.example");
+        assert_eq!(lookup.records[0].alpn, ["h2"]);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn multiple_alias_records_are_accepted() {
+        let (addr, server) = start_udp_alias_server(vec![
+            (
+                "example.com".to_string(),
+                vec![
+                    (60, record(0, &["alias", "example"], Vec::new())),
+                    (60, record(0, &["alias", "example"], Vec::new())),
+                ],
+            ),
+            ("alias.example".to_string(), Vec::new()),
+        ]);
+
+        let lookup = lookup_https_records(
+            HttpsRecordResolver::Custom(&addr.to_string()),
+            "example.com",
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert!(lookup.records.is_empty());
+        assert_eq!(lookup.fallback_target, "alias.example");
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn alias_mode_depth_limit_falls_back_to_the_original_name() {
+        let answers = (0..=MAX_ALIAS_CHAIN_DEPTH)
+            .map(|index| {
+                (
+                    format!("n{index}.example"),
+                    vec![(
+                        60,
+                        record(0, &[&format!("n{}", index + 1), "example"], Vec::new()),
+                    )],
+                )
+            })
+            .collect();
+        let (addr, server) = start_udp_alias_server(answers);
+
+        let lookup = lookup_https_records(
+            HttpsRecordResolver::Custom(&addr.to_string()),
+            "n0.example",
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert!(lookup.records.is_empty());
+        assert_eq!(lookup.fallback_target, "n0.example");
+        server.join().unwrap();
     }
 
     #[tokio::test]
@@ -602,7 +943,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(records.is_empty());
+        assert!(records.records.is_empty());
+        assert_eq!(records.fallback_target, "missing.example");
         handle.join().unwrap();
     }
 
@@ -616,7 +958,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(records.is_empty());
+        assert!(records.records.is_empty());
+        assert_eq!(records.fallback_target, "127.0.0.1");
     }
 
     #[test]

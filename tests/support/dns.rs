@@ -14,6 +14,45 @@ pub(crate) fn start_udp_dns_server(host: &'static str, ip: Ipv4Addr) -> String {
     start_udp_dns_server_with_hosts(vec![(host, ip)])
 }
 
+pub(crate) fn start_udp_dns_server_with_https_alias(
+    host: &'static str,
+    origin_ip: Option<Ipv4Addr>,
+    target: &'static str,
+    target_ip: Ipv4Addr,
+    https_delay: Duration,
+) -> String {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            let answer = if name == host && qtype == TYPE_HTTPS {
+                Some((TYPE_HTTPS, https_alias_rdata(target)))
+            } else if name == host && qtype == TYPE_A {
+                origin_ip.map(|ip| (TYPE_A, ip.octets().to_vec()))
+            } else if name == target && qtype == TYPE_A {
+                Some((TYPE_A, target_ip.octets().to_vec()))
+            } else {
+                None
+            };
+            let response = dns_response(&buf[..n], question_end, answer);
+            if name == host && qtype == TYPE_HTTPS && !https_delay.is_zero() {
+                let socket = socket.try_clone().expect("clone udp DNS socket");
+                thread::spawn(move || {
+                    thread::sleep(https_delay);
+                    let _ = socket.send_to(&response, peer);
+                });
+            } else {
+                let _ = socket.send_to(&response, peer);
+            }
+        }
+    });
+    addr
+}
+
 pub(crate) fn start_udp_dns_server_with_https(
     host: &'static str,
     ip: Ipv4Addr,
@@ -387,6 +426,13 @@ fn dns_response_many(query: &[u8], question_end: usize, answers: Vec<(u16, Vec<u
         resp.extend_from_slice(&data);
     }
     resp
+}
+
+fn https_alias_rdata(target: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0_u16.to_be_bytes());
+    write_dns_name(&mut out, target);
+    out
 }
 
 fn https_rdata(port: u16, ipv4_hint: Ipv4Addr) -> Vec<u8> {

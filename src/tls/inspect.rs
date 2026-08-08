@@ -233,7 +233,7 @@ async fn lookup_inspect_ech_candidates(
         ))
         .await
     {
-        Ok(records) => records,
+        Ok(lookup) => lookup.records,
         Err(err) => {
             let authenticated = cli
                 .dns_server
