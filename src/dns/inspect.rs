@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -352,6 +352,9 @@ async fn lookup(
         return Ok(out);
     }
 
+    // All record types share one absolute inspection deadline. Without an
+    // explicit timeout, use the same finite default as other DNS operations.
+    let timeout = crate::dns::util::dns_transaction_budget(timeout);
     let doh_client = match &target {
         ResolverTarget::Doh { .. } => Some(
             crate::dns::doh::client_with_budget(timeout)
@@ -359,27 +362,20 @@ async fn lookup(
         ),
         _ => None,
     };
-    let results = timeout
-        .run(async {
-            let results = match target {
-                // DoH already reuses its client, while the other inspection
-                // transports are explicitly grouped by connection below.
-                ResolverTarget::Doh { url, .. } => {
-                    lookup_doh_all(doh_client.as_ref().expect("DoH client"), &url, host).await
-                }
-                ResolverTarget::Udp { addr, .. } => lookup_udp_all(addr, host, timeout).await,
-                ResolverTarget::Tcp { addr, .. } => lookup_tcp_all(addr, host, timeout).await,
-                ResolverTarget::Tls {
-                    server_name, addrs, ..
-                } => lookup_tls_all(&server_name, &addrs, host, timeout, false).await,
-                ResolverTarget::Quic {
-                    server_name, addrs, ..
-                } => lookup_quic_all(&server_name, &addrs, host, timeout, false).await,
-                ResolverTarget::Default { .. } => unreachable!("default resolver handled earlier"),
-            };
-            Ok::<_, FetchError>(results)
-        })
-        .await?;
+    let results = match target {
+        ResolverTarget::Doh { url, .. } => {
+            lookup_doh_all(doh_client.as_ref().expect("DoH client"), &url, host).await
+        }
+        ResolverTarget::Udp { addr, .. } => lookup_udp_all(addr, host, timeout).await,
+        ResolverTarget::Tcp { addr, .. } => lookup_tcp_all(addr, host, timeout).await,
+        ResolverTarget::Tls {
+            server_name, addrs, ..
+        } => lookup_tls_all(&server_name, &addrs, host, timeout, false).await,
+        ResolverTarget::Quic {
+            server_name, addrs, ..
+        } => lookup_quic_all(&server_name, &addrs, host, timeout, false).await,
+        ResolverTarget::Default { .. } => unreachable!("default resolver handled earlier"),
+    };
 
     let mut first_err: Option<String> = None;
     let mut failures = Vec::new();
@@ -498,19 +494,17 @@ async fn lookup_udp_all(
     host: &str,
     timeout: TimeoutBudget,
 ) -> Vec<QueryResult> {
-    let socket = match crate::dns::transport::udp_socket(server_addr, timeout).await {
-        Ok(socket) => socket,
-        Err(err) => return failed_query_results(err),
-    };
-
-    let mut results = Vec::with_capacity(INSPECT_TYPES.len());
-    for query_type in INSPECT_TYPES.iter().copied() {
-        results.push((
-            query_type,
-            lookup_udp_record(&socket, server_addr, host, query_type, timeout).await,
-        ));
-    }
-    results
+    // A connected socket per query gives each concurrent receive an isolated
+    // datagram queue. ResponseMatcher still validates the random ID and the
+    // complete question before accepting a packet.
+    join_all(INSPECT_TYPES.iter().copied().map(|query_type| async move {
+        let result = match crate::dns::transport::udp_socket(server_addr, timeout).await {
+            Ok(socket) => lookup_udp_record(&socket, server_addr, host, query_type, timeout).await,
+            Err(err) => Err(QueryError::other(err)),
+        };
+        (query_type, result)
+    }))
+    .await
 }
 
 async fn lookup_udp_record(
@@ -583,39 +577,110 @@ async fn lookup_stream_all<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let mut results = Vec::with_capacity(INSPECT_TYPES.len());
-    for query_type in INSPECT_TYPES.iter().copied() {
-        results.push((
-            query_type,
-            lookup_stream_record(stream, host, query_type, timeout).await,
+    // INSPECT_TYPES is a fixed, small in-flight bound. Pipeline the complete
+    // batch on one TCP or TLS connection, then correlate out-of-order replies.
+    let mut ids = HashSet::with_capacity(INSPECT_TYPES.len());
+    let mut queries = Vec::with_capacity(INSPECT_TYPES.len());
+    let mut results: Vec<Option<Result<Vec<Record>, QueryError>>> =
+        (0..INSPECT_TYPES.len()).map(|_| None).collect();
+
+    for (index, query_type) in INSPECT_TYPES.iter().copied().enumerate() {
+        let id = loop {
+            let id = dns_query_id();
+            if ids.insert(id) {
+                break id;
+            }
+        };
+        match wire::build_query(id, host, query_type.dns_type) {
+            Ok(raw) => queries.push((index, query_type, id, raw)),
+            Err(err) => results[index] = Some(Err(QueryError::other(err))),
+        }
+    }
+
+    let query_timeout = udp_dns_timeout(timeout.remaining().unwrap_or(Some(Duration::ZERO)));
+    let deadline = tokio::time::Instant::now() + query_timeout;
+    let mut pending: HashMap<u16, (usize, QueryType)> = queries
+        .iter()
+        .map(|(index, query_type, id, _)| (*id, (*index, *query_type)))
+        .collect();
+
+    for (_, _, _, raw) in &queries {
+        let write = crate::dns::transport::write_framed_query(stream, raw);
+        match tokio::time::timeout_at(deadline, write).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                fail_pending_stream_queries(&mut results, &pending, err);
+                pending.clear();
+                break;
+            }
+            Err(_) => {
+                fail_pending_stream_queries(&mut results, &pending, "DNS lookup timed out");
+                pending.clear();
+                break;
+            }
+        }
+    }
+
+    while !pending.is_empty() {
+        let response = match tokio::time::timeout_at(
+            deadline,
+            crate::dns::transport::read_framed_response(stream),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(err)) => {
+                fail_pending_stream_queries(&mut results, &pending, err);
+                break;
+            }
+            Err(_) => {
+                fail_pending_stream_queries(&mut results, &pending, "DNS lookup timed out");
+                break;
+            }
+        };
+        let Ok(id) = wire::read_u16(&response, 0) else {
+            continue;
+        };
+        let Some(&(index, query_type)) = pending.get(&id) else {
+            continue;
+        };
+        let matcher = wire::ResponseMatcher::new(id, host, query_type.dns_type, DNS_CLASS_IN);
+        if !matcher.matches(&response) {
+            continue;
+        }
+        pending.remove(&id);
+        results[index] = Some(inspect_records_from_response(
+            &response,
+            id,
+            host,
+            query_type.dns_type,
         ));
     }
-    results
+
+    INSPECT_TYPES
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, query_type)| {
+            (
+                query_type,
+                results[index]
+                    .take()
+                    .unwrap_or_else(|| Err(QueryError::other("DNS lookup timed out"))),
+            )
+        })
+        .collect()
 }
 
-async fn lookup_stream_record<S>(
-    stream: &mut S,
-    host: &str,
-    query_type: QueryType,
-    timeout: TimeoutBudget,
-) -> Result<Vec<Record>, QueryError>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let id = dns_query_id();
-    let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
-    let query_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
-    let response = tokio::time::timeout(query_timeout, async {
-        crate::dns::transport::write_framed_query(stream, &raw)
-            .await
-            .map_err(QueryError::other)?;
-        crate::dns::transport::read_framed_response(stream)
-            .await
-            .map_err(QueryError::other)
-    })
-    .await
-    .map_err(|_| QueryError::other("DNS lookup timed out"))??;
-    inspect_records_from_response(&response, id, host, query_type.dns_type)
+fn fail_pending_stream_queries(
+    results: &mut [Option<Result<Vec<Record>, QueryError>>],
+    pending: &HashMap<u16, (usize, QueryType)>,
+    error: impl ToString,
+) {
+    let error = error.to_string();
+    for &(index, _) in pending.values() {
+        results[index] = Some(Err(QueryError::other(&error)));
+    }
 }
 
 async fn lookup_quic_all(
@@ -1270,16 +1335,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_lookup_stream_all_reuses_one_connection_in_query_order() {
+    async fn test_lookup_stream_all_pipelines_and_correlates_out_of_order_responses() {
         let (mut client, mut server) = tokio::io::duplex(16 * 1024);
         let server_task = tokio::spawn(async move {
-            let mut query_types = Vec::with_capacity(INSPECT_TYPES.len());
+            let mut queries = Vec::with_capacity(INSPECT_TYPES.len());
             for _ in INSPECT_TYPES {
-                let query = crate::dns::transport::read_framed_response(&mut server)
-                    .await
-                    .unwrap();
-                query_types.push(read_question_type(&query).unwrap());
-                let response = inspect_response_header(&query, 0x8180, false);
+                queries.push(
+                    crate::dns::transport::read_framed_response(&mut server)
+                        .await
+                        .unwrap(),
+                );
+            }
+            let query_types = queries
+                .iter()
+                .map(|query| read_question_type(query).unwrap())
+                .collect::<Vec<_>>();
+            for query in queries.iter().rev() {
+                let response = inspect_response_header(query, 0x8180, false);
                 crate::dns::transport::write_framed_query(&mut server, &response)
                     .await
                     .unwrap();
@@ -1299,6 +1371,57 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(results.iter().all(|(_, result)| result.is_ok()));
+        assert_eq!(
+            results
+                .iter()
+                .map(|(query_type, _)| query_type.dns_type)
+                .collect::<Vec<_>>(),
+            query_types
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lookup_stream_all_dropped_type_does_not_delay_other_types() {
+        let (mut client, mut server) = tokio::io::duplex(16 * 1024);
+        let server_task = tokio::spawn(async move {
+            let mut queries = Vec::with_capacity(INSPECT_TYPES.len());
+            for _ in INSPECT_TYPES {
+                queries.push(
+                    crate::dns::transport::read_framed_response(&mut server)
+                        .await
+                        .unwrap(),
+                );
+            }
+            for query in queries.iter().rev() {
+                if read_question_type(query) == Some(DNS_TYPE_AAAA) {
+                    continue;
+                }
+                let response = inspect_response_header(query, 0x8180, false);
+                crate::dns::transport::write_framed_query(&mut server, &response)
+                    .await
+                    .unwrap();
+            }
+            std::future::pending::<()>().await;
+        });
+
+        let start = Instant::now();
+        let results = lookup_stream_all(
+            &mut client,
+            "example.com",
+            TimeoutBudget::new(Some(Duration::from_millis(150))),
+        )
+        .await;
+
+        assert!(start.elapsed() < Duration::from_millis(350));
+        assert_eq!(results.len(), INSPECT_TYPES.len());
+        for (query_type, result) in results {
+            if query_type.dns_type == DNS_TYPE_AAAA {
+                assert!(result.is_err());
+            } else {
+                assert!(result.is_ok(), "{} did not finish", query_type.label);
+            }
+        }
+        server_task.abort();
     }
 
     #[tokio::test]
@@ -1336,6 +1459,43 @@ mod tests {
         assert_eq!(results.len(), INSPECT_TYPES.len());
         assert!(results.iter().all(|(_, result)| result.is_ok()));
         assert_eq!(connections.load(Ordering::SeqCst), 1);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_lookup_udp_all_dropped_type_does_not_delay_other_types() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            loop {
+                let (size, peer) = socket.recv_from(&mut buf).await.unwrap();
+                let query = &buf[..size];
+                if read_question_type(query) == Some(DNS_TYPE_AAAA) {
+                    continue;
+                }
+                let response = inspect_response_header(query, 0x8180, false);
+                socket.send_to(&response, peer).await.unwrap();
+            }
+        });
+
+        let start = Instant::now();
+        let results = lookup_udp_all(
+            addr,
+            "example.com",
+            TimeoutBudget::new(Some(Duration::from_millis(150))),
+        )
+        .await;
+
+        assert!(start.elapsed() < Duration::from_millis(350));
+        assert_eq!(results.len(), INSPECT_TYPES.len());
+        for (query_type, result) in results {
+            if query_type.dns_type == DNS_TYPE_AAAA {
+                assert!(result.is_err());
+            } else {
+                assert!(result.is_ok(), "{} did not finish", query_type.label);
+            }
+        }
         server_task.abort();
     }
 
