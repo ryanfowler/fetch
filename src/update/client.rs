@@ -226,6 +226,7 @@ impl UpdateClient {
             });
         };
 
+        let ech_dns_warning_emitted = std::sync::atomic::AtomicBool::new(false);
         let context = client::ClientBuildContext {
             mode: client::ClientMode::Request(None),
             request_timeout: None,
@@ -234,6 +235,7 @@ impl UpdateClient {
             session: None,
             connect_timing: None,
             har: None,
+            ech_dns_warning_emitted: &ech_dns_warning_emitted,
         };
         client::build_client_for_url(cli, url, &context).await
     }

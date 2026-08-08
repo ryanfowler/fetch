@@ -83,6 +83,32 @@ pub(crate) fn generate_ech_grease_config() -> EchGreaseConfig {
     EchGreaseConfig::new(suite, public_key)
 }
 
+/// Warns when ECH discovery can reveal the target name on the DNS transport.
+pub(crate) fn warn_for_unverified_dns_transport(
+    cli: &Cli,
+    emitted: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<(), FetchError> {
+    if cli.verbose < 3 || cli.silent {
+        return Ok(());
+    }
+    let security =
+        crate::dns::custom::dns_transport_security(cli.dns_server.as_deref(), !cli.insecure)?;
+    if security == crate::dns::custom::DnsTransportSecurity::Verified {
+        return Ok(());
+    }
+    if emitted.is_some_and(|emitted| emitted.swap(true, std::sync::atomic::Ordering::Relaxed)) {
+        return Ok(());
+    }
+
+    let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
+    core::write_warning_msg_no_flush(
+        &mut printer,
+        "ECH discovery is using DNS without verified transport security; the DNS query can reveal the hostname",
+    );
+    core::flush_stderr(printer);
+    Ok(())
+}
+
 /// Handle a failure to discover ECH configuration in DNS.
 ///
 /// Required ECH reports the original discovery error. Automatic ECH can use

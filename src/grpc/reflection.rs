@@ -54,6 +54,7 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
         .flatten();
     crate::tls::install_default_crypto_provider();
     let connect_timing = crate::http::client::ConnectionTiming::default();
+    let ech_dns_warning_emitted = std::sync::atomic::AtomicBool::new(false);
     let client_build = crate::http::client::ClientBuildContext {
         mode: crate::http::client::ClientMode::GrpcReflection,
         request_timeout,
@@ -62,6 +63,7 @@ pub async fn execute_discovery(cli: &Cli) -> Result<i32, FetchError> {
         session: session.as_ref(),
         connect_timing: Some(&connect_timing),
         har: None,
+        ech_dns_warning_emitted: &ech_dns_warning_emitted,
     };
     let client = crate::http::client::build_client_for_url(cli, &url, &client_build)
         .await?

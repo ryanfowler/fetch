@@ -214,6 +214,7 @@ async fn lookup_inspect_ech_candidates(
     host: &str,
     timeout: TimeoutBudget,
 ) -> Result<Vec<Vec<u8>>, FetchError> {
+    super::ech::warn_for_unverified_dns_transport(cli, None)?;
     let resolver = cli
         .dns_server
         .as_deref()

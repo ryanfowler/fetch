@@ -200,6 +200,53 @@ fn ech_dns_discovery_failure_is_reported_and_auto_falls_back() {
 }
 
 #[test]
+fn ech_discovery_warns_once_for_unverified_dns_and_silent_suppresses_it() {
+    const WARNING: &str = "ECH discovery is using DNS without verified transport security";
+    let target = start_tls_server(|_| TestResponse::ok("ECH DNS warning"));
+    let target_port = Url::parse(&target.url).unwrap().port().unwrap();
+    let target_url = format!("https://fetch-ech-dns-warning-b.test:{target_port}/warning");
+    let redirect = start_tls_server(move |_| {
+        TestResponse::status(302, "Found", "").header("Location", &target_url)
+    });
+    let redirect_port = Url::parse(&redirect.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server_with_hosts(vec![
+        ("fetch-ech-dns-warning-a.test.", Ipv4Addr::new(127, 0, 0, 1)),
+        ("fetch-ech-dns-warning-b.test.", Ipv4Addr::new(127, 0, 0, 1)),
+    ]);
+    let url = format!("https://fetch-ech-dns-warning-a.test:{redirect_port}/redirect");
+
+    let verbose = run_fetch(&[
+        "-vvv",
+        "--insecure",
+        "--dns-server",
+        &dns_addr,
+        "--ech",
+        "auto",
+        &url,
+    ]);
+    assert_exit(&verbose, 0);
+    assert_eq!(
+        verbose.stderr.matches(WARNING).count(),
+        1,
+        "{}",
+        verbose.stderr
+    );
+
+    let silent = run_fetch(&[
+        "-vvv",
+        "--silent",
+        "--insecure",
+        "--dns-server",
+        &dns_addr,
+        "--ech",
+        "auto",
+        &url,
+    ]);
+    assert_exit(&silent, 0);
+    assert!(!silent.stderr.contains(WARNING), "{}", silent.stderr);
+}
+
+#[test]
 fn ech_dns_timeout_is_reported_instead_of_no_configuration() {
     let tls = start_tls_server(|_| TestResponse::ok("ECH timeout"));
     let port = Url::parse(&tls.url).unwrap().port().unwrap();
@@ -248,6 +295,7 @@ fn inspect_ech_discovery_uses_custom_doh_tls_config() {
 
     let result = run_fetch(&[
         "--inspect-tls",
+        "-vvv",
         "--ech",
         "auto",
         "--ca-cert",
@@ -259,6 +307,13 @@ fn inspect_ech_discovery_uses_custom_doh_tls_config() {
 
     assert_exit(&result, 0);
     assert_eq!(https_queries.load(Ordering::SeqCst), 1, "{}", result.stderr);
+    assert!(
+        !result
+            .stderr
+            .contains("ECH discovery is using DNS without verified transport security"),
+        "{}",
+        result.stderr
+    );
 }
 
 #[test]
