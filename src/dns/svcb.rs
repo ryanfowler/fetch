@@ -1588,7 +1588,7 @@ mod tests {
             response.extend_from_slice(&query[..2]);
             response.extend_from_slice(&0x8183u16.to_be_bytes());
             response.extend_from_slice(&1u16.to_be_bytes());
-            response.extend_from_slice(&0u32.to_be_bytes());
+            response.extend_from_slice(&[0; 6]);
             response.extend_from_slice(&query[12..question_end]);
             stream
                 .write_all(&(response.len() as u16).to_be_bytes())

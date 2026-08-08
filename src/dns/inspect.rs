@@ -1196,7 +1196,7 @@ mod tests {
             out.contains("warning: DNS queries for AAAA"),
             "output: {out}"
         );
-        assert!(out.contains("NXDomain"), "output: {out}");
+        assert!(out.contains("NXDOMAIN"), "output: {out}");
         assert!(out.contains("results are incomplete"), "output: {out}");
         task.abort();
     }
@@ -1839,7 +1839,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.to_string().contains("NXDomain"));
+        assert!(err.to_string().contains("NXDOMAIN"));
         task.abort();
     }
 

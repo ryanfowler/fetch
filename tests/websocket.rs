@@ -1305,11 +1305,7 @@ fn websocket_ech_discovery_uses_http_error_policy() {
         "off",
     ]);
     assert_exit(&required, 1);
-    assert!(
-        required.stderr.contains("ServerFailure"),
-        "{}",
-        required.stderr
-    );
+    assert!(required.stderr.contains("SERVFAIL"), "{}", required.stderr);
     assert!(!required.stderr.contains("does not advertise ECH"));
 
     let automatic = run_fetch(&[

@@ -17,19 +17,36 @@ const DNS_CLASS_IN: u16 = wire::CLASS_IN;
 pub(crate) const DOQ_MESSAGE_ID: u16 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolverError(String);
+pub struct ResolverError {
+    kind: crate::dns::error::DnsErrorKind,
+    detail: Option<String>,
+}
 
 impl fmt::Display for ResolverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match &self.detail {
+            Some(detail) => f.write_str(detail),
+            None => self.kind.fmt(f),
+        }
     }
 }
 
 impl std::error::Error for ResolverError {}
 
 impl ResolverError {
+    fn dns(kind: crate::dns::error::DnsErrorKind) -> Self {
+        Self { kind, detail: None }
+    }
+
+    fn other(detail: impl Into<String>) -> Self {
+        Self {
+            kind: crate::dns::error::DnsErrorKind::Other,
+            detail: Some(detail.into()),
+        }
+    }
+
     pub(crate) fn is_nxdomain(&self) -> bool {
-        self.0 == "no such host: NXDomain"
+        self.kind == crate::dns::error::DnsErrorKind::NxDomain
     }
 }
 
@@ -66,10 +83,18 @@ pub(crate) async fn lookup_udp_addr(
 
     let budget = TimeoutBudget::new(timeout);
     resolve_address_families(
-        lookup_udp_type_with_budget(addr, host, DNS_TYPE_A, budget),
-        lookup_udp_type_with_budget(addr, host, DNS_TYPE_AAAA, budget),
+        async {
+            query_udp_type(addr, host, DNS_TYPE_A, budget)
+                .await
+                .map(|records| collect_ip_records(records, DNS_TYPE_A))
+        },
+        async {
+            query_udp_type(addr, host, DNS_TYPE_AAAA, budget)
+                .await
+                .map(|records| collect_ip_records(records, DNS_TYPE_AAAA))
+        },
         crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
-        ResolverError("no such host".to_string()),
+        ResolverError::dns(crate::dns::error::DnsErrorKind::NoData),
     )
     .await
     .map(|records| records.into_iter().map(|record| record.ip).collect())
@@ -92,7 +117,7 @@ async fn lookup_udp_type_with_budget(
     budget: TimeoutBudget,
 ) -> Result<Vec<DnsRecord>, ResolverError> {
     let records = query_udp_type(server_addr, host, dns_type, budget).await?;
-    Ok(ip_records(records, dns_type))
+    ip_records(records, dns_type)
 }
 
 pub(crate) async fn query_udp_type(
@@ -103,20 +128,20 @@ pub(crate) async fn query_udp_type(
 ) -> Result<Vec<WireDnsRecord>, ResolverError> {
     let budget = dns_transaction_budget(budget);
     let id = dns_query_id();
-    let raw = wire::build_query(id, host, dns_type).map_err(resolver_error)?;
+    let raw = wire::build_query(id, host, dns_type).map_err(ResolverError::from)?;
     let matcher = wire::ResponseMatcher::new(id, host, dns_type, DNS_CLASS_IN);
     let response = crate::dns::transport::query_udp(*server_addr, &raw, &matcher, budget)
         .await
-        .map_err(resolver_error)?;
+        .map_err(ResolverError::from)?;
     match wire_records_from_response(&response, id, host, dns_type) {
         Ok(records) => Ok(records),
         Err(err) if err.is_truncated() => {
             let response = crate::dns::transport::query_tcp(*server_addr, &raw, budget)
                 .await
-                .map_err(resolver_error)?;
-            wire_records_from_response(&response, id, host, dns_type).map_err(resolver_error)
+                .map_err(ResolverError::from)?;
+            wire_records_from_response(&response, id, host, dns_type).map_err(ResolverError::from)
         }
-        Err(err) => Err(resolver_error(err)),
+        Err(err) => Err(ResolverError::from(err)),
     }
 }
 
@@ -133,15 +158,15 @@ pub(crate) async fn lookup_tcp_addr(
         async {
             query_tcp_type(addr, host, DNS_TYPE_A, budget)
                 .await
-                .map(|records| ip_records(records, DNS_TYPE_A))
+                .map(|records| collect_ip_records(records, DNS_TYPE_A))
         },
         async {
             query_tcp_type(addr, host, DNS_TYPE_AAAA, budget)
                 .await
-                .map(|records| ip_records(records, DNS_TYPE_AAAA))
+                .map(|records| collect_ip_records(records, DNS_TYPE_AAAA))
         },
         crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
-        ResolverError("no such host".to_string()),
+        ResolverError::dns(crate::dns::error::DnsErrorKind::NoData),
     )
     .await
     .map(|records| records.into_iter().map(|record| record.ip).collect())
@@ -169,7 +194,7 @@ pub(crate) async fn lookup_tls(
                 insecure,
             )
             .await
-            .map(|records| ip_records(records, DNS_TYPE_A))
+            .map(|records| collect_ip_records(records, DNS_TYPE_A))
         },
         async {
             query_tls_type(
@@ -181,10 +206,10 @@ pub(crate) async fn lookup_tls(
                 insecure,
             )
             .await
-            .map(|records| ip_records(records, DNS_TYPE_AAAA))
+            .map(|records| collect_ip_records(records, DNS_TYPE_AAAA))
         },
         crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
-        ResolverError("no such host".to_string()),
+        ResolverError::dns(crate::dns::error::DnsErrorKind::NoData),
     )
     .await
     .map(|records| records.into_iter().map(|record| record.ip).collect())
@@ -201,7 +226,11 @@ pub(crate) async fn lookup_quic(
         return Ok(vec![ip]);
     }
     let budget = TimeoutBudget::new(timeout);
-    let connect_timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
+    let connect_timeout = udp_dns_timeout(
+        budget
+            .remaining()
+            .map_err(|_| ResolverError::dns(crate::dns::error::DnsErrorKind::Timeout))?,
+    );
     let connection = crate::dns::transport::quic_connection(
         server_name,
         server_addrs,
@@ -209,7 +238,7 @@ pub(crate) async fn lookup_quic(
         insecure,
     )
     .await
-    .map_err(resolver_error)?;
+    .map_err(ResolverError::from)?;
     run_quic_lookup(&connection, host, budget).await
 }
 
@@ -223,7 +252,7 @@ pub(crate) async fn lookup_tcp_type(
         return Ok(vec![DnsRecord { ip, ttl: None }]);
     }
     let records = query_tcp_type(addr, host, dns_type, TimeoutBudget::new(Some(timeout))).await?;
-    Ok(ip_records(records, dns_type))
+    ip_records(records, dns_type)
 }
 
 pub(crate) async fn query_tcp_type(
@@ -232,10 +261,14 @@ pub(crate) async fn query_tcp_type(
     dns_type: u16,
     budget: TimeoutBudget,
 ) -> Result<Vec<WireDnsRecord>, ResolverError> {
-    let connect_timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
+    let connect_timeout = udp_dns_timeout(
+        budget
+            .remaining()
+            .map_err(|_| ResolverError::dns(crate::dns::error::DnsErrorKind::Timeout))?,
+    );
     let mut stream = crate::dns::transport::tcp_connection(addr, connect_timeout)
         .await
-        .map_err(resolver_error)?;
+        .map_err(ResolverError::from)?;
     query_stream_type(&mut stream, host, dns_type, budget).await
 }
 
@@ -259,7 +292,7 @@ pub(crate) async fn lookup_tls_type(
         insecure,
     )
     .await?;
-    Ok(ip_records(records, dns_type))
+    ip_records(records, dns_type)
 }
 
 pub(crate) async fn query_tls_type(
@@ -270,11 +303,15 @@ pub(crate) async fn query_tls_type(
     budget: TimeoutBudget,
     insecure: bool,
 ) -> Result<Vec<WireDnsRecord>, ResolverError> {
-    let connect_timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
+    let connect_timeout = udp_dns_timeout(
+        budget
+            .remaining()
+            .map_err(|_| ResolverError::dns(crate::dns::error::DnsErrorKind::Timeout))?,
+    );
     let mut stream =
         crate::dns::transport::tls_connection(server_name, server_addrs, connect_timeout, insecure)
             .await
-            .map_err(resolver_error)?;
+            .map_err(ResolverError::from)?;
     query_stream_type(&mut stream, host, dns_type, budget).await
 }
 
@@ -298,7 +335,7 @@ pub(crate) async fn lookup_quic_type(
         insecure,
     )
     .await?;
-    Ok(ip_records(records, dns_type))
+    ip_records(records, dns_type)
 }
 
 pub(crate) async fn query_quic_type(
@@ -309,7 +346,11 @@ pub(crate) async fn query_quic_type(
     budget: TimeoutBudget,
     insecure: bool,
 ) -> Result<Vec<WireDnsRecord>, ResolverError> {
-    let connect_timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
+    let connect_timeout = udp_dns_timeout(
+        budget
+            .remaining()
+            .map_err(|_| ResolverError::dns(crate::dns::error::DnsErrorKind::Timeout))?,
+    );
     let connection = crate::dns::transport::quic_connection(
         server_name,
         server_addrs,
@@ -317,16 +358,19 @@ pub(crate) async fn query_quic_type(
         insecure,
     )
     .await
-    .map_err(resolver_error)?;
-    let query = wire::build_query(DOQ_MESSAGE_ID, host, dns_type).map_err(resolver_error)?;
-    let timeout = budget.remaining().map_err(resolver_error)?;
+    .map_err(ResolverError::from)?;
+    let query = wire::build_query(DOQ_MESSAGE_ID, host, dns_type).map_err(ResolverError::from)?;
+    let timeout = budget
+        .remaining()
+        .map_err(|_| ResolverError::dns(crate::dns::error::DnsErrorKind::Timeout))?;
     let response = with_optional_timeout(timeout, async {
         crate::dns::transport::quic_query(&connection, &query)
             .await
-            .map_err(resolver_error)
+            .map_err(ResolverError::from)
     })
     .await?;
-    wire_records_from_response(&response, DOQ_MESSAGE_ID, host, dns_type).map_err(resolver_error)
+    wire_records_from_response(&response, DOQ_MESSAGE_ID, host, dns_type)
+        .map_err(ResolverError::from)
 }
 
 async fn query_stream_type<S: AsyncRead + AsyncWrite + Unpin>(
@@ -336,21 +380,25 @@ async fn query_stream_type<S: AsyncRead + AsyncWrite + Unpin>(
     budget: TimeoutBudget,
 ) -> Result<Vec<WireDnsRecord>, ResolverError> {
     let id = dns_query_id();
-    let query = wire::build_query(id, host, dns_type).map_err(resolver_error)?;
-    let timeout = budget.remaining().map_err(resolver_error)?;
+    let query = wire::build_query(id, host, dns_type).map_err(ResolverError::from)?;
+    let timeout = budget
+        .remaining()
+        .map_err(|_| ResolverError::dns(crate::dns::error::DnsErrorKind::Timeout))?;
     let response = with_optional_timeout(timeout, async {
         crate::dns::transport::write_framed_query(stream, &query)
             .await
-            .map_err(resolver_error)?;
+            .map_err(ResolverError::from)?;
         crate::dns::transport::read_framed_response(stream)
             .await
-            .map_err(resolver_error)
+            .map_err(ResolverError::from)
     })
     .await?;
     if response.len() < 2 {
-        return Err(ResolverError("short DNS response".to_string()));
+        return Err(ResolverError::dns(
+            crate::dns::error::DnsErrorKind::Malformed,
+        ));
     }
-    wire_records_from_response(&response, id, host, dns_type).map_err(resolver_error)
+    wire_records_from_response(&response, id, host, dns_type).map_err(ResolverError::from)
 }
 
 async fn run_quic_lookup(
@@ -359,17 +407,20 @@ async fn run_quic_lookup(
     budget: TimeoutBudget,
 ) -> Result<Vec<IpAddr>, ResolverError> {
     // RFC 9250 requires DNS message ID 0 for DoQ.
-    let query_a = wire::build_query(DOQ_MESSAGE_ID, host, DNS_TYPE_A).map_err(resolver_error)?;
+    let query_a =
+        wire::build_query(DOQ_MESSAGE_ID, host, DNS_TYPE_A).map_err(ResolverError::from)?;
     let query_aaaa =
-        wire::build_query(DOQ_MESSAGE_ID, host, DNS_TYPE_AAAA).map_err(resolver_error)?;
+        wire::build_query(DOQ_MESSAGE_ID, host, DNS_TYPE_AAAA).map_err(ResolverError::from)?;
 
-    let timeout = budget.remaining().map_err(resolver_error)?;
+    let timeout = budget
+        .remaining()
+        .map_err(|_| ResolverError::dns(crate::dns::error::DnsErrorKind::Timeout))?;
     with_optional_timeout(timeout, async {
         resolve_address_families(
             quic_single_query(connection, query_a, DOQ_MESSAGE_ID, host, DNS_TYPE_A),
             quic_single_query(connection, query_aaaa, DOQ_MESSAGE_ID, host, DNS_TYPE_AAAA),
             crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
-            ResolverError("no such host".to_string()),
+            ResolverError::dns(crate::dns::error::DnsErrorKind::NoData),
         )
         .await
         .map(|records| records.into_iter().map(|record| record.ip).collect())
@@ -386,7 +437,7 @@ where
 {
     tokio::time::timeout(udp_dns_timeout(timeout), fut)
         .await
-        .map_err(|_| ResolverError("DNS lookup timed out".to_string()))?
+        .map_err(|_| ResolverError::dns(crate::dns::error::DnsErrorKind::Timeout))?
 }
 
 async fn quic_single_query(
@@ -398,14 +449,16 @@ async fn quic_single_query(
 ) -> Result<Vec<DnsRecord>, ResolverError> {
     let response = crate::dns::transport::quic_query(connection, &query)
         .await
-        .map_err(resolver_error)?;
-    dns_records_from_response(&response, expected_id, host, dns_type).map_err(resolver_error)
+        .map_err(ResolverError::from)?;
+    let records = wire_records_from_response(&response, expected_id, host, dns_type)
+        .map_err(ResolverError::from)?;
+    Ok(collect_ip_records(records, dns_type))
 }
 
 fn parse_normalized_addr(server: &str) -> Result<SocketAddr, ResolverError> {
     normalize_udp_dns_server(server)?
         .parse::<SocketAddr>()
-        .map_err(|err| ResolverError(format!("invalid DNS server address: {err}")))
+        .map_err(|err| ResolverError::other(format!("invalid DNS server address: {err}")))
 }
 
 pub fn normalize_udp_dns_server(server: &str) -> Result<String, ResolverError> {
@@ -425,21 +478,21 @@ pub fn normalize_udp_dns_server(server: &str) -> Result<String, ResolverError> {
 }
 
 fn dns_server_value_error(server: &str) -> ResolverError {
-    ResolverError(format!(
+    ResolverError::other(format!(
         "invalid value '{server}' for option '--dns-server': must be in the format <IP[:PORT]>"
     ))
 }
 
+#[cfg(test)]
 fn dns_records_from_response(
     raw: &[u8],
     expected_id: u16,
     expected_name: &str,
     expected_type: u16,
-) -> Result<Vec<DnsRecord>, wire::WireError> {
-    Ok(ip_records(
-        wire_records_from_response(raw, expected_id, expected_name, expected_type)?,
-        expected_type,
-    ))
+) -> Result<Vec<DnsRecord>, ResolverError> {
+    let records = wire_records_from_response(raw, expected_id, expected_name, expected_type)
+        .map_err(ResolverError::from)?;
+    ip_records(records, expected_type)
 }
 
 fn wire_records_from_response(
@@ -461,7 +514,19 @@ fn wire_records_from_response(
     )
 }
 
-fn ip_records(records: Vec<WireDnsRecord>, expected_type: u16) -> Vec<DnsRecord> {
+fn ip_records(
+    records: Vec<WireDnsRecord>,
+    expected_type: u16,
+) -> Result<Vec<DnsRecord>, ResolverError> {
+    let records = collect_ip_records(records, expected_type);
+    if records.is_empty() {
+        Err(ResolverError::dns(crate::dns::error::DnsErrorKind::NoData))
+    } else {
+        Ok(records)
+    }
+}
+
+fn collect_ip_records(records: Vec<WireDnsRecord>, expected_type: u16) -> Vec<DnsRecord> {
     records
         .into_iter()
         .filter(|record| record.typ == expected_type)
@@ -490,8 +555,29 @@ fn ip_record(record: WireDnsRecord) -> Option<DnsRecord> {
     })
 }
 
-fn resolver_error(err: impl ToString) -> ResolverError {
-    ResolverError(err.to_string())
+impl From<crate::dns::transport::DnsTransportError> for ResolverError {
+    fn from(error: crate::dns::transport::DnsTransportError) -> Self {
+        match error.kind() {
+            crate::dns::error::DnsErrorKind::Timeout => {
+                Self::dns(crate::dns::error::DnsErrorKind::Timeout)
+            }
+            _ => Self::other(error.to_string()),
+        }
+    }
+}
+
+impl From<wire::WireError> for ResolverError {
+    fn from(error: wire::WireError) -> Self {
+        let kind = error.kind();
+        match kind {
+            crate::dns::error::DnsErrorKind::Other => Self::other(error.to_string()),
+            crate::dns::error::DnsErrorKind::Malformed => Self {
+                kind,
+                detail: Some(error.to_string()),
+            },
+            _ => Self::dns(kind),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -511,6 +597,34 @@ mod tests {
     use tokio::net::TcpListener as TokioTcpListener;
     use tokio::net::TcpStream as TokioTcpStream;
     use tokio_rustls::{TlsAcceptor, server::TlsStream as ServerTlsStream};
+
+    #[tokio::test]
+    async fn address_family_nodata_does_not_hide_other_family_errors() {
+        for expected in [
+            crate::dns::error::DnsErrorKind::Timeout,
+            crate::dns::error::DnsErrorKind::ServFail,
+        ] {
+            let error = resolve_address_families(
+                std::future::ready(Ok::<Vec<DnsRecord>, ResolverError>(Vec::new())),
+                std::future::ready(Err(ResolverError::dns(expected))),
+                Duration::ZERO,
+                ResolverError::dns(crate::dns::error::DnsErrorKind::NoData),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind, expected);
+        }
+
+        let error = resolve_address_families(
+            std::future::ready(Ok::<Vec<DnsRecord>, ResolverError>(Vec::new())),
+            std::future::ready(Ok(Vec::new())),
+            Duration::ZERO,
+            ResolverError::dns(crate::dns::error::DnsErrorKind::NoData),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, crate::dns::error::DnsErrorKind::NoData);
+    }
 
     #[tokio::test]
     async fn lookup_udp_returns_a_and_aaaa() {
@@ -629,7 +743,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("NXDomain"));
+        assert!(err.to_string().contains("NXDOMAIN"));
         stop();
     }
 
@@ -651,9 +765,9 @@ mod tests {
         let response =
             test_response_with_answers(&[("unrelated.example", DNS_TYPE_A, vec![192, 0, 2, 1])]);
 
-        let records =
-            dns_records_from_response(&response, 0x1234, "example.com", DNS_TYPE_A).unwrap();
-        assert!(records.is_empty());
+        let error =
+            dns_records_from_response(&response, 0x1234, "example.com", DNS_TYPE_A).unwrap_err();
+        assert_eq!(error.kind, crate::dns::error::DnsErrorKind::NoData);
     }
 
     #[test]
@@ -1237,7 +1351,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.to_string(), "short DNS response");
+        assert_eq!(err.to_string(), "malformed DNS response");
         *done.lock().unwrap() = true;
         let _ = StdTcpStream::connect(addr);
         handle.join().unwrap();

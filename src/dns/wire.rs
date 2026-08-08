@@ -18,7 +18,6 @@ pub(crate) const TYPE_OPT: u16 = 41;
 pub(crate) const CLASS_IN: u16 = 1;
 pub(crate) const EDNS_UDP_PAYLOAD_SIZE: u16 = 1232;
 
-const TRUNCATED_RESPONSE: &str = "DNS response was truncated";
 const FLAG_RESPONSE: u16 = 0x8000;
 const FLAG_OPCODE: u16 = 0x7800;
 const FLAG_TRUNCATED: u16 = 0x0200;
@@ -29,19 +28,50 @@ const MAX_NAME_LABELS: usize = 127;
 const MAX_NAME_POINTER_DEPTH: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WireError(String);
+pub(crate) enum WireError {
+    Response(crate::dns::error::DnsErrorKind),
+    Malformed(String),
+    Other(String),
+}
 
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Response(kind) => kind.fmt(f),
+            Self::Malformed(detail) => write!(f, "malformed DNS response: {detail}"),
+            Self::Other(detail) => f.write_str(detail),
+        }
     }
 }
 
 impl std::error::Error for WireError {}
 
 impl WireError {
+    fn other(message: String) -> Self {
+        Self::Other(message)
+    }
+
+    fn malformed(message: impl Into<String>) -> Self {
+        Self::Malformed(message.into())
+    }
+
+    pub(crate) fn kind(&self) -> crate::dns::error::DnsErrorKind {
+        match self {
+            Self::Response(kind) => *kind,
+            Self::Malformed(_) => crate::dns::error::DnsErrorKind::Malformed,
+            Self::Other(_) => crate::dns::error::DnsErrorKind::Other,
+        }
+    }
+
     pub(crate) fn is_truncated(&self) -> bool {
-        self.0 == TRUNCATED_RESPONSE
+        self.kind() == crate::dns::error::DnsErrorKind::Truncated
+    }
+
+    fn into_response_error(self) -> Self {
+        match self {
+            Self::Other(detail) => Self::Malformed(detail),
+            error => error,
+        }
     }
 }
 
@@ -96,7 +126,7 @@ pub(crate) fn decode_rdata<'a>(
     let end = offset
         .checked_add(len)
         .filter(|&end| end <= packet.len())
-        .ok_or_else(|| WireError("short DNS resource".to_string()))?;
+        .ok_or_else(|| WireError::other("short DNS resource".to_string()))?;
     let raw = &packet[offset..end];
     let mut reader = RdataReader {
         packet,
@@ -166,7 +196,7 @@ pub(crate) fn decode_rdata<'a>(
         TYPE_CAA => Err(malformed_rdata(typ)),
         TYPE_SVCB | TYPE_HTTPS => crate::dns::svcb::parse_rdata(raw)
             .map(|_| DecodedRdata::Raw(raw))
-            .map_err(|err| WireError(format!("malformed DNS RDATA for type {typ}: {err}"))),
+            .map_err(|err| WireError::other(format!("malformed DNS RDATA for type {typ}: {err}"))),
         _ => Ok(DecodedRdata::Raw(raw)),
     }
 }
@@ -199,7 +229,7 @@ impl RdataReader<'_> {
             .pos
             .checked_add(len)
             .filter(|&end| end <= self.end)
-            .ok_or_else(|| WireError("short DNS RDATA".to_string()))?;
+            .ok_or_else(|| WireError::other("short DNS RDATA".to_string()))?;
         let bytes = &self.packet[self.pos..end];
         self.pos = end;
         Ok(bytes)
@@ -215,7 +245,7 @@ impl RdataReader<'_> {
 }
 
 pub(crate) fn malformed_rdata(typ: u16) -> WireError {
-    WireError(format!("malformed DNS RDATA for type {typ}"))
+    WireError::malformed(format!("DNS RDATA for type {typ}"))
 }
 
 fn parse_txt_rdata(raw: &[u8], typ: u16) -> Result<String, WireError> {
@@ -276,10 +306,25 @@ impl ResponseMatcher {
         let Ok(flags) = read_u16(raw, 2) else {
             return false;
         };
-        if flags & FLAG_RESPONSE == 0
-            || flags & FLAG_OPCODE != 0
-            || !read_u16(raw, 4).is_ok_and(|count| count == 1)
-        {
+        if flags & FLAG_RESPONSE == 0 || flags & FLAG_OPCODE != 0 {
+            return false;
+        }
+        let Ok(question_count) = read_u16(raw, 4) else {
+            return false;
+        };
+        if question_count == 0 {
+            // Some servers omit the question from an error response that they
+            // could not parse. Parse all sections so an OPT-only extended
+            // RCODE is also bound to this transaction.
+            return parse_response(raw, self.id, ".", self.typ, self.class).is_err_and(|error| {
+                !matches!(
+                    error.kind(),
+                    crate::dns::error::DnsErrorKind::Malformed
+                        | crate::dns::error::DnsErrorKind::Other
+                )
+            });
+        }
+        if question_count != 1 {
             return false;
         }
         let Ok(question_name) = read_parsed_name_bounded(raw, 12, raw.len(), true) else {
@@ -307,6 +352,7 @@ pub(crate) fn parse_response<'a>(
         expected_type,
         expected_class,
     )
+    .map_err(WireError::into_response_error)
 }
 
 #[cfg(test)]
@@ -317,6 +363,7 @@ pub(crate) fn parse_response_without_id<'a>(
     expected_class: u16,
 ) -> Result<Vec<ResourceRecord<'a>>, WireError> {
     parse_response_inner(raw, None, expected_name, expected_type, expected_class)
+        .map_err(WireError::into_response_error)
 }
 
 #[cfg(target_os = "linux")]
@@ -333,7 +380,7 @@ pub(crate) fn parse_standalone_resource_record(
     let end = data_offset
         .checked_add(rdlen)
         .filter(|end| *end == raw.len())
-        .ok_or_else(|| WireError("malformed standalone DNS resource".to_string()))?;
+        .ok_or_else(|| WireError::other("malformed standalone DNS resource".to_string()))?;
     Ok(ResourceRecord {
         canonical_name: name.canonical,
         typ,
@@ -352,56 +399,56 @@ fn parse_response_inner<'a>(
     expected_class: u16,
 ) -> Result<Vec<ResourceRecord<'a>>, WireError> {
     if raw.len() < 12 {
-        return Err(WireError("short DNS response".to_string()));
+        return Err(WireError::malformed("short header"));
     }
     if expected_id.is_some_and(|expected_id| read_u16(raw, 0).is_ok_and(|id| id != expected_id)) {
-        return Err(WireError("mismatched DNS response ID".to_string()));
+        return Err(WireError::malformed("mismatched response ID"));
     }
     let flags = read_u16(raw, 2)?;
     if flags & FLAG_RESPONSE == 0 {
-        return Err(WireError("DNS message is not a response".to_string()));
+        return Err(WireError::malformed("message is not a response"));
     }
     if flags & FLAG_OPCODE != 0 {
-        return Err(WireError("unexpected DNS response opcode".to_string()));
+        return Err(WireError::malformed("unexpected response opcode"));
     }
     if flags & FLAG_TRUNCATED != 0 {
-        return Err(WireError(TRUNCATED_RESPONSE.to_string()));
-    }
-    let rcode = i32::from(flags & 0x000f);
-    if rcode != 0 {
-        let name = rcode_name(rcode);
-        if name.is_empty() {
-            return Err(WireError("no such host".to_string()));
-        }
-        return Err(WireError(format!("no such host: {name}")));
+        return Err(WireError::Response(
+            crate::dns::error::DnsErrorKind::Truncated,
+        ));
     }
 
     let question_count = usize::from(read_u16(raw, 4)?);
     let answer_count = usize::from(read_u16(raw, 6)?);
-    if question_count != 1 {
-        return Err(WireError("unexpected DNS question count".to_string()));
+    let authority_count = usize::from(read_u16(raw, 8)?);
+    let additional_count = usize::from(read_u16(raw, 10)?);
+    if question_count > 1 {
+        return Err(WireError::malformed("unexpected question count"));
     }
-    if answer_count > MAX_ANSWER_RECORDS {
-        return Err(WireError(
-            "DNS response has too many answer records".to_string(),
-        ));
-    }
+    let record_count = answer_count
+        .checked_add(authority_count)
+        .and_then(|count| count.checked_add(additional_count))
+        .filter(|count| *count <= MAX_ANSWER_RECORDS)
+        .ok_or_else(|| WireError::malformed("too many resource records"))?;
+
     let mut offset = 12;
-    let question_name = read_parsed_name_bounded(raw, offset, raw.len(), true)?;
-    offset = question_name.next;
-    let question_type = read_u16(raw, offset)?;
-    let question_class = read_u16(raw, offset + 2)?;
-    offset += 4;
     let expected_canonical = parse_presentation_name(expected_name)?;
-    if question_name.canonical != expected_canonical
-        || question_type != expected_type
-        || question_class != expected_class
-    {
-        return Err(WireError("mismatched DNS response question".to_string()));
+    if question_count == 1 {
+        let question_name = read_parsed_name_bounded(raw, offset, raw.len(), true)?;
+        offset = question_name.next;
+        let question_type = read_u16(raw, offset)?;
+        let question_class = read_u16(raw, offset + 2)?;
+        offset += 4;
+        if question_name.canonical != expected_canonical
+            || question_type != expected_type
+            || question_class != expected_class
+        {
+            return Err(WireError::malformed("mismatched response question"));
+        }
     }
 
-    let mut records = Vec::new();
-    for _ in 0..answer_count {
+    let mut records = Vec::with_capacity(answer_count);
+    let mut extended_rcode = None;
+    for index in 0..record_count {
         let name = read_parsed_name_bounded(raw, offset, raw.len(), true)?;
         offset = name.next;
         let typ = read_u16(raw, offset)?;
@@ -409,19 +456,42 @@ fn parse_response_inner<'a>(
         let ttl = read_u32(raw, offset + 4)?;
         let rdlen = usize::from(read_u16(raw, offset + 8)?);
         offset += 10;
-        if offset + rdlen > raw.len() {
-            return Err(WireError("short DNS resource".to_string()));
+        let end = offset
+            .checked_add(rdlen)
+            .filter(|end| *end <= raw.len())
+            .ok_or_else(|| WireError::malformed("short resource record"))?;
+
+        let in_answer = index < answer_count;
+        let in_additional = index >= answer_count + authority_count;
+        if typ == TYPE_OPT {
+            if !in_additional || !name.canonical.0.is_empty() || extended_rcode.is_some() {
+                return Err(WireError::malformed("invalid OPT record"));
+            }
+            extended_rcode = Some((ttl >> 24) as u8);
+        } else if in_answer {
+            records.push(ResourceRecord {
+                canonical_name: name.canonical,
+                typ,
+                class,
+                ttl,
+                data_offset: offset,
+                data: &raw[offset..end],
+            });
         }
-        let data_offset = offset;
-        offset += rdlen;
-        records.push(ResourceRecord {
-            canonical_name: name.canonical,
-            typ,
-            class,
-            ttl,
-            data_offset,
-            data: &raw[data_offset..data_offset + rdlen],
-        });
+        offset = end;
+    }
+    if offset != raw.len() {
+        return Err(WireError::malformed("trailing bytes"));
+    }
+
+    let rcode = (flags & 0x000f) | (u16::from(extended_rcode.unwrap_or(0)) << 4);
+    if let Some(kind) = crate::dns::error::DnsErrorKind::from_rcode(rcode) {
+        return Err(WireError::Response(kind));
+    }
+    if question_count == 0 {
+        return Err(WireError::malformed(
+            "successful response omitted the question",
+        ));
     }
 
     let owners = records
@@ -479,7 +549,7 @@ pub(crate) fn reachable_answer_names(
 ) -> Result<HashSet<CanonicalName>, WireError> {
     assert_eq!(owners.len(), types.len());
     if owners.len() > MAX_ANSWER_RECORDS {
-        return Err(WireError(
+        return Err(WireError::other(
             "DNS response has too many answer records".to_string(),
         ));
     }
@@ -512,19 +582,21 @@ pub(crate) fn reachable_answer_names(
             continue;
         }
         if owner.has_other_data {
-            return Err(WireError(
+            return Err(WireError::other(
                 "DNS CNAME owner has conflicting answer data".to_string(),
             ));
         }
         if depth == MAX_CNAME_DEPTH {
-            return Err(WireError("DNS CNAME chain exceeds depth limit".to_string()));
+            return Err(WireError::other(
+                "DNS CNAME chain exceeds depth limit".to_string(),
+            ));
         }
 
         let mut target = None;
         for &index in &owner.cname_records {
             let parsed = cname_target(index)?;
             if target.as_ref().is_some_and(|prior| prior != &parsed) {
-                return Err(WireError(
+                return Err(WireError::other(
                     "DNS CNAME owner has conflicting targets".to_string(),
                 ));
             }
@@ -533,7 +605,9 @@ pub(crate) fn reachable_answer_names(
 
         let target = target.expect("CNAME owner has at least one record");
         if !reachable.insert(target.clone()) {
-            return Err(WireError("DNS CNAME chain contains a cycle".to_string()));
+            return Err(WireError::other(
+                "DNS CNAME chain contains a cycle".to_string(),
+            ));
         }
         pending.push_back(target);
         depth += 1;
@@ -546,7 +620,7 @@ pub(crate) fn parse_presentation_name(name: &str) -> Result<CanonicalName, WireE
         return Ok(CanonicalName(Vec::new()));
     }
     if name.is_empty() {
-        return Err(WireError("invalid DNS name".to_string()));
+        return Err(WireError::other("invalid DNS name".to_string()));
     }
 
     let bytes = name.as_bytes();
@@ -557,7 +631,7 @@ pub(crate) fn parse_presentation_name(name: &str) -> Result<CanonicalName, WireE
         match bytes[offset] {
             b'.' => {
                 if label.is_empty() {
-                    return Err(WireError("invalid DNS name".to_string()));
+                    return Err(WireError::other("invalid DNS name".to_string()));
                 }
                 labels.push(std::mem::take(&mut label));
                 offset += 1;
@@ -568,7 +642,7 @@ pub(crate) fn parse_presentation_name(name: &str) -> Result<CanonicalName, WireE
             b'\\' => {
                 offset += 1;
                 if offset == bytes.len() {
-                    return Err(WireError("invalid DNS name escape".to_string()));
+                    return Err(WireError::other("invalid DNS name escape".to_string()));
                 }
                 if offset + 2 < bytes.len()
                     && bytes[offset..offset + 3].iter().all(u8::is_ascii_digit)
@@ -577,7 +651,7 @@ pub(crate) fn parse_presentation_name(name: &str) -> Result<CanonicalName, WireE
                         + u16::from(bytes[offset + 1] - b'0') * 10
                         + u16::from(bytes[offset + 2] - b'0');
                     if value > u16::from(u8::MAX) {
-                        return Err(WireError("invalid DNS name escape".to_string()));
+                        return Err(WireError::other("invalid DNS name escape".to_string()));
                     }
                     label.push(value as u8);
                     offset += 3;
@@ -592,7 +666,7 @@ pub(crate) fn parse_presentation_name(name: &str) -> Result<CanonicalName, WireE
             }
         }
         if label.len() > 63 {
-            return Err(WireError("invalid DNS name label".to_string()));
+            return Err(WireError::other("invalid DNS name label".to_string()));
         }
     }
     if !label.is_empty() {
@@ -602,7 +676,7 @@ pub(crate) fn parse_presentation_name(name: &str) -> Result<CanonicalName, WireE
         || labels.len() > MAX_NAME_LABELS
         || labels.iter().map(|label| label.len() + 1).sum::<usize>() + 1 > MAX_ENCODED_NAME_LEN
     {
-        return Err(WireError("invalid DNS name".to_string()));
+        return Err(WireError::other("invalid DNS name".to_string()));
     }
 
     Ok(CanonicalName(
@@ -626,7 +700,7 @@ fn read_parsed_name_bounded(
     allow_compression: bool,
 ) -> Result<ParsedName, WireError> {
     if offset > end || end > packet.len() {
-        return Err(WireError("short DNS name".to_string()));
+        return Err(WireError::other("short DNS name".to_string()));
     }
     let mut labels = Vec::new();
     let mut pos = offset;
@@ -637,15 +711,17 @@ fn read_parsed_name_bounded(
 
     loop {
         if pos >= packet.len() || (!jumped && pos >= end) {
-            return Err(WireError("short DNS name".to_string()));
+            return Err(WireError::other("short DNS name".to_string()));
         }
         let len = packet[pos];
         if len & 0xc0 == 0xc0 {
             if !allow_compression {
-                return Err(WireError("compressed DNS name is not allowed".to_string()));
+                return Err(WireError::other(
+                    "compressed DNS name is not allowed".to_string(),
+                ));
             }
             if pos + 1 >= end {
-                return Err(WireError("short DNS name pointer".to_string()));
+                return Err(WireError::other("short DNS name pointer".to_string()));
             }
             if !jumped {
                 next = pos + 2;
@@ -655,14 +731,14 @@ fn read_parsed_name_bounded(
             jumped = true;
             pointer_depth += 1;
             if pointer_depth > MAX_NAME_POINTER_DEPTH {
-                return Err(WireError(
+                return Err(WireError::other(
                     "DNS name pointer depth exceeds limit".to_string(),
                 ));
             }
             continue;
         }
         if len & 0xc0 != 0 {
-            return Err(WireError("invalid DNS name label".to_string()));
+            return Err(WireError::other("invalid DNS name label".to_string()));
         }
         pos += 1;
         if len == 0 {
@@ -673,14 +749,16 @@ fn read_parsed_name_bounded(
         }
         let len = usize::from(len);
         if pos + len > end {
-            return Err(WireError("short DNS name label".to_string()));
+            return Err(WireError::other("short DNS name label".to_string()));
         }
         if labels.len() == MAX_NAME_LABELS {
-            return Err(WireError("DNS name exceeds label count limit".to_string()));
+            return Err(WireError::other(
+                "DNS name exceeds label count limit".to_string(),
+            ));
         }
         expanded_len += len + 1;
         if expanded_len > MAX_ENCODED_NAME_LEN {
-            return Err(WireError(
+            return Err(WireError::other(
                 "DNS name exceeds expanded length limit".to_string(),
             ));
         }
@@ -739,27 +817,27 @@ fn format_label(label: &[u8]) -> String {
 pub(crate) fn read_u16(raw: &[u8], offset: usize) -> Result<u16, WireError> {
     let bytes = raw
         .get(offset..offset + 2)
-        .ok_or_else(|| WireError("short DNS message".to_string()))?;
+        .ok_or_else(|| WireError::other("short DNS message".to_string()))?;
     Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
 
 pub(crate) fn read_u32(raw: &[u8], offset: usize) -> Result<u32, WireError> {
     let bytes = raw
         .get(offset..offset + 4)
-        .ok_or_else(|| WireError("short DNS message".to_string()))?;
+        .ok_or_else(|| WireError::other("short DNS message".to_string()))?;
     Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 pub(crate) fn write_name(raw: &mut Vec<u8>, host: &str) -> Result<(), WireError> {
     if host.is_empty() {
-        return Err(WireError("invalid DNS name: empty name".to_string()));
+        return Err(WireError::other("invalid DNS name: empty name".to_string()));
     }
     if host == "." {
         raw.push(0);
         return Ok(());
     }
     let name = parse_presentation_name(host)
-        .map_err(|_| WireError(format!("invalid DNS name: {host}")))?;
+        .map_err(|_| WireError::other(format!("invalid DNS name: {host}")))?;
     for label in name.0 {
         raw.push(label.len() as u8);
         raw.extend_from_slice(&label);
@@ -776,17 +854,6 @@ fn write_opt_record(raw: &mut Vec<u8>) {
     raw.extend_from_slice(&0u16.to_be_bytes());
 }
 
-fn rcode_name(status: i32) -> &'static str {
-    match status {
-        1 => "FormatError",
-        2 => "ServerFailure",
-        3 => "NXDomain",
-        4 => "NotImplemented",
-        5 => "Refused",
-        _ => "",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,7 +862,10 @@ mod tests {
     fn rejects_query_packet_as_response() {
         let query = build_query(0x1234, "example.com", TYPE_A).unwrap();
         let err = parse_response(&query, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
-        assert_eq!(err.to_string(), "DNS message is not a response");
+        assert_eq!(
+            err.to_string(),
+            "malformed DNS response: message is not a response"
+        );
     }
 
     #[test]
@@ -803,7 +873,10 @@ mod tests {
         let mut response = build_query(0x1234, "other.example", TYPE_A).unwrap();
         response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
         let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
-        assert_eq!(err.to_string(), "mismatched DNS response question");
+        assert_eq!(
+            err.to_string(),
+            "malformed DNS response: mismatched response question"
+        );
     }
 
     #[test]
@@ -901,7 +974,7 @@ mod tests {
         ]);
 
         let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
-        assert!(err.to_string().contains("malformed DNS RDATA"));
+        assert!(err.to_string().contains("malformed DNS response"));
     }
 
     #[test]
@@ -1028,7 +1101,10 @@ mod tests {
 
         let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
 
-        assert_eq!(err.to_string(), "DNS CNAME chain exceeds depth limit");
+        assert_eq!(
+            err.to_string(),
+            "malformed DNS response: DNS CNAME chain exceeds depth limit"
+        );
     }
 
     #[test]
@@ -1039,7 +1115,10 @@ mod tests {
 
         let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
 
-        assert_eq!(err.to_string(), "DNS response has too many answer records");
+        assert_eq!(
+            err.to_string(),
+            "malformed DNS response: too many resource records"
+        );
     }
 
     fn cname_chain(depth: usize) -> Vec<(Vec<u8>, u16, Vec<u8>)> {
@@ -1053,6 +1132,92 @@ mod tests {
             encoded_name(b"example", b"com")
         } else {
             encoded_name(format!("n{index}").as_bytes(), b"example")
+        }
+    }
+
+    #[test]
+    fn response_codes_are_structured_and_include_edns_extended_bits() {
+        let cases: [(u16, crate::dns::error::DnsErrorKind); 7] = [
+            (1, crate::dns::error::DnsErrorKind::FormErr),
+            (2, crate::dns::error::DnsErrorKind::ServFail),
+            (3, crate::dns::error::DnsErrorKind::NxDomain),
+            (4, crate::dns::error::DnsErrorKind::NotImp),
+            (5, crate::dns::error::DnsErrorKind::Refused),
+            (16, crate::dns::error::DnsErrorKind::BadVers),
+            (23, crate::dns::error::DnsErrorKind::OtherRcode(23)),
+        ];
+
+        for (rcode, expected) in cases {
+            let query = build_query(0x1234, "example.com", TYPE_A).unwrap();
+            let (_, question_end) = read_name(&query, 12).unwrap();
+            let mut response = Vec::new();
+            response.extend_from_slice(&0x1234u16.to_be_bytes());
+            response.extend_from_slice(&(0x8180 | (rcode & 0x0f)).to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&0u16.to_be_bytes());
+            response.extend_from_slice(&0u16.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&query[12..question_end + 4]);
+            response.push(0);
+            response.extend_from_slice(&TYPE_OPT.to_be_bytes());
+            response.extend_from_slice(&EDNS_UDP_PAYLOAD_SIZE.to_be_bytes());
+            response.extend_from_slice(&(u32::from(rcode >> 4) << 24).to_be_bytes());
+            response.extend_from_slice(&0u16.to_be_bytes());
+
+            let error =
+                parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+            assert_eq!(error.kind(), expected, "RCODE {rcode}");
+        }
+    }
+
+    #[test]
+    fn error_response_can_omit_the_question() {
+        let mut response = vec![0; 12];
+        response[0..2].copy_from_slice(&0x1234u16.to_be_bytes());
+        response[2..4].copy_from_slice(&0x8181u16.to_be_bytes());
+
+        let error = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+        assert_eq!(error.kind(), crate::dns::error::DnsErrorKind::FormErr);
+        assert!(ResponseMatcher::new(0x1234, "example.com", TYPE_A, CLASS_IN).matches(&response));
+
+        response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+        response[10..12].copy_from_slice(&1u16.to_be_bytes());
+        response.push(0);
+        response.extend_from_slice(&TYPE_OPT.to_be_bytes());
+        response.extend_from_slice(&EDNS_UDP_PAYLOAD_SIZE.to_be_bytes());
+        response.extend_from_slice(&(1u32 << 24).to_be_bytes());
+        response.extend_from_slice(&0u16.to_be_bytes());
+        let error = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+        assert_eq!(error.kind(), crate::dns::error::DnsErrorKind::BadVers);
+        assert!(ResponseMatcher::new(0x1234, "example.com", TYPE_A, CLASS_IN).matches(&response));
+    }
+
+    #[test]
+    fn malformed_opt_records_are_rejected_before_rcode_classification() {
+        for mutate in ["non-root owner", "duplicate"] {
+            let query = build_query(0x1234, "example.com", TYPE_A).unwrap();
+            let (_, question_end) = read_name(&query, 12).unwrap();
+            let mut response = query[..question_end + 4].to_vec();
+            response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+            response[6..10].fill(0);
+            response[10..12]
+                .copy_from_slice(&(if mutate == "duplicate" { 2u16 } else { 1u16 }).to_be_bytes());
+            let owner = if mutate == "non-root owner" {
+                &[1, b'x', 0][..]
+            } else {
+                &[0][..]
+            };
+            for _ in 0..if mutate == "duplicate" { 2 } else { 1 } {
+                response.extend_from_slice(owner);
+                response.extend_from_slice(&TYPE_OPT.to_be_bytes());
+                response.extend_from_slice(&EDNS_UDP_PAYLOAD_SIZE.to_be_bytes());
+                response.extend_from_slice(&0u32.to_be_bytes());
+                response.extend_from_slice(&0u16.to_be_bytes());
+            }
+
+            let error =
+                parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+            assert_eq!(error.kind(), crate::dns::error::DnsErrorKind::Malformed);
         }
     }
 
