@@ -215,26 +215,7 @@ async fn lookup_doh_json_records_with_client(
         return Err(doh_status_error(&response));
     }
 
-    let body = serde_json::from_slice::<DohResponse>(response.body())
-        .map_err(|err| DnsError(err.to_string()))?;
-
-    if body.status != 0 {
-        let name = rcode_name(body.status);
-        if name.is_empty() {
-            return Err(DnsError("no such host".to_string()));
-        }
-        return Err(DnsError(format!("no such host: {name}")));
-    }
-
-    Ok(body
-        .answer
-        .into_iter()
-        .map(|answer| DohRecord {
-            answer_type: answer.answer_type,
-            data: answer.data,
-            ttl: answer.ttl,
-        })
-        .collect())
+    doh_records_from_json_response(response.body(), host)
 }
 
 impl DohClient {
@@ -319,6 +300,52 @@ async fn buffer_response_with_limit(
         headers,
         body: Bytes::from(body),
     })
+}
+
+fn doh_records_from_json_response(
+    raw: &[u8],
+    expected_name: &str,
+) -> Result<Vec<DohRecord>, DnsError> {
+    let body =
+        serde_json::from_slice::<DohResponse>(raw).map_err(|err| DnsError(err.to_string()))?;
+    if body.status != 0 {
+        let name = rcode_name(body.status);
+        if name.is_empty() {
+            return Err(DnsError("no such host".to_string()));
+        }
+        return Err(DnsError(format!("no such host: {name}")));
+    }
+
+    let expected =
+        wire::parse_presentation_name(expected_name).map_err(|err| DnsError(err.to_string()))?;
+    let owners = body
+        .answer
+        .iter()
+        .map(|answer| wire::parse_presentation_name(&answer.name))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| DnsError(err.to_string()))?;
+    let types = body
+        .answer
+        .iter()
+        .map(|answer| Some(answer.answer_type))
+        .collect::<Vec<_>>();
+    let reachable = wire::reachable_answer_names(expected, &owners, &types, |index| {
+        wire::parse_presentation_name(&body.answer[index].data)
+            .map_err(|_| wire::malformed_rdata(wire::TYPE_CNAME))
+    })
+    .map_err(|err| DnsError(err.to_string()))?;
+
+    Ok(body
+        .answer
+        .into_iter()
+        .zip(owners)
+        .filter(|(_, owner)| reachable.contains(owner))
+        .map(|(answer, _)| DohRecord {
+            answer_type: answer.answer_type,
+            data: answer.data,
+            ttl: answer.ttl,
+        })
+        .collect())
 }
 
 fn ip_records(records: Vec<DohRecord>, answer_type: u16) -> Result<Vec<DnsRecord>, DnsError> {
@@ -566,6 +593,7 @@ struct DohResponse {
 
 #[derive(Debug, Deserialize)]
 struct DohAnswer {
+    name: String,
     #[serde(rename = "type")]
     answer_type: u16,
     data: String,
@@ -684,10 +712,10 @@ mod tests {
 
                     let response = match ty {
                         "A" => http::Response::new(
-                            r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#.to_string(),
+                            r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"127.0.0.1"}]}"#.to_string(),
                         ),
                         "AAAA" => http::Response::new(
-                            r#"{"Status":0,"Answer":[{"type":28,"data":"::1"}]}"#.to_string(),
+                            r#"{"Status":0,"Answer":[{"name":"example.com.","type":28,"data":"::1"}]}"#.to_string(),
                         ),
                         _ => http::Response::builder()
                             .status(400)
@@ -972,6 +1000,95 @@ mod tests {
         assert!(records.is_empty());
     }
 
+    #[test]
+    fn json_response_rejects_unrelated_address_owner() {
+        let raw =
+            br#"{"Status":0,"Answer":[{"name":"unrelated.example.","type":1,"data":"192.0.2.1"}]}"#;
+
+        let records = doh_records_from_json_response(raw, "example.com").unwrap();
+
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn json_response_accepts_valid_cname_chain() {
+        let raw = br#"{"Status":0,"Answer":[
+            {"name":"EXAMPLE.com.","type":5,"data":"Alias.Example."},
+            {"name":"alias.example.","type":1,"data":"192.0.2.1"}
+        ]}"#;
+
+        let records = doh_records_from_json_response(raw, "example.com").unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].data, "192.0.2.1");
+    }
+
+    #[test]
+    fn json_response_accepts_rrsig_with_cname() {
+        let raw = br#"{"Status":0,"Answer":[
+            {"name":"example.com.","type":5,"data":"alias.example."},
+            {"name":"example.com.","type":46,"data":"5 13 300 0 0 0 example. signature"},
+            {"name":"alias.example.","type":1,"data":"192.0.2.1"}
+        ]}"#;
+
+        let records = doh_records_from_json_response(raw, "example.com").unwrap();
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[2].data, "192.0.2.1");
+    }
+
+    #[test]
+    fn json_response_rejects_malformed_cname_chain() {
+        let raw = br#"{"Status":0,"Answer":[
+            {"name":"example.com.","type":5,"data":"first.example."},
+            {"name":"example.com.","type":5,"data":"second.example."}
+        ]}"#;
+
+        let err = doh_records_from_json_response(raw, "example.com").unwrap_err();
+
+        assert_eq!(err.to_string(), "DNS CNAME owner has conflicting targets");
+    }
+
+    #[test]
+    fn json_response_filters_mixed_reachable_and_unrelated_answers() {
+        let raw = br#"{"Status":0,"Answer":[
+            {"name":"example.com.","type":5,"data":"alias.example."},
+            {"name":"unrelated.example.","type":1,"data":"192.0.2.200"},
+            {"name":"alias.example.","type":1,"data":"192.0.2.1"},
+            {"name":"other.example.","type":28,"data":"2001:db8::1"}
+        ]}"#;
+
+        let records = doh_records_from_json_response(raw, "example.com").unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].answer_type, wire::TYPE_CNAME);
+        assert_eq!(records[1].data, "192.0.2.1");
+    }
+
+    #[test]
+    fn json_response_requires_valid_owner_names() {
+        let missing = br#"{"Status":0,"Answer":[{"type":1,"data":"192.0.2.1"}]}"#;
+        let malformed =
+            br#"{"Status":0,"Answer":[{"name":"bad..example.","type":1,"data":"192.0.2.1"}]}"#;
+
+        assert!(doh_records_from_json_response(missing, "example.com").is_err());
+        assert!(doh_records_from_json_response(malformed, "example.com").is_err());
+    }
+
+    #[test]
+    fn json_response_compares_escaped_owner_octets_without_loss() {
+        let raw = br#"{"Status":0,"Answer":[
+            {"name":"example.com.","type":5,"data":"\\255.example."},
+            {"name":"\\254.example.","type":1,"data":"192.0.2.200"},
+            {"name":"\\255.example.","type":1,"data":"192.0.2.1"}
+        ]}"#;
+
+        let records = doh_records_from_json_response(raw, "example.com").unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].data, "192.0.2.1");
+    }
+
     #[tokio::test]
     async fn lookup_doh_uses_rfc8484_wire_format() {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1053,11 +1170,11 @@ mod tests {
             seen.lock().unwrap().push(ty.clone());
             match ty.as_str() {
                 "A" => http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":5,"data":"alias.example"},{"type":1,"data":"127.0.0.1"}]}"#
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":5,"data":"alias.example"},{"name":"alias.example.","type":1,"data":"127.0.0.1"}]}"#
                         .to_string(),
                 ),
                 "AAAA" => http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":28,"data":"::1"}]}"#.to_string(),
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":28,"data":"::1"}]}"#.to_string(),
                 ),
                 _ => http::Response::builder()
                     .status(400)
@@ -1089,7 +1206,8 @@ mod tests {
                 .unwrap()
                 .push(request.body().clone());
             http::Response::new(
-                r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#.to_string(),
+                r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"127.0.0.1"}]}"#
+                    .to_string(),
             )
         })
         .await;
@@ -1183,7 +1301,7 @@ mod tests {
     async fn lookup_doh_type_returns_ttl() {
         let (url, task) = start_test_server(|_| {
             http::Response::new(
-                r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1","TTL":123}]}"#.to_string(),
+                r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"127.0.0.1","TTL":123}]}"#.to_string(),
             )
         })
         .await;

@@ -10,6 +10,7 @@ pub(crate) const TYPE_MX: u16 = 15;
 pub(crate) const TYPE_TXT: u16 = 16;
 pub(crate) const TYPE_AAAA: u16 = 28;
 pub(crate) const TYPE_SRV: u16 = 33;
+pub(crate) const TYPE_RRSIG: u16 = 46;
 pub(crate) const TYPE_SVCB: u16 = 64;
 pub(crate) const TYPE_HTTPS: u16 = 65;
 pub(crate) const TYPE_CAA: u16 = 257;
@@ -210,7 +211,7 @@ impl RdataReader<'_> {
     }
 }
 
-fn malformed_rdata(typ: u16) -> WireError {
+pub(crate) fn malformed_rdata(typ: u16) -> WireError {
     WireError(format!("malformed DNS RDATA for type {typ}"))
 }
 
@@ -354,70 +355,23 @@ fn parse_response_inner<'a>(
         });
     }
 
-    // Index each owner once, then traverse only reachable CNAME owners. This
-    // keeps reverse-ordered answers linear in the number of records.
-    let mut cname_owners = HashMap::<CanonicalName, CnameOwner>::new();
-    for (index, record) in records.iter().enumerate() {
-        if record.class != expected_class {
-            continue;
+    let owners = records
+        .iter()
+        .map(|record| record.canonical_name.clone())
+        .collect::<Vec<_>>();
+    let types = records
+        .iter()
+        .map(|record| (record.class == expected_class).then_some(record.typ))
+        .collect::<Vec<_>>();
+    let reachable = reachable_answer_names(expected_canonical, &owners, &types, |index| {
+        let cname = &records[index];
+        let end = cname.data_offset + cname.data.len();
+        let parsed = read_parsed_name_bounded(raw, cname.data_offset, end)?;
+        if parsed.next != end {
+            return Err(malformed_rdata(TYPE_CNAME));
         }
-        let owner = cname_owners
-            .entry(record.canonical_name.clone())
-            .or_default();
-        if record.typ == TYPE_CNAME {
-            owner.cname_records.push(index);
-        } else {
-            owner.has_other_data = true;
-        }
-    }
-
-    // Use canonical label bytes for authorization. Presentation strings can
-    // map distinct invalid octets to the same text.
-    let mut reachable = HashSet::from([expected_canonical.clone()]);
-    let mut pending = VecDeque::from([expected_canonical]);
-    let mut depth = 0;
-    while let Some(owner_name) = pending.pop_front() {
-        let Some(owner) = cname_owners.get(&owner_name) else {
-            continue;
-        };
-        if owner.cname_records.is_empty() {
-            continue;
-        }
-        if owner.has_other_data {
-            return Err(WireError(
-                "DNS CNAME owner has conflicting answer data".to_string(),
-            ));
-        }
-        if depth == MAX_CNAME_DEPTH {
-            return Err(WireError("DNS CNAME chain exceeds depth limit".to_string()));
-        }
-
-        let mut target = None;
-        for &index in &owner.cname_records {
-            let cname = &records[index];
-            let end = cname.data_offset + cname.data.len();
-            let parsed = read_parsed_name_bounded(raw, cname.data_offset, end)?;
-            if parsed.next != end {
-                return Err(malformed_rdata(TYPE_CNAME));
-            }
-            if target
-                .as_ref()
-                .is_some_and(|prior| prior != &parsed.canonical)
-            {
-                return Err(WireError(
-                    "DNS CNAME owner has conflicting targets".to_string(),
-                ));
-            }
-            target = Some(parsed.canonical);
-        }
-
-        let target = target.expect("CNAME owner has at least one record");
-        if !reachable.insert(target.clone()) {
-            return Err(WireError("DNS CNAME chain contains a cycle".to_string()));
-        }
-        pending.push_back(target);
-        depth += 1;
-    }
+        Ok(parsed.canonical)
+    })?;
     records.retain(|record| reachable.contains(&record.canonical_name));
     Ok(records)
 }
@@ -437,7 +391,7 @@ fn read_name_bounded(
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct CanonicalName(Vec<Vec<u8>>);
+pub(crate) struct CanonicalName(Vec<Vec<u8>>);
 
 impl CanonicalName {
     fn from_text(name: &str) -> Self {
@@ -451,6 +405,145 @@ impl CanonicalName {
                 .collect(),
         )
     }
+}
+
+pub(crate) fn reachable_answer_names(
+    expected: CanonicalName,
+    owners: &[CanonicalName],
+    types: &[Option<u16>],
+    mut cname_target: impl FnMut(usize) -> Result<CanonicalName, WireError>,
+) -> Result<HashSet<CanonicalName>, WireError> {
+    assert_eq!(owners.len(), types.len());
+    if owners.len() > MAX_ANSWER_RECORDS {
+        return Err(WireError(
+            "DNS response has too many answer records".to_string(),
+        ));
+    }
+
+    // Index each owner once, then traverse only reachable CNAME owners. This
+    // keeps reverse-ordered answers linear in the number of records.
+    let mut cname_owners = HashMap::<CanonicalName, CnameOwner>::new();
+    for (index, (owner_name, typ)) in owners.iter().zip(types).enumerate() {
+        let Some(typ) = typ else {
+            continue;
+        };
+        let owner = cname_owners.entry(owner_name.clone()).or_default();
+        if *typ == TYPE_CNAME {
+            owner.cname_records.push(index);
+        } else if *typ != TYPE_RRSIG {
+            owner.has_other_data = true;
+        }
+    }
+
+    // Use canonical label bytes for authorization. Presentation strings can
+    // map distinct invalid octets to the same text.
+    let mut reachable = HashSet::from([expected.clone()]);
+    let mut pending = VecDeque::from([expected]);
+    let mut depth = 0;
+    while let Some(owner_name) = pending.pop_front() {
+        let Some(owner) = cname_owners.get(&owner_name) else {
+            continue;
+        };
+        if owner.cname_records.is_empty() {
+            continue;
+        }
+        if owner.has_other_data {
+            return Err(WireError(
+                "DNS CNAME owner has conflicting answer data".to_string(),
+            ));
+        }
+        if depth == MAX_CNAME_DEPTH {
+            return Err(WireError("DNS CNAME chain exceeds depth limit".to_string()));
+        }
+
+        let mut target = None;
+        for &index in &owner.cname_records {
+            let parsed = cname_target(index)?;
+            if target.as_ref().is_some_and(|prior| prior != &parsed) {
+                return Err(WireError(
+                    "DNS CNAME owner has conflicting targets".to_string(),
+                ));
+            }
+            target = Some(parsed);
+        }
+
+        let target = target.expect("CNAME owner has at least one record");
+        if !reachable.insert(target.clone()) {
+            return Err(WireError("DNS CNAME chain contains a cycle".to_string()));
+        }
+        pending.push_back(target);
+        depth += 1;
+    }
+    Ok(reachable)
+}
+
+pub(crate) fn parse_presentation_name(name: &str) -> Result<CanonicalName, WireError> {
+    if name == "." {
+        return Ok(CanonicalName(Vec::new()));
+    }
+    if name.is_empty() {
+        return Err(WireError("invalid DNS name".to_string()));
+    }
+
+    let bytes = name.as_bytes();
+    let mut labels = Vec::new();
+    let mut label = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'.' => {
+                if label.is_empty() {
+                    return Err(WireError("invalid DNS name".to_string()));
+                }
+                labels.push(std::mem::take(&mut label));
+                offset += 1;
+                if offset == bytes.len() {
+                    break;
+                }
+            }
+            b'\\' => {
+                offset += 1;
+                if offset == bytes.len() {
+                    return Err(WireError("invalid DNS name escape".to_string()));
+                }
+                if offset + 2 < bytes.len()
+                    && bytes[offset..offset + 3].iter().all(u8::is_ascii_digit)
+                {
+                    let value = u16::from(bytes[offset] - b'0') * 100
+                        + u16::from(bytes[offset + 1] - b'0') * 10
+                        + u16::from(bytes[offset + 2] - b'0');
+                    if value > u16::from(u8::MAX) {
+                        return Err(WireError("invalid DNS name escape".to_string()));
+                    }
+                    label.push(value as u8);
+                    offset += 3;
+                } else {
+                    label.push(bytes[offset]);
+                    offset += 1;
+                }
+            }
+            octet => {
+                label.push(octet);
+                offset += 1;
+            }
+        }
+        if label.len() > 63 {
+            return Err(WireError("invalid DNS name label".to_string()));
+        }
+    }
+    if !label.is_empty() {
+        labels.push(label);
+    }
+    if labels.is_empty() || labels.iter().map(|label| label.len() + 1).sum::<usize>() + 1 > 255 {
+        return Err(WireError("invalid DNS name".to_string()));
+    }
+
+    Ok(CanonicalName(
+        labels
+            .into_iter()
+            .map(|label| label.into_iter().map(ascii_lowercase).collect())
+            .collect(),
+    ))
 }
 
 struct ParsedName {

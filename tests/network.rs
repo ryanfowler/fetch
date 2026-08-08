@@ -238,7 +238,7 @@ fn inspect_ech_discovery_uses_custom_doh_tls_config() {
             seen_https_queries.fetch_add(1, Ordering::SeqCst);
         }
         let body = if req.path.contains("type=A") {
-            r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#
+            r#"{"Status":0,"Answer":[{"name":"localhost.","type":1,"data":"127.0.0.1"}]}"#
         } else {
             r#"{"Status":0}"#
         };
@@ -274,7 +274,7 @@ fn authenticated_doh_failure_is_fatal_for_ech_auto() {
             return TestResponse::status(503, "Service Unavailable", "HTTPS lookup failed");
         }
         let body = if req.path.contains("type=A") {
-            r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#
+            r#"{"Status":0,"Answer":[{"name":"localhost.","type":1,"data":"127.0.0.1"}]}"#
         } else {
             r#"{"Status":0}"#
         };
@@ -310,7 +310,7 @@ fn authenticated_doh_failure_is_fatal_for_auto_http3() {
             return TestResponse::status(503, "Service Unavailable", "HTTPS lookup failed");
         }
         let body = if req.path.contains("type=A") {
-            r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#
+            r#"{"Status":0,"Answer":[{"name":"localhost.","type":1,"data":"127.0.0.1"}]}"#
         } else {
             r#"{"Status":0}"#
         };
@@ -1498,28 +1498,28 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
         if req.path.contains("/dns-query") {
             if req.path.contains("name=localhost") {
                 return TestResponse::ok(
-                    r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#,
+                    r#"{"Status":0,"Answer":[{"name":"localhost.","type":1,"data":"127.0.0.1"}]}"#,
                 )
                 .header("Content-Type", "application/dns-json")
                 .header("Connection", "close");
             }
             if req.path.contains("type=AAAA") {
                 return TestResponse::ok(
-                    r#"{"Status":0,"Answer":[{"type":28,"data":"2001:db8::1","TTL":300}]}"#,
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":28,"data":"2001:db8::1","TTL":300}]}"#,
                 )
                 .header("Content-Type", "application/dns-json")
                 .header("Connection", "close");
             }
             if req.path.contains("type=A") {
                 return TestResponse::ok(
-                    r#"{"Status":0,"Answer":[{"type":5,"data":"alias.example.com.","TTL":120},{"type":1,"data":"192.0.2.1","TTL":60}]}"#,
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":5,"data":"alias.example.com.","TTL":120},{"name":"alias.example.com.","type":1,"data":"192.0.2.1","TTL":60}]}"#,
                 )
                 .header("Content-Type", "application/dns-json")
                 .header("Connection", "close");
             }
             if req.path.contains("type=TXT") {
                 return TestResponse::ok(
-                    r#"{"Status":0,"Answer":[{"type":16,"data":"v=spf1 -all","TTL":180}]}"#,
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":16,"data":"v=spf1 -all","TTL":180}]}"#,
                 )
                 .header("Content-Type", "application/dns-json")
                 .header("Connection", "close");
