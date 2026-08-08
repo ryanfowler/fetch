@@ -160,10 +160,9 @@ pub(crate) fn decode_rdata<'a>(
         }
         TYPE_CAA if len >= 2 && usize::from(raw[1]) <= len - 2 => Ok(DecodedRdata::Raw(raw)),
         TYPE_CAA => Err(malformed_rdata(typ)),
-        TYPE_SVCB | TYPE_HTTPS if crate::dns::svcb::parse_rdata(raw).is_some() => {
-            Ok(DecodedRdata::Raw(raw))
-        }
-        TYPE_SVCB | TYPE_HTTPS => Err(malformed_rdata(typ)),
+        TYPE_SVCB | TYPE_HTTPS => crate::dns::svcb::parse_rdata(raw)
+            .map(|_| DecodedRdata::Raw(raw))
+            .map_err(|err| WireError(format!("malformed DNS RDATA for type {typ}: {err}"))),
         _ => Ok(DecodedRdata::Raw(raw)),
     }
 }
