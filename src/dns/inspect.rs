@@ -903,10 +903,18 @@ mod tests {
                     let (parts, body) = response.into_parts();
                     let status = parts.status.as_u16();
                     let reason = parts.status.canonical_reason().unwrap_or("");
-                    let raw = format!(
-                        "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+                    let mut raw = format!(
+                        "HTTP/1.1 {status} {reason}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n",
                         body.len()
                     );
+                    for (name, value) in &parts.headers {
+                        raw.push_str(name.as_str());
+                        raw.push_str(": ");
+                        raw.push_str(value.to_str().unwrap());
+                        raw.push_str("\r\n");
+                    }
+                    raw.push_str("\r\n");
+                    raw.push_str(&body);
                     let _ = stream.writable().await;
                     let _ = stream.try_write(raw.as_bytes());
                 });
@@ -969,6 +977,40 @@ mod tests {
         for want in wants {
             assert!(out.contains(&want), "output missing {want:?}:\n{out}");
         }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn test_inspect_doh_subtracts_http_age_from_ttls() {
+        let (server_url, task) = start_test_server(|request| {
+            let query_type = request
+                .uri()
+                .query()
+                .unwrap_or_default()
+                .split('&')
+                .find_map(|part| part.strip_prefix("type="))
+                .unwrap_or_default();
+            let body = if query_type == "A" {
+                r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"192.0.2.1","TTL":90}]}"#
+            } else {
+                r#"{"Status":0}"#
+            };
+            http::Response::builder()
+                .header(http::header::AGE, "30")
+                .body(body.to_string())
+                .unwrap()
+        })
+        .await;
+
+        let out = inspect(
+            &Url::parse("https://example.com").unwrap(),
+            Some(server_url.as_str()),
+        )
+        .await
+        .unwrap();
+
+        assert!(out.contains("192.0.2.1 (TTL 1m)"), "output: {out}");
+        assert!(!out.contains("TTL 1m30s"), "output: {out}");
         task.abort();
     }
 
