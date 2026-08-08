@@ -306,7 +306,7 @@ async fn resolve_doh_ips(
     shared_doh: Option<&SharedDohResolver>,
     timeout: TimeoutBudget,
 ) -> Result<Vec<IpAddr>, FetchError> {
-    let (ipv4, ipv6) = tokio::join!(
+    crate::dns::util::resolve_address_families(
         resolve_doh_host_family(
             host,
             dns_server,
@@ -322,22 +322,11 @@ async fn resolve_doh_ips(
             "AAAA",
             crate::dns::wire::TYPE_AAAA,
             timeout,
-        )
-    );
-
-    let mut addrs = Vec::new();
-    if let Ok(records) = &ipv4 {
-        addrs.extend(records.iter().copied());
-    }
-    if let Ok(records) = &ipv6 {
-        addrs.extend(records.iter().copied());
-    }
-    if !addrs.is_empty() {
-        return Ok(addrs);
-    }
-    ipv4?;
-    ipv6?;
-    Err(FetchError::Runtime(format!("lookup {host}: no such host")))
+        ),
+        HAPPY_EYEBALLS_RESOLUTION_DELAY,
+        FetchError::Runtime(format!("lookup {host}: no such host")),
+    )
+    .await
 }
 
 async fn resolve_doh_host_family(
