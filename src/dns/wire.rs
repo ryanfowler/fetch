@@ -319,6 +319,7 @@ pub(crate) fn parse_response_without_id<'a>(
     parse_response_inner(raw, None, expected_name, expected_type, expected_class)
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn parse_standalone_resource_record(
     raw: &[u8],
 ) -> Result<ResourceRecord<'_>, WireError> {
