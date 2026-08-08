@@ -285,6 +285,9 @@ pub(crate) fn run_binary_pty_with_custom_body(
     cmd.env("NO_PROXY", "*");
     configure_pty_child(&mut cmd, &pty.slave);
     let mut child = cmd.spawn().expect("spawn fetch under PTY");
+    // Command keeps its configured stdio handles after spawning. Drop it so
+    // the parent does not keep the PTY slave open after the child exits.
+    drop(cmd);
     drop(pty.slave);
     let capture = start_pty_capture(&pty.master);
     let status = wait_child(&mut child, Duration::from_secs(5))
