@@ -314,6 +314,30 @@ pub(crate) fn parse_response_without_id<'a>(
     parse_response_inner(raw, None, expected_name, expected_type, expected_class)
 }
 
+pub(crate) fn parse_standalone_resource_record(
+    raw: &[u8],
+) -> Result<ResourceRecord<'_>, WireError> {
+    let name = read_parsed_name_bounded(raw, 0, raw.len())?;
+    let offset = name.next;
+    let typ = read_u16(raw, offset)?;
+    let class = read_u16(raw, offset + 2)?;
+    let ttl = read_u32(raw, offset + 4)?;
+    let rdlen = usize::from(read_u16(raw, offset + 8)?);
+    let data_offset = offset + 10;
+    let end = data_offset
+        .checked_add(rdlen)
+        .filter(|end| *end == raw.len())
+        .ok_or_else(|| WireError("malformed standalone DNS resource".to_string()))?;
+    Ok(ResourceRecord {
+        canonical_name: name.canonical,
+        typ,
+        class,
+        ttl,
+        data_offset,
+        data: &raw[data_offset..end],
+    })
+}
+
 fn parse_response_inner<'a>(
     raw: &'a [u8],
     expected_id: Option<u16>,

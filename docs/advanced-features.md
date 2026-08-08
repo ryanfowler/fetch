@@ -216,9 +216,14 @@ for `--http 1`, `--http 2`, and `--http 3`.
 
 When `--http` is unset, direct HTTPS requests use DNS HTTPS/SVCB records to
 discover `h3`. With `--dns-server`, HTTPS-record discovery uses that custom
-UDP, TCP, DoT, DoQ, or DoH resolver. Without `--dns-server`, it uses the
-platform resolver, matching normal address lookup. HTTPS-record discovery and normal A/AAAA lookup
-run in parallel. `fetch` starts the TCP/TLS path as soon as normal DNS produces
+UDP, TCP, DoT, DoQ, or DoH resolver. Without `--dns-server`, it uses the platform resolver. On Linux, `fetch` first
+uses `systemd-resolved` through `resolvectl`. This path honors per-link and
+split-DNS routing. If that service or command interface is unavailable, `fetch`
+uses all valid name servers in `/etc/resolv.conf` and honors the `rotate`,
+`attempts`, and `timeout` options. The file fallback cannot honor NSS modules,
+per-link routing, or resolver configuration stored outside `resolv.conf`. Other
+Unix systems without a record-query API use the same file fallback. HTTPS-record
+discovery and normal A/AAAA lookup run in parallel. `fetch` starts the TCP/TLS path as soon as normal DNS produces
 a usable address, and a usable `h3` candidate that is discovered before TCP/TLS
 wins races QUIC setup against it. The request is sent once on the winning
 transport. With system, UDP, TCP, or plaintext HTTP DNS, a slow or failed
@@ -279,8 +284,9 @@ fetch --http 3 example.com
 
 By default, `fetch` negotiates the best available version:
 
-1. Uses DNS HTTPS/SVCB records from the platform resolver, or from
-   `--dns-server` when set, to discover `h3` candidates for direct HTTPS
+1. Uses DNS HTTPS/SVCB records from the platform resolver, or the documented
+   Unix resolver-file fallback, or from `--dns-server` when set, to discover
+   `h3` candidates for direct HTTPS
 2. Reuses fresh cached HTTP/3 alternatives learned from prior HTTPS/SVCB or
    `Alt-Svc` responses
 3. Resolves A and AAAA in parallel and starts TCP/TLS as soon as an address is
