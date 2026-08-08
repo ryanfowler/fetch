@@ -101,8 +101,9 @@ pub(crate) async fn query_udp_type(
 ) -> Result<Vec<WireDnsRecord>, ResolverError> {
     let id = dns_query_id();
     let raw = wire::build_query(id, host, dns_type).map_err(resolver_error)?;
+    let matcher = wire::ResponseMatcher::new(id, host, dns_type, DNS_CLASS_IN);
     let timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
-    let response = crate::dns::transport::query_udp(*server_addr, &raw, timeout)
+    let response = crate::dns::transport::query_udp(*server_addr, &raw, &matcher, timeout)
         .await
         .map_err(resolver_error)?;
     match wire_records_from_response(&response, id, host, dns_type) {

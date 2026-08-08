@@ -168,7 +168,7 @@ fn ech_dns_discovery_failure_is_reported_and_auto_falls_back() {
     ]);
     assert_exit(&required, 1);
     assert!(
-        required.stderr.contains("mismatched DNS response ID"),
+        required.stderr.contains("ServerFailure"),
         "{}",
         required.stderr
     );

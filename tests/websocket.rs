@@ -1306,7 +1306,7 @@ fn websocket_ech_discovery_uses_http_error_policy() {
     ]);
     assert_exit(&required, 1);
     assert!(
-        required.stderr.contains("mismatched DNS response ID"),
+        required.stderr.contains("ServerFailure"),
         "{}",
         required.stderr
     );
