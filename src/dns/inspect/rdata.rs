@@ -18,7 +18,7 @@ const DNS_TYPE_HTTPS: u16 = wire::TYPE_HTTPS;
 const DNS_TYPE_CAA: u16 = wire::TYPE_CAA;
 
 pub(super) fn records_from_ip_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<Record> {
-    addrs
+    crate::dns::ordered_unique_ip_addrs(addrs)
         .into_iter()
         .map(|ip| {
             let typ = if ip.is_ipv4() { "A" } else { "AAAA" };

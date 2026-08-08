@@ -363,7 +363,7 @@ async fn resolve_dns_for_client_inner(
         )
         .await?;
         let https_records = https_lookup.records;
-        let timing_addrs = dns_timing_addrs(addrs.iter().copied());
+        let timing_addrs = crate::dns::ordered_unique_ip_addrs(addrs.iter().copied());
         let socket_addrs = custom::socket_addrs_for_override(&addrs);
         let auto_http3_config = auto_http3_config_for_records(
             &https_records,
@@ -459,7 +459,7 @@ async fn resolve_dns_for_client_inner(
     .await?;
     let effective_host = https_records.fallback_target;
     let https_records = https_records.records;
-    let addrs = dns_timing_addrs(socket_addrs.iter().map(|addr| addr.ip()));
+    let addrs = crate::dns::ordered_unique_ip_addrs(socket_addrs.iter().map(|addr| addr.ip()));
     let auto_http3_config =
         auto_http3_config_for_records(&https_records, &effective_host, &socket_addrs);
     if auto_http3 && https_lookup_succeeded {
@@ -700,16 +700,6 @@ fn auto_http3_optional_lookup_timeout_for_remaining(
         Some(timeout) if timeout <= max_lookup => None,
         Some(timeout) => Some((timeout - max_lookup).min(max_lookup)),
     }
-}
-
-fn dns_timing_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<IpAddr> {
-    let mut unique = Vec::new();
-    for addr in addrs {
-        if !unique.contains(&addr) {
-            unique.push(addr);
-        }
-    }
-    unique
 }
 
 fn configure_dns_resolution(
@@ -1246,7 +1236,7 @@ mod tests {
             "::2".parse().unwrap(),
         ];
 
-        let display_addrs = dns_timing_addrs(addrs);
+        let display_addrs = crate::dns::ordered_unique_ip_addrs(addrs);
 
         assert_eq!(
             display_addrs,

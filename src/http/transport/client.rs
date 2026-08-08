@@ -760,20 +760,10 @@ pub(super) fn record_dns_addrs_trace(
         socket_addrs: addrs.to_vec(),
         timing: Some(DnsTiming {
             host: host.to_string(),
-            addrs: dns_timing_addrs(addrs.iter().map(|addr| addr.ip())),
+            addrs: crate::dns::ordered_unique_ip_addrs(addrs.iter().map(|addr| addr.ip())),
             duration,
         }),
     });
-}
-
-fn dns_timing_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<IpAddr> {
-    let mut unique = Vec::new();
-    for addr in addrs {
-        if !unique.contains(&addr) {
-            unique.push(addr);
-        }
-    }
-    unique
 }
 
 pub(super) fn alpn_for_config(config: &ClientConfig) -> Vec<Vec<u8>> {
