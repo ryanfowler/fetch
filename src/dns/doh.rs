@@ -9,7 +9,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::core;
-use crate::dns::util::dns_query_id;
+use crate::dns::util::{dns_query_id, resolve_address_families};
 use crate::dns::wire;
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
@@ -70,25 +70,14 @@ pub async fn lookup_doh(
     }
 
     let client = client(timeout)?;
-    let (a, aaaa) = tokio::join!(
+    resolve_address_families(
         lookup_doh_type_with_client(&client, server_url, host, "A", DNS_TYPE_A),
-        lookup_doh_type_with_client(&client, server_url, host, "AAAA", DNS_TYPE_AAAA)
-    );
-
-    let mut addrs = Vec::new();
-    if let Ok(records) = &a {
-        addrs.extend(records.iter().map(|record| record.ip));
-    }
-    if let Ok(records) = &aaaa {
-        addrs.extend(records.iter().map(|record| record.ip));
-    }
-
-    if !addrs.is_empty() {
-        return Ok(addrs);
-    }
-    a?;
-    aaaa?;
-    Err(DnsError("no such host".to_string()))
+        lookup_doh_type_with_client(&client, server_url, host, "AAAA", DNS_TYPE_AAAA),
+        crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
+        DnsError("no such host".to_string()),
+    )
+    .await
+    .map(|records| records.into_iter().map(|record| record.ip).collect())
 }
 
 pub async fn lookup_doh_type(
@@ -722,6 +711,42 @@ mod tests {
         )
     }
 
+    async fn start_stalled_family_server() -> (Url, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let Some(request) = read_wire_test_request(&mut stream).await else {
+                        return;
+                    };
+                    let Some((_, query_type, _)) = test_dns_question(&request.body) else {
+                        return;
+                    };
+                    if query_type == DNS_TYPE_AAAA {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        return;
+                    }
+                    let body =
+                        wire_response(&request.body, vec![(DNS_TYPE_A, 60, vec![127, 0, 0, 1])]);
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: {APPLICATION_DNS_MESSAGE}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(headers.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                });
+            }
+        });
+        (
+            Url::parse(&format!("http://{addr}/dns-query")).unwrap(),
+            task,
+        )
+    }
+
     async fn start_delayed_415_fallback_server(
         post_delay: Duration,
     ) -> (Url, tokio::task::JoinHandle<()>) {
@@ -1082,6 +1107,23 @@ mod tests {
                 .any(|line| line.eq_ignore_ascii_case(&format!("host: {expected_host}")))),
             "DoH HTTP/1.1 request did not include Host header:\n{}",
             requests.join("\n---\n")
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_doh_returns_after_one_family_succeeds() {
+        let (url, task) = start_stalled_family_server().await;
+        let start = Instant::now();
+
+        let addrs = lookup_doh(&url, "example.com", Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+
+        assert_eq!(addrs, ["127.0.0.1".parse::<IpAddr>().unwrap()]);
+        assert!(
+            start.elapsed() < Duration::from_millis(350),
+            "positive family waited for the DNS timeout"
         );
         task.abort();
     }

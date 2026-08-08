@@ -5,7 +5,7 @@ use std::time::Duration;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::dns::util::{dns_query_id, udp_dns_timeout};
+use crate::dns::util::{dns_query_id, resolve_address_families, udp_dns_timeout};
 use crate::dns::wire;
 use crate::duration::TimeoutBudget;
 
@@ -63,12 +63,14 @@ pub(crate) async fn lookup_udp_addr(
     }
 
     let budget = TimeoutBudget::new(timeout);
-    let (a, aaaa) = tokio::join!(
+    resolve_address_families(
         lookup_udp_type_with_budget(addr, host, DNS_TYPE_A, budget),
-        lookup_udp_type_with_budget(addr, host, DNS_TYPE_AAAA, budget)
-    );
-
-    combine_results(a, aaaa)
+        lookup_udp_type_with_budget(addr, host, DNS_TYPE_AAAA, budget),
+        crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
+        ResolverError("no such host".to_string()),
+    )
+    .await
+    .map(|records| records.into_iter().map(|record| record.ip).collect())
 }
 
 pub async fn lookup_udp_type(
@@ -124,11 +126,22 @@ pub(crate) async fn lookup_tcp_addr(
         return Ok(vec![ip]);
     }
     let budget = TimeoutBudget::new(timeout);
-    let connect_timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
-    let mut stream = crate::dns::transport::tcp_connection(addr, connect_timeout)
-        .await
-        .map_err(resolver_error)?;
-    run_stream_lookup(&mut stream, host, budget).await
+    resolve_address_families(
+        async {
+            query_tcp_type(addr, host, DNS_TYPE_A, budget)
+                .await
+                .map(|records| ip_records(records, DNS_TYPE_A))
+        },
+        async {
+            query_tcp_type(addr, host, DNS_TYPE_AAAA, budget)
+                .await
+                .map(|records| ip_records(records, DNS_TYPE_AAAA))
+        },
+        crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
+        ResolverError("no such host".to_string()),
+    )
+    .await
+    .map(|records| records.into_iter().map(|record| record.ip).collect())
 }
 
 pub(crate) async fn lookup_tls(
@@ -142,12 +155,36 @@ pub(crate) async fn lookup_tls(
         return Ok(vec![ip]);
     }
     let budget = TimeoutBudget::new(timeout);
-    let connect_timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
-    let mut stream =
-        crate::dns::transport::tls_connection(server_name, server_addrs, connect_timeout, insecure)
+    resolve_address_families(
+        async {
+            query_tls_type(
+                server_name,
+                server_addrs,
+                host,
+                DNS_TYPE_A,
+                budget,
+                insecure,
+            )
             .await
-            .map_err(resolver_error)?;
-    run_stream_lookup(&mut stream, host, budget).await
+            .map(|records| ip_records(records, DNS_TYPE_A))
+        },
+        async {
+            query_tls_type(
+                server_name,
+                server_addrs,
+                host,
+                DNS_TYPE_AAAA,
+                budget,
+                insecure,
+            )
+            .await
+            .map(|records| ip_records(records, DNS_TYPE_AAAA))
+        },
+        crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
+        ResolverError("no such host".to_string()),
+    )
+    .await
+    .map(|records| records.into_iter().map(|record| record.ip).collect())
 }
 
 pub(crate) async fn lookup_quic(
@@ -313,73 +350,6 @@ async fn query_stream_type<S: AsyncRead + AsyncWrite + Unpin>(
     wire_records_from_response(&response, id, host, dns_type).map_err(resolver_error)
 }
 
-async fn run_stream_lookup<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: &mut S,
-    host: &str,
-    budget: TimeoutBudget,
-) -> Result<Vec<IpAddr>, ResolverError> {
-    run_stream_lookup_with_id_generator(stream, host, budget, dns_query_id).await
-}
-
-async fn run_stream_lookup_with_id_generator<
-    S: AsyncRead + AsyncWrite + Unpin,
-    F: FnMut() -> u16,
->(
-    stream: &mut S,
-    host: &str,
-    budget: TimeoutBudget,
-    mut next_id: F,
-) -> Result<Vec<IpAddr>, ResolverError> {
-    let id_a = next_id();
-    let query_a = wire::build_query(id_a, host, DNS_TYPE_A).map_err(resolver_error)?;
-    let id_aaaa = loop {
-        let id = next_id();
-        if id != id_a {
-            break id;
-        }
-    };
-    let query_aaaa = wire::build_query(id_aaaa, host, DNS_TYPE_AAAA).map_err(resolver_error)?;
-
-    let timeout = budget.remaining().map_err(resolver_error)?;
-    let (a_response, aaaa_response) = with_optional_timeout(timeout, async {
-        crate::dns::transport::write_framed_query(stream, &query_a)
-            .await
-            .map_err(resolver_error)?;
-        crate::dns::transport::write_framed_query(stream, &query_aaaa)
-            .await
-            .map_err(resolver_error)?;
-        let mut a_response = None;
-        let mut aaaa_response = None;
-        for _ in 0..2 {
-            let response = crate::dns::transport::read_framed_response(stream)
-                .await
-                .map_err(resolver_error)?;
-            if response.len() < 2 {
-                return Err(ResolverError("short DNS response".to_string()));
-            }
-            let response_id = u16::from_be_bytes([response[0], response[1]]);
-            if response_id == id_a {
-                a_response = Some(response);
-            } else if response_id == id_aaaa {
-                aaaa_response = Some(response);
-            } else {
-                return Err(ResolverError("mismatched DNS response ID".to_string()));
-            }
-        }
-        Ok::<_, ResolverError>((a_response, aaaa_response))
-    })
-    .await?;
-
-    let a_response = a_response.ok_or_else(|| ResolverError("missing DNS response".to_string()))?;
-    let aaaa_response =
-        aaaa_response.ok_or_else(|| ResolverError("missing DNS response".to_string()))?;
-    let a_records =
-        dns_records_from_response(&a_response, id_a, host, DNS_TYPE_A).map_err(resolver_error);
-    let aaaa_records = dns_records_from_response(&aaaa_response, id_aaaa, host, DNS_TYPE_AAAA)
-        .map_err(resolver_error);
-    combine_results(a_records, aaaa_records)
-}
-
 async fn run_quic_lookup(
     connection: &quinn::Connection,
     host: &str,
@@ -391,16 +361,17 @@ async fn run_quic_lookup(
         wire::build_query(DOQ_MESSAGE_ID, host, DNS_TYPE_AAAA).map_err(resolver_error)?;
 
     let timeout = budget.remaining().map_err(resolver_error)?;
-    let (a_records, aaaa_records) = with_optional_timeout(timeout, async {
-        let (a_result, aaaa_result) = tokio::join!(
+    with_optional_timeout(timeout, async {
+        resolve_address_families(
             quic_single_query(connection, query_a, DOQ_MESSAGE_ID, host, DNS_TYPE_A),
             quic_single_query(connection, query_aaaa, DOQ_MESSAGE_ID, host, DNS_TYPE_AAAA),
-        );
-        Ok::<_, ResolverError>((a_result, aaaa_result))
+            crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
+            ResolverError("no such host".to_string()),
+        )
+        .await
+        .map(|records| records.into_iter().map(|record| record.ip).collect())
     })
-    .await?;
-
-    combine_results(a_records, aaaa_records)
+    .await
 }
 
 async fn with_optional_timeout<T, Fut>(
@@ -426,26 +397,6 @@ async fn quic_single_query(
         .await
         .map_err(resolver_error)?;
     dns_records_from_response(&response, expected_id, host, dns_type).map_err(resolver_error)
-}
-
-fn combine_results(
-    a: Result<Vec<DnsRecord>, ResolverError>,
-    aaaa: Result<Vec<DnsRecord>, ResolverError>,
-) -> Result<Vec<IpAddr>, ResolverError> {
-    let mut addrs = Vec::new();
-    if let Ok(records) = &a {
-        addrs.extend(records.iter().map(|record| record.ip));
-    }
-    if let Ok(records) = &aaaa {
-        addrs.extend(records.iter().map(|record| record.ip));
-    }
-
-    if !addrs.is_empty() {
-        return Ok(addrs);
-    }
-    a?;
-    aaaa?;
-    Err(ResolverError("no such host".to_string()))
 }
 
 fn parse_normalized_addr(server: &str) -> Result<SocketAddr, ResolverError> {
@@ -595,6 +546,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lookup_udp_returns_after_one_family_succeeds() {
+        let (addr, stop) = start_udp_server(DnsServerMode::DropAaaa);
+        let start = Instant::now();
+
+        let addrs = lookup_udp(&addr, "example.com", Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+
+        assert_eq!(addrs, ["127.0.0.1".parse::<IpAddr>().unwrap()]);
+        assert!(
+            start.elapsed() < Duration::from_millis(350),
+            "positive family waited for the DNS timeout"
+        );
+        stop();
+    }
+
+    #[tokio::test]
     async fn lookup_udp_type_returns_ttl() {
         let (addr, stop) = start_udp_server(DnsServerMode::Success);
 
@@ -722,6 +690,7 @@ mod tests {
     enum DnsServerMode {
         Success,
         NxDomain,
+        DropAaaa,
     }
 
     fn start_udp_server(mode: DnsServerMode) -> (String, impl FnOnce()) {
@@ -750,7 +719,10 @@ mod tests {
                 let mut response = Vec::new();
                 response.extend_from_slice(&buf[0..2]);
                 match mode {
-                    DnsServerMode::Success => {
+                    DnsServerMode::Success | DnsServerMode::DropAaaa => {
+                        if matches!(mode, DnsServerMode::DropAaaa) && query_type == DNS_TYPE_AAAA {
+                            continue;
+                        }
                         let answer_count =
                             u16::from(query_type == DNS_TYPE_A || query_type == DNS_TYPE_AAAA);
                         response.extend_from_slice(&0x8180u16.to_be_bytes());
@@ -766,7 +738,7 @@ mod tests {
                 response.extend_from_slice(&0u16.to_be_bytes());
                 response.extend_from_slice(&0u16.to_be_bytes());
                 response.extend_from_slice(&buf[12..question_end]);
-                if matches!(mode, DnsServerMode::Success) {
+                if matches!(mode, DnsServerMode::Success | DnsServerMode::DropAaaa) {
                     match query_type {
                         DNS_TYPE_A => write_answer(&mut response, DNS_TYPE_A, 42, &[127, 0, 0, 1]),
                         DNS_TYPE_AAAA => write_answer(
@@ -1042,7 +1014,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lookup_tcp_queries_a_and_aaaa_over_one_connection() {
+    async fn lookup_tcp_returns_after_one_family_succeeds() {
+        let (addr, stop) = start_tcp_server(DnsServerMode::DropAaaa);
+        let start = Instant::now();
+
+        let addrs = lookup_tcp_addr(&addr, "example.com", Some(Duration::from_millis(500)))
+            .await
+            .unwrap();
+
+        assert_eq!(addrs, ["127.0.0.1".parse::<IpAddr>().unwrap()]);
+        assert!(
+            start.elapsed() < Duration::from_millis(350),
+            "positive family waited for the DNS timeout"
+        );
+        stop();
+    }
+
+    #[tokio::test]
+    async fn lookup_tcp_queries_a_and_aaaa_independently() {
         let queries = Arc::new(Mutex::new(Vec::new()));
         let (addr, stop) = start_counting_tcp_server(queries.clone());
 
@@ -1056,48 +1045,10 @@ mod tests {
         );
         assert_eq!(
             queries.lock().unwrap().len(),
-            1,
-            "expected one TCP connection"
+            2,
+            "expected independent TCP connections"
         );
         stop();
-    }
-
-    #[tokio::test]
-    async fn stream_lookup_retries_duplicate_query_id() {
-        let (mut client, mut server) = tokio::io::duplex(4096);
-        let server = tokio::spawn(async move {
-            let mut query_ids = Vec::new();
-            for _ in 0..2 {
-                let query = crate::dns::transport::read_framed_response(&mut server)
-                    .await
-                    .unwrap();
-                query_ids.push(u16::from_be_bytes([query[0], query[1]]));
-                let response = tcp_response(&query, DnsServerMode::Success);
-                crate::dns::transport::write_framed_query(&mut server, &response)
-                    .await
-                    .unwrap();
-            }
-            query_ids
-        });
-        let mut ids = [0x1234, 0x1234, 0x5678].into_iter();
-
-        let addrs = run_stream_lookup_with_id_generator(
-            &mut client,
-            "example.com",
-            TimeoutBudget::new(Some(Duration::from_secs(1))),
-            || ids.next().unwrap(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            addrs,
-            [
-                "127.0.0.1".parse::<IpAddr>().unwrap(),
-                "::1".parse::<IpAddr>().unwrap(),
-            ]
-        );
-        assert_eq!(server.await.unwrap(), [0x1234, 0x5678]);
     }
 
     #[tokio::test]
@@ -1123,6 +1074,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lookup_tls_returns_after_one_family_succeeds() {
+        let (addr, stop) = start_tls_server_mode(DnsServerMode::DropAaaa).await;
+        let server_name = ServerName::IpAddress("127.0.0.1".parse::<IpAddr>().unwrap().into());
+        let start = Instant::now();
+
+        let addrs = lookup_tls(
+            &server_name,
+            &[addr],
+            "example.com",
+            Some(Duration::from_millis(700)),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(addrs, ["127.0.0.1".parse::<IpAddr>().unwrap()]);
+        assert!(
+            start.elapsed() < Duration::from_millis(450),
+            "positive family waited for the DNS timeout"
+        );
+        stop();
+    }
+
+    #[tokio::test]
     async fn lookup_quic_returns_a_and_aaaa() {
         let (addr, stop) = start_quic_server().await;
 
@@ -1140,6 +1115,30 @@ mod tests {
         assert_eq!(
             addrs.iter().map(ToString::to_string).collect::<Vec<_>>(),
             ["127.0.0.1", "::1"]
+        );
+        stop();
+    }
+
+    #[tokio::test]
+    async fn lookup_quic_returns_after_one_family_succeeds() {
+        let (addr, stop) = start_quic_server_mode(DnsServerMode::DropAaaa).await;
+        let server_name = ServerName::IpAddress("127.0.0.1".parse::<IpAddr>().unwrap().into());
+        let start = Instant::now();
+
+        let addrs = lookup_quic(
+            &server_name,
+            &[addr],
+            "example.com",
+            Some(Duration::from_millis(700)),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(addrs, ["127.0.0.1".parse::<IpAddr>().unwrap()]);
+        assert!(
+            start.elapsed() < Duration::from_millis(450),
+            "positive family waited for the DNS timeout"
         );
         stop();
     }
@@ -1231,7 +1230,7 @@ mod tests {
             }
         });
 
-        let err = lookup_tcp_addr(&addr, "example.com", Some(Duration::from_millis(500)))
+        let err = lookup_tcp_type(&addr, "example.com", DNS_TYPE_A, Duration::from_millis(500))
             .await
             .unwrap_err();
 
@@ -1286,7 +1285,7 @@ mod tests {
                     .expect("set nonblocking on TCP listener");
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        handle_tcp_connection(&mut stream, mode);
+                        thread::spawn(move || handle_tcp_connection(&mut stream, mode));
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -1319,7 +1318,9 @@ mod tests {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         accepts.lock().unwrap().push(());
-                        handle_tcp_connection(&mut stream, DnsServerMode::Success);
+                        thread::spawn(move || {
+                            handle_tcp_connection(&mut stream, DnsServerMode::Success)
+                        });
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -1341,6 +1342,12 @@ mod tests {
             let Some(query) = read_tcp_query(stream) else {
                 return;
             };
+            if matches!(mode, DnsServerMode::DropAaaa)
+                && read_question_type(&query) == Some(DNS_TYPE_AAAA)
+            {
+                thread::sleep(Duration::from_secs(2));
+                return;
+            }
             let response = tcp_response(&query, mode);
             let mut framed = Vec::with_capacity(response.len() + 2);
             framed.extend_from_slice(&(response.len() as u16).to_be_bytes());
@@ -1361,7 +1368,7 @@ mod tests {
         let mut response = Vec::new();
         response.extend_from_slice(&query[0..2]);
         match mode {
-            DnsServerMode::Success => {
+            DnsServerMode::Success | DnsServerMode::DropAaaa => {
                 let answer_count = u16::from(matches!(
                     query_type,
                     DNS_TYPE_A | DNS_TYPE_AAAA | wire::TYPE_HTTPS
@@ -1379,7 +1386,7 @@ mod tests {
         response.extend_from_slice(&0u16.to_be_bytes());
         response.extend_from_slice(&0u16.to_be_bytes());
         response.extend_from_slice(&query[12..question_end]);
-        if matches!(mode, DnsServerMode::Success) {
+        if matches!(mode, DnsServerMode::Success | DnsServerMode::DropAaaa) {
             match query_type {
                 DNS_TYPE_A => write_answer(&mut response, DNS_TYPE_A, 42, &[127, 0, 0, 1]),
                 DNS_TYPE_AAAA => write_answer(
@@ -1503,6 +1510,10 @@ mod tests {
     }
 
     async fn start_tls_server() -> (SocketAddr, impl FnOnce()) {
+        start_tls_server_mode(DnsServerMode::Success).await
+    }
+
+    async fn start_tls_server_mode(mode: DnsServerMode) -> (SocketAddr, impl FnOnce()) {
         let listener = TokioTcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let config = test_server_config();
@@ -1519,7 +1530,7 @@ mod tests {
                         let acceptor = acceptor.clone();
                         tokio::spawn(async move {
                             if let Ok(mut tls) = acceptor.accept(stream).await {
-                                handle_tls_stream(&mut tls).await;
+                                handle_tls_stream(&mut tls, mode).await;
                             }
                         });
                     }
@@ -1535,13 +1546,19 @@ mod tests {
         })
     }
 
-    async fn handle_tls_stream(stream: &mut ServerTlsStream<TokioTcpStream>) {
+    async fn handle_tls_stream(stream: &mut ServerTlsStream<TokioTcpStream>, mode: DnsServerMode) {
         loop {
             let query = match crate::dns::transport::read_framed_response(stream).await {
                 Ok(q) => q,
                 Err(_) => return,
             };
-            let response = tcp_response(&query, DnsServerMode::Success);
+            if matches!(mode, DnsServerMode::DropAaaa)
+                && read_question_type(&query) == Some(DNS_TYPE_AAAA)
+            {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                return;
+            }
+            let response = tcp_response(&query, mode);
             if crate::dns::transport::write_framed_query(stream, &response)
                 .await
                 .is_err()
@@ -1552,6 +1569,10 @@ mod tests {
     }
 
     async fn start_quic_server() -> (SocketAddr, impl FnOnce()) {
+        start_quic_server_mode(DnsServerMode::Success).await
+    }
+
+    async fn start_quic_server_mode(mode: DnsServerMode) -> (SocketAddr, impl FnOnce()) {
         let config = test_quic_server_config();
         let quic_config = QuicServerConfig::try_from(config).expect("valid QUIC server config");
         let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_config));
@@ -1570,7 +1591,7 @@ mod tests {
                 {
                     tokio::spawn(async move {
                         if let Ok(connection) = incoming.await {
-                            handle_quic_connection(connection).await;
+                            handle_quic_connection(connection, mode).await;
                         }
                     });
                 }
@@ -1583,27 +1604,36 @@ mod tests {
         })
     }
 
-    async fn handle_quic_connection(connection: quinn::Connection) {
+    async fn handle_quic_connection(connection: quinn::Connection, mode: DnsServerMode) {
         loop {
             match connection.accept_bi().await {
                 Ok((mut send, mut recv)) => {
-                    let query = match crate::dns::transport::read_framed_response(&mut recv).await {
-                        Ok(q) => q,
-                        Err(_) => continue,
-                    };
-                    // RFC 9250 requires DoQ queries to use message ID 0.
-                    if query.len() < 2 || u16::from_be_bytes([query[0], query[1]]) != DOQ_MESSAGE_ID
-                    {
-                        continue;
-                    }
-                    let response = tcp_response(&query, DnsServerMode::Success);
-                    if crate::dns::transport::write_framed_query(&mut send, &response)
-                        .await
-                        .is_err()
-                    {
-                        continue;
-                    }
-                    let _ = send.finish();
+                    tokio::spawn(async move {
+                        let query =
+                            match crate::dns::transport::read_framed_response(&mut recv).await {
+                                Ok(q) => q,
+                                Err(_) => return,
+                            };
+                        // RFC 9250 requires DNS message ID 0 for DoQ.
+                        if query.len() < 2
+                            || u16::from_be_bytes([query[0], query[1]]) != DOQ_MESSAGE_ID
+                        {
+                            return;
+                        }
+                        if matches!(mode, DnsServerMode::DropAaaa)
+                            && read_question_type(&query) == Some(DNS_TYPE_AAAA)
+                        {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            return;
+                        }
+                        let response = tcp_response(&query, mode);
+                        if crate::dns::transport::write_framed_query(&mut send, &response)
+                            .await
+                            .is_ok()
+                        {
+                            let _ = send.finish();
+                        }
+                    });
                 }
                 Err(_) => return,
             }
