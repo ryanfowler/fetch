@@ -171,13 +171,13 @@ impl Client {
             .host_str()
             .ok_or_else(|| Error::request("URL host is required"))?;
         let discovery_start = std::time::Instant::now();
-        let cached_candidates = self
-            .config
-            .http3_cache
-            .as_ref()
-            .map(|cache| cache.candidates(url, self.config.dns_server.as_deref()));
-        let cached_candidates = match cached_candidates {
-            Some(candidates) => candidates.await,
+        let alt_svc_candidates = match &self.config.http3_cache {
+            Some(cache) => cache
+                .candidates(url, self.config.dns_server.as_deref())
+                .await
+                .into_iter()
+                .filter(|candidate| candidate.from_alt_svc)
+                .collect(),
             None => Vec::new(),
         };
         let fresh = self.connect_fresh_dynamic_auto_http3_client(
@@ -187,9 +187,44 @@ impl Client {
             discovery_start,
             timeout,
         );
-        let cached =
-            self.connect_cached_dynamic_auto_http3_client(url, origin, cached_candidates, timeout);
-        race_dynamic_auto_http3_candidates(fresh, cached).await
+        let alt_svc = self.connect_cached_dynamic_auto_http3_client(
+            url,
+            origin.clone(),
+            alt_svc_candidates,
+            timeout,
+        );
+        let fresh_outcome = match race_dynamic_auto_http3_candidates(fresh, alt_svc).await {
+            Ok(result) => return Ok(result),
+            Err(outcome) => outcome,
+        };
+        match fresh_outcome {
+            DynamicHttp3ConnectOutcome::Failed(err) => return Err(err),
+            DynamicHttp3ConnectOutcome::NoCandidates => {
+                return Err(Error::connect("no HTTP/3 candidates discovered"));
+            }
+            DynamicHttp3ConnectOutcome::Connected(_) => unreachable!("winner returned above"),
+            DynamicHttp3ConnectOutcome::LookupFailed => {}
+        }
+
+        // A failed lookup leaves previous DNS-derived candidates available.
+        let cached_candidates = match &self.config.http3_cache {
+            Some(cache) => {
+                cache
+                    .candidates(url, self.config.dns_server.as_deref())
+                    .await
+            }
+            None => Vec::new(),
+        };
+        match self
+            .connect_cached_dynamic_auto_http3_client(url, origin, cached_candidates, timeout)
+            .await
+        {
+            DynamicHttp3ConnectOutcome::Connected(result) => Ok(result),
+            DynamicHttp3ConnectOutcome::Failed(err) => Err(err),
+            DynamicHttp3ConnectOutcome::NoCandidates | DynamicHttp3ConnectOutcome::LookupFailed => {
+                Err(Error::connect("no HTTP/3 candidates discovered"))
+            }
+        }
     }
 
     async fn connect_fresh_dynamic_auto_http3_client(
@@ -206,9 +241,13 @@ impl Client {
             self.config.doh_tls_config.clone(),
             timeout,
         );
-        let lookup =
+        let Some(lookup) =
             lookup_auto_http3_https_records(self.config.dns_server.as_deref(), &host, timeout)
-                .await;
+                .await
+        else {
+            origin_addrs_task.abort();
+            return DynamicHttp3ConnectOutcome::LookupFailed;
+        };
         if let Some(cache) = &self.config.http3_cache {
             cache
                 .store_https_records(url, self.config.dns_server.as_deref(), &lookup.records)
@@ -413,92 +452,46 @@ enum DynamicHttp3ConnectOutcome {
     Connected(Http3ConnectResult),
     Failed(Error),
     NoCandidates,
+    LookupFailed,
 }
 
 async fn race_dynamic_auto_http3_candidates<FreshFuture, CachedFuture>(
     fresh: FreshFuture,
     cached: CachedFuture,
-) -> Result<Http3ConnectResult, Error>
+) -> Result<Http3ConnectResult, DynamicHttp3ConnectOutcome>
 where
     FreshFuture: Future<Output = DynamicHttp3ConnectOutcome>,
     CachedFuture: Future<Output = DynamicHttp3ConnectOutcome>,
 {
     let mut fresh = Box::pin(fresh);
-    let prompt_fresh = tokio::task::yield_now();
-    tokio::pin!(prompt_fresh);
-
+    let mut cached = Box::pin(cached);
     let mut fresh_done = false;
     let mut cached_done = false;
-    let mut fresh_err = None;
-    let mut cached_err = None;
+    let mut fresh_outcome = None;
 
-    tokio::select! {
-        result = fresh.as_mut() => {
-            fresh_done = true;
-            if let Some(result) = record_dynamic_http3_outcome(result, &mut fresh_err) {
-                return Ok(result);
-            }
-        }
-        _ = &mut prompt_fresh => {}
-    }
-
-    let mut cached = Box::pin(cached);
-
-    loop {
-        if fresh_done && cached_done {
-            return Err(fresh_err
-                .or(cached_err)
-                .unwrap_or_else(|| Error::connect("no HTTP/3 candidates discovered")));
-        }
-
-        match (fresh_done, cached_done) {
-            (false, false) => {
-                tokio::select! {
-                    result = fresh.as_mut() => {
-                        fresh_done = true;
-                        if let Some(result) = record_dynamic_http3_outcome(result, &mut fresh_err) {
-                            return Ok(result);
-                        }
-                    }
-                    result = cached.as_mut() => {
-                        cached_done = true;
-                        if let Some(result) = record_dynamic_http3_outcome(result, &mut cached_err) {
-                            return Ok(result);
-                        }
-                    }
-                }
-            }
-            (false, true) => {
-                let result = fresh.as_mut().await;
+    while !fresh_done || !cached_done {
+        let (is_fresh, outcome) = tokio::select! {
+            outcome = fresh.as_mut(), if !fresh_done => {
                 fresh_done = true;
-                if let Some(result) = record_dynamic_http3_outcome(result, &mut fresh_err) {
-                    return Ok(result);
-                }
+                (true, outcome)
             }
-            (true, false) => {
-                let result = cached.as_mut().await;
+            outcome = cached.as_mut(), if !cached_done => {
                 cached_done = true;
-                if let Some(result) = record_dynamic_http3_outcome(result, &mut cached_err) {
-                    return Ok(result);
-                }
+                (false, outcome)
             }
-            (true, true) => unreachable!("handled at top of loop"),
+        };
+        if let DynamicHttp3ConnectOutcome::Connected(result) = outcome {
+            return Ok(result);
+        }
+        if is_fresh {
+            if matches!(outcome, DynamicHttp3ConnectOutcome::LookupFailed) {
+                return Err(outcome);
+            }
+            fresh_outcome = Some(outcome);
         }
     }
-}
 
-fn record_dynamic_http3_outcome(
-    outcome: DynamicHttp3ConnectOutcome,
-    error: &mut Option<Error>,
-) -> Option<Http3ConnectResult> {
-    match outcome {
-        DynamicHttp3ConnectOutcome::Connected(result) => Some(result),
-        DynamicHttp3ConnectOutcome::Failed(err) => {
-            *error = Some(err);
-            None
-        }
-        DynamicHttp3ConnectOutcome::NoCandidates => None,
-    }
+    Err(fresh_outcome.unwrap_or(DynamicHttp3ConnectOutcome::LookupFailed))
 }
 
 pub(super) fn spawn_auto_http3_origin_addrs(
@@ -532,13 +525,8 @@ async fn lookup_auto_http3_https_records(
     dns_server: Option<&str>,
     host: &str,
     timeout: TimeoutBudget,
-) -> HttpsLookup {
-    let Some(timeout) = auto_http3_lookup_timeout(timeout) else {
-        return HttpsLookup {
-            records: Vec::new(),
-            fallback_target: host.to_string(),
-        };
-    };
+) -> Option<HttpsLookup> {
+    let timeout = auto_http3_lookup_timeout(timeout)?;
     let resolver = dns_server
         .map(HttpsRecordResolver::Custom)
         .unwrap_or(HttpsRecordResolver::System);
@@ -549,10 +537,6 @@ async fn lookup_auto_http3_https_records(
     .await
     .ok()
     .and_then(Result::ok)
-    .unwrap_or_else(|| HttpsLookup {
-        records: Vec::new(),
-        fallback_target: host.to_string(),
-    })
 }
 
 fn auto_http3_lookup_timeout(timeout: TimeoutBudget) -> Option<Duration> {
@@ -1161,5 +1145,28 @@ fn build_h3_request(
             let (parts, _) = request.into_parts();
             Ok((Request::from_parts(parts, ()), None))
         }
+    }
+}
+
+#[cfg(test)]
+mod dynamic_cache_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn lookup_failure_does_not_wait_for_stalled_alt_svc() {
+        let fresh = std::future::ready(DynamicHttp3ConnectOutcome::LookupFailed);
+        let stalled_alt_svc = std::future::pending::<DynamicHttp3ConnectOutcome>();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(50),
+            race_dynamic_auto_http3_candidates(fresh, stalled_alt_svc),
+        )
+        .await
+        .expect("lookup failure waited for Alt-Svc");
+
+        assert!(matches!(
+            outcome,
+            Err(DynamicHttp3ConnectOutcome::LookupFailed)
+        ));
     }
 }

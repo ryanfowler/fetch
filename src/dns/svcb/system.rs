@@ -244,10 +244,9 @@ async fn lookup_with_resolv_conf(
     host: &str,
     budget: TimeoutBudget,
 ) -> Result<Vec<SvcbRecord>, FetchError> {
-    let contents = match tokio::fs::read_to_string("/etc/resolv.conf").await {
-        Ok(contents) => contents,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let contents = tokio::fs::read_to_string("/etc/resolv.conf")
+        .await
+        .map_err(|err| FetchError::Runtime(format!("read /etc/resolv.conf: {err}")))?;
     lookup_with_resolv_conf_config(host, budget, &parse_resolv_conf(&contents)).await
 }
 
@@ -258,7 +257,9 @@ async fn lookup_with_resolv_conf_config(
     config: &ResolvConf,
 ) -> Result<Vec<SvcbRecord>, FetchError> {
     if config.nameservers.is_empty() || config.attempts == 0 {
-        return Ok(Vec::new());
+        return Err(FetchError::Runtime(
+            "system DNS resolver has no usable nameservers or attempts".to_string(),
+        ));
     }
     let start = if config.rotate {
         RESOLVER_ROTATION.fetch_add(1, Ordering::Relaxed) % config.nameservers.len()
@@ -368,6 +369,7 @@ fn lookup_https_records_blocking(
     type DNSServiceFlags = c_uint;
 
     const K_DNS_SERVICE_ERR_NO_ERROR: DNSServiceErrorType = 0;
+    const K_DNS_SERVICE_ERR_NO_SUCH_RECORD: DNSServiceErrorType = -65554;
     const K_DNS_SERVICE_FLAGS_MORE_COMING: DNSServiceFlags = 1;
 
     type DNSServiceQueryRecordReply = unsafe extern "C" fn(
@@ -436,6 +438,10 @@ fn lookup_https_records_blocking(
             return;
         }
         let state = unsafe { &mut *(context.cast::<QueryState>()) };
+        if error_code == K_DNS_SERVICE_ERR_NO_SUCH_RECORD {
+            state.finished = true;
+            return;
+        }
         if error_code != K_DNS_SERVICE_ERR_NO_ERROR {
             state.error = Some(format!("system HTTPS record lookup failed: {error_code}"));
             state.finished = true;
@@ -480,12 +486,16 @@ fn lookup_https_records_blocking(
         )
     };
     if status != K_DNS_SERVICE_ERR_NO_ERROR {
-        return Ok(Vec::new());
+        return Err(FetchError::Runtime(format!(
+            "system DNS query setup failed with status {status}"
+        )));
     }
     let _guard = DnsServiceRefGuard(sd_ref);
     let fd = unsafe { DNSServiceRefSockFD(sd_ref) };
     if fd < 0 {
-        return Ok(Vec::new());
+        return Err(FetchError::Runtime(
+            "system DNS query returned an invalid socket".to_string(),
+        ));
     }
 
     let deadline = timeout.and_then(|timeout| Instant::now().checked_add(timeout));
@@ -494,7 +504,9 @@ fn lookup_https_records_blocking(
             break;
         }
         let Some(timeout_ms) = poll_timeout_ms(deadline) else {
-            return Ok(Vec::new());
+            return Err(FetchError::Runtime(
+                "system DNS query timed out".to_string(),
+            ));
         };
         let mut pollfd = libc::pollfd {
             fd,
@@ -503,7 +515,9 @@ fn lookup_https_records_blocking(
         };
         let ready = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
         if ready == 0 {
-            return Ok(Vec::new());
+            return Err(FetchError::Runtime(
+                "system DNS query timed out".to_string(),
+            ));
         }
         if ready < 0 {
             return Err(FetchError::Runtime(format!(
@@ -513,7 +527,9 @@ fn lookup_https_records_blocking(
         }
         let status = unsafe { DNSServiceProcessResult(sd_ref) };
         if status != K_DNS_SERVICE_ERR_NO_ERROR {
-            return Ok(Vec::new());
+            return Err(FetchError::Runtime(format!(
+                "system DNS response processing failed with status {status}"
+            )));
         }
     }
 
@@ -567,7 +583,17 @@ fn lookup_https_records_blocking(
             std::ptr::null_mut(),
         )
     };
-    if status != 0 || records.is_null() {
+    const DNS_ERROR_RCODE_NAME_ERROR: u32 = 9003;
+    const DNS_INFO_NO_RECORDS: u32 = 9501;
+    if status == DNS_ERROR_RCODE_NAME_ERROR || status == DNS_INFO_NO_RECORDS {
+        return Ok(Vec::new());
+    }
+    if status != 0 {
+        return Err(FetchError::Runtime(format!(
+            "system DNS query failed with status {status}"
+        )));
+    }
+    if records.is_null() {
         return Ok(Vec::new());
     }
     let _guard = DnsRecordListGuard(records);
@@ -792,6 +818,20 @@ mod tests {
         assert_eq!(config.timeout, std::time::Duration::from_secs(9));
         assert_eq!(config.attempts, 4);
         assert!(config.rotate);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn empty_resolver_config_is_a_lookup_failure() {
+        let err = lookup_with_resolv_conf_config(
+            "example.com",
+            TimeoutBudget::new(Some(std::time::Duration::from_secs(1))),
+            &ResolvConf::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("no usable nameservers"));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
