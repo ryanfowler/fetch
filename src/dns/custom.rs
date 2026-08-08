@@ -64,12 +64,30 @@ pub(crate) struct DnsQueryRecord {
 }
 
 pub(crate) fn parse_dns_server(value: &str) -> Result<ParsedDnsServer, FetchError> {
-    if value.starts_with("http://") || value.starts_with("https://") {
+    if value.starts_with("http://") {
+        // DNS unit tests use loopback HTTP fixtures. This branch is absent
+        // from production builds, which always require HTTPS for DoH.
+        #[cfg(test)]
+        if let Ok(url) = Url::parse(value)
+            && url.host().is_some_and(|host| match host {
+                url::Host::Ipv4(ip) => ip.is_loopback(),
+                url::Host::Ipv6(ip) => ip.is_loopback(),
+                url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+            })
+        {
+            return Ok(ParsedDnsServer::Doh(url));
+        }
+        return Err(FetchError::Message(format!(
+            "invalid value '{value}' for option '--dns-server': DoH endpoints must use HTTPS"
+        )));
+    }
+    if value.starts_with("https://") {
         let url = Url::parse(value).map_err(|err| {
             FetchError::Message(format!(
                 "invalid value '{value}' for option '--dns-server': {err}"
             ))
         })?;
+        host_and_port(&url)?;
         return Ok(ParsedDnsServer::Doh(url));
     }
 
@@ -349,11 +367,6 @@ mod tests {
                 .is_authenticated(true)
         );
         assert!(
-            !parse_dns_server("http://resolver.example/dns-query")
-                .unwrap()
-                .is_authenticated(true)
-        );
-        assert!(
             !parse_dns_server("https://resolver.example/dns-query")
                 .unwrap()
                 .is_authenticated(false)
@@ -482,6 +495,25 @@ mod tests {
         assert!(
             matches!(parsed, ParsedDnsServer::Doh(url) if url.as_str() == "https://dns.example/dns-query")
         );
+    }
+
+    #[test]
+    fn parse_dns_server_rejects_plaintext_doh_url() {
+        let err = parse_dns_server("http://dns.example/dns-query").unwrap_err();
+
+        assert!(err.to_string().contains("DoH endpoints must use HTTPS"));
+    }
+
+    #[test]
+    fn parse_dns_server_allows_plaintext_loopback_only_in_unit_tests() {
+        let parsed = parse_dns_server("http://127.0.0.1:8080/dns-query").unwrap();
+
+        assert!(matches!(parsed, ParsedDnsServer::Doh(_)));
+    }
+
+    #[test]
+    fn parse_dns_server_rejects_doh_url_without_host() {
+        assert!(parse_dns_server("https://").is_err());
     }
 
     #[test]
