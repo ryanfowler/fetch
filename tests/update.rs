@@ -3,6 +3,7 @@
 mod support;
 
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +14,10 @@ use support::update::{
     update_artifact_name,
 };
 use tempfile::TempDir;
+
+fn file_id(path: &Path) -> u64 {
+    fs::metadata(path).unwrap().ino()
+}
 
 #[cfg(not(windows))]
 #[test]
@@ -57,6 +62,7 @@ fn self_update_go_harness_cases() {
     };
 
     let original_modified = fs::metadata(&update_bin).unwrap().modified().unwrap();
+    let original_file_id = file_id(&update_bin);
     let res = run_fetch_opts(opts(&update_bin, env.clone()), &[&server.url, "--update"]);
     assert_exit(&res, 0);
     assert!(res.stderr.contains("Already using the latest version"));
@@ -131,17 +137,14 @@ fn self_update_go_harness_cases() {
         2,
         "unexpected update temp files"
     );
-    assert_ne!(
-        fs::metadata(&update_bin).unwrap().modified().unwrap(),
-        original_modified
-    );
+    assert_ne!(file_id(&update_bin), original_file_id);
 
     let res = run_fetch_opts(opts(&update_bin, env.clone()), &["--version"]);
     assert_exit(&res, 0);
     assert!(res.stdout.contains("fetch v999.0.0-test"));
 
     *latest_version.lock().unwrap() = "v1000.0.0-test".to_string();
-    let auto_update_modified = fs::metadata(&auto_update_bin).unwrap().modified().unwrap();
+    let auto_update_file_id = file_id(&auto_update_bin);
     let mut sync_auto_update_env = env.clone();
     sync_auto_update_env.push((
         "FETCH_INTERNAL_SYNC_AUTO_UPDATE".to_string(),
@@ -152,10 +155,7 @@ fn self_update_go_harness_cases() {
         &[&server.url, "--auto-update", "0s"],
     );
     assert_exit(&res, 0);
-    assert_ne!(
-        fs::metadata(&auto_update_bin).unwrap().modified().unwrap(),
-        auto_update_modified
-    );
+    assert_ne!(file_id(&auto_update_bin), auto_update_file_id);
 
     let res = run_fetch_opts(opts(&auto_update_bin, env), &["--version"]);
     assert_exit(&res, 0);
@@ -205,7 +205,7 @@ fn auto_update_preserves_explicit_config_proxy() {
 
     let config = dir.path().join("config");
     fs::write(&config, format!("format = off\nproxy = {}\n", proxy.url)).unwrap();
-    let before_modified = fs::metadata(&auto_update_bin).unwrap().modified().unwrap();
+    let before_file_id = file_id(&auto_update_bin);
     let res = run_fetch_opts(
         FetchOpts {
             bin: Some(auto_update_bin.clone()),
@@ -229,10 +229,7 @@ fn auto_update_preserves_explicit_config_proxy() {
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "primary ok");
     assert_eq!(update_requests.load(Ordering::SeqCst), 3);
-    assert_ne!(
-        fs::metadata(&auto_update_bin).unwrap().modified().unwrap(),
-        before_modified
-    );
+    assert_ne!(file_id(&auto_update_bin), before_file_id);
 
     let res = run_fetch_opts(
         FetchOpts {
