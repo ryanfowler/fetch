@@ -7,7 +7,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 use std::time::Instant;
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 use crate::dns::wire;
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
@@ -601,7 +601,7 @@ fn windows_svcb_rdata(
     let mut out = Vec::new();
     out.extend_from_slice(&svcb.wSvcPriority.to_be_bytes());
     let target = pstr_to_string(svcb.pszTargetName)?;
-    write_dns_name(&mut out, &target)?;
+    wire::write_name(&mut out, &target).ok()?;
 
     if !svcb.pSvcParams.is_null() {
         for index in 0..usize::from(svcb.cSvcParams) {
@@ -730,22 +730,9 @@ fn records_from_wire_response_for_host(
         .collect()
 }
 
-#[cfg(any(windows, test))]
+#[cfg(test)]
 fn write_dns_name(out: &mut Vec<u8>, name: &str) -> Option<()> {
-    let name = name.trim_end_matches('.');
-    if name.is_empty() {
-        out.push(0);
-        return Some(());
-    }
-    for label in name.split('.') {
-        if label.is_empty() || label.len() > 63 {
-            return None;
-        }
-        out.push(label.len() as u8);
-        out.extend_from_slice(label.as_bytes());
-    }
-    out.push(0);
-    Some(())
+    wire::write_name(out, name).ok()
 }
 
 #[cfg(test)]

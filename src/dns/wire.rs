@@ -24,6 +24,9 @@ const FLAG_OPCODE: u16 = 0x7800;
 const FLAG_TRUNCATED: u16 = 0x0200;
 const MAX_ANSWER_RECORDS: usize = 4096;
 const MAX_CNAME_DEPTH: usize = 16;
+const MAX_ENCODED_NAME_LEN: usize = 255;
+const MAX_NAME_LABELS: usize = 127;
+const MAX_NAME_POINTER_DEPTH: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WireError(String);
@@ -251,7 +254,7 @@ pub(crate) fn build_query(id: u16, host: &str, dns_type: u16) -> Result<Vec<u8>,
 
 pub(crate) struct ResponseMatcher {
     id: u16,
-    name: CanonicalName,
+    name: Option<CanonicalName>,
     typ: u16,
     class: u16,
 }
@@ -260,7 +263,7 @@ impl ResponseMatcher {
     pub(crate) fn new(id: u16, name: &str, typ: u16, class: u16) -> Self {
         Self {
             id,
-            name: CanonicalName::from_text(name),
+            name: parse_presentation_name(name).ok(),
             typ,
             class,
         }
@@ -279,10 +282,12 @@ impl ResponseMatcher {
         {
             return false;
         }
-        let Ok(question_name) = read_parsed_name_bounded(raw, 12, raw.len()) else {
+        let Ok(question_name) = read_parsed_name_bounded(raw, 12, raw.len(), true) else {
             return false;
         };
-        question_name.canonical == self.name
+        self.name
+            .as_ref()
+            .is_some_and(|expected| question_name.canonical == *expected)
             && read_u16(raw, question_name.next).is_ok_and(|typ| typ == self.typ)
             && read_u16(raw, question_name.next + 2).is_ok_and(|class| class == self.class)
     }
@@ -317,7 +322,7 @@ pub(crate) fn parse_response_without_id<'a>(
 pub(crate) fn parse_standalone_resource_record(
     raw: &[u8],
 ) -> Result<ResourceRecord<'_>, WireError> {
-    let name = read_parsed_name_bounded(raw, 0, raw.len())?;
+    let name = read_parsed_name_bounded(raw, 0, raw.len(), true)?;
     let offset = name.next;
     let typ = read_u16(raw, offset)?;
     let class = read_u16(raw, offset + 2)?;
@@ -381,12 +386,12 @@ fn parse_response_inner<'a>(
         ));
     }
     let mut offset = 12;
-    let question_name = read_parsed_name_bounded(raw, offset, raw.len())?;
+    let question_name = read_parsed_name_bounded(raw, offset, raw.len(), true)?;
     offset = question_name.next;
     let question_type = read_u16(raw, offset)?;
     let question_class = read_u16(raw, offset + 2)?;
     offset += 4;
-    let expected_canonical = CanonicalName::from_text(expected_name);
+    let expected_canonical = parse_presentation_name(expected_name)?;
     if question_name.canonical != expected_canonical
         || question_type != expected_type
         || question_class != expected_class
@@ -396,7 +401,7 @@ fn parse_response_inner<'a>(
 
     let mut records = Vec::new();
     for _ in 0..answer_count {
-        let name = read_parsed_name_bounded(raw, offset, raw.len())?;
+        let name = read_parsed_name_bounded(raw, offset, raw.len(), true)?;
         offset = name.next;
         let typ = read_u16(raw, offset)?;
         let class = read_u16(raw, offset + 2)?;
@@ -429,7 +434,7 @@ fn parse_response_inner<'a>(
     let reachable = reachable_answer_names(expected_canonical, &owners, &types, |index| {
         let cname = &records[index];
         let end = cname.data_offset + cname.data.len();
-        let parsed = read_parsed_name_bounded(raw, cname.data_offset, end)?;
+        let parsed = read_parsed_name_bounded(raw, cname.data_offset, end, true)?;
         if parsed.next != end {
             return Err(malformed_rdata(TYPE_CNAME));
         }
@@ -449,26 +454,21 @@ fn read_name_bounded(
     offset: usize,
     end: usize,
 ) -> Result<(String, usize), WireError> {
-    let name = read_parsed_name_bounded(packet, offset, end)?;
+    let name = read_parsed_name_bounded(packet, offset, end, true)?;
+    Ok((name.presentation, name.next))
+}
+
+pub(crate) fn read_uncompressed_name(
+    packet: &[u8],
+    offset: usize,
+    end: usize,
+) -> Result<(String, usize), WireError> {
+    let name = read_parsed_name_bounded(packet, offset, end, false)?;
     Ok((name.presentation, name.next))
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct CanonicalName(Vec<Vec<u8>>);
-
-impl CanonicalName {
-    fn from_text(name: &str) -> Self {
-        let name = name.trim_end_matches('.');
-        if name.is_empty() {
-            return Self(Vec::new());
-        }
-        Self(
-            name.split('.')
-                .map(|label| label.bytes().map(ascii_lowercase).collect())
-                .collect(),
-        )
-    }
-}
 
 pub(crate) fn reachable_answer_names(
     expected: CanonicalName,
@@ -597,7 +597,10 @@ pub(crate) fn parse_presentation_name(name: &str) -> Result<CanonicalName, WireE
     if !label.is_empty() {
         labels.push(label);
     }
-    if labels.is_empty() || labels.iter().map(|label| label.len() + 1).sum::<usize>() + 1 > 255 {
+    if labels.is_empty()
+        || labels.len() > MAX_NAME_LABELS
+        || labels.iter().map(|label| label.len() + 1).sum::<usize>() + 1 > MAX_ENCODED_NAME_LEN
+    {
         return Err(WireError("invalid DNS name".to_string()));
     }
 
@@ -619,6 +622,7 @@ fn read_parsed_name_bounded(
     packet: &[u8],
     offset: usize,
     end: usize,
+    allow_compression: bool,
 ) -> Result<ParsedName, WireError> {
     if offset > end || end > packet.len() {
         return Err(WireError("short DNS name".to_string()));
@@ -627,7 +631,8 @@ fn read_parsed_name_bounded(
     let mut pos = offset;
     let mut next = offset;
     let mut jumped = false;
-    let mut jumps = 0usize;
+    let mut pointer_depth = 0usize;
+    let mut expanded_len = 1usize; // Include the root terminator.
 
     loop {
         if pos >= packet.len() || (!jumped && pos >= end) {
@@ -635,18 +640,23 @@ fn read_parsed_name_bounded(
         }
         let len = packet[pos];
         if len & 0xc0 == 0xc0 {
+            if !allow_compression {
+                return Err(WireError("compressed DNS name is not allowed".to_string()));
+            }
             if pos + 1 >= end {
                 return Err(WireError("short DNS name pointer".to_string()));
             }
-            let pointer = usize::from(u16::from_be_bytes([len & 0x3f, packet[pos + 1]]));
             if !jumped {
                 next = pos + 2;
             }
+            let pointer = usize::from(u16::from_be_bytes([len & 0x3f, packet[pos + 1]]));
             pos = pointer;
             jumped = true;
-            jumps += 1;
-            if jumps > 128 {
-                return Err(WireError("DNS name pointer loop".to_string()));
+            pointer_depth += 1;
+            if pointer_depth > MAX_NAME_POINTER_DEPTH {
+                return Err(WireError(
+                    "DNS name pointer depth exceeds limit".to_string(),
+                ));
             }
             continue;
         }
@@ -663,6 +673,15 @@ fn read_parsed_name_bounded(
         let len = usize::from(len);
         if pos + len > end {
             return Err(WireError("short DNS name label".to_string()));
+        }
+        if labels.len() == MAX_NAME_LABELS {
+            return Err(WireError("DNS name exceeds label count limit".to_string()));
+        }
+        expanded_len += len + 1;
+        if expanded_len > MAX_ENCODED_NAME_LEN {
+            return Err(WireError(
+                "DNS name exceeds expanded length limit".to_string(),
+            ));
         }
         labels.push(packet[pos..pos + len].to_vec());
         pos += len;
@@ -730,18 +749,19 @@ pub(crate) fn read_u32(raw: &[u8], offset: usize) -> Result<u32, WireError> {
     Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
-fn write_name(raw: &mut Vec<u8>, host: &str) -> Result<(), WireError> {
-    let host = host.trim_end_matches('.');
+pub(crate) fn write_name(raw: &mut Vec<u8>, host: &str) -> Result<(), WireError> {
     if host.is_empty() {
+        return Err(WireError("invalid DNS name: empty name".to_string()));
+    }
+    if host == "." {
         raw.push(0);
         return Ok(());
     }
-    for label in host.split('.') {
-        if label.is_empty() || label.len() > 63 {
-            return Err(WireError(format!("invalid DNS name: {host}")));
-        }
+    let name = parse_presentation_name(host)
+        .map_err(|_| WireError(format!("invalid DNS name: {host}")))?;
+    for label in name.0 {
         raw.push(label.len() as u8);
-        raw.extend_from_slice(label.as_bytes());
+        raw.extend_from_slice(&label);
     }
     raw.push(0);
     Ok(())
@@ -1064,6 +1084,131 @@ mod tests {
         }
         name.push(0);
         name
+    }
+
+    fn name_with_label_lengths(lengths: &[usize]) -> String {
+        lengths
+            .iter()
+            .map(|length| "a".repeat(*length))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    fn encoded_labels(lengths: &[usize]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for &length in lengths {
+            raw.push(length as u8);
+            raw.extend(std::iter::repeat_n(b'a', length));
+        }
+        raw.push(0);
+        raw
+    }
+
+    #[test]
+    fn query_name_rejects_empty_name_and_accepts_root() {
+        assert!(build_query(0x1234, "", TYPE_A).is_err());
+
+        let mut response = build_query(0x1234, ".", TYPE_A).unwrap();
+        response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+        assert!(ResponseMatcher::new(0x1234, ".", TYPE_A, CLASS_IN).matches(&response));
+        assert!(parse_response(&response, 0x1234, ".", TYPE_A, CLASS_IN).is_ok());
+    }
+
+    #[test]
+    fn query_name_enforces_encoded_length_boundary() {
+        let maximum = name_with_label_lengths(&[63, 63, 63, 61]);
+        let too_long = name_with_label_lengths(&[63, 63, 63, 62]);
+
+        assert!(build_query(0x1234, &maximum, TYPE_A).is_ok());
+        let err = build_query(0x1234, &too_long, TYPE_A).unwrap_err();
+        assert!(err.to_string().contains("invalid DNS name"));
+    }
+
+    #[test]
+    fn query_name_rejects_too_many_labels() {
+        let maximum = std::iter::repeat_n("a", MAX_NAME_LABELS)
+            .collect::<Vec<_>>()
+            .join(".");
+        let too_many = format!("{maximum}.a");
+
+        assert!(build_query(0x1234, &maximum, TYPE_A).is_ok());
+        assert!(build_query(0x1234, &too_many, TYPE_A).is_err());
+    }
+
+    #[test]
+    fn compressed_name_enforces_expanded_length_boundary() {
+        let mut maximum = vec![0xc0, 0x02];
+        maximum.extend_from_slice(&encoded_labels(&[63, 63, 63, 61]));
+        let (name, next) = read_name(&maximum, 0).unwrap();
+        assert_eq!(next, 2);
+        assert_eq!(name.len(), 254);
+
+        // Compression can replace the one-byte root terminator with a
+        // two-byte pointer, so the compressed representation can use 256
+        // octets while the expanded name remains at the 255-octet limit.
+        let mut maximum_with_root_pointer = vec![0];
+        maximum_with_root_pointer.extend_from_slice(&encoded_labels(&[63, 63, 63, 61])[..254]);
+        maximum_with_root_pointer.extend_from_slice(&[0xc0, 0x00]);
+        assert!(read_name(&maximum_with_root_pointer, 1).is_ok());
+
+        let mut too_long = vec![0xc0, 0x02];
+        too_long.extend_from_slice(&encoded_labels(&[63, 63, 63, 62]));
+        let err = read_name(&too_long, 0).unwrap_err();
+        assert!(err.to_string().contains("expanded length limit"));
+    }
+
+    #[test]
+    fn parsed_name_enforces_label_count_limit() {
+        let maximum = encoded_labels(&vec![1; MAX_NAME_LABELS]);
+        assert!(read_name(&maximum, 0).is_ok());
+
+        let too_many = encoded_labels(&vec![1; MAX_NAME_LABELS + 1]);
+        let err = read_name(&too_many, 0).unwrap_err();
+        assert!(err.to_string().contains("label count limit"));
+    }
+
+    #[test]
+    fn escaped_query_name_matches_response_question() {
+        let name = r"foo\.bar.\255.example.";
+        let mut response = build_query(0x1234, name, TYPE_A).unwrap();
+        response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+
+        let matcher = ResponseMatcher::new(0x1234, name, TYPE_A, CLASS_IN);
+        assert!(matcher.matches(&response));
+        assert!(
+            parse_response(&response, 0x1234, name, TYPE_A, CLASS_IN)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn presentation_name_round_trips_escaped_label_octets() {
+        let encoded = [
+            7, b'f', b'o', b'o', b'\\', b'b', b'a', b'r', 7, b'f', b'o', b'o', b'.', b'b', b'a',
+            b'r', 0,
+        ];
+        let (presentation, next) = read_name(&encoded, 0).unwrap();
+        assert_eq!(next, encoded.len());
+
+        let mut round_trip = Vec::new();
+        write_name(&mut round_trip, &presentation).unwrap();
+        assert_eq!(round_trip, encoded);
+    }
+
+    #[test]
+    fn compressed_name_enforces_pointer_depth_boundary() {
+        let mut packet = vec![0];
+        let mut starts = vec![0usize];
+        for _ in 0..=MAX_NAME_POINTER_DEPTH {
+            let target = *starts.last().unwrap() as u16;
+            starts.push(packet.len());
+            packet.extend_from_slice(&(0xc000 | target).to_be_bytes());
+        }
+
+        assert!(read_name(&packet, starts[MAX_NAME_POINTER_DEPTH]).is_ok());
+        let err = read_name(&packet, starts[MAX_NAME_POINTER_DEPTH + 1]).unwrap_err();
+        assert!(err.to_string().contains("pointer depth exceeds limit"));
     }
 
     #[test]
