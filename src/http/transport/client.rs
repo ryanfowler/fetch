@@ -664,6 +664,66 @@ pub(super) async fn connect_direct_tcp_config(
             tcp_duration: tcp_start.elapsed(),
         });
     }
+    if config.auto_http3_discovery && url.scheme() == "https" {
+        let max_discovery = crate::net::HAPPY_EYEBALLS_FALLBACK_DELAY;
+        let discovery_timeout = match timeout.remaining()? {
+            None => Some(max_discovery),
+            Some(remaining) if remaining <= max_discovery => None,
+            Some(remaining) => Some((remaining - max_discovery).min(max_discovery)),
+        };
+        if let Some(discovery_timeout) = discovery_timeout {
+            let resolver = config
+                .dns_server
+                .as_deref()
+                .map(crate::dns::svcb::HttpsRecordResolver::Custom)
+                .unwrap_or(crate::dns::svcb::HttpsRecordResolver::System);
+            let original = crate::net::connect_tcp_traced_with_doh_tls(
+                url,
+                config.dns_server.as_deref(),
+                config.doh_tls_config.clone(),
+                timeout,
+            );
+            let service = crate::dns::svcb::lookup_https_records_with_doh_tls_config(
+                resolver,
+                host,
+                Some(discovery_timeout),
+                config.doh_tls_config.clone(),
+            );
+            tokio::pin!(original);
+            tokio::pin!(service);
+            let (original_result, service_result) = tokio::select! {
+                service_result = &mut service => (None, Some(service_result)),
+                original_result = &mut original => {
+                    if original_result.is_ok() {
+                        return original_result;
+                    }
+                    (Some(original_result), Some(service.await))
+                }
+            };
+            if let Some(Ok(service)) = service_result
+                && !service.fallback_target.eq_ignore_ascii_case(host)
+            {
+                let mut target_url = url.clone();
+                target_url
+                    .set_host(Some(&service.fallback_target))
+                    .map_err(|_| {
+                        FetchError::Runtime("invalid HTTPS AliasMode target".to_string())
+                    })?;
+                return crate::net::connect_tcp_traced_with_doh_tls(
+                    &target_url,
+                    config.dns_server.as_deref(),
+                    config.doh_tls_config.clone(),
+                    timeout,
+                )
+                .await;
+            }
+            return match original_result {
+                Some(result) => result,
+                None => original.await,
+            };
+        }
+    }
+
     crate::net::connect_tcp_traced_with_doh_tls(
         url,
         config.dns_server.as_deref(),

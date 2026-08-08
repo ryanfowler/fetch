@@ -15,7 +15,7 @@ use support::dns::{
     start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_delayed_https_and_resolution,
     start_udp_dns_server_with_delayed_resolution, start_udp_dns_server_with_failing_https,
     start_udp_dns_server_with_hosts, start_udp_dns_server_with_https,
-    start_udp_dns_server_with_https_target_dropping_target,
+    start_udp_dns_server_with_https_alias, start_udp_dns_server_with_https_target_dropping_target,
     start_udp_dns_server_with_https_targets_dropping_targets,
     start_udp_dns_server_with_toggleable_https, start_unresponsive_udp_dns_server,
 };
@@ -837,6 +837,34 @@ fn http3_go_harness_cases() {
     );
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "welcome h3");
+}
+
+#[test]
+fn https_alias_mode_uses_delayed_target_instead_of_origin_address() {
+    let tls = start_tls_server(|req| {
+        if req.path == "/alias-mode" {
+            return TestResponse::ok("alias target ok");
+        }
+        TestResponse::status(404, "Not Found", "")
+    });
+    let port = Url::parse(&tls.url).unwrap().port().unwrap();
+    let dns_addr = start_udp_dns_server_with_https_alias(
+        "fetch-alias-origin.test.",
+        Some(Ipv4Addr::new(127, 0, 0, 2)),
+        "fetch-alias-target.test.",
+        Ipv4Addr::LOCALHOST,
+        Duration::from_millis(40),
+    );
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--insecure",
+        &format!("https://fetch-alias-origin.test:{port}/alias-mode"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "alias target ok");
 }
 
 #[test]

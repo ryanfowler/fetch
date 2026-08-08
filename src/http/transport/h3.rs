@@ -17,7 +17,7 @@ use super::client::{
     record_dns_addrs_trace,
 };
 use super::{Error, ErrorKind};
-use crate::dns::svcb::{HttpsRecordResolver, SvcbRecord};
+use crate::dns::svcb::{HttpsLookup, HttpsRecordResolver, SvcbRecord};
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
 use crate::http::http3_cache::Http3CacheCandidate;
@@ -187,24 +187,38 @@ impl Client {
             self.config.doh_tls_config.clone(),
             timeout,
         );
-        let records =
+        let lookup =
             lookup_auto_http3_https_records(self.config.dns_server.as_deref(), &host, timeout)
                 .await;
         if let Some(cache) = &self.config.http3_cache {
             cache
-                .store_https_records(url, self.config.dns_server.as_deref(), &records)
+                .store_https_records(url, self.config.dns_server.as_deref(), &lookup.records)
                 .await;
         }
-        if records.is_empty() {
+        if lookup.records.is_empty() {
             origin_addrs_task.abort();
             return DynamicHttp3ConnectOutcome::NoCandidates;
         }
-        let origin_addrs = take_finished_auto_http3_origin_addrs(origin_addrs_task).await;
+        let effective_host = &lookup.fallback_target;
+        let origin_addrs = if effective_host.eq_ignore_ascii_case(&host) {
+            take_finished_auto_http3_origin_addrs(origin_addrs_task).await
+        } else {
+            origin_addrs_task.abort();
+            crate::net::resolve_host_with_doh_tls(
+                effective_host,
+                self.config.dns_server.as_deref(),
+                self.config.doh_tls_config.clone(),
+                timeout,
+            )
+            .await
+            .unwrap_or_default()
+        };
         let addrs = auto_http3_addrs_for_records(
             self.config.dns_server.as_deref(),
             self.config.doh_tls_config.clone(),
             url,
-            &records,
+            effective_host,
+            &lookup.records,
             &origin_addrs,
             timeout,
         )
@@ -510,9 +524,12 @@ async fn lookup_auto_http3_https_records(
     dns_server: Option<&str>,
     host: &str,
     timeout: TimeoutBudget,
-) -> Vec<SvcbRecord> {
+) -> HttpsLookup {
     let Some(timeout) = auto_http3_lookup_timeout(timeout) else {
-        return Vec::new();
+        return HttpsLookup {
+            records: Vec::new(),
+            fallback_target: host.to_string(),
+        };
     };
     let resolver = dns_server
         .map(HttpsRecordResolver::Custom)
@@ -524,7 +541,10 @@ async fn lookup_auto_http3_https_records(
     .await
     .ok()
     .and_then(Result::ok)
-    .unwrap_or_default()
+    .unwrap_or_else(|| HttpsLookup {
+        records: Vec::new(),
+        fallback_target: host.to_string(),
+    })
 }
 
 fn auto_http3_lookup_timeout(timeout: TimeoutBudget) -> Option<Duration> {
@@ -540,6 +560,7 @@ async fn auto_http3_addrs_for_records(
     dns_server: Option<&str>,
     doh_tls_config: Option<rustls::ClientConfig>,
     url: &Url,
+    effective_host: &str,
     records: &[SvcbRecord],
     origin_addrs: &[SocketAddr],
     timeout: TimeoutBudget,
@@ -562,14 +583,14 @@ async fn auto_http3_addrs_for_records(
         let mut record_addrs = auto_http3_hint_addrs(record, origin_addrs, port);
         if record_addrs.is_empty() {
             let target = auto_http3_target_host(origin_host, &record.target);
-            if target.eq_ignore_ascii_case(origin_host) && !origin_addrs.is_empty() {
+            if target.eq_ignore_ascii_case(effective_host) && !origin_addrs.is_empty() {
                 record_addrs = origin_addrs
                     .iter()
                     .map(|addr| SocketAddr::new(addr.ip(), port))
                     .collect();
-            } else if target.eq_ignore_ascii_case(origin_host) {
+            } else if target.eq_ignore_ascii_case(effective_host) {
                 record_addrs = crate::net::resolve_host_with_doh_tls(
-                    origin_host,
+                    effective_host,
                     dns_server,
                     doh_tls_config.clone(),
                     timeout,
@@ -581,6 +602,18 @@ async fn auto_http3_addrs_for_records(
                 .collect();
             } else if let Ok(ip) = target.parse::<IpAddr>() {
                 record_addrs.push(SocketAddr::new(ip, port));
+            } else if !effective_host.eq_ignore_ascii_case(origin_host) {
+                record_addrs = crate::net::resolve_host_with_doh_tls(
+                    &target,
+                    dns_server,
+                    doh_tls_config.clone(),
+                    timeout,
+                )
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|addr| SocketAddr::new(addr.ip(), port))
+                .collect();
             }
         }
         append_unique_socket_addrs(&mut addrs, record_addrs);
