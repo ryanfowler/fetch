@@ -85,11 +85,17 @@ pub(crate) fn generate_ech_grease_config() -> EchGreaseConfig {
 
 /// Handle a failure to discover ECH configuration in DNS.
 ///
-/// Required ECH reports the original discovery error. Automatic ECH keeps
-/// working with GREASE, but reports the discovery error at verbose level.
-pub(crate) fn handle_ech_discovery_error(cli: &Cli, err: FetchError) -> Result<(), FetchError> {
+/// Required ECH reports the original discovery error. Automatic ECH can use
+/// GREASE after a failure from unauthenticated DNS. A failure from authenticated
+/// DNS is fatal because fallback would permit an active downgrade.
+pub(crate) fn handle_ech_discovery_error(
+    cli: &Cli,
+    err: FetchError,
+    dns_authenticated: bool,
+) -> Result<(), FetchError> {
     match cli.ech.as_deref() {
         Some("on") => Err(err),
+        Some("auto") if dns_authenticated => Err(err),
         Some("auto") => {
             if cli.verbose >= 3 && !cli.silent {
                 let mut printer = core::stdio().stderr_printer(cli.color.as_deref());
@@ -324,6 +330,30 @@ mod tests {
     }
 
     // --- Auto mode with verbose warning for unusable config ---
+
+    #[test]
+    fn authenticated_discovery_error_is_fatal_in_auto_mode() {
+        let cli = cli_with_ech("auto");
+        let err = handle_ech_discovery_error(
+            &cli,
+            FetchError::Runtime("HTTPS lookup timed out".to_string()),
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "HTTPS lookup timed out");
+    }
+
+    #[test]
+    fn unauthenticated_discovery_error_allows_auto_fallback() {
+        let cli = cli_with_ech("auto");
+        handle_ech_discovery_error(
+            &cli,
+            FetchError::Runtime("HTTPS lookup timed out".to_string()),
+            false,
+        )
+        .unwrap();
+    }
 
     #[test]
     fn auto_mode_with_malformed_and_verbose_produces_warning() {

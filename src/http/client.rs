@@ -116,7 +116,7 @@ pub(crate) async fn build_client_for_url(
     let dns_timeout = connect_budget.remaining()?;
     let effective_proxy = effective_proxy_for_url(cli.proxy.as_deref(), http_version, url)?;
     let auto_http3 = auto_http3_allowed(context.mode, url, cli.unix.as_deref(), effective_proxy);
-    let discovery = if dynamic_dns_for_client(cli, url, effective_proxy) {
+    let discovery = if dynamic_dns_for_client(cli, url, effective_proxy, auto_http3)? {
         let debug_dns = cli.timing || cli.har.is_some() || (cli.verbose >= 3 && !cli.silent);
         ClientDnsDiscovery {
             dns_resolution: None,
@@ -321,6 +321,15 @@ async fn resolve_dns_for_client_inner(
                 lookup_ech_https_records(cli, Some(dns_server), host, timeout),
             );
             (addrs?, https_records?)
+        } else if auto_http3 && custom::dns_server_is_authenticated(dns_server, !cli.insecure)? {
+            // Authenticated HTTPS lookup failures must gate service access.
+            // Run address and service discovery together, but do not abort or
+            // suppress the service lookup when address resolution completes.
+            let (addrs, https_records) = tokio::join!(
+                lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout),
+                lookup_authenticated_auto_http3_https_records(cli, dns_server, host, timeout),
+            );
+            (addrs?, https_records?)
         } else if let Some(auto_http3_budget) = auto_http3_discovery {
             let https = spawn_auto_http3_https_records(
                 Some(dns_server.to_string()),
@@ -453,12 +462,25 @@ async fn resolve_dns_for_client_inner(
     })
 }
 
-fn dynamic_dns_for_client(cli: &Cli, url: &Url, effective_proxy: Option<EffectiveProxy>) -> bool {
-    url.host_str()
+fn dynamic_dns_for_client(
+    cli: &Cli,
+    url: &Url,
+    effective_proxy: Option<EffectiveProxy>,
+    auto_http3: bool,
+) -> Result<bool, FetchError> {
+    let authenticated_dns = cli
+        .dns_server
+        .as_deref()
+        .map(|server| custom::dns_server_is_authenticated(server, !cli.insecure))
+        .transpose()?
+        .unwrap_or(false);
+    Ok(url
+        .host_str()
         .is_some_and(|host| host.parse::<IpAddr>().is_err())
         && cli.unix.is_none()
         && effective_proxy.is_none()
         && !is_ech_active(cli)
+        && !(auto_http3 && authenticated_dns))
 }
 
 fn is_ech_active(cli: &Cli) -> bool {
@@ -531,10 +553,31 @@ async fn lookup_ech_https_records(
     {
         Ok(records) => Ok(records),
         Err(err) => {
-            crate::tls::ech::handle_ech_discovery_error(cli, err)?;
+            let authenticated = dns_server
+                .map(|server| custom::dns_server_is_authenticated(server, !cli.insecure))
+                .transpose()?
+                .unwrap_or(false);
+            crate::tls::ech::handle_ech_discovery_error(cli, err, authenticated)?;
             Ok(Vec::new())
         }
     }
+}
+
+async fn lookup_authenticated_auto_http3_https_records(
+    cli: &Cli,
+    dns_server: &str,
+    host: &str,
+    timeout: TimeoutBudget,
+) -> Result<Vec<SvcbRecord>, FetchError> {
+    let lookup_timeout = timeout.remaining()?.unwrap_or(Duration::from_secs(5));
+    TimeoutBudget::new(Some(lookup_timeout))
+        .run(crate::dns::svcb::lookup_https_records_with_doh_tls_config(
+            HttpsRecordResolver::Custom(dns_server),
+            host,
+            Some(lookup_timeout),
+            doh_tls_config_for_cli(cli)?,
+        ))
+        .await
 }
 
 fn spawn_auto_http3_https_records(

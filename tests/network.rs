@@ -264,6 +264,76 @@ fn inspect_ech_discovery_uses_custom_doh_tls_config() {
 }
 
 #[test]
+fn authenticated_doh_failure_is_fatal_for_ech_auto() {
+    let server = start_tls_server(|req| {
+        if req.path == "/authenticated-ech-target" {
+            return TestResponse::ok("must not downgrade");
+        }
+        if req.path.contains("type=HTTPS") {
+            return TestResponse::status(503, "Service Unavailable", "HTTPS lookup failed");
+        }
+        let body = if req.path.contains("type=A") {
+            r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#
+        } else {
+            r#"{"Status":0}"#
+        };
+        TestResponse::ok(body)
+            .header("Content-Type", "application/dns-json")
+            .header("Connection", "close")
+    });
+    let doh_url = format!("{}/dns-query", server.url);
+    let target_url = format!("{}/authenticated-ech-target", server.url);
+
+    let result = run_fetch(&[
+        "--ech",
+        "auto",
+        "--ca-cert",
+        server.ca_cert_path.to_str().unwrap(),
+        "--dns-server",
+        &doh_url,
+        &target_url,
+    ]);
+
+    assert_exit(&result, 1);
+    assert!(result.stderr.contains("503"), "{}", result.stderr);
+    assert!(!result.stderr.contains("falling back to GREASE"));
+}
+
+#[test]
+fn authenticated_doh_failure_is_fatal_for_auto_http3() {
+    let server = start_tls_server(|req| {
+        if req.path == "/authenticated-http3-target" {
+            return TestResponse::ok("must not downgrade");
+        }
+        if req.path.contains("type=HTTPS") {
+            return TestResponse::status(503, "Service Unavailable", "HTTPS lookup failed");
+        }
+        let body = if req.path.contains("type=A") {
+            r#"{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}"#
+        } else {
+            r#"{"Status":0}"#
+        };
+        TestResponse::ok(body)
+            .header("Content-Type", "application/dns-json")
+            .header("Connection", "close")
+    });
+    let doh_url = format!("{}/dns-query", server.url);
+    let target_url = format!("{}/authenticated-http3-target", server.url);
+
+    let result = run_fetch(&[
+        "--ca-cert",
+        server.ca_cert_path.to_str().unwrap(),
+        "--dns-server",
+        &doh_url,
+        &target_url,
+    ]);
+
+    assert_exit(&result, 1);
+    assert!(result.stderr.contains("503"), "{}", result.stderr);
+    assert!(!result.stdout.contains("must not downgrade"));
+}
+
+#[test]
 fn connect_timeout_is_shared_between_preresolved_dns_and_tls() {
     let tls = start_h2_tls_server_with_accept_delay(
         |_| TestResponse::ok("too late"),

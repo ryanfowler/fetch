@@ -235,7 +235,15 @@ async fn lookup_inspect_ech_candidates(
     {
         Ok(records) => records,
         Err(err) => {
-            super::ech::handle_ech_discovery_error(cli, err)?;
+            let authenticated = cli
+                .dns_server
+                .as_deref()
+                .map(|server| {
+                    crate::dns::custom::dns_server_is_authenticated(server, !cli.insecure)
+                })
+                .transpose()?
+                .unwrap_or(false);
+            super::ech::handle_ech_discovery_error(cli, err, authenticated)?;
             Vec::new()
         }
     };

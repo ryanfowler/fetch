@@ -28,6 +28,28 @@ pub(crate) enum ParsedDnsServer {
     Doh(Url),
 }
 
+impl ParsedDnsServer {
+    /// Returns whether DNS responses have transport authentication.
+    ///
+    /// DoT and DoQ always verify the configured resolver identity. HTTPS DoH
+    /// is authenticated unless certificate verification was disabled by the
+    /// caller. Plain HTTP, UDP, and TCP do not authenticate responses.
+    pub(crate) fn is_authenticated(&self, verify_doh_certificate: bool) -> bool {
+        match self {
+            Self::Tls { .. } | Self::Quic { .. } => true,
+            Self::Doh(url) => url.scheme() == "https" && verify_doh_certificate,
+            Self::Udp(_) | Self::Tcp(_) => false,
+        }
+    }
+}
+
+pub(crate) fn dns_server_is_authenticated(
+    value: &str,
+    verify_doh_certificate: bool,
+) -> Result<bool, FetchError> {
+    Ok(parse_dns_server(value)?.is_authenticated(verify_doh_certificate))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DnsRecordData {
     Wire(Vec<u8>),
@@ -219,10 +241,20 @@ pub(crate) async fn query_type(
         ParsedDnsServer::Doh(url) => {
             let client = crate::dns::doh::client_with_budget_and_tls_config(budget, doh_tls_config)
                 .map_err(|err| FetchError::Message(err.to_string()))?;
-            let answers =
-                crate::dns::doh::lookup_doh_records_with_client(&client, url, host, dns_type_name)
-                    .await
-                    .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?;
+            let answers = match crate::dns::doh::lookup_doh_records_with_client(
+                &client,
+                url,
+                host,
+                dns_type_name,
+            )
+            .await
+            {
+                Ok(answers) => answers,
+                Err(err) if err.is_nxdomain() => return Ok(Vec::new()),
+                Err(err) => {
+                    return Err(FetchError::Runtime(format!("lookup {host}: {err}")));
+                }
+            };
             return Ok(answers
                 .into_iter()
                 .map(|answer| DnsQueryRecord {
@@ -234,18 +266,18 @@ pub(crate) async fn query_type(
         }
     };
 
-    wire_records
-        .map(|records| {
-            records
-                .into_iter()
-                .map(|record| DnsQueryRecord {
-                    typ: record.typ,
-                    ttl: Some(record.ttl),
-                    data: DnsRecordData::Wire(record.data),
-                })
-                .collect()
-        })
-        .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
+    match wire_records {
+        Ok(records) => Ok(records
+            .into_iter()
+            .map(|record| DnsQueryRecord {
+                typ: record.typ,
+                ttl: Some(record.ttl),
+                data: DnsRecordData::Wire(record.data),
+            })
+            .collect()),
+        Err(err) if err.is_nxdomain() => Ok(Vec::new()),
+        Err(err) => Err(FetchError::Runtime(format!("lookup {host}: {err}"))),
+    }
 }
 
 pub(crate) async fn lookup_ips(
@@ -303,6 +335,45 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use super::*;
+
+    #[test]
+    fn classifies_authenticated_dns_transports() {
+        assert!(
+            !parse_dns_server("udp://127.0.0.1")
+                .unwrap()
+                .is_authenticated(true)
+        );
+        assert!(
+            !parse_dns_server("tcp://127.0.0.1")
+                .unwrap()
+                .is_authenticated(true)
+        );
+        assert!(
+            !parse_dns_server("http://resolver.example/dns-query")
+                .unwrap()
+                .is_authenticated(true)
+        );
+        assert!(
+            !parse_dns_server("https://resolver.example/dns-query")
+                .unwrap()
+                .is_authenticated(false)
+        );
+        assert!(
+            parse_dns_server("https://resolver.example/dns-query")
+                .unwrap()
+                .is_authenticated(true)
+        );
+        assert!(
+            parse_dns_server("tls://resolver.example")
+                .unwrap()
+                .is_authenticated(true)
+        );
+        assert!(
+            parse_dns_server("doq://resolver.example")
+                .unwrap()
+                .is_authenticated(true)
+        );
+    }
 
     #[test]
     fn socket_addrs_use_zero_port_for_transport_override() {
