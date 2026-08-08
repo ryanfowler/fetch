@@ -308,9 +308,9 @@ pub(crate) fn start_udp_dns_server_with_failing_https(host: &'static str, ip: Ip
                 dns_response(&buf[..n], question_end, None)
             };
             if name == host && qtype == TYPE_HTTPS {
-                // Return a response with a mismatched transaction ID so the
-                // resolver reports a protocol failure instead of no records.
-                response[0] ^= 1;
+                // Return a matching SERVFAIL response so the resolver reports
+                // the DNS error instead of treating the response as no records.
+                response[3] = 0x82;
             }
             let _ = socket.send_to(&response, peer);
         }

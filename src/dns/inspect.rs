@@ -522,10 +522,12 @@ async fn lookup_udp_record(
 ) -> Result<Vec<Record>, QueryError> {
     let id = dns_query_id();
     let raw = wire::build_query(id, host, query_type.dns_type).map_err(QueryError::other)?;
+    let matcher = wire::ResponseMatcher::new(id, host, query_type.dns_type, DNS_CLASS_IN);
     let udp_timeout = udp_dns_timeout(timeout.remaining().map_err(QueryError::other)?);
-    let mut response = crate::dns::transport::query_udp_on_socket(socket, &raw, udp_timeout)
-        .await
-        .map_err(QueryError::other)?;
+    let mut response =
+        crate::dns::transport::query_udp_on_socket(socket, &raw, &matcher, udp_timeout)
+            .await
+            .map_err(QueryError::other)?;
     let raw_records =
         match wire::parse_response(&response, id, host, query_type.dns_type, DNS_CLASS_IN) {
             Ok(records) => records,

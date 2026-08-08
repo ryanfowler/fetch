@@ -10,6 +10,7 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
 
 use crate::dns::util::udp_dns_timeout;
+use crate::dns::wire::ResponseMatcher;
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
 
@@ -27,10 +28,11 @@ impl std::error::Error for DnsTransportError {}
 pub(crate) async fn query_udp(
     server_addr: SocketAddr,
     query: &[u8],
+    matcher: &ResponseMatcher,
     timeout: Duration,
 ) -> Result<Vec<u8>, DnsTransportError> {
     let socket = udp_socket(server_addr).await?;
-    query_udp_on_socket(&socket, query, timeout).await
+    query_udp_on_socket(&socket, query, matcher, timeout).await
 }
 
 pub(crate) async fn udp_socket(server_addr: SocketAddr) -> Result<UdpSocket, DnsTransportError> {
@@ -48,18 +50,27 @@ pub(crate) async fn udp_socket(server_addr: SocketAddr) -> Result<UdpSocket, Dns
 pub(crate) async fn query_udp_on_socket(
     socket: &UdpSocket,
     query: &[u8],
+    matcher: &ResponseMatcher,
     timeout: Duration,
 ) -> Result<Vec<u8>, DnsTransportError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let expected_source = socket.peer_addr().map_err(transport_error)?;
     socket.send(query).await.map_err(transport_error)?;
 
     let mut buf = vec![0u8; 4096];
-    let n = match tokio::time::timeout(timeout, socket.recv(&mut buf)).await {
-        Ok(Ok(n)) => n,
-        Ok(Err(err)) => return Err(transport_error(err)),
-        Err(_) => return Err(DnsTransportError("DNS lookup timed out".to_string())),
-    };
-    buf.truncate(n);
-    Ok(buf)
+    loop {
+        let (n, source) = match tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
+        {
+            Ok(Ok(received)) => received,
+            Ok(Err(err)) => return Err(transport_error(err)),
+            Err(_) => return Err(DnsTransportError("DNS lookup timed out".to_string())),
+        };
+        if source != expected_source || !matcher.matches(&buf[..n]) {
+            continue;
+        }
+        buf.truncate(n);
+        return Ok(buf);
+    }
 }
 
 pub(crate) async fn query_tcp(
@@ -258,6 +269,110 @@ fn transport_error(err: impl ToString) -> DnsTransportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dns::wire::{self, CLASS_IN, TYPE_A, TYPE_AAAA};
+
+    fn response_for(query: &[u8], flags: u16) -> Vec<u8> {
+        let mut response = query.to_vec();
+        response[2..4].copy_from_slice(&flags.to_be_bytes());
+        response
+    }
+
+    #[tokio::test]
+    async fn udp_discards_stale_response_from_timed_out_query() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = udp_socket(server_addr).await.unwrap();
+        let first = wire::build_query(0x1001, "example.com", TYPE_A).unwrap();
+        let second = wire::build_query(0x1002, "example.com", TYPE_AAAA).unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (first_len, peer) = server.recv_from(&mut buf).await.unwrap();
+            let first_response = response_for(&buf[..first_len], 0x8180);
+            let (second_len, second_peer) = server.recv_from(&mut buf).await.unwrap();
+            assert_eq!(peer, second_peer);
+            let second_response = response_for(&buf[..second_len], 0x8180);
+            server.send_to(&first_response, peer).await.unwrap();
+            server.send_to(&second_response, peer).await.unwrap();
+        });
+
+        let first_matcher = ResponseMatcher::new(0x1001, "example.com", TYPE_A, CLASS_IN);
+        let err = query_udp_on_socket(&client, &first, &first_matcher, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "DNS lookup timed out");
+
+        let second_matcher = ResponseMatcher::new(0x1002, "example.com", TYPE_AAAA, CLASS_IN);
+        let response =
+            query_udp_on_socket(&client, &second, &second_matcher, Duration::from_secs(1))
+                .await
+                .unwrap();
+        assert_eq!(u16::from_be_bytes([response[0], response[1]]), 0x1002);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_discards_mismatched_response_fields() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let query = wire::build_query(0x2001, "example.com", TYPE_A).unwrap();
+        let matcher = ResponseMatcher::new(0x2001, "example.com", TYPE_A, CLASS_IN);
+        let server_query = query.clone();
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (_, peer) = server.recv_from(&mut buf).await.unwrap();
+            let mut wrong_class = response_for(&server_query, 0x8180);
+            wrong_class[27..29].copy_from_slice(&2u16.to_be_bytes());
+            let packets = vec![
+                response_for(&server_query, 0x0100),
+                response_for(&server_query, 0x8800),
+                response_for(
+                    &wire::build_query(0x2001, "other.example", TYPE_A).unwrap(),
+                    0x8180,
+                ),
+                response_for(
+                    &wire::build_query(0x2001, "example.com", TYPE_AAAA).unwrap(),
+                    0x8180,
+                ),
+                wrong_class,
+                response_for(&server_query, 0x8180),
+            ];
+            for packet in packets {
+                server.send_to(&packet, peer).await.unwrap();
+            }
+        });
+
+        let response = query_udp(server_addr, &query, &matcher, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(response, response_for(&query, 0x8180));
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_discards_response_from_wrong_source() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let attacker = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let query = wire::build_query(0x3001, "example.com", TYPE_A).unwrap();
+        let matcher = ResponseMatcher::new(0x3001, "example.com", TYPE_A, CLASS_IN);
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = server.recv_from(&mut buf).await.unwrap();
+            let spoof = response_for(&buf[..len], 0x8183);
+            attacker.send_to(&spoof, peer).await.unwrap();
+            let valid = response_for(&buf[..len], 0x8180);
+            server.send_to(&valid, peer).await.unwrap();
+        });
+
+        let response = query_udp(server_addr, &query, &matcher, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(u16::from_be_bytes([response[2], response[3]]), 0x8180);
+        server_task.await.unwrap();
+    }
 
     #[tokio::test]
     async fn write_read_framed_query_round_trips() {

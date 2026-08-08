@@ -249,6 +249,45 @@ pub(crate) fn build_query(id: u16, host: &str, dns_type: u16) -> Result<Vec<u8>,
     Ok(raw)
 }
 
+pub(crate) struct ResponseMatcher {
+    id: u16,
+    name: CanonicalName,
+    typ: u16,
+    class: u16,
+}
+
+impl ResponseMatcher {
+    pub(crate) fn new(id: u16, name: &str, typ: u16, class: u16) -> Self {
+        Self {
+            id,
+            name: CanonicalName::from_text(name),
+            typ,
+            class,
+        }
+    }
+
+    pub(crate) fn matches(&self, raw: &[u8]) -> bool {
+        if raw.len() < 12 || !read_u16(raw, 0).is_ok_and(|id| id == self.id) {
+            return false;
+        }
+        let Ok(flags) = read_u16(raw, 2) else {
+            return false;
+        };
+        if flags & FLAG_RESPONSE == 0
+            || flags & FLAG_OPCODE != 0
+            || !read_u16(raw, 4).is_ok_and(|count| count == 1)
+        {
+            return false;
+        }
+        let Ok(question_name) = read_parsed_name_bounded(raw, 12, raw.len()) else {
+            return false;
+        };
+        question_name.canonical == self.name
+            && read_u16(raw, question_name.next).is_ok_and(|typ| typ == self.typ)
+            && read_u16(raw, question_name.next + 2).is_ok_and(|class| class == self.class)
+    }
+}
+
 pub(crate) fn parse_response<'a>(
     raw: &'a [u8],
     expected_id: u16,
