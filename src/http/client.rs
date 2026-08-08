@@ -349,7 +349,6 @@ async fn resolve_dns_for_client_inner(
                 empty_https_lookup(host),
             )
         };
-        let alias_followed = !https_lookup.fallback_target.eq_ignore_ascii_case(host);
         let addrs = resolve_custom_alias_fallback(
             cli,
             dns_server,
@@ -363,15 +362,10 @@ async fn resolve_dns_for_client_inner(
         let timing_addrs = dns_timing_addrs(addrs.iter().copied());
         let socket_addrs = custom::socket_addrs_for_override(&addrs);
         let auto_http3_config = auto_http3_config_for_records(
-            Some(dns_server),
-            doh_tls_config_for_cli(cli)?,
-            url,
             &https_records,
+            &https_lookup.fallback_target,
             &socket_addrs,
-            auto_http3_discovery,
-            alias_followed,
-        )
-        .await;
+        );
         if auto_http3 {
             Http3Cache::new()
                 .store_https_records(url, Some(dns_server), &https_records)
@@ -387,7 +381,7 @@ async fn resolve_dns_for_client_inner(
                 }),
             }),
             runtime_dns_resolution: None,
-            dns_server: None,
+            dns_server: Some(dns_server.to_string()),
             auto_http3: auto_http3_config,
             auto_http3_discovery: false,
             ech_https_records: https_records,
@@ -448,7 +442,6 @@ async fn resolve_dns_for_client_inner(
             empty_https_lookup(host),
         )
     };
-    let alias_followed = !https_records.fallback_target.eq_ignore_ascii_case(host);
     let socket_addrs = resolve_system_alias_fallback(
         host,
         port,
@@ -457,18 +450,11 @@ async fn resolve_dns_for_client_inner(
         socket_addrs,
     )
     .await?;
+    let effective_host = https_records.fallback_target;
     let https_records = https_records.records;
     let addrs = dns_timing_addrs(socket_addrs.iter().map(|addr| addr.ip()));
-    let auto_http3_config = auto_http3_config_for_records(
-        None,
-        None,
-        url,
-        &https_records,
-        &socket_addrs,
-        auto_http3_discovery,
-        alias_followed,
-    )
-    .await;
+    let auto_http3_config =
+        auto_http3_config_for_records(&https_records, &effective_host, &socket_addrs);
     if auto_http3 {
         Http3Cache::new()
             .store_https_records(url, None, &https_records)
@@ -744,137 +730,21 @@ fn auto_http3_allowed(
             .is_some_and(|host| host.parse::<IpAddr>().is_err())
 }
 
-#[derive(Clone)]
-struct AutoHttp3ResolveConfig<'a> {
-    dns_server: Option<&'a str>,
-    doh_tls_config: Option<rustls::ClientConfig>,
-}
-
-async fn auto_http3_config_for_records(
-    dns_server: Option<&str>,
-    doh_tls_config: Option<rustls::ClientConfig>,
-    url: &Url,
+fn auto_http3_config_for_records(
     records: &[SvcbRecord],
+    effective_host: &str,
     origin_addrs: &[SocketAddr],
-    discovery_budget: Option<AutoHttp3DiscoveryBudget>,
-    allow_target_dns_lookup: bool,
 ) -> Option<AutoHttp3Config> {
-    let origin_host = url.host_str()?;
-    let origin_port = url.port_or_known_default()?;
-    let mut sorted = records.iter().collect::<Vec<_>>();
-    sorted.sort_by_key(|record| record.priority);
-
-    let mut addrs = Vec::new();
-    for record in sorted {
-        if record.is_alias_mode() || !record.is_usable() || !record.advertises_alpn("h3") {
-            continue;
-        }
-        let port = record.port.unwrap_or(origin_port);
-        let record_addrs = auto_http3_record_addrs(
-            AutoHttp3ResolveConfig {
-                dns_server,
-                doh_tls_config: doh_tls_config.clone(),
-            },
-            origin_host,
-            record,
-            origin_addrs,
-            port,
-            discovery_budget,
-            allow_target_dns_lookup,
-        )
-        .await;
-        append_unique_socket_addrs(&mut addrs, record_addrs);
-    }
-
-    (!addrs.is_empty()).then_some(AutoHttp3Config { addrs })
-}
-
-async fn auto_http3_record_addrs(
-    resolver: AutoHttp3ResolveConfig<'_>,
-    origin_host: &str,
-    record: &SvcbRecord,
-    origin_addrs: &[SocketAddr],
-    port: u16,
-    discovery_budget: Option<AutoHttp3DiscoveryBudget>,
-    allow_target_dns_lookup: bool,
-) -> Vec<SocketAddr> {
-    let hinted = auto_http3_hint_addrs(record, origin_addrs, port);
-    if !hinted.is_empty() {
-        return hinted;
-    }
-
-    let target = auto_http3_target_host(origin_host, &record.target);
-    if target.eq_ignore_ascii_case(origin_host) && !origin_addrs.is_empty() {
-        return origin_addrs
-            .iter()
-            .map(|addr| SocketAddr::new(addr.ip(), port))
-            .collect();
-    }
-    if let Ok(ip) = target.parse::<IpAddr>() {
-        return vec![SocketAddr::new(ip, port)];
-    }
-    if !allow_target_dns_lookup {
-        return Vec::new();
-    }
-    let Some(timeout) = discovery_budget.and_then(AutoHttp3DiscoveryBudget::remaining) else {
-        return Vec::new();
-    };
-    let timeout = TimeoutBudget::new(Some(timeout));
-    let Ok(mut addrs) = timeout
-        .run(crate::net::resolve_host_with_doh_tls(
-            &target,
-            resolver.dns_server,
-            resolver.doh_tls_config,
-            timeout,
-        ))
-        .await
-    else {
-        return Vec::new();
-    };
-    for addr in &mut addrs {
-        addr.set_port(port);
-    }
-    addrs
-}
-
-fn auto_http3_hint_addrs(
-    record: &SvcbRecord,
-    origin_addrs: &[SocketAddr],
-    port: u16,
-) -> Vec<SocketAddr> {
-    let ipv4 = record
-        .ipv4_hint
+    let records = records
         .iter()
-        .copied()
-        .map(|addr| SocketAddr::new(IpAddr::V4(addr), port))
+        .filter(|record| record.is_usable() && record.advertises_alpn("h3"))
+        .cloned()
         .collect::<Vec<_>>();
-    let ipv6 = record
-        .ipv6_hint
-        .iter()
-        .copied()
-        .map(|addr| SocketAddr::new(IpAddr::V6(addr), port))
-        .collect::<Vec<_>>();
-
-    match origin_addrs.first().map(|addr| addr.ip()) {
-        Some(IpAddr::V4(_)) => crate::net::interleave_socket_addr_families(&ipv4, &ipv6),
-        Some(IpAddr::V6(_)) | None => crate::net::interleave_socket_addr_families(&ipv6, &ipv4),
-    }
-}
-
-fn auto_http3_target_host(origin_host: &str, target: &str) -> String {
-    if target == "." {
-        origin_host.to_string()
-    } else {
-        target.trim_end_matches('.').to_string()
-    }
-}
-
-fn append_unique_socket_addrs(target: &mut Vec<SocketAddr>, addrs: Vec<SocketAddr>) {
-    for addr in addrs {
-        if !target.contains(&addr) {
-            target.push(addr);
-        }
-    }
+    (!records.is_empty()).then(|| AutoHttp3Config {
+        records,
+        effective_host: effective_host.to_string(),
+        origin_addrs: origin_addrs.to_vec(),
+    })
 }
 
 fn configure_http3_local_address(
@@ -1408,10 +1278,6 @@ mod tests {
         }
     }
 
-    fn auto_http3_test_discovery_budget() -> Option<AutoHttp3DiscoveryBudget> {
-        AutoHttp3DiscoveryBudget::new(TimeoutBudget::new(None))
-    }
-
     #[test]
     fn websocket_effective_proxy_preserves_authorization() {
         let selected = effective_proxy_for_websocket(
@@ -1486,159 +1352,37 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn auto_http3_candidate_builder_uses_h3_records_and_port_overrides() {
-        let url = Url::parse("https://example.com:8443/").unwrap();
-        let origin_addrs = [SocketAddr::new("127.0.0.1".parse().unwrap(), 8443)];
-        let records = [
-            https_record(5, ".", &["h2"], Some(9443)),
-            https_record(1, ".", &["h3", "h2"], Some(9443)),
-        ];
-
-        let got = auto_http3_config_for_records(
-            None,
-            None,
-            &url,
-            &records,
-            &origin_addrs,
-            auto_http3_test_discovery_budget(),
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            got.addrs,
-            [SocketAddr::new("127.0.0.1".parse().unwrap(), 9443)]
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_http3_candidate_builder_orders_hints_by_resolver_family_preference() {
-        let url = Url::parse("https://example.com/").unwrap();
-        let mut record = https_record(1, ".", &["h3"], None);
-        record.ipv4_hint = vec!["192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap()];
-        record.ipv6_hint = vec![
-            "2001:db8::1".parse().unwrap(),
-            "2001:db8::2".parse().unwrap(),
-        ];
-
-        let ipv4_first = auto_http3_config_for_records(
-            None,
-            None,
-            &url,
-            &[record.clone()],
-            &[
-                SocketAddr::new("198.51.100.1".parse().unwrap(), 443),
-                SocketAddr::new("2001:db8::10".parse().unwrap(), 443),
-            ],
-            auto_http3_test_discovery_budget(),
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            ipv4_first.addrs,
-            [
-                SocketAddr::new("192.0.2.1".parse().unwrap(), 443),
-                SocketAddr::new("2001:db8::1".parse().unwrap(), 443),
-                SocketAddr::new("192.0.2.2".parse().unwrap(), 443),
-                SocketAddr::new("2001:db8::2".parse().unwrap(), 443),
-            ]
-        );
-
-        let ipv6_first = auto_http3_config_for_records(
-            None,
-            None,
-            &url,
-            &[record],
-            &[
-                SocketAddr::new("2001:db8::10".parse().unwrap(), 443),
-                SocketAddr::new("198.51.100.1".parse().unwrap(), 443),
-            ],
-            auto_http3_test_discovery_budget(),
-            false,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            ipv6_first.addrs,
-            [
-                SocketAddr::new("2001:db8::1".parse().unwrap(), 443),
-                SocketAddr::new("192.0.2.1".parse().unwrap(), 443),
-                SocketAddr::new("2001:db8::2".parse().unwrap(), 443),
-                SocketAddr::new("192.0.2.2".parse().unwrap(), 443),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_http3_candidate_builder_ignores_missing_or_unusable_h3() {
-        let url = Url::parse("https://example.com/").unwrap();
+    #[test]
+    fn auto_http3_candidate_builder_keeps_usable_records_for_transport_resolution() {
         let origin_addrs = [SocketAddr::new("127.0.0.1".parse().unwrap(), 443)];
-        assert!(
-            auto_http3_config_for_records(
-                None,
-                None,
-                &url,
-                &[],
-                &origin_addrs,
-                auto_http3_test_discovery_budget(),
-                false,
-            )
-            .await
-            .is_none()
-        );
-        assert!(
-            auto_http3_config_for_records(
-                None,
-                None,
-                &url,
-                &[https_record(1, ".", &["h2"], None)],
-                &origin_addrs,
-                auto_http3_test_discovery_budget(),
-                false,
-            )
-            .await
-            .is_none()
-        );
+        let records = [
+            https_record(5, ".", &["h2"], None),
+            https_record(1, "h3.example.com.", &["h3"], Some(9443)),
+        ];
+
+        let got = auto_http3_config_for_records(&records, "example.com", &origin_addrs).unwrap();
+
+        assert_eq!(got.records.len(), 1);
+        assert_eq!(got.records[0].target, "h3.example.com.");
+        assert_eq!(got.effective_host, "example.com");
+        assert_eq!(got.origin_addrs, origin_addrs);
+    }
+
+    #[test]
+    fn auto_http3_candidate_builder_ignores_unusable_records() {
         let mut unsupported = https_record(1, ".", &["h3"], None);
         unsupported.unsupported_mandatory = vec![9];
+
+        assert!(auto_http3_config_for_records(&[], "example.com", &[]).is_none());
         assert!(
             auto_http3_config_for_records(
-                None,
-                None,
-                &url,
-                &[unsupported],
-                &origin_addrs,
-                auto_http3_test_discovery_budget(),
-                false,
+                &[https_record(1, ".", &["h2"], None)],
+                "example.com",
+                &[],
             )
-            .await
             .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn auto_http3_candidate_builder_skips_target_dns_when_not_allowed() {
-        let url = Url::parse("https://example.com/").unwrap();
-        let origin_addrs = [SocketAddr::new("127.0.0.1".parse().unwrap(), 443)];
-
-        assert!(
-            auto_http3_config_for_records(
-                None,
-                None,
-                &url,
-                &[https_record(1, "h3.example.com.", &["h3"], None)],
-                &origin_addrs,
-                auto_http3_test_discovery_budget(),
-                false,
-            )
-            .await
-            .is_none()
-        );
+        assert!(auto_http3_config_for_records(&[unsupported], "example.com", &[]).is_none());
     }
 
     #[test]

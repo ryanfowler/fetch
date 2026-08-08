@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures_util::StreamExt;
 use http::header::HeaderMap;
 use http::{Method, Request, Version};
 use quinn::crypto::rustls::QuicClientConfig;
@@ -27,7 +28,9 @@ type H3SendRequest = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AutoHttp3Config {
-    pub(crate) addrs: Vec<SocketAddr>,
+    pub(crate) records: Vec<SvcbRecord>,
+    pub(crate) effective_host: String,
+    pub(crate) origin_addrs: Vec<SocketAddr>,
 }
 
 #[derive(Clone)]
@@ -40,6 +43,22 @@ pub(super) struct H3PooledClient {
 struct Http3ConnectResult {
     client: H3PooledClient,
     timing: TransportTiming,
+}
+
+struct SvcbConnectCandidates<'a> {
+    effective_host: &'a str,
+    records: &'a [SvcbRecord],
+    origin_addrs: &'a [SocketAddr],
+    discovery_start: std::time::Instant,
+}
+
+#[derive(Clone, Copy)]
+struct SvcbRecordConnect<'a> {
+    origin_host: &'a str,
+    origin_port: u16,
+    effective_host: &'a str,
+    origin_addrs: &'a [SocketAddr],
+    discovery_start: std::time::Instant,
 }
 
 enum AutoRaceWinner {
@@ -204,31 +223,20 @@ impl Client {
             take_finished_auto_http3_origin_addrs(origin_addrs_task).await
         } else {
             origin_addrs_task.abort();
-            crate::net::resolve_host_with_doh_tls(
-                effective_host,
-                self.config.dns_server.as_deref(),
-                self.config.doh_tls_config.clone(),
+            Vec::new()
+        };
+        match self
+            .connect_http3_client_with_records(
+                url,
+                origin,
+                SvcbConnectCandidates {
+                    effective_host,
+                    records: &lookup.records,
+                    origin_addrs: &origin_addrs,
+                    discovery_start,
+                },
                 timeout,
             )
-            .await
-            .unwrap_or_default()
-        };
-        let addrs = auto_http3_addrs_for_records(
-            self.config.dns_server.as_deref(),
-            self.config.doh_tls_config.clone(),
-            url,
-            effective_host,
-            &lookup.records,
-            &origin_addrs,
-            timeout,
-        )
-        .await;
-        if addrs.is_empty() {
-            return DynamicHttp3ConnectOutcome::NoCandidates;
-        }
-        record_dns_addrs_trace(&self.config, url, &addrs, discovery_start.elapsed());
-        match self
-            .connect_http3_client_with_addrs(url, origin, addrs, timeout)
             .await
         {
             Ok(result) => DynamicHttp3ConnectOutcome::Connected(result),
@@ -556,79 +564,30 @@ fn auto_http3_lookup_timeout(timeout: TimeoutBudget) -> Option<Duration> {
     }
 }
 
-async fn auto_http3_addrs_for_records(
-    dns_server: Option<&str>,
-    doh_tls_config: Option<rustls::ClientConfig>,
-    url: &Url,
-    effective_host: &str,
-    records: &[SvcbRecord],
-    origin_addrs: &[SocketAddr],
-    timeout: TimeoutBudget,
-) -> Vec<SocketAddr> {
-    let Some(origin_host) = url.host_str() else {
-        return Vec::new();
-    };
-    let Some(origin_port) = url.port_or_known_default() else {
-        return Vec::new();
-    };
-    let mut sorted = records.iter().collect::<Vec<_>>();
-    sorted.sort_by_key(|record| record.priority);
-
-    let mut addrs = Vec::new();
-    for record in sorted {
-        if record.is_alias_mode() || !record.is_usable() || !record.advertises_alpn("h3") {
-            continue;
-        }
-        let port = record.port.unwrap_or(origin_port);
-        let mut record_addrs = auto_http3_hint_addrs(record, origin_addrs, port);
-        if record_addrs.is_empty() {
-            let target = auto_http3_target_host(origin_host, &record.target);
-            if target.eq_ignore_ascii_case(effective_host) && !origin_addrs.is_empty() {
-                record_addrs = origin_addrs
-                    .iter()
-                    .map(|addr| SocketAddr::new(addr.ip(), port))
-                    .collect();
-            } else if target.eq_ignore_ascii_case(effective_host) {
-                record_addrs = crate::net::resolve_host_with_doh_tls(
-                    effective_host,
-                    dns_server,
-                    doh_tls_config.clone(),
-                    timeout,
-                )
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|addr| SocketAddr::new(addr.ip(), port))
-                .collect();
-            } else if let Ok(ip) = target.parse::<IpAddr>() {
-                record_addrs.push(SocketAddr::new(ip, port));
-            } else if !effective_host.eq_ignore_ascii_case(origin_host) {
-                record_addrs = crate::net::resolve_host_with_doh_tls(
-                    &target,
-                    dns_server,
-                    doh_tls_config.clone(),
-                    timeout,
-                )
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|addr| SocketAddr::new(addr.ip(), port))
-                .collect();
-            }
-        }
-        append_unique_socket_addrs(&mut addrs, record_addrs);
-    }
-    addrs
-}
-
 async fn auto_http3_addrs_for_cached_candidates(
     dns_server: Option<&str>,
     doh_tls_config: Option<rustls::ClientConfig>,
     candidates: &[Http3CacheCandidate],
     timeout: TimeoutBudget,
 ) -> Vec<SocketAddr> {
+    use rand::seq::SliceRandom;
+
     let mut sorted = candidates.iter().collect::<Vec<_>>();
     sorted.sort_by_key(|candidate| candidate.priority.unwrap_or(u16::MAX));
+    {
+        let mut start = 0;
+        let mut rng = rand::rng();
+        while start < sorted.len() {
+            let priority = sorted[start].priority.unwrap_or(u16::MAX);
+            let end = start
+                + sorted[start..]
+                    .iter()
+                    .take_while(|candidate| candidate.priority.unwrap_or(u16::MAX) == priority)
+                    .count();
+            sorted[start..end].shuffle(&mut rng);
+            start = end;
+        }
+    }
     let mut addrs = Vec::new();
     for candidate in sorted {
         let record_addrs = if let Ok(ip) = candidate.alt_host.parse::<IpAddr>() {
@@ -802,15 +761,19 @@ impl Client {
             });
         }
         let mut fresh_error = None;
-        if let Some(addrs) = self
-            .config
-            .auto_http3
-            .as_ref()
-            .map(|config| config.addrs.clone())
-            .filter(|addrs| !addrs.is_empty())
-        {
+        if let Some(config) = &self.config.auto_http3 {
             match self
-                .connect_http3_client_with_addrs(url, origin.clone(), addrs, timeout)
+                .connect_http3_client_with_records(
+                    url,
+                    origin.clone(),
+                    SvcbConnectCandidates {
+                        effective_host: &config.effective_host,
+                        records: &config.records,
+                        origin_addrs: &config.origin_addrs,
+                        discovery_start: std::time::Instant::now(),
+                    },
+                    timeout,
+                )
                 .await
             {
                 Ok(result) => return Ok(result),
@@ -828,6 +791,139 @@ impl Client {
         Err(fresh_error
             .or(cached_error)
             .unwrap_or_else(|| Error::connect("no HTTP/3 candidates discovered")))
+    }
+
+    async fn connect_http3_client_with_records(
+        &self,
+        url: &Url,
+        origin: String,
+        candidates: SvcbConnectCandidates<'_>,
+        timeout: TimeoutBudget,
+    ) -> Result<Http3ConnectResult, Error> {
+        let SvcbConnectCandidates {
+            effective_host,
+            records,
+            origin_addrs,
+            discovery_start,
+        } = candidates;
+        let origin_host = url
+            .host_str()
+            .ok_or_else(|| Error::request("URL host is required"))?;
+        let origin_port = url
+            .port_or_known_default()
+            .ok_or_else(|| Error::request("URL port is required"))?;
+        let records = crate::dns::svcb::randomized_service_records(records)
+            .into_iter()
+            .filter(|record| record.is_usable() && record.advertises_alpn("h3"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let connect = SvcbRecordConnect {
+            origin_host,
+            origin_port,
+            effective_host,
+            origin_addrs,
+            discovery_start,
+        };
+        let mut start = 0;
+        let mut last_error = None;
+        while start < records.len() {
+            let priority = records[start].priority;
+            let end = start
+                + records[start..]
+                    .iter()
+                    .take_while(|record| record.priority == priority)
+                    .count();
+            let mut attempts = records[start..end]
+                .iter()
+                .map(|record| {
+                    self.connect_http3_client_with_record(
+                        url,
+                        origin.clone(),
+                        record,
+                        connect,
+                        timeout,
+                    )
+                })
+                .collect::<futures_util::stream::FuturesUnordered<_>>();
+            while let Some(result) = attempts.next().await {
+                match result {
+                    Ok(result) => return Ok(result),
+                    Err(err) => last_error = Some(err),
+                }
+            }
+            start = end;
+        }
+
+        Err(last_error.unwrap_or_else(|| Error::connect("no HTTP/3 candidates discovered")))
+    }
+
+    async fn connect_http3_client_with_record(
+        &self,
+        url: &Url,
+        origin: String,
+        record: &SvcbRecord,
+        connect: SvcbRecordConnect<'_>,
+        timeout: TimeoutBudget,
+    ) -> Result<Http3ConnectResult, Error> {
+        let port = record.port.unwrap_or(connect.origin_port);
+        let hints = auto_http3_hint_addrs(record, connect.origin_addrs, port);
+        let target = auto_http3_target_host(connect.origin_host, &record.target);
+        let resolve = async {
+            if target.eq_ignore_ascii_case(connect.effective_host)
+                && !connect.origin_addrs.is_empty()
+            {
+                connect
+                    .origin_addrs
+                    .iter()
+                    .map(|addr| SocketAddr::new(addr.ip(), port))
+                    .collect()
+            } else if let Ok(ip) = target.parse::<IpAddr>() {
+                vec![SocketAddr::new(ip, port)]
+            } else {
+                crate::net::resolve_host_with_doh_tls(
+                    &target,
+                    self.config.dns_server.as_deref(),
+                    self.config.doh_tls_config.clone(),
+                    timeout,
+                )
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|addr| SocketAddr::new(addr.ip(), port))
+                .collect::<Vec<_>>()
+            }
+        };
+        tokio::pin!(resolve);
+
+        let authoritative = if hints.is_empty() {
+            resolve.await
+        } else {
+            record_dns_addrs_trace(&self.config, url, &hints, connect.discovery_start.elapsed());
+            let hint_connect =
+                self.connect_http3_client_with_addrs(url, origin.clone(), hints.clone(), timeout);
+            tokio::pin!(hint_connect);
+            tokio::select! {
+                result = &mut hint_connect => match result {
+                    Ok(result) => return Ok(result),
+                    Err(_) => resolve.await,
+                },
+                addrs = &mut resolve => {
+                    if addrs.is_empty() {
+                        return hint_connect.await;
+                    }
+                    addrs
+                }
+            }
+        };
+
+        if authoritative.is_empty() {
+            return Err(Error::connect("SVCB TargetName resolved no addresses"));
+        }
+        let mut addrs = authoritative;
+        append_unique_socket_addrs(&mut addrs, hints);
+        record_dns_addrs_trace(&self.config, url, &addrs, connect.discovery_start.elapsed());
+        self.connect_http3_client_with_addrs(url, origin, addrs, timeout)
+            .await
     }
 
     async fn connect_cached_auto_http3_client(

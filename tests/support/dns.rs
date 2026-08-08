@@ -80,6 +80,44 @@ pub(crate) fn start_udp_dns_server_with_https(
     addr
 }
 
+pub(crate) fn start_udp_dns_server_with_https_target_and_stale_hint(
+    host: &'static str,
+    origin_ip: Ipv4Addr,
+    target: &'static str,
+    target_ip: Ipv4Addr,
+    stale_hint: Ipv4Addr,
+    https_port: u16,
+) -> (String, Arc<AtomicUsize>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp dns server");
+    let addr = socket.local_addr().unwrap().to_string();
+    let target_queries = Arc::new(AtomicUsize::new(0));
+    let queries_for_thread = target_queries.clone();
+    thread::spawn(move || {
+        let mut buf = [0_u8; 512];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf) {
+            let Some((name, qtype, question_end)) = parse_dns_question(&buf[..n]) else {
+                continue;
+            };
+            let answer = if name == host && qtype == TYPE_A {
+                Some((TYPE_A, origin_ip.octets().to_vec()))
+            } else if name == host && qtype == TYPE_HTTPS {
+                Some((
+                    TYPE_HTTPS,
+                    https_target_with_hint_rdata(https_port, target, stale_hint),
+                ))
+            } else if name == target && qtype == TYPE_A {
+                queries_for_thread.fetch_add(1, Ordering::SeqCst);
+                Some((TYPE_A, target_ip.octets().to_vec()))
+            } else {
+                None
+            };
+            let response = dns_response(&buf[..n], question_end, answer);
+            let _ = socket.send_to(&response, peer);
+        }
+    });
+    (addr, target_queries)
+}
+
 pub(crate) fn start_udp_dns_server_with_toggleable_https(
     host: &'static str,
     ip: Ipv4Addr,
@@ -451,6 +489,12 @@ fn https_target_rdata(port: u16, target: &str) -> Vec<u8> {
     write_dns_name(&mut out, target);
     write_svc_param(&mut out, 1, &[2, b'h', b'3']);
     write_svc_param(&mut out, 3, &port.to_be_bytes());
+    out
+}
+
+fn https_target_with_hint_rdata(port: u16, target: &str, ipv4_hint: Ipv4Addr) -> Vec<u8> {
+    let mut out = https_target_rdata(port, target);
+    write_svc_param(&mut out, 4, &ipv4_hint.octets());
     out
 }
 

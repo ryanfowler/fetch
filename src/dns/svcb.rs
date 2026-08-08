@@ -730,6 +730,33 @@ pub(crate) async fn lookup_https_records_with_doh_tls_config(
     unreachable!("alias depth is bounded by the loop")
 }
 
+/// Order ServiceMode records by priority and randomize records that have the
+/// same priority. RFC 9460 requires clients to avoid always selecting the
+/// first record from an equal-priority group.
+pub(crate) fn randomized_service_records(records: &[SvcbRecord]) -> Vec<&SvcbRecord> {
+    use rand::seq::SliceRandom;
+
+    let mut ordered = records
+        .iter()
+        .filter(|record| !record.is_alias_mode())
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|record| record.priority);
+
+    let mut start = 0;
+    let mut rng = rand::rng();
+    while start < ordered.len() {
+        let priority = ordered[start].priority;
+        let end = start
+            + ordered[start..]
+                .iter()
+                .take_while(|record| record.priority == priority)
+                .count();
+        ordered[start..end].shuffle(&mut rng);
+        start = end;
+    }
+    ordered
+}
+
 fn canonical_host(host: &str) -> String {
     host.trim_end_matches('.').to_ascii_lowercase()
 }
@@ -956,6 +983,25 @@ mod tests {
             }
         });
         (addr, handle)
+    }
+
+    #[test]
+    fn equal_priority_service_records_are_randomized() {
+        let first = parse_rdata(&record(1, &["first"], vec![])).unwrap();
+        let second = parse_rdata(&record(1, &["second"], vec![])).unwrap();
+        let later = parse_rdata(&record(2, &["later"], vec![])).unwrap();
+        let records = [first, second, later];
+        let mut saw_first = false;
+        let mut saw_second = false;
+
+        for _ in 0..64 {
+            let ordered = randomized_service_records(&records);
+            assert_eq!(ordered[2].priority, 2);
+            saw_first |= ordered[0].target == "first.";
+            saw_second |= ordered[0].target == "second.";
+        }
+
+        assert!(saw_first && saw_second);
     }
 
     #[test]

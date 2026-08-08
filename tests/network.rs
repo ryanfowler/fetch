@@ -15,7 +15,8 @@ use support::dns::{
     start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_delayed_https_and_resolution,
     start_udp_dns_server_with_delayed_resolution, start_udp_dns_server_with_failing_https,
     start_udp_dns_server_with_hosts, start_udp_dns_server_with_https,
-    start_udp_dns_server_with_https_alias, start_udp_dns_server_with_https_target_dropping_target,
+    start_udp_dns_server_with_https_alias, start_udp_dns_server_with_https_target_and_stale_hint,
+    start_udp_dns_server_with_https_target_dropping_target,
     start_udp_dns_server_with_https_targets_dropping_targets,
     start_udp_dns_server_with_toggleable_https, start_unresponsive_udp_dns_server,
 };
@@ -898,6 +899,38 @@ fn default_https_uses_http3_from_https_dns_record() {
 }
 
 #[test]
+fn default_https_supplements_stale_hint_with_non_origin_target_lookup() {
+    let h3 = start_http3_server(|req| {
+        if req.path == "/auto-h3-target" {
+            return H3Response::ok("authoritative target wins");
+        }
+        H3Response::status(404, "not found")
+    });
+    let h3_port = Url::parse(&h3.url).unwrap().port().unwrap();
+    let (dns_addr, target_queries) = start_udp_dns_server_with_https_target_and_stale_hint(
+        "localhost.",
+        Ipv4Addr::LOCALHOST,
+        "h3-target.localhost.",
+        Ipv4Addr::LOCALHOST,
+        Ipv4Addr::new(127, 0, 0, 2),
+        h3_port,
+    );
+
+    let res = run_fetch(&[
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        h3.ca_cert_path.to_str().unwrap(),
+        &format!("https://localhost:{h3_port}/auto-h3-target"),
+    ]);
+
+    assert_exit(&res, 0);
+    assert_eq!(res.stdout, "authoritative target wins");
+    assert!(res.stderr.contains("HTTP/3.0 200 OK"), "{}", res.stderr);
+    assert!(target_queries.load(Ordering::SeqCst) > 0);
+}
+
+#[test]
 fn default_https_uses_cached_http3_from_https_dns_record() {
     let cache_dir = TempDir::new().unwrap();
     let h3 = start_http3_server(|req| match req.path.as_str() {
@@ -1274,7 +1307,7 @@ fn default_https_auto_http3_does_not_wait_for_dropped_svcb_target_dns_record() {
 }
 
 #[test]
-fn default_https_auto_http3_skips_svcb_target_dns_resolution_by_default() {
+fn default_https_auto_http3_target_resolution_does_not_block_tcp_fallback() {
     let tls = start_tls_server(|req| {
         if req.path == "/auto-h3-multiple-dropped-svcb-targets" {
             return TestResponse::ok("tcp without target lookup");
@@ -1282,7 +1315,7 @@ fn default_https_auto_http3_skips_svcb_target_dns_resolution_by_default() {
         TestResponse::status(404, "Not Found", "")
     });
     let tls_port = Url::parse(&tls.url).unwrap().port().unwrap();
-    let (dns_addr, target_queries) = start_udp_dns_server_with_https_targets_dropping_targets(
+    let (dns_addr, _target_queries) = start_udp_dns_server_with_https_targets_dropping_targets(
         "localhost.",
         Ipv4Addr::new(127, 0, 0, 1),
         vec![
@@ -1295,6 +1328,7 @@ fn default_https_auto_http3_skips_svcb_target_dns_resolution_by_default() {
         tls_port,
     );
 
+    let start = std::time::Instant::now();
     let res = run_fetch(&[
         "--dns-server",
         &dns_addr,
@@ -1302,13 +1336,13 @@ fn default_https_auto_http3_skips_svcb_target_dns_resolution_by_default() {
         tls.ca_cert_path.to_str().unwrap(),
         &format!("https://localhost:{tls_port}/auto-h3-multiple-dropped-svcb-targets"),
     ]);
+    let elapsed = start.elapsed();
 
     assert_exit(&res, 0);
     assert_eq!(res.stdout, "tcp without target lookup");
-    assert_eq!(
-        target_queries.load(Ordering::SeqCst),
-        0,
-        "auto-H3 target-name resolution should not delay default TCP requests\nstderr:\n{}",
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "SVCB TargetName lookups delayed TCP fallback: {elapsed:?}\nstderr:\n{}",
         res.stderr
     );
 }
