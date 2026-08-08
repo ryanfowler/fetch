@@ -316,10 +316,17 @@ async fn inspect_result(
         });
     }
 
-    let target = resolver.resolve().await?;
-    let start = Instant::now();
-    let result = lookup(host, target, start, timeout).await?;
+    let result = lookup_after_resolving_target(host, timeout, resolver.resolve(timeout)).await?;
     Ok(InspectionOutput::Lookup(result))
+}
+
+async fn lookup_after_resolving_target(
+    host: &str,
+    timeout: TimeoutBudget,
+    target: impl Future<Output = Result<ResolverTarget, FetchError>>,
+) -> Result<Inspection, FetchError> {
+    let start = Instant::now();
+    lookup(host, target.await?, start, timeout).await
 }
 
 async fn lookup(
@@ -872,7 +879,7 @@ impl ResolverConfig {
         &self.label
     }
 
-    async fn resolve(self) -> Result<ResolverTarget, FetchError> {
+    async fn resolve(self, timeout: TimeoutBudget) -> Result<ResolverTarget, FetchError> {
         let Self { label, server } = self;
         match server {
             None => Ok(ResolverTarget::Default { label }),
@@ -887,7 +894,9 @@ impl ResolverConfig {
                 host,
                 port,
             }) => {
-                let addrs = crate::dns::custom::resolve_server_host(&host, port, None).await?;
+                let addrs =
+                    crate::dns::custom::resolve_server_host(&host, port, timeout.remaining()?)
+                        .await?;
                 Ok(ResolverTarget::Tls {
                     label,
                     server_name,
@@ -899,7 +908,9 @@ impl ResolverConfig {
                 host,
                 port,
             }) => {
-                let addrs = crate::dns::custom::resolve_server_host(&host, port, None).await?;
+                let addrs =
+                    crate::dns::custom::resolve_server_host(&host, port, timeout.remaining()?)
+                        .await?;
                 Ok(ResolverTarget::Quic {
                     label,
                     server_name,
@@ -935,6 +946,40 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    #[tokio::test]
+    async fn encrypted_resolver_bootstrap_uses_inspection_budget() {
+        let started_at = Instant::now()
+            .checked_sub(Duration::from_millis(50))
+            .unwrap();
+        let budget = TimeoutBudget::started_at(Some(Duration::from_millis(10)), started_at);
+        let resolver = resolver_config(Some("tls://resolver.invalid")).unwrap();
+
+        let err = resolver.resolve(budget).await.unwrap_err();
+
+        assert_eq!(err.to_string(), "request timed out after 10ms");
+    }
+
+    #[tokio::test]
+    async fn displayed_lookup_duration_includes_resolver_bootstrap() {
+        let (addr, stop) = start_udp_server();
+        let result = lookup_after_resolving_target(
+            "example.com",
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
+            async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                Ok(ResolverTarget::Udp {
+                    label: format!("udp {addr}"),
+                    addr: addr.parse().unwrap(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.duration >= Duration::from_millis(30));
+        stop();
+    }
 
     async fn start_test_server<F>(handler: F) -> (Url, tokio::task::JoinHandle<()>)
     where
@@ -1201,7 +1246,7 @@ mod tests {
     async fn test_resolver_config_resolves_ip_literal_encrypted_dns_endpoints() {
         let dot = resolver_config(Some("dot://127.0.0.1:8853"))
             .unwrap()
-            .resolve()
+            .resolve(TimeoutBudget::new(None))
             .await
             .unwrap();
         assert!(matches!(
@@ -1212,7 +1257,7 @@ mod tests {
 
         let doq = resolver_config(Some("doq://127.0.0.1:8853"))
             .unwrap()
-            .resolve()
+            .resolve(TimeoutBudget::new(None))
             .await
             .unwrap();
         assert!(matches!(
@@ -1572,7 +1617,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_inspection_uses_platform_resolver() {
-        let target = resolver_config(None).unwrap().resolve().await.unwrap();
+        let target = resolver_config(None)
+            .unwrap()
+            .resolve(TimeoutBudget::new(None))
+            .await
+            .unwrap();
 
         assert_eq!(
             target,
