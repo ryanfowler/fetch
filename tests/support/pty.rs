@@ -117,6 +117,15 @@ impl PtyCapture {
         drop(self.file);
         let _ = self.done.recv_timeout(Duration::from_secs(1));
     }
+
+    /// Closes the PTY and returns all output after the capture thread drains it.
+    pub(crate) fn finish(self) -> String {
+        drop(self.file);
+        self.done
+            .recv_timeout(Duration::from_secs(3))
+            .expect("PTY capture thread did not finish");
+        String::from_utf8_lossy(&self.buffer.lock().unwrap()).into_owned()
+    }
 }
 
 pub(crate) fn configure_pty_child(cmd: &mut Command, slave: &fs::File) {

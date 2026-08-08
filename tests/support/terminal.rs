@@ -301,9 +301,8 @@ pub(crate) fn run_binary_pty_with_custom_body(
         "fetch exited with {status}; PTY output:\n{}",
         capture.output()
     );
-    let output = capture.output();
     drop(pty.master);
-    capture.close();
+    let output = capture.finish();
     (
         output,
         fs::read_to_string(less_args).ok(),
