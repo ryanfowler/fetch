@@ -9,7 +9,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::core;
-use crate::dns::util::{dns_query_id, dns_transaction_budget, resolve_address_families};
+use crate::dns::util::{dns_transaction_budget, resolve_address_families};
 use crate::dns::wire;
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
@@ -18,8 +18,13 @@ use crate::http::transport::{Client, Response};
 const DNS_TYPE_A: u16 = wire::TYPE_A;
 const DNS_TYPE_AAAA: u16 = wire::TYPE_AAAA;
 const DNS_CLASS_IN: u16 = wire::CLASS_IN;
-const DOH_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
-const DOH_RESPONSE_LIMIT_ERROR: &str = "DoH response exceeded maximum allowed size of 1 MiB";
+const DNS_MESSAGE_MAX_BYTES: usize = u16::MAX as usize;
+const DNS_MESSAGE_LIMIT_ERROR: &str =
+    "DoH application/dns-message response exceeded maximum allowed size of 65,535 bytes";
+const DOH_JSON_MAX_BYTES: usize = 1024 * 1024;
+const DOH_JSON_LIMIT_ERROR: &str = "DoH JSON response exceeded maximum allowed size of 1 MiB";
+const DOH_ERROR_MAX_BYTES: usize = 64 * 1024;
+const DOH_ERROR_LIMIT_ERROR: &str = "DoH error response exceeded maximum allowed size of 64 KiB";
 const DOH_ERROR_EXCERPT_MAX_BYTES: usize = 4 * 1024;
 const DOH_ERROR_TRUNCATION_SUFFIX: &str = "... [truncated]";
 const APPLICATION_DNS_MESSAGE: &str = "application/dns-message";
@@ -151,8 +156,10 @@ async fn lookup_doh_wire_records_with_client(
     host: &str,
     dns_type: u16,
 ) -> Result<Vec<DohRecord>, WireDohError> {
-    let id = dns_query_id();
-    let query = wire::build_query(id, host, dns_type)
+    // HTTP correlates DoH exchanges. RFC 8484 recommends ID 0 to improve
+    // HTTP cache reuse and avoid carrying unnecessary entropy in the query.
+    const DOH_QUERY_ID: u16 = 0;
+    let query = wire::build_query(DOH_QUERY_ID, host, dns_type)
         .map_err(|err| WireDohError::Fatal(DnsError(err.to_string())))?;
 
     let mut headers = HeaderMap::new();
@@ -188,7 +195,7 @@ async fn lookup_doh_wire_records_with_client(
     }
 
     let age = doh_response_age(response.headers());
-    match doh_records_from_wire_response(response.body(), id, host, dns_type) {
+    match doh_records_from_wire_response(response.body(), DOH_QUERY_ID, host, dns_type) {
         Ok(mut records) => {
             subtract_age_from_ttls(&mut records, age);
             Ok(records)
@@ -246,6 +253,8 @@ impl DohClient {
         headers: HeaderMap,
         body: Option<Vec<u8>>,
     ) -> Result<DohResponseBody, DnsError> {
+        validate_doh_endpoint(&url)?;
+        let wire_request = method == Method::POST;
         self.budget
             .run(Box::pin(async {
                 let mut request = self.client.request(method, url).headers(headers);
@@ -253,12 +262,14 @@ impl DohClient {
                     request = request.body(body);
                 }
                 let response = Box::pin(request.send()).await?;
-                Box::pin(buffer_response_with_limit(
-                    response,
-                    DOH_RESPONSE_MAX_BYTES,
-                    DOH_RESPONSE_LIMIT_ERROR,
-                ))
-                .await
+                if wire_request && wire_status_may_support_json(response.status()) {
+                    return Ok(DohResponseBody {
+                        status: response.status(),
+                        headers: response.headers().clone(),
+                        body: Bytes::new(),
+                    });
+                }
+                Box::pin(buffer_doh_response(response, wire_request)).await
             }))
             .await
             .map_err(|err| DnsError(err.to_string()))
@@ -283,6 +294,48 @@ impl DohResponseBody {
     fn body(&self) -> &[u8] {
         &self.body
     }
+}
+
+fn validate_doh_endpoint(url: &Url) -> Result<(), DnsError> {
+    if url.scheme() == "https" && url.host_str().is_some() {
+        return Ok(());
+    }
+    // Unit tests use local plaintext servers to test protocol details without
+    // adding TLS setup to each case. Production builds never allow this path.
+    #[cfg(test)]
+    if url.scheme() == "http"
+        && url.host().is_some_and(|host| match host {
+            url::Host::Ipv4(ip) => ip.is_loopback(),
+            url::Host::Ipv6(ip) => ip.is_loopback(),
+            url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+        })
+    {
+        return Ok(());
+    }
+    Err(DnsError("DoH endpoints must use HTTPS".to_string()))
+}
+
+async fn buffer_doh_response(
+    response: Response,
+    wire_request: bool,
+) -> Result<DohResponseBody, FetchError> {
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(media_type);
+    let (max_body_bytes, limit_error) = if !response.status().is_success() {
+        (DOH_ERROR_MAX_BYTES, DOH_ERROR_LIMIT_ERROR)
+    } else if content_type.is_some_and(has_json_media_type) {
+        (DOH_JSON_MAX_BYTES, DOH_JSON_LIMIT_ERROR)
+    } else if wire_request
+        || content_type.is_some_and(|value| value.eq_ignore_ascii_case(APPLICATION_DNS_MESSAGE))
+    {
+        (DNS_MESSAGE_MAX_BYTES, DNS_MESSAGE_LIMIT_ERROR)
+    } else {
+        (DOH_JSON_MAX_BYTES, DOH_JSON_LIMIT_ERROR)
+    };
+    buffer_response_with_limit(response, max_body_bytes, limit_error).await
 }
 
 async fn buffer_response_with_limit(
@@ -519,12 +572,14 @@ fn has_json_content_type(response: &DohResponseBody) -> bool {
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            let media_type = media_type(value).to_ascii_lowercase();
-            media_type.eq_ignore_ascii_case(APPLICATION_DNS_JSON)
-                || media_type.eq_ignore_ascii_case("application/json")
-                || media_type.ends_with("+json")
-        })
+        .is_some_and(|value| has_json_media_type(media_type(value)))
+}
+
+fn has_json_media_type(value: &str) -> bool {
+    let media_type = value.to_ascii_lowercase();
+    media_type == APPLICATION_DNS_JSON
+        || media_type == "application/json"
+        || media_type.ends_with("+json")
 }
 
 fn media_type(content_type: &str) -> &str {
@@ -1045,6 +1100,18 @@ mod tests {
     }
 
     #[test]
+    fn wire_response_rejects_mismatched_zero_id() {
+        let query = wire::build_query(0, "example.com", wire::TYPE_A).unwrap();
+        let mut response = wire_response(&query, vec![(wire::TYPE_A, 30, vec![192, 0, 2, 1])]);
+        response[0..2].copy_from_slice(&1_u16.to_be_bytes());
+
+        let err =
+            doh_records_from_wire_response(&response, 0, "example.com", wire::TYPE_A).unwrap_err();
+
+        assert_eq!(err.to_string(), "mismatched DNS response ID");
+    }
+
+    #[test]
     fn wire_response_rejects_unrelated_answer_owner() {
         let query = wire::build_query(0x1234, "example.com", wire::TYPE_A).unwrap();
         let (_, _, question_end) = test_dns_question(&query).unwrap();
@@ -1164,6 +1231,7 @@ mod tests {
                     .unwrap();
             }
             let (name, qtype, _) = test_dns_question(&request.body).unwrap();
+            assert_eq!(&request.body[..2], &[0, 0], "DoH query ID must be zero");
             seen_for_handler.lock().unwrap().push((
                 qtype,
                 request.method.clone(),
@@ -1384,6 +1452,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lookup_doh_falls_back_without_buffering_oversized_post_error() {
+        let (url, task) = start_wire_test_server(|request| {
+            if request.method == "POST" {
+                return http::Response::builder()
+                    .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                    .body(vec![b'x'; DOH_ERROR_MAX_BYTES + 1])
+                    .unwrap();
+            }
+            http::Response::builder()
+                .header(CONTENT_TYPE, APPLICATION_DNS_JSON)
+                .body(
+                    br#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"192.0.2.1"}]}"#
+                        .to_vec(),
+                )
+                .unwrap()
+        })
+        .await;
+
+        let records = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A, None)
+            .await
+            .unwrap();
+
+        assert_eq!(records[0].ip, "192.0.2.1".parse::<IpAddr>().unwrap());
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn lookup_doh_nxdomain_mentions_rcode() {
         let (url, task) =
             start_test_server(|_| http::Response::new(r#"{"Status":3}"#.to_string())).await;
@@ -1502,7 +1597,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lookup_doh_rejects_oversized_response() {
+    async fn lookup_doh_rejects_oversized_dns_message_response() {
+        let (url, task) = start_wire_test_server(|_| {
+            http::Response::builder()
+                .header(CONTENT_TYPE, APPLICATION_DNS_MESSAGE)
+                .body(vec![0; DNS_MESSAGE_MAX_BYTES + 1])
+                .unwrap()
+        })
+        .await;
+
+        let err = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), DNS_MESSAGE_LIMIT_ERROR);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_doh_rejects_oversized_wire_response_without_content_type() {
+        let (url, task) = start_wire_test_server(|_| {
+            http::Response::builder()
+                .body(vec![0; DNS_MESSAGE_MAX_BYTES + 1])
+                .unwrap()
+        })
+        .await;
+
+        let err = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), DNS_MESSAGE_LIMIT_ERROR);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_doh_rejects_oversized_error_response() {
+        let (url, task) = start_wire_test_server(|_| {
+            http::Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(CONTENT_TYPE, APPLICATION_DNS_JSON)
+                .body(vec![b'x'; DOH_ERROR_MAX_BYTES + 1])
+                .unwrap()
+        })
+        .await;
+
+        let err = lookup_doh_type(&url, "example.com", "A", DNS_TYPE_A, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), DOH_ERROR_LIMIT_ERROR);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn lookup_doh_rejects_oversized_json_response() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -1522,7 +1671,7 @@ mod tests {
             let _ = stream
                 .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n")
                 .await;
-            let oversized = vec![b' '; DOH_RESPONSE_MAX_BYTES + 1];
+            let oversized = vec![b' '; DOH_JSON_MAX_BYTES + 1];
             let _ = stream.write_all(&oversized).await;
         });
         let url = Url::parse(&format!("http://{addr}/dns-query")).unwrap();
@@ -1531,7 +1680,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.to_string(), DOH_RESPONSE_LIMIT_ERROR);
+        assert_eq!(err.to_string(), DOH_JSON_LIMIT_ERROR);
         task.await.unwrap();
     }
 

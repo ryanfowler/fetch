@@ -60,9 +60,11 @@ fetch --dns-server doq://dns.adguard-dns.com example.com
 
 ### DNS-over-HTTPS (DoH)
 
-Use an HTTPS URL for encrypted DNS queries. `fetch` uses RFC 8484
-`application/dns-message` requests for generic DoH endpoints and falls back to
-Google-style JSON DoH responses for compatibility. A DoH transaction has a
+Use an HTTPS URL for encrypted DNS queries. Plain HTTP DoH endpoints are not
+accepted. `fetch` uses RFC 8484 `application/dns-message` requests for generic
+DoH endpoints and falls back to Google-style JSON DoH responses for
+compatibility. Wire-format DNS responses are limited to 65,535 bytes. JSON and
+HTTP error responses use separate bounded limits. A DoH transaction has a
 five-second timeout when no request or connection timeout applies. An
 applicable user-set timeout takes precedence.
 
