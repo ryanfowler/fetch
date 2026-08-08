@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::net::IpAddr;
 
@@ -21,6 +21,8 @@ const TRUNCATED_RESPONSE: &str = "DNS response was truncated";
 const FLAG_RESPONSE: u16 = 0x8000;
 const FLAG_OPCODE: u16 = 0x7800;
 const FLAG_TRUNCATED: u16 = 0x0200;
+const MAX_ANSWER_RECORDS: usize = 4096;
+const MAX_CNAME_DEPTH: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WireError(String);
@@ -47,6 +49,12 @@ pub(crate) struct ResourceRecord<'a> {
     pub(crate) ttl: u32,
     pub(crate) data_offset: usize,
     pub(crate) data: &'a [u8],
+}
+
+#[derive(Default)]
+struct CnameOwner {
+    cname_records: Vec<usize>,
+    has_other_data: bool,
 }
 
 pub(crate) enum DecodedRdata<'a> {
@@ -304,6 +312,11 @@ fn parse_response_inner<'a>(
     if question_count != 1 {
         return Err(WireError("unexpected DNS question count".to_string()));
     }
+    if answer_count > MAX_ANSWER_RECORDS {
+        return Err(WireError(
+            "DNS response has too many answer records".to_string(),
+        ));
+    }
     let mut offset = 12;
     let question_name = read_parsed_name_bounded(raw, offset, raw.len())?;
     offset = question_name.next;
@@ -342,67 +355,69 @@ fn parse_response_inner<'a>(
         });
     }
 
-    // Answer records are relevant only when their owner is the queried name or
-    // is reachable from it through a valid IN-class CNAME chain. Use canonical
-    // label bytes here. Presentation strings can map distinct invalid octets to
-    // the same text and are not safe for authorization decisions.
-    let mut reachable = HashSet::from([expected_canonical]);
-    let mut processed = HashSet::new();
-    loop {
-        let mut changed = false;
-        for record in &records {
-            if record.class != expected_class
-                || record.typ != TYPE_CNAME
-                || !reachable.contains(&record.canonical_name)
-                || processed.contains(&record.canonical_name)
-            {
-                continue;
-            }
+    // Index each owner once, then traverse only reachable CNAME owners. This
+    // keeps reverse-ordered answers linear in the number of records.
+    let mut cname_owners = HashMap::<CanonicalName, CnameOwner>::new();
+    for (index, record) in records.iter().enumerate() {
+        if record.class != expected_class {
+            continue;
+        }
+        let owner = cname_owners
+            .entry(record.canonical_name.clone())
+            .or_default();
+        if record.typ == TYPE_CNAME {
+            owner.cname_records.push(index);
+        } else {
+            owner.has_other_data = true;
+        }
+    }
 
-            let owner = record.canonical_name.clone();
-            if records.iter().any(|candidate| {
-                candidate.class == expected_class
-                    && candidate.canonical_name == owner
-                    && candidate.typ != TYPE_CNAME
-            }) {
+    // Use canonical label bytes for authorization. Presentation strings can
+    // map distinct invalid octets to the same text.
+    let mut reachable = HashSet::from([expected_canonical.clone()]);
+    let mut pending = VecDeque::from([expected_canonical]);
+    let mut depth = 0;
+    while let Some(owner_name) = pending.pop_front() {
+        let Some(owner) = cname_owners.get(&owner_name) else {
+            continue;
+        };
+        if owner.cname_records.is_empty() {
+            continue;
+        }
+        if owner.has_other_data {
+            return Err(WireError(
+                "DNS CNAME owner has conflicting answer data".to_string(),
+            ));
+        }
+        if depth == MAX_CNAME_DEPTH {
+            return Err(WireError("DNS CNAME chain exceeds depth limit".to_string()));
+        }
+
+        let mut target = None;
+        for &index in &owner.cname_records {
+            let cname = &records[index];
+            let end = cname.data_offset + cname.data.len();
+            let parsed = read_parsed_name_bounded(raw, cname.data_offset, end)?;
+            if parsed.next != end {
+                return Err(malformed_rdata(TYPE_CNAME));
+            }
+            if target
+                .as_ref()
+                .is_some_and(|prior| prior != &parsed.canonical)
+            {
                 return Err(WireError(
-                    "DNS CNAME owner has conflicting answer data".to_string(),
+                    "DNS CNAME owner has conflicting targets".to_string(),
                 ));
             }
-
-            let mut target = None;
-            for cname in records.iter().filter(|candidate| {
-                candidate.class == expected_class
-                    && candidate.typ == TYPE_CNAME
-                    && candidate.canonical_name == owner
-            }) {
-                let end = cname.data_offset + cname.data.len();
-                let parsed = read_parsed_name_bounded(raw, cname.data_offset, end)?;
-                if parsed.next != end {
-                    return Err(malformed_rdata(TYPE_CNAME));
-                }
-                if target
-                    .as_ref()
-                    .is_some_and(|prior| prior != &parsed.canonical)
-                {
-                    return Err(WireError(
-                        "DNS CNAME owner has conflicting targets".to_string(),
-                    ));
-                }
-                target = Some(parsed.canonical);
-            }
-
-            let target = target.expect("CNAME owner has at least one record");
-            processed.insert(owner);
-            if reachable.contains(&target) {
-                return Err(WireError("DNS CNAME chain contains a cycle".to_string()));
-            }
-            reachable.insert(target);
-            changed = true;
+            target = Some(parsed.canonical);
         }
-        if !changed {
-            break;
+
+        let target = target.expect("CNAME owner has at least one record");
+        if !reachable.insert(target.clone()) {
+            return Err(WireError("DNS CNAME chain contains a cycle".to_string()));
         }
+        pending.push_back(target);
+        depth += 1;
     }
     records.retain(|record| reachable.contains(&record.canonical_name));
     Ok(records)
@@ -814,6 +829,55 @@ mod tests {
 
         let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
         assert!(err.to_string().contains("contains a cycle"));
+    }
+
+    #[test]
+    fn accepts_cname_chain_at_depth_limit() {
+        let mut answers = cname_chain(MAX_CNAME_DEPTH);
+        answers.push((chain_name(MAX_CNAME_DEPTH), TYPE_A, vec![192, 0, 2, 1]));
+        let response = response_with_answers(&answers);
+
+        let records = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap();
+
+        assert_eq!(records.len(), MAX_CNAME_DEPTH + 1);
+        assert_eq!(records.last().unwrap().typ, TYPE_A);
+    }
+
+    #[test]
+    fn rejects_large_reverse_ordered_cname_chain_at_depth_limit() {
+        let mut answers = cname_chain(MAX_ANSWER_RECORDS);
+        answers.reverse();
+        let response = response_with_answers(&answers);
+        assert!(response.len() < 1024 * 1024);
+
+        let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+
+        assert_eq!(err.to_string(), "DNS CNAME chain exceeds depth limit");
+    }
+
+    #[test]
+    fn rejects_excessive_answer_count_before_parsing_records() {
+        let mut response = build_query(0x1234, "example.com", TYPE_A).unwrap();
+        response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+        response[6..8].copy_from_slice(&((MAX_ANSWER_RECORDS + 1) as u16).to_be_bytes());
+
+        let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+
+        assert_eq!(err.to_string(), "DNS response has too many answer records");
+    }
+
+    fn cname_chain(depth: usize) -> Vec<(Vec<u8>, u16, Vec<u8>)> {
+        (0..depth)
+            .map(|index| (chain_name(index), TYPE_CNAME, chain_name(index + 1)))
+            .collect()
+    }
+
+    fn chain_name(index: usize) -> Vec<u8> {
+        if index == 0 {
+            encoded_name(b"example", b"com")
+        } else {
+            encoded_name(format!("n{index}").as_bytes(), b"example")
+        }
     }
 
     fn response_with_answers(answers: &[(Vec<u8>, u16, Vec<u8>)]) -> Vec<u8> {
