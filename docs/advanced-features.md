@@ -211,9 +211,9 @@ Force a specific HTTP version. `--http1`, `--http2`, and `--http3` are aliases
 for `--http 1`, `--http 2`, and `--http 3`.
 
 When `--http` is unset, direct HTTPS requests use DNS HTTPS/SVCB records to
-discover `h3`. With `--dns-server`, HTTPS-record discovery uses that custom UDP
-or DoH resolver. Without `--dns-server`, it uses the platform resolver,
-matching normal address lookup. HTTPS-record discovery and normal A/AAAA lookup
+discover `h3`. With `--dns-server`, HTTPS-record discovery uses that custom
+UDP, TCP, DoT, DoQ, or DoH resolver. Without `--dns-server`, it uses the
+platform resolver, matching normal address lookup. HTTPS-record discovery and normal A/AAAA lookup
 run in parallel. `fetch` starts the TCP/TLS path as soon as normal DNS produces
 a usable address, and a usable `h3` candidate that is discovered before TCP/TLS
 wins races QUIC setup against it. The request is sent once on the winning
@@ -364,7 +364,7 @@ effect with `--inspect-tls`. They cause a warning that `fetch` does not send an
 HTTP request. Configuration-file defaults do not cause this warning.
 
 `--dns-server` applies to TLS inspection too, so certificate diagnostics can use
-the same UDP or DNS-over-HTTPS resolver override as normal requests. When
+the same UDP, TCP, DoT, DoQ, or DoH resolver override as normal requests. When
 combined with `--http 3`, TLS inspection uses a QUIC handshake and offers `h3`
 ALPN instead of dialing TCP.
 

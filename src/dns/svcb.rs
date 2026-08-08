@@ -1,19 +1,15 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use base64::Engine;
-use url::Url;
-
-use crate::dns::util::{dns_query_id, udp_dns_timeout};
+use crate::dns::custom::DnsRecordData;
 use crate::dns::wire;
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
+use base64::Engine;
 
 mod system;
 
 const DNS_TYPE_HTTPS: u16 = wire::TYPE_HTTPS;
-const DNS_CLASS_IN: u16 = wire::CLASS_IN;
-
 const KEY_MANDATORY: u16 = 0;
 const KEY_ALPN: u16 = 1;
 const KEY_NO_DEFAULT_ALPN: u16 = 2;
@@ -254,21 +250,18 @@ pub(crate) async fn lookup_https_records_with_doh_tls_config(
         return Ok(Vec::new());
     }
     match resolver {
-        HttpsRecordResolver::Custom(server)
-            if server.starts_with("http://") || server.starts_with("https://") =>
-        {
-            let server_url = Url::parse(server).map_err(|err| {
-                FetchError::Message(format!("invalid dns-server '{server}': {err}"))
-            })?;
-            lookup_doh_https_records(&server_url, host, timeout, doh_tls_config).await
-        }
         HttpsRecordResolver::Custom(server) => {
-            let server_addr = crate::dns::resolver::normalize_udp_dns_server(server)
-                .map_err(|err| FetchError::Message(err.to_string()))?;
-            let server_addr = server_addr.parse::<SocketAddr>().map_err(|err| {
-                FetchError::Message(format!("invalid dns-server '{server}': {err}"))
-            })?;
-            lookup_udp_https_records(server_addr, host, TimeoutBudget::new(timeout)).await
+            let server = crate::dns::custom::parse_dns_server(server)?;
+            let records = crate::dns::custom::query_type(
+                &server,
+                host,
+                DNS_TYPE_HTTPS,
+                "HTTPS",
+                TimeoutBudget::new(timeout),
+                doh_tls_config,
+            )
+            .await?;
+            Ok(svcb_records_from_query(records))
         }
         HttpsRecordResolver::System => {
             system::lookup_https_records(host, TimeoutBudget::new(timeout)).await
@@ -276,69 +269,23 @@ pub(crate) async fn lookup_https_records_with_doh_tls_config(
     }
 }
 
-async fn lookup_doh_https_records(
-    server_url: &Url,
-    host: &str,
-    timeout: Option<Duration>,
-    doh_tls_config: Option<rustls::ClientConfig>,
-) -> Result<Vec<SvcbRecord>, FetchError> {
-    let client = crate::dns::doh::client_with_budget_and_tls_config(
-        TimeoutBudget::new(timeout),
-        doh_tls_config,
-    )
-    .map_err(|err| FetchError::Message(err.to_string()))?;
-    let answers =
-        crate::dns::doh::lookup_doh_records_with_client(&client, server_url, host, "HTTPS")
-            .await
-            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?;
-    Ok(answers
+pub(super) fn svcb_records_from_query(
+    records: Vec<crate::dns::custom::DnsQueryRecord>,
+) -> Vec<SvcbRecord> {
+    records
         .into_iter()
-        .filter(|answer| answer.answer_type == DNS_TYPE_HTTPS)
-        .filter_map(|answer| {
-            parse_generic_rdata(&answer.data).and_then(|raw| {
-                parse_rdata(&raw).map(|mut record| {
-                    record.ttl = answer.ttl;
-                    record
-                })
-            })
-        })
-        .collect())
-}
-
-async fn lookup_udp_https_records(
-    server_addr: SocketAddr,
-    host: &str,
-    timeout: TimeoutBudget,
-) -> Result<Vec<SvcbRecord>, FetchError> {
-    let id = dns_query_id();
-    let raw = wire::build_query(id, host, DNS_TYPE_HTTPS)
-        .map_err(|err| FetchError::Runtime(err.to_string()))?;
-    let udp_timeout = udp_dns_timeout(timeout.remaining()?);
-    let mut response = crate::dns::transport::query_udp(server_addr, &raw, udp_timeout)
-        .await
-        .map_err(|err| FetchError::Runtime(err.to_string()))?;
-    let raw_records = match wire::parse_response(&response, id, host, DNS_TYPE_HTTPS, DNS_CLASS_IN)
-    {
-        Ok(records) => records,
-        Err(err) if err.is_truncated() => {
-            response = crate::dns::transport::query_tcp(server_addr, &raw, timeout)
-                .await
-                .map_err(|err| FetchError::Runtime(err.to_string()))?;
-            wire::parse_response(&response, id, host, DNS_TYPE_HTTPS, DNS_CLASS_IN)
-                .map_err(|err| FetchError::Runtime(err.to_string()))?
-        }
-        Err(err) => return Err(FetchError::Runtime(err.to_string())),
-    };
-    Ok(raw_records
-        .into_iter()
-        .filter(|record| record.class == DNS_CLASS_IN && record.typ == DNS_TYPE_HTTPS)
+        .filter(|record| record.typ == DNS_TYPE_HTTPS)
         .filter_map(|record| {
-            parse_rdata(record.data).map(|mut parsed| {
-                parsed.ttl = Some(record.ttl);
+            let raw = match record.data {
+                DnsRecordData::Wire(raw) => Some(raw),
+                DnsRecordData::Text(text) => parse_generic_rdata(&text),
+            }?;
+            parse_rdata(&raw).map(|mut parsed| {
+                parsed.ttl = record.ttl;
                 parsed
             })
         })
-        .collect())
+        .collect()
 }
 
 fn unpack_dns_name(raw: &[u8], mut offset: usize) -> Option<(String, usize)> {
@@ -448,6 +395,10 @@ fn hex_digit(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
     use super::*;
 
     fn name(labels: &[&str]) -> Vec<u8> {
@@ -541,6 +492,64 @@ mod tests {
 
         let bad_port = record(1, &[], vec![param(KEY_PORT, &[1])]);
         assert_eq!(parse_rdata(&bad_port), None);
+    }
+
+    #[tokio::test]
+    async fn custom_tcp_lookup_returns_https_records() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut len = [0u8; 2];
+            stream.read_exact(&mut len).unwrap();
+            let mut query = vec![0u8; usize::from(u16::from_be_bytes(len))];
+            stream.read_exact(&mut query).unwrap();
+            let question_end = query
+                .iter()
+                .enumerate()
+                .skip(12)
+                .find_map(|(index, byte)| (*byte == 0).then_some(index + 5))
+                .unwrap();
+            let rdata = record(
+                1,
+                &[],
+                vec![
+                    param(KEY_ALPN, &[2, b'h', b'3']),
+                    param(KEY_PORT, &8443u16.to_be_bytes()),
+                ],
+            );
+            let mut response = Vec::new();
+            response.extend_from_slice(&query[..2]);
+            response.extend_from_slice(&0x8180u16.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&0u32.to_be_bytes());
+            response.extend_from_slice(&query[12..question_end]);
+            response.extend_from_slice(&[0xc0, 0x0c]);
+            response.extend_from_slice(&DNS_TYPE_HTTPS.to_be_bytes());
+            response.extend_from_slice(&wire::CLASS_IN.to_be_bytes());
+            response.extend_from_slice(&30u32.to_be_bytes());
+            response.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+            response.extend_from_slice(&rdata);
+            stream
+                .write_all(&(response.len() as u16).to_be_bytes())
+                .unwrap();
+            stream.write_all(&response).unwrap();
+        });
+
+        let server = format!("tcp://{addr}");
+        let records = lookup_https_records(
+            HttpsRecordResolver::Custom(&server),
+            "example.com",
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].port, Some(8443));
+        assert_eq!(records[0].ttl, Some(30));
+        handle.join().unwrap();
     }
 
     #[tokio::test]

@@ -611,9 +611,10 @@ Aliases: `--http1`, `--http2`, `--http3`.
 
 When `--http` is unset, direct HTTPS requests use DNS HTTPS/SVCB records to
 discover `h3` endpoints. With `--dns-server`, HTTPS-record discovery uses that
-custom UDP or DoH resolver. Without `--dns-server`, it uses the platform
-resolver, matching normal address lookup. This discovery is opportunistic and
-does not delay the normal address lookup or TCP/TLS setup: `fetch` starts
+custom UDP, TCP, DoT, DoQ, or DoH resolver. Without `--dns-server`, it uses the
+platform resolver, matching normal address lookup. This discovery is
+opportunistic and does not delay the normal address lookup or TCP/TLS setup:
+`fetch` starts
 TCP/TLS as soon as normal DNS produces a usable address, while a usable `h3`
 record discovered before TCP/TLS wins races QUIC setup against it. The request
 is sent once on the winning transport. If HTTPS-record discovery is too slow,
