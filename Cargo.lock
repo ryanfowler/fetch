@@ -1353,9 +1353,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "legible"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41ec7f7fa1fc97c139420025a96185aa4d1db3a7d2a4270dbb93d0866f7af830"
+checksum = "b1365098e73aae697c4d747782d2fd5b9bfa3d6a82f2a3f6070c2039053146e5"
 dependencies = [
  "html5ever",
  "memchr",
