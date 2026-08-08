@@ -282,7 +282,7 @@ async fn resolve_dns_for_client_inner(
     // through a proxy; auto_http3_allowed already blocks that path.
     if effective_proxy.is_some_and(|proxy| !proxy.uses_local_target_dns()) {
         if need_ech_svcb {
-            let https_records = if let Some(dns_server) = cli.dns_server.as_deref() {
+            let (https_records, _) = if let Some(dns_server) = cli.dns_server.as_deref() {
                 lookup_ech_https_records(cli, Some(dns_server), host, timeout).await?
             } else {
                 lookup_ech_https_records(cli, None, host, timeout).await?
@@ -313,14 +313,15 @@ async fn resolve_dns_for_client_inner(
 
     if let Some(dns_server) = cli.dns_server.as_deref() {
         let start = Instant::now();
-        let (addrs, https_lookup) = if need_ech_svcb {
+        let (addrs, https_lookup, https_lookup_succeeded) = if need_ech_svcb {
             // ECH requires HTTPS records; don't use the abort-early auto-H3
             // pattern which may discard them before the SVCB query finishes.
             let (addrs, https_records) = tokio::join!(
                 lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout),
                 lookup_ech_https_records(cli, Some(dns_server), host, timeout),
             );
-            (addrs, https_records?)
+            let (https_records, succeeded) = https_records?;
+            (addrs, https_records, succeeded)
         } else if auto_http3 && custom::dns_server_is_authenticated(dns_server, !cli.insecure)? {
             // Authenticated HTTPS lookup failures must gate service access.
             // Run address and service discovery together, but do not abort or
@@ -329,7 +330,7 @@ async fn resolve_dns_for_client_inner(
                 lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout),
                 lookup_authenticated_auto_http3_https_records(cli, dns_server, host, timeout),
             );
-            (addrs, https_records?)
+            (addrs, https_records?, true)
         } else if let Some(auto_http3_budget) = auto_http3_discovery {
             let https = spawn_auto_http3_https_records(
                 Some(dns_server.to_string()),
@@ -337,16 +338,19 @@ async fn resolve_dns_for_client_inner(
                 Some(auto_http3_budget),
             );
             let addrs = lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout).await;
-            let https_records = if addrs.is_err() {
-                https.await.unwrap_or_else(|_| empty_https_lookup(host))
+            let (https_records, succeeded) = if addrs.is_err() {
+                https
+                    .await
+                    .unwrap_or_else(|_| (empty_https_lookup(host), false))
             } else {
                 take_finished_auto_http3_https_records(https, host).await
             };
-            (addrs, https_records)
+            (addrs, https_records, succeeded)
         } else {
             (
                 lookup_custom_ips_with_doh_tls(cli, dns_server, host, timeout).await,
                 empty_https_lookup(host),
+                false,
             )
         };
         let addrs = resolve_custom_alias_fallback(
@@ -366,7 +370,7 @@ async fn resolve_dns_for_client_inner(
             &https_lookup.fallback_target,
             &socket_addrs,
         );
-        if auto_http3 {
+        if auto_http3 && https_lookup_succeeded {
             Http3Cache::new()
                 .store_https_records(url, Some(dns_server), &https_records)
                 .await;
@@ -408,22 +412,23 @@ async fn resolve_dns_for_client_inner(
     });
     let start = Instant::now();
     let lookup = tokio::net::lookup_host((host, port));
-    let (socket_addrs, https_records) = if need_ech_svcb {
+    let (socket_addrs, https_records, https_lookup_succeeded) = if need_ech_svcb {
         // ECH requires HTTPS records; await the SVCB query properly instead
         // of using the abort-early auto-H3 pattern.
         let (socket_addrs, https_records) =
             tokio::join!(lookup, lookup_ech_https_records(cli, None, host, timeout),);
-        (
-            socket_addrs
-                .map(|addrs| addrs.collect::<Vec<_>>())
-                .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}"))),
-            https_records?,
-        )
+        let socket_addrs = socket_addrs
+            .map(|addrs| addrs.collect::<Vec<_>>())
+            .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")));
+        let (https_records, succeeded) = https_records?;
+        (socket_addrs, https_records, succeeded)
     } else if let Some(auto_http3_budget) = auto_http3_discovery {
         let https = spawn_auto_http3_https_records(None, host.to_string(), Some(auto_http3_budget));
         let socket_addrs = lookup.await;
-        let https_records = if socket_addrs.is_err() {
-            https.await.unwrap_or_else(|_| empty_https_lookup(host))
+        let (https_records, succeeded) = if socket_addrs.is_err() {
+            https
+                .await
+                .unwrap_or_else(|_| (empty_https_lookup(host), false))
         } else {
             take_finished_auto_http3_https_records(https, host).await
         };
@@ -432,6 +437,7 @@ async fn resolve_dns_for_client_inner(
                 .map(|addrs| addrs.collect::<Vec<_>>())
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}"))),
             https_records,
+            succeeded,
         )
     } else {
         (
@@ -440,6 +446,7 @@ async fn resolve_dns_for_client_inner(
                 .map(|addrs| addrs.collect::<Vec<_>>())
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}"))),
             empty_https_lookup(host),
+            false,
         )
     };
     let socket_addrs = resolve_system_alias_fallback(
@@ -455,7 +462,7 @@ async fn resolve_dns_for_client_inner(
     let addrs = dns_timing_addrs(socket_addrs.iter().map(|addr| addr.ip()));
     let auto_http3_config =
         auto_http3_config_for_records(&https_records, &effective_host, &socket_addrs);
-    if auto_http3 {
+    if auto_http3 && https_lookup_succeeded {
         Http3Cache::new()
             .store_https_records(url, None, &https_records)
             .await;
@@ -563,21 +570,22 @@ async fn lookup_auto_http3_https_records(
     dns_server: Option<&str>,
     host: &str,
     discovery_budget: Option<AutoHttp3DiscoveryBudget>,
-) -> HttpsLookup {
+) -> (HttpsLookup, bool) {
     let Some(timeout) = discovery_budget.and_then(AutoHttp3DiscoveryBudget::remaining) else {
-        return empty_https_lookup(host);
+        return (empty_https_lookup(host), false);
     };
     let resolver = dns_server
         .map(HttpsRecordResolver::Custom)
         .unwrap_or(HttpsRecordResolver::System);
-    tokio::time::timeout(
+    match tokio::time::timeout(
         timeout,
         crate::dns::svcb::lookup_https_records(resolver, host, Some(timeout)),
     )
     .await
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or_else(|| empty_https_lookup(host))
+    {
+        Ok(Ok(lookup)) => (lookup, true),
+        Ok(Err(_)) | Err(_) => (empty_https_lookup(host), false),
+    }
 }
 
 async fn lookup_ech_https_records(
@@ -585,7 +593,7 @@ async fn lookup_ech_https_records(
     dns_server: Option<&str>,
     host: &str,
     timeout: TimeoutBudget,
-) -> Result<HttpsLookup, FetchError> {
+) -> Result<(HttpsLookup, bool), FetchError> {
     let ech_timeout = timeout.remaining()?.unwrap_or(Duration::from_secs(5));
     let resolver = dns_server
         .map(HttpsRecordResolver::Custom)
@@ -599,14 +607,14 @@ async fn lookup_ech_https_records(
         ))
         .await
     {
-        Ok(lookup) => Ok(lookup),
+        Ok(lookup) => Ok((lookup, true)),
         Err(err) => {
             let authenticated = dns_server
                 .map(|server| custom::dns_server_is_authenticated(server, !cli.insecure))
                 .transpose()?
                 .unwrap_or(false);
             crate::tls::ech::handle_ech_discovery_error(cli, err, authenticated)?;
-            Ok(empty_https_lookup(host))
+            Ok((empty_https_lookup(host), false))
         }
     }
 }
@@ -632,24 +640,26 @@ fn spawn_auto_http3_https_records(
     dns_server: Option<String>,
     host: String,
     discovery_budget: Option<AutoHttp3DiscoveryBudget>,
-) -> JoinHandle<HttpsLookup> {
+) -> JoinHandle<(HttpsLookup, bool)> {
     tokio::spawn(async move {
         lookup_auto_http3_https_records(dns_server.as_deref(), &host, discovery_budget).await
     })
 }
 
 async fn take_finished_auto_http3_https_records(
-    handle: JoinHandle<HttpsLookup>,
+    handle: JoinHandle<(HttpsLookup, bool)>,
     host: &str,
-) -> HttpsLookup {
+) -> (HttpsLookup, bool) {
     if !handle.is_finished() {
         tokio::task::yield_now().await;
     }
     if handle.is_finished() {
-        handle.await.unwrap_or_else(|_| empty_https_lookup(host))
+        handle
+            .await
+            .unwrap_or_else(|_| (empty_https_lookup(host), false))
     } else {
         handle.abort();
-        empty_https_lookup(host)
+        (empty_https_lookup(host), false)
     }
 }
 
@@ -789,7 +799,8 @@ pub(crate) async fn resolve_websocket_ech_mode(
     if host.parse::<IpAddr>().is_ok() {
         return Ok(None);
     }
-    let records = lookup_ech_https_records(cli, cli.dns_server.as_deref(), host, timeout).await?;
+    let (records, _) =
+        lookup_ech_https_records(cli, cli.dns_server.as_deref(), host, timeout).await?;
     let candidates = ech_candidates_from_records(&records.records);
     crate::tls::ech::resolve_ech_mode(cli, &candidates)
 }

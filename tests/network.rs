@@ -12,7 +12,8 @@ use support::common::{
 };
 use support::dns::{
     parse_dns_question, start_udp_dns_server, start_udp_dns_server_dropping_https,
-    start_udp_dns_server_with_delayed_aaaa, start_udp_dns_server_with_delayed_https_and_resolution,
+    start_udp_dns_server_with_controllable_https, start_udp_dns_server_with_delayed_aaaa,
+    start_udp_dns_server_with_delayed_https_and_resolution,
     start_udp_dns_server_with_delayed_resolution, start_udp_dns_server_with_failing_https,
     start_udp_dns_server_with_hosts, start_udp_dns_server_with_https,
     start_udp_dns_server_with_https_alias, start_udp_dns_server_with_https_target_and_stale_hint,
@@ -927,7 +928,50 @@ fn default_https_supplements_stale_hint_with_non_origin_target_lookup() {
 }
 
 #[test]
-fn default_https_uses_cached_http3_from_https_dns_record() {
+fn default_https_nodata_does_not_use_stale_cached_https_dns_record() {
+    let cache_dir = TempDir::new().unwrap();
+    let h3 = start_http3_server(|_| H3Response::ok("stale h3"));
+    let h3_port = Url::parse(&h3.url).unwrap().port().unwrap();
+    let (dns_addr, advertise_https) =
+        start_udp_dns_server_with_toggleable_https("localhost.", Ipv4Addr::LOCALHOST, h3_port);
+    let env = vec![(
+        "FETCH_INTERNAL_HTTP3_CACHE_DIR".to_string(),
+        cache_dir.path().display().to_string(),
+    )];
+    let args = [
+        "--dns-server",
+        &dns_addr,
+        "--ca-cert",
+        h3.ca_cert_path.to_str().unwrap(),
+        &format!("https://localhost:{h3_port}/nodata-replacement"),
+    ];
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env: env.clone(),
+            ..Default::default()
+        },
+        &args,
+    );
+    assert_exit(&res, 0);
+    advertise_https.store(false, Ordering::SeqCst);
+
+    let res = run_fetch_opts(
+        FetchOpts {
+            env,
+            ..Default::default()
+        },
+        &args,
+    );
+    assert!(
+        !res.status.success(),
+        "stale DNS candidate served NODATA request"
+    );
+    assert_eq!(wait_for_h3_requests(&h3, 1).len(), 1);
+}
+
+#[test]
+fn default_https_lookup_failure_preserves_cached_https_dns_record() {
     let cache_dir = TempDir::new().unwrap();
     let h3 = start_http3_server(|req| match req.path.as_str() {
         "/learn-h3-cache" => H3Response::ok("learned h3 cache"),
@@ -935,7 +979,7 @@ fn default_https_uses_cached_http3_from_https_dns_record() {
         _ => H3Response::status(404, "not found"),
     });
     let h3_port = Url::parse(&h3.url).unwrap().port().unwrap();
-    let (dns_addr, advertise_https) = start_udp_dns_server_with_toggleable_https(
+    let (dns_addr, _, drop_https) = start_udp_dns_server_with_controllable_https(
         "localhost.",
         Ipv4Addr::new(127, 0, 0, 1),
         h3_port,
@@ -962,7 +1006,7 @@ fn default_https_uses_cached_http3_from_https_dns_record() {
     assert_eq!(res.stdout, "learned h3 cache");
     assert!(res.stderr.contains("HTTP/3.0 200 OK"), "{}", res.stderr);
 
-    advertise_https.store(false, Ordering::SeqCst);
+    drop_https.store(true, Ordering::SeqCst);
 
     let res = run_fetch_opts(
         FetchOpts {

@@ -43,6 +43,7 @@ pub(crate) struct Http3CacheCandidate {
     pub(crate) alt_host: String,
     pub(crate) alt_port: u16,
     pub(crate) priority: Option<u16>,
+    pub(crate) from_alt_svc: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -125,6 +126,7 @@ impl Http3Cache {
                 .candidates
                 .into_iter()
                 .map(|candidate| Http3CacheCandidate {
+                    from_alt_svc: candidate.source == SOURCE_ALT_SVC,
                     alt_host: candidate.alt_host,
                     alt_port: candidate.alt_port,
                     priority: candidate.priority,
@@ -223,14 +225,14 @@ impl Http3Cache {
             })
             .collect::<Vec<_>>();
         candidates.sort_by_key(|(priority, _, _, _)| *priority);
-        if candidates.is_empty() {
-            return;
-        }
 
         let cache = self.clone();
         let _ = tokio::task::spawn_blocking(move || {
             cache.update_shard(&path, &key, |shard, now| {
                 prune_expired_candidates(&mut shard.candidates, now);
+                shard
+                    .candidates
+                    .retain(|candidate| candidate.source != SOURCE_HTTPS);
                 for (priority, alt_host, alt_port, ttl) in &candidates {
                     let ttl = u64::from(*ttl).min(MAX_RETENTION_SECS);
                     let candidate = StoredCandidate {
@@ -854,6 +856,7 @@ mod tests {
                 alt_host: "example.com".to_string(),
                 alt_port: 9443,
                 priority: Some(1),
+                from_alt_svc: false,
             }]
         );
         assert!(
@@ -884,6 +887,72 @@ mod tests {
             .await;
 
         assert!(cache.candidates(&test_url(), None).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fresh_https_records_replace_previous_rrset() {
+        let dir = TempDir::new().unwrap();
+        let cache = Http3Cache::with_dir(dir.path().to_path_buf());
+        let old = record("old.example.", Some(9443), Some(60));
+        let retained = record("retained.example.", Some(9444), Some(60));
+        cache
+            .store_https_records(&test_url(), None, &[old, retained.clone()])
+            .await;
+
+        cache
+            .store_https_records(&test_url(), None, &[retained])
+            .await;
+
+        let got = cache.candidates(&test_url(), None).await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].alt_host, "retained.example");
+    }
+
+    #[tokio::test]
+    async fn fresh_https_records_replace_changed_priority() {
+        let dir = TempDir::new().unwrap();
+        let cache = Http3Cache::with_dir(dir.path().to_path_buf());
+        let mut candidate = record("retained.example.", Some(9444), Some(60));
+        cache
+            .store_https_records(&test_url(), None, &[candidate.clone()])
+            .await;
+
+        candidate.priority = 7;
+        cache
+            .store_https_records(&test_url(), None, &[candidate])
+            .await;
+
+        assert_eq!(
+            cache.candidates(&test_url(), None).await[0].priority,
+            Some(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_https_nodata_clears_only_dns_candidates() {
+        let dir = TempDir::new().unwrap();
+        let cache = Http3Cache::with_dir(dir.path().to_path_buf());
+        cache
+            .store_https_records(&test_url(), None, &[record(".", Some(9443), Some(60))])
+            .await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            ALT_SVC,
+            HeaderValue::from_static(r#"h3="alt.example:9555"; ma=60"#),
+        );
+        cache.store_alt_svc(&test_url(), None, &headers).await;
+
+        cache.store_https_records(&test_url(), None, &[]).await;
+
+        assert_eq!(
+            cache.candidates(&test_url(), None).await,
+            vec![Http3CacheCandidate {
+                alt_host: "alt.example".to_string(),
+                alt_port: 9555,
+                priority: None,
+                from_alt_svc: true,
+            }]
+        );
     }
 
     #[tokio::test]
