@@ -800,7 +800,7 @@ mod tests {
         SvcbRecord {
             priority: 1,
             target: target.to_string(),
-            alpn: vec!["h3".to_string()],
+            alpn: vec![b"h3".to_vec()],
             no_default_alpn: false,
             port,
             ipv4_hint: Vec::new(),

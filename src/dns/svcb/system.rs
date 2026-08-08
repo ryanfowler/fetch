@@ -140,9 +140,14 @@ fn lookup_https_records_blocking(
         }
         if rrtype == wire::TYPE_HTTPS && rrclass == wire::CLASS_IN && !rdata.is_null() {
             let raw = unsafe { std::slice::from_raw_parts(rdata.cast::<u8>(), usize::from(rdlen)) };
-            if let Some(mut record) = parse_rdata(raw) {
-                record.ttl = Some(ttl);
-                state.records.push(record);
+            match parse_rdata(raw) {
+                Ok(mut record) => {
+                    record.ttl = Some(ttl);
+                    state.records.push(record);
+                }
+                Err(err) => {
+                    state.error = Some(format!("malformed HTTPS DNS record data: {err}"));
+                }
             }
         }
         if flags & K_DNS_SERVICE_FLAGS_MORE_COMING == 0 {
@@ -288,12 +293,16 @@ fn lookup_https_records_blocking(
     while !current.is_null() {
         let dns_record = unsafe { &*current };
         if dns_record.wType == DNS_TYPE_HTTPS {
-            if let Some(raw) = windows_svcb_rdata(dns_record) {
-                if let Some(mut parsed_record) = parse_rdata(&raw) {
-                    parsed_record.ttl = Some(dns_record.dwTtl);
-                    parsed.push(parsed_record);
-                }
-            }
+            let raw = windows_svcb_rdata(dns_record).ok_or_else(|| {
+                FetchError::Runtime(
+                    "malformed HTTPS DNS record data from system resolver".to_string(),
+                )
+            })?;
+            let mut parsed_record = parse_rdata(&raw).map_err(|err| {
+                FetchError::Runtime(format!("malformed HTTPS DNS record data: {err}"))
+            })?;
+            parsed_record.ttl = Some(dns_record.dwTtl);
+            parsed.push(parsed_record);
         }
         current = dns_record.pNext;
     }
@@ -422,16 +431,17 @@ fn records_from_wire_response(raw: &[u8]) -> Result<Vec<SvcbRecord>, FetchError>
     let records =
         wire::parse_response_without_id(raw, "example.com", wire::TYPE_HTTPS, wire::CLASS_IN)
             .map_err(|err| FetchError::Runtime(err.to_string()))?;
-    Ok(records
+    records
         .into_iter()
         .filter(|record| record.class == wire::CLASS_IN && record.typ == wire::TYPE_HTTPS)
-        .filter_map(|record| {
-            parse_rdata(record.data).map(|mut parsed| {
-                parsed.ttl = Some(record.ttl);
-                parsed
-            })
+        .map(|record| {
+            let mut parsed = parse_rdata(record.data).map_err(|err| {
+                FetchError::Runtime(format!("malformed HTTPS DNS record data: {err}"))
+            })?;
+            parsed.ttl = Some(record.ttl);
+            Ok(parsed)
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(any(windows, test))]
@@ -506,7 +516,7 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].priority, 1);
         assert_eq!(records[0].target, ".");
-        assert_eq!(records[0].alpn, ["h3"]);
+        assert_eq!(records[0].alpn, [b"h3".to_vec()]);
     }
 
     #[test]

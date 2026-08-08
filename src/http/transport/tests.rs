@@ -90,7 +90,7 @@ fn https_record(priority: u16, target: &str, alpn: &[&str], port: Option<u16>) -
     SvcbRecord {
         priority,
         target: target.to_string(),
-        alpn: alpn.iter().map(|value| value.to_string()).collect(),
+        alpn: alpn.iter().map(|value| value.as_bytes().to_vec()).collect(),
         no_default_alpn: false,
         port,
         ipv4_hint: Vec::new(),
