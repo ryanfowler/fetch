@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
 
-use crate::dns::util::udp_dns_timeout;
+use crate::dns::util::{dns_transaction_budget, udp_dns_timeout};
 use crate::dns::wire::ResponseMatcher;
 use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
@@ -25,25 +25,33 @@ impl fmt::Display for DnsTransportError {
 
 impl std::error::Error for DnsTransportError {}
 
+const UDP_MAX_ATTEMPTS: usize = 3;
+const UDP_INITIAL_RETRANSMIT_DELAY: Duration = Duration::from_millis(100);
+const UDP_MAX_RETRANSMIT_DELAY: Duration = Duration::from_millis(250);
+
 pub(crate) async fn query_udp(
     server_addr: SocketAddr,
     query: &[u8],
     matcher: &ResponseMatcher,
-    timeout: Duration,
+    budget: TimeoutBudget,
 ) -> Result<Vec<u8>, DnsTransportError> {
-    let socket = udp_socket(server_addr).await?;
-    query_udp_on_socket(&socket, query, matcher, timeout).await
+    let budget = dns_transaction_budget(budget);
+    let socket = udp_socket(server_addr, budget).await?;
+    query_udp_on_socket(&socket, query, matcher, budget).await
 }
 
-pub(crate) async fn udp_socket(server_addr: SocketAddr) -> Result<UdpSocket, DnsTransportError> {
-    let socket = UdpSocket::bind(if server_addr.is_ipv6() {
+pub(crate) async fn udp_socket(
+    server_addr: SocketAddr,
+    budget: TimeoutBudget,
+) -> Result<UdpSocket, DnsTransportError> {
+    let budget = dns_transaction_budget(budget);
+    let bind_addr = if server_addr.is_ipv6() {
         "[::]:0"
     } else {
         "0.0.0.0:0"
-    })
-    .await
-    .map_err(transport_error)?;
-    socket.connect(server_addr).await.map_err(transport_error)?;
+    };
+    let socket = run_udp_budgeted(budget, UdpSocket::bind(bind_addr)).await?;
+    run_udp_budgeted(budget, socket.connect(server_addr)).await?;
     Ok(socket)
 }
 
@@ -51,26 +59,68 @@ pub(crate) async fn query_udp_on_socket(
     socket: &UdpSocket,
     query: &[u8],
     matcher: &ResponseMatcher,
-    timeout: Duration,
+    budget: TimeoutBudget,
 ) -> Result<Vec<u8>, DnsTransportError> {
-    let deadline = tokio::time::Instant::now() + timeout;
+    let budget = dns_transaction_budget(budget);
+    let remaining = udp_remaining(budget)?;
+    // TCP fallback uses this same absolute budget if a truncated reply arrives.
+    let deadline = tokio::time::Instant::now() + remaining;
     let expected_source = socket.peer_addr().map_err(transport_error)?;
-    socket.send(query).await.map_err(transport_error)?;
-
+    let mut retransmit_delay = UDP_INITIAL_RETRANSMIT_DELAY;
     let mut buf = vec![0u8; 4096];
-    loop {
-        let (n, source) = match tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
-        {
-            Ok(Ok(received)) => received,
+
+    for attempt in 0..UDP_MAX_ATTEMPTS {
+        match tokio::time::timeout_at(deadline, socket.send(query)).await {
+            Ok(Ok(_)) => {}
             Ok(Err(err)) => return Err(transport_error(err)),
-            Err(_) => return Err(DnsTransportError("DNS lookup timed out".to_string())),
-        };
-        if source != expected_source || !matcher.matches(&buf[..n]) {
-            continue;
+            Err(_) => return Err(udp_timeout_error()),
         }
-        buf.truncate(n);
-        return Ok(buf);
+
+        let receive_deadline = if attempt + 1 == UDP_MAX_ATTEMPTS {
+            deadline
+        } else {
+            deadline.min(tokio::time::Instant::now() + retransmit_delay)
+        };
+        loop {
+            let (n, source) =
+                match tokio::time::timeout_at(receive_deadline, socket.recv_from(&mut buf)).await {
+                    Ok(Ok(received)) => received,
+                    Ok(Err(err)) => return Err(transport_error(err)),
+                    Err(_) if receive_deadline < deadline => break,
+                    Err(_) => return Err(udp_timeout_error()),
+                };
+            if source != expected_source || !matcher.matches(&buf[..n]) {
+                continue;
+            }
+            buf.truncate(n);
+            return Ok(buf);
+        }
+        retransmit_delay = (retransmit_delay * 2).min(UDP_MAX_RETRANSMIT_DELAY);
     }
+
+    Err(udp_timeout_error())
+}
+
+async fn run_udp_budgeted<T>(
+    budget: TimeoutBudget,
+    future: impl std::future::Future<Output = std::io::Result<T>>,
+) -> Result<T, DnsTransportError> {
+    let remaining = udp_remaining(budget)?;
+    tokio::time::timeout(remaining, future)
+        .await
+        .map_err(|_| udp_timeout_error())?
+        .map_err(transport_error)
+}
+
+fn udp_remaining(budget: TimeoutBudget) -> Result<Duration, DnsTransportError> {
+    budget
+        .remaining()
+        .map_err(|_| udp_timeout_error())?
+        .ok_or_else(udp_timeout_error)
+}
+
+fn udp_timeout_error() -> DnsTransportError {
+    DnsTransportError("DNS lookup timed out".to_string())
 }
 
 pub(crate) async fn query_tcp(
@@ -281,7 +331,12 @@ mod tests {
     async fn udp_discards_stale_response_from_timed_out_query() {
         let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server.local_addr().unwrap();
-        let client = udp_socket(server_addr).await.unwrap();
+        let client = udp_socket(
+            server_addr,
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
+        )
+        .await
+        .unwrap();
         let first = wire::build_query(0x1001, "example.com", TYPE_A).unwrap();
         let second = wire::build_query(0x1002, "example.com", TYPE_AAAA).unwrap();
 
@@ -297,16 +352,25 @@ mod tests {
         });
 
         let first_matcher = ResponseMatcher::new(0x1001, "example.com", TYPE_A, CLASS_IN);
-        let err = query_udp_on_socket(&client, &first, &first_matcher, Duration::from_millis(20))
-            .await
-            .unwrap_err();
+        let err = query_udp_on_socket(
+            &client,
+            &first,
+            &first_matcher,
+            TimeoutBudget::new(Some(Duration::from_millis(20))),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.to_string(), "DNS lookup timed out");
 
         let second_matcher = ResponseMatcher::new(0x1002, "example.com", TYPE_AAAA, CLASS_IN);
-        let response =
-            query_udp_on_socket(&client, &second, &second_matcher, Duration::from_secs(1))
-                .await
-                .unwrap();
+        let response = query_udp_on_socket(
+            &client,
+            &second,
+            &second_matcher,
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
+        )
+        .await
+        .unwrap();
         assert_eq!(u16::from_be_bytes([response[0], response[1]]), 0x1002);
         server_task.await.unwrap();
     }
@@ -343,9 +407,14 @@ mod tests {
             }
         });
 
-        let response = query_udp(server_addr, &query, &matcher, Duration::from_secs(1))
-            .await
-            .unwrap();
+        let response = query_udp(
+            server_addr,
+            &query,
+            &matcher,
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
+        )
+        .await
+        .unwrap();
         assert_eq!(response, response_for(&query, 0x8180));
         server_task.await.unwrap();
     }
@@ -367,11 +436,90 @@ mod tests {
             server.send_to(&valid, peer).await.unwrap();
         });
 
-        let response = query_udp(server_addr, &query, &matcher, Duration::from_secs(1))
-            .await
-            .unwrap();
+        let response = query_udp(
+            server_addr,
+            &query,
+            &matcher,
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
+        )
+        .await
+        .unwrap();
         assert_eq!(u16::from_be_bytes([response[2], response[3]]), 0x8180);
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_retransmits_after_dropped_query() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let query = wire::build_query(0x4001, "example.com", TYPE_A).unwrap();
+        let matcher = ResponseMatcher::new(0x4001, "example.com", TYPE_A, CLASS_IN);
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let _dropped = server.recv_from(&mut buf).await.unwrap();
+            let (len, peer) = server.recv_from(&mut buf).await.unwrap();
+            server
+                .send_to(&response_for(&buf[..len], 0x8180), peer)
+                .await
+                .unwrap();
+        });
+
+        let response = query_udp(
+            server_addr,
+            &query,
+            &matcher,
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response, response_for(&query, 0x8180));
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_retransmits_after_dropped_reply() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let query = wire::build_query(0x4002, "example.com", TYPE_A).unwrap();
+        let matcher = ResponseMatcher::new(0x4002, "example.com", TYPE_A, CLASS_IN);
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (first_len, _) = server.recv_from(&mut buf).await.unwrap();
+            let _dropped_reply = response_for(&buf[..first_len], 0x8180);
+            let (second_len, peer) = server.recv_from(&mut buf).await.unwrap();
+            server
+                .send_to(&response_for(&buf[..second_len], 0x8180), peer)
+                .await
+                .unwrap();
+        });
+
+        let response = query_udp(
+            server_addr,
+            &query,
+            &matcher,
+            TimeoutBudget::new(Some(Duration::from_secs(1))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response, response_for(&query, 0x8180));
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_setup_obeys_expired_budget() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let budget = TimeoutBudget::started_at(
+            Some(Duration::from_millis(10)),
+            std::time::Instant::now() - Duration::from_millis(20),
+        );
+
+        let err = udp_socket(server.local_addr().unwrap(), budget)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "DNS lookup timed out");
     }
 
     #[tokio::test]

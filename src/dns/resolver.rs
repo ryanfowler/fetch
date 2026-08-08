@@ -5,7 +5,9 @@ use std::time::Duration;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::dns::util::{dns_query_id, resolve_address_families, udp_dns_timeout};
+use crate::dns::util::{
+    dns_query_id, dns_transaction_budget, resolve_address_families, udp_dns_timeout,
+};
 use crate::dns::wire;
 use crate::duration::TimeoutBudget;
 
@@ -99,11 +101,11 @@ pub(crate) async fn query_udp_type(
     dns_type: u16,
     budget: TimeoutBudget,
 ) -> Result<Vec<WireDnsRecord>, ResolverError> {
+    let budget = dns_transaction_budget(budget);
     let id = dns_query_id();
     let raw = wire::build_query(id, host, dns_type).map_err(resolver_error)?;
     let matcher = wire::ResponseMatcher::new(id, host, dns_type, DNS_CLASS_IN);
-    let timeout = udp_dns_timeout(budget.remaining().map_err(resolver_error)?);
-    let response = crate::dns::transport::query_udp(*server_addr, &raw, &matcher, timeout)
+    let response = crate::dns::transport::query_udp(*server_addr, &raw, &matcher, budget)
         .await
         .map_err(resolver_error)?;
     match wire_records_from_response(&response, id, host, dns_type) {
