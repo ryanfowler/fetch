@@ -1617,6 +1617,17 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert_exit(&res, 0);
     assert!(res.stderr.contains("204 No Content"));
 
+    let mixed_case_doh_url = doh.url.replacen("https://", "HtTpS://", 1);
+    let res = run_fetch(&[
+        &localhost_url,
+        "--dns-server",
+        &format!("{mixed_case_doh_url}/dns-query"),
+        "--ca-cert",
+        doh.ca_cert_path.to_str().unwrap(),
+    ]);
+    assert_exit(&res, 0);
+    assert!(res.stderr.contains("204 No Content"));
+
     let res = run_fetch(&[
         &localhost_url,
         "--dns-server",

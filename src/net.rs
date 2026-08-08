@@ -131,10 +131,22 @@ pub(crate) async fn resolve_host_with_doh_tls(
     doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<Vec<SocketAddr>, FetchError> {
+    let dns_server = dns_server
+        .map(crate::dns::custom::parse_dns_server)
+        .transpose()?;
+    resolve_host_with_dns_server(host, dns_server.as_ref(), doh_tls_config, timeout).await
+}
+
+pub(crate) async fn resolve_host_with_dns_server(
+    host: &str,
+    dns_server: Option<&crate::dns::custom::ParsedDnsServer>,
+    doh_tls_config: Option<rustls::ClientConfig>,
+    timeout: TimeoutBudget,
+) -> Result<Vec<SocketAddr>, FetchError> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, 0)]);
     }
-    let Some(dns_server) = dns_server else {
+    let Some(server) = dns_server else {
         return resolve_system_host_with(
             host,
             timeout,
@@ -147,11 +159,11 @@ pub(crate) async fn resolve_host_with_doh_tls(
         .await;
     };
 
-    let addrs = if is_doh_dns_server(dns_server) {
-        let shared_doh = shared_doh_resolver(dns_server, host, timeout, doh_tls_config.as_ref())?;
-        resolve_doh_ips(host, dns_server, Some(&shared_doh), timeout).await?
+    let addrs = if matches!(server, crate::dns::custom::ParsedDnsServer::Doh(_)) {
+        let shared_doh = shared_doh_resolver(server, host, timeout, doh_tls_config.as_ref())?;
+        resolve_doh_ips(host, &shared_doh).await?
     } else {
-        crate::dns::custom::lookup_ips(dns_server, host, timeout.remaining()?).await?
+        crate::dns::custom::lookup_ips_with_server(server, host, timeout.remaining()?).await?
     };
     Ok(addrs
         .into_iter()
@@ -179,7 +191,7 @@ async fn resolve_system_host_with(
 async fn resolve_host_family(
     host: &str,
     port: u16,
-    dns_server: Option<&str>,
+    dns_server: Option<&crate::dns::custom::ParsedDnsServer>,
     shared_doh: Option<&SharedDohResolver>,
     family: AddressFamily,
     timeout: TimeoutBudget,
@@ -205,7 +217,7 @@ async fn resolve_host_family(
 
 async fn resolve_custom_host_family(
     host: &str,
-    dns_server: &str,
+    dns_server: &crate::dns::custom::ParsedDnsServer,
     shared_doh: Option<&SharedDohResolver>,
     family: AddressFamily,
     timeout: TimeoutBudget,
@@ -214,9 +226,9 @@ async fn resolve_custom_host_family(
         AddressFamily::Ipv4 => ("A", crate::dns::wire::TYPE_A),
         AddressFamily::Ipv6 => ("AAAA", crate::dns::wire::TYPE_AAAA),
     };
-    match crate::dns::custom::parse_dns_server(dns_server)? {
+    match dns_server {
         crate::dns::custom::ParsedDnsServer::Doh(_) => {
-            resolve_doh_host_family(host, dns_server, shared_doh, label, answer_type, timeout).await
+            resolve_doh_host_family(host, shared_doh, label, answer_type).await
         }
         crate::dns::custom::ParsedDnsServer::Udp(addr) => {
             let server_addr = addr.to_string();
@@ -228,7 +240,7 @@ async fn resolve_custom_host_family(
         }
         crate::dns::custom::ParsedDnsServer::Tcp(addr) => {
             let timeout = crate::dns::util::udp_dns_timeout(timeout.remaining()?);
-            crate::dns::resolver::lookup_tcp_type(&addr, host, answer_type, timeout)
+            crate::dns::resolver::lookup_tcp_type(addr, host, answer_type, timeout)
                 .await
                 .map(|records| records.into_iter().map(|record| record.ip).collect())
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
@@ -239,11 +251,11 @@ async fn resolve_custom_host_family(
             port,
         } => {
             let addrs =
-                crate::dns::custom::resolve_server_host(&server_host, port, timeout.remaining()?)
+                crate::dns::custom::resolve_server_host(server_host, *port, timeout.remaining()?)
                     .await?;
             let timeout = crate::dns::util::udp_dns_timeout(timeout.remaining()?);
             crate::dns::resolver::lookup_tls_type(
-                &server_name,
+                server_name,
                 &addrs,
                 host,
                 answer_type,
@@ -260,11 +272,11 @@ async fn resolve_custom_host_family(
             port,
         } => {
             let addrs =
-                crate::dns::custom::resolve_server_host(&server_host, port, timeout.remaining()?)
+                crate::dns::custom::resolve_server_host(server_host, *port, timeout.remaining()?)
                     .await?;
             let timeout = crate::dns::util::udp_dns_timeout(timeout.remaining()?);
             crate::dns::resolver::lookup_quic_type(
-                &server_name,
+                server_name,
                 &addrs,
                 host,
                 answer_type,
@@ -279,50 +291,32 @@ async fn resolve_custom_host_family(
 }
 
 fn shared_doh_resolver(
-    dns_server: &str,
+    dns_server: &crate::dns::custom::ParsedDnsServer,
     host: &str,
     timeout: TimeoutBudget,
     doh_tls_config: Option<&rustls::ClientConfig>,
 ) -> Result<SharedDohResolver, FetchError> {
-    let server_url = parse_doh_dns_server(dns_server)?;
+    let crate::dns::custom::ParsedDnsServer::Doh(server_url) = dns_server else {
+        return Err(FetchError::Message(
+            "DNS server is not a DoH endpoint".to_string(),
+        ));
+    };
     let client =
         crate::dns::doh::client_with_budget_and_tls_config(timeout, doh_tls_config.cloned())
             .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))?;
-    Ok(SharedDohResolver { server_url, client })
-}
-
-fn is_doh_dns_server(dns_server: &str) -> bool {
-    dns_server.starts_with("http://") || dns_server.starts_with("https://")
-}
-
-fn parse_doh_dns_server(dns_server: &str) -> Result<Url, FetchError> {
-    Url::parse(dns_server)
-        .map_err(|err| FetchError::Message(format!("invalid dns-server '{dns_server}': {err}")))
+    Ok(SharedDohResolver {
+        server_url: server_url.clone(),
+        client,
+    })
 }
 
 async fn resolve_doh_ips(
     host: &str,
-    dns_server: &str,
-    shared_doh: Option<&SharedDohResolver>,
-    timeout: TimeoutBudget,
+    shared_doh: &SharedDohResolver,
 ) -> Result<Vec<IpAddr>, FetchError> {
     crate::dns::util::resolve_address_families(
-        resolve_doh_host_family(
-            host,
-            dns_server,
-            shared_doh,
-            "A",
-            crate::dns::wire::TYPE_A,
-            timeout,
-        ),
-        resolve_doh_host_family(
-            host,
-            dns_server,
-            shared_doh,
-            "AAAA",
-            crate::dns::wire::TYPE_AAAA,
-            timeout,
-        ),
+        resolve_doh_host_family(host, Some(shared_doh), "A", crate::dns::wire::TYPE_A),
+        resolve_doh_host_family(host, Some(shared_doh), "AAAA", crate::dns::wire::TYPE_AAAA),
         HAPPY_EYEBALLS_RESOLUTION_DELAY,
         FetchError::Runtime(format!("lookup {host}: no such host")),
     )
@@ -331,32 +325,19 @@ async fn resolve_doh_ips(
 
 async fn resolve_doh_host_family(
     host: &str,
-    dns_server: &str,
     shared_doh: Option<&SharedDohResolver>,
     label: &str,
     answer_type: u16,
-    timeout: TimeoutBudget,
 ) -> Result<Vec<IpAddr>, FetchError> {
-    let records = if let Some(shared_doh) = shared_doh {
-        crate::dns::doh::lookup_doh_type_with_client(
-            &shared_doh.client,
-            &shared_doh.server_url,
-            host,
-            label,
-            answer_type,
-        )
-        .await
-    } else {
-        let server_url = parse_doh_dns_server(dns_server)?;
-        crate::dns::doh::lookup_doh_type(
-            &server_url,
-            host,
-            label,
-            answer_type,
-            timeout.remaining()?,
-        )
-        .await
-    };
+    let shared_doh = shared_doh.expect("DoH resolver is initialized for a parsed DoH server");
+    let records = crate::dns::doh::lookup_doh_type_with_client(
+        &shared_doh.client,
+        &shared_doh.server_url,
+        host,
+        label,
+        answer_type,
+    )
+    .await;
     records
         .map(|records| records.into_iter().map(|record| record.ip).collect())
         .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
@@ -555,20 +536,21 @@ pub(crate) async fn connect_host_happy_eyeballs_traced(
     doh_tls_config: Option<rustls::ClientConfig>,
     timeout: TimeoutBudget,
 ) -> Result<TcpConnectTrace, FetchError> {
-    let shared_doh = match dns_server.filter(|s| is_doh_dns_server(s)) {
-        Some(server) => Some(shared_doh_resolver(
-            server,
-            host,
-            timeout,
-            doh_tls_config.as_ref(),
-        )?),
-        None => None,
-    };
+    let dns_server = dns_server
+        .map(crate::dns::custom::parse_dns_server)
+        .transpose()?;
+    let shared_doh =
+        match dns_server.as_ref() {
+            Some(server @ crate::dns::custom::ParsedDnsServer::Doh(_)) => Some(
+                shared_doh_resolver(server, host, timeout, doh_tls_config.as_ref())?,
+            ),
+            _ => None,
+        };
     let dns_start = Instant::now();
     let mut ipv4 = Box::pin(resolve_host_family(
         host,
         port,
-        dns_server,
+        dns_server.as_ref(),
         shared_doh.as_ref(),
         AddressFamily::Ipv4,
         timeout,
@@ -576,7 +558,7 @@ pub(crate) async fn connect_host_happy_eyeballs_traced(
     let mut ipv6 = Box::pin(resolve_host_family(
         host,
         port,
-        dns_server,
+        dns_server.as_ref(),
         shared_doh.as_ref(),
         AddressFamily::Ipv6,
         timeout,

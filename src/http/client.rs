@@ -849,17 +849,15 @@ async fn lookup_custom_ips_with_doh_tls(
     host: &str,
     timeout: TimeoutBudget,
 ) -> Result<Vec<IpAddr>, FetchError> {
-    if dns_server.starts_with("http://") || dns_server.starts_with("https://") {
-        return crate::net::resolve_host_with_doh_tls(
-            host,
-            Some(dns_server),
-            doh_tls_config_for_cli(cli)?,
-            timeout,
-        )
-        .await
-        .map(|addrs| addrs.into_iter().map(|addr| addr.ip()).collect());
-    }
-    custom::lookup_ips(dns_server, host, timeout.timeout()).await
+    let server = custom::parse_dns_server(dns_server)?;
+    crate::net::resolve_host_with_dns_server(
+        host,
+        Some(&server),
+        doh_tls_config_for_server(cli, &server)?,
+        timeout,
+    )
+    .await
+    .map(|addrs| addrs.into_iter().map(|addr| addr.ip()).collect())
 }
 
 pub(crate) fn doh_tls_config_for_cli(
@@ -868,7 +866,15 @@ pub(crate) fn doh_tls_config_for_cli(
     let Some(dns_server) = cli.dns_server.as_deref() else {
         return Ok(None);
     };
-    if !(dns_server.starts_with("http://") || dns_server.starts_with("https://")) {
+    let server = custom::parse_dns_server(dns_server)?;
+    doh_tls_config_for_server(cli, &server)
+}
+
+fn doh_tls_config_for_server(
+    cli: &Cli,
+    server: &custom::ParsedDnsServer,
+) -> Result<Option<rustls::ClientConfig>, FetchError> {
+    if !matches!(server, custom::ParsedDnsServer::Doh(_)) {
         return Ok(None);
     }
     let min_tls = cli.min_tls.as_deref().or(cli.tls.as_deref());
