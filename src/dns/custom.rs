@@ -64,51 +64,39 @@ pub(crate) struct DnsQueryRecord {
 }
 
 pub(crate) fn parse_dns_server(value: &str) -> Result<ParsedDnsServer, FetchError> {
-    if value.starts_with("http://") {
-        // DNS unit tests use loopback HTTP fixtures. This branch is absent
-        // from production builds, which always require HTTPS for DoH.
-        #[cfg(test)]
-        if let Ok(url) = Url::parse(value)
-            && url.host().is_some_and(|host| match host {
-                url::Host::Ipv4(ip) => ip.is_loopback(),
-                url::Host::Ipv6(ip) => ip.is_loopback(),
-                url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
-            })
-        {
-            return Ok(ParsedDnsServer::Doh(url));
-        }
-        return Err(FetchError::Message(format!(
-            "invalid value '{value}' for option '--dns-server': DoH endpoints must use HTTPS"
-        )));
-    }
-    if value.starts_with("https://") {
-        let url = Url::parse(value).map_err(|err| {
-            FetchError::Message(format!(
-                "invalid value '{value}' for option '--dns-server': {err}"
-            ))
-        })?;
-        host_and_port(&url)?;
-        return Ok(ParsedDnsServer::Doh(url));
+    if let Some(addr) = parse_bare_dns_server(value) {
+        // Bare IP[:PORT] is treated as udp:// for backward compatibility.
+        return nonzero_socket_addr(value, addr).map(ParsedDnsServer::Udp);
     }
 
     let url = if value.contains("://") {
-        Url::parse(value).map_err(|err| {
-            FetchError::Message(format!(
-                "invalid value '{value}' for option '--dns-server': {err}"
-            ))
-        })?
-    } else if let Some(addr) = parse_bare_dns_server(value) {
-        // Bare IP[:PORT] is treated as udp:// for backward compatibility.
-        return Ok(ParsedDnsServer::Udp(addr));
+        Url::parse(value)
     } else {
-        Url::parse(&format!("udp://{value}")).map_err(|err| {
-            FetchError::Message(format!(
-                "invalid value '{value}' for option '--dns-server': {err}"
-            ))
-        })?
-    };
+        Url::parse(&format!("udp://{value}"))
+    }
+    .map_err(|err| dns_server_error(value, &err.to_string()))?;
 
     let scheme = url.scheme();
+    if scheme == "http" || scheme == "https" {
+        validate_doh_url(value, &url)?;
+        if scheme == "https" {
+            return Ok(ParsedDnsServer::Doh(url));
+        }
+
+        // DNS unit tests use loopback HTTP fixtures. This branch is absent
+        // from production builds, which always require HTTPS for DoH.
+        #[cfg(test)]
+        if url.host().is_some_and(|host| match host {
+            url::Host::Ipv4(ip) => ip.is_loopback(),
+            url::Host::Ipv6(ip) => ip.is_loopback(),
+            url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+        }) {
+            return Ok(ParsedDnsServer::Doh(url));
+        }
+        return Err(dns_server_error(value, "DoH endpoints must use HTTPS"));
+    }
+
+    validate_non_http_url(value, &url)?;
     let (host, port) = host_and_port(&url)?;
     match scheme {
         "udp" => Ok(ParsedDnsServer::Udp(socket_addr(
@@ -131,10 +119,57 @@ pub(crate) fn parse_dns_server(value: &str) -> Result<ParsedDnsServer, FetchErro
             host,
             port: port.unwrap_or(DEFAULT_DNS_OVER_QUIC_PORT),
         }),
-        _ => Err(FetchError::Message(format!(
-            "invalid value '{value}' for option '--dns-server': unsupported scheme '{scheme}'"
-        ))),
+        _ => Err(dns_server_error(
+            value,
+            &format!("unsupported scheme '{scheme}'"),
+        )),
     }
+}
+
+fn validate_doh_url(value: &str, url: &Url) -> Result<(), FetchError> {
+    host_and_port(url)?;
+    validate_nonzero_port(value, url.port())?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(dns_server_error(value, "credentials are not allowed"));
+    }
+    if url.fragment().is_some() {
+        return Err(dns_server_error(value, "fragments are not allowed"));
+    }
+    Ok(())
+}
+
+fn validate_non_http_url(value: &str, url: &Url) -> Result<(), FetchError> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(dns_server_error(value, "credentials are not allowed"));
+    }
+    if !url.path().is_empty() {
+        return Err(dns_server_error(value, "paths are not allowed"));
+    }
+    if url.query().is_some() {
+        return Err(dns_server_error(value, "queries are not allowed"));
+    }
+    if url.fragment().is_some() {
+        return Err(dns_server_error(value, "fragments are not allowed"));
+    }
+    validate_nonzero_port(value, url.port())
+}
+
+fn validate_nonzero_port(value: &str, port: Option<u16>) -> Result<(), FetchError> {
+    if port == Some(0) {
+        return Err(dns_server_error(value, "port must be greater than zero"));
+    }
+    Ok(())
+}
+
+fn nonzero_socket_addr(value: &str, addr: SocketAddr) -> Result<SocketAddr, FetchError> {
+    validate_nonzero_port(value, Some(addr.port()))?;
+    Ok(addr)
+}
+
+fn dns_server_error(value: &str, message: &str) -> FetchError {
+    FetchError::Message(format!(
+        "invalid value '{value}' for option '--dns-server': {message}"
+    ))
 }
 
 fn parse_bare_dns_server(value: &str) -> Option<SocketAddr> {
@@ -298,8 +333,8 @@ pub(crate) async fn query_type(
     }
 }
 
-pub(crate) async fn lookup_ips(
-    dns_server: &str,
+pub(crate) async fn lookup_ips_with_server(
+    dns_server: &ParsedDnsServer,
     host: &str,
     timeout: Option<Duration>,
 ) -> Result<Vec<IpAddr>, FetchError> {
@@ -307,11 +342,11 @@ pub(crate) async fn lookup_ips(
         return Ok(vec![ip]);
     }
 
-    match parse_dns_server(dns_server)? {
-        ParsedDnsServer::Udp(addr) => crate::dns::resolver::lookup_udp_addr(&addr, host, timeout)
+    match dns_server {
+        ParsedDnsServer::Udp(addr) => crate::dns::resolver::lookup_udp_addr(addr, host, timeout)
             .await
             .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}"))),
-        ParsedDnsServer::Tcp(addr) => crate::dns::resolver::lookup_tcp_addr(&addr, host, timeout)
+        ParsedDnsServer::Tcp(addr) => crate::dns::resolver::lookup_tcp_addr(addr, host, timeout)
             .await
             .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}"))),
         ParsedDnsServer::Tls {
@@ -320,9 +355,9 @@ pub(crate) async fn lookup_ips(
             port,
         } => {
             let resolve_start = std::time::Instant::now();
-            let addrs = resolve_server_host(&server_host, port, timeout).await?;
+            let addrs = resolve_server_host(server_host, *port, timeout).await?;
             let remaining = timeout.map(|t| t.saturating_sub(resolve_start.elapsed()));
-            crate::dns::resolver::lookup_tls(&server_name, &addrs, host, remaining, false)
+            crate::dns::resolver::lookup_tls(server_name, &addrs, host, remaining, false)
                 .await
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
         }
@@ -332,13 +367,13 @@ pub(crate) async fn lookup_ips(
             port,
         } => {
             let resolve_start = std::time::Instant::now();
-            let addrs = resolve_server_host(&server_host, port, timeout).await?;
+            let addrs = resolve_server_host(server_host, *port, timeout).await?;
             let remaining = timeout.map(|t| t.saturating_sub(resolve_start.elapsed()));
-            crate::dns::resolver::lookup_quic(&server_name, &addrs, host, remaining, false)
+            crate::dns::resolver::lookup_quic(server_name, &addrs, host, remaining, false)
                 .await
                 .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}")))
         }
-        ParsedDnsServer::Doh(url) => crate::dns::doh::lookup_doh(&url, host, timeout)
+        ParsedDnsServer::Doh(url) => crate::dns::doh::lookup_doh(url, host, timeout)
             .await
             .map_err(|err| FetchError::Runtime(format!("lookup {host}: {err}"))),
     }
@@ -491,10 +526,73 @@ mod tests {
 
     #[test]
     fn parse_dns_server_accepts_doh_url() {
-        let parsed = parse_dns_server("https://dns.example/dns-query").unwrap();
+        let parsed = parse_dns_server("https://dns.example/dns-query?profile=secure").unwrap();
         assert!(
-            matches!(parsed, ParsedDnsServer::Doh(url) if url.as_str() == "https://dns.example/dns-query")
+            matches!(parsed, ParsedDnsServer::Doh(url) if url.as_str() == "https://dns.example/dns-query?profile=secure")
         );
+    }
+
+    #[test]
+    fn parse_dns_server_normalizes_mixed_case_schemes() {
+        assert!(matches!(
+            parse_dns_server("UdP://1.1.1.1").unwrap(),
+            ParsedDnsServer::Udp(_)
+        ));
+        assert!(matches!(
+            parse_dns_server("TcP://1.1.1.1").unwrap(),
+            ParsedDnsServer::Tcp(_)
+        ));
+        assert!(matches!(
+            parse_dns_server("DoT://dns.example").unwrap(),
+            ParsedDnsServer::Tls { .. }
+        ));
+        assert!(matches!(
+            parse_dns_server("DoQ://dns.example").unwrap(),
+            ParsedDnsServer::Quic { .. }
+        ));
+        assert!(matches!(
+            parse_dns_server("HtTpS://dns.example/dns-query").unwrap(),
+            ParsedDnsServer::Doh(url) if url.scheme() == "https"
+        ));
+    }
+
+    #[test]
+    fn parse_dns_server_rejects_non_http_url_components() {
+        for scheme in ["udp", "tcp", "tls", "dot", "quic", "doq"] {
+            for suffix in ["/dns-query", "?profile=x", "#fragment"] {
+                let value = format!("{scheme}://1.1.1.1{suffix}");
+                assert!(parse_dns_server(&value).is_err(), "accepted {value}");
+            }
+            for authority in ["user@1.1.1.1", "user:pass@1.1.1.1"] {
+                let value = format!("{scheme}://{authority}");
+                assert!(parse_dns_server(&value).is_err(), "accepted {value}");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_dns_server_rejects_doh_credentials_and_fragments() {
+        for value in [
+            "https://user@dns.example/dns-query",
+            "https://user:pass@dns.example/dns-query",
+            "https://dns.example/dns-query#fragment",
+        ] {
+            assert!(parse_dns_server(value).is_err(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn parse_dns_server_rejects_port_zero() {
+        for value in [
+            "1.1.1.1:0",
+            "udp://1.1.1.1:0",
+            "tcp://1.1.1.1:0",
+            "tls://dns.example:0",
+            "doq://dns.example:0",
+            "https://dns.example:0/dns-query",
+        ] {
+            assert!(parse_dns_server(value).is_err(), "accepted {value}");
+        }
     }
 
     #[test]
