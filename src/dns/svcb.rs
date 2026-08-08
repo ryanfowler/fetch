@@ -249,7 +249,8 @@ pub(crate) fn parse_rdata(raw: &[u8]) -> Result<SvcbRecord, SvcbParseError> {
         return Err(SvcbParseError::ShortRdata);
     }
     let priority = u16::from_be_bytes([raw[0], raw[1]]);
-    let (target, mut offset) = unpack_dns_name(raw, 2).ok_or(SvcbParseError::InvalidTargetName)?;
+    let (target, mut offset) = crate::dns::wire::read_uncompressed_name(raw, 2, raw.len())
+        .map_err(|_| SvcbParseError::InvalidTargetName)?;
     let mut params = Vec::new();
     let mut previous_key = None;
     while offset < raw.len() {
@@ -601,7 +602,7 @@ pub(crate) fn format_rdata(raw: &[u8]) -> Option<String> {
         return None;
     }
     let priority = u16::from_be_bytes([raw[0], raw[1]]);
-    let (target, mut offset) = unpack_dns_name(raw, 2)?;
+    let (target, mut offset) = crate::dns::wire::read_uncompressed_name(raw, 2, raw.len()).ok()?;
     let mut params = Vec::new();
     while offset < raw.len() {
         if offset + 4 > raw.len() {
@@ -785,29 +786,6 @@ pub(super) fn svcb_records_from_query(
             Ok(parsed)
         })
         .collect()
-}
-
-fn unpack_dns_name(raw: &[u8], mut offset: usize) -> Option<(String, usize)> {
-    let mut labels = Vec::new();
-    loop {
-        let len = *raw.get(offset)?;
-        offset += 1;
-        if len == 0 {
-            let name = if labels.is_empty() {
-                ".".to_string()
-            } else {
-                format!("{}.", labels.join("."))
-            };
-            return Some((name, offset));
-        }
-        if len & 0xc0 != 0 {
-            return None;
-        }
-        let len = usize::from(len);
-        let label = raw.get(offset..offset + len)?;
-        labels.push(String::from_utf8_lossy(label).into_owned());
-        offset += len;
-    }
 }
 
 fn format_svc_param(key: u16, value: &[u8]) -> String {
