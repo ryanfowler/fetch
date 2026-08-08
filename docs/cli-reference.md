@@ -615,7 +615,9 @@ Aliases: `--http1`, `--http2`, `--http3`.
 When `--http` is unset, direct HTTPS requests use DNS HTTPS/SVCB records to
 discover `h3` endpoints. With `--dns-server`, HTTPS-record discovery uses that
 custom UDP, TCP, DoT, DoQ, or DoH resolver. Without `--dns-server`, it uses the
-platform resolver, matching normal address lookup. This discovery is
+platform resolver. On Linux, this uses `systemd-resolved` when available. The
+documented Unix resolver-file fallback cannot honor NSS or split-DNS policy.
+This discovery is
 opportunistic and does not delay the normal address lookup or TCP/TLS setup:
 `fetch` starts
 TCP/TLS as soon as normal DNS produces a usable address, while a usable `h3`
