@@ -62,7 +62,9 @@ fetch --dns-server doq://dns.adguard-dns.com example.com
 
 Use an HTTPS URL for encrypted DNS queries. `fetch` uses RFC 8484
 `application/dns-message` requests for generic DoH endpoints and falls back to
-Google-style JSON DoH responses for compatibility.
+Google-style JSON DoH responses for compatibility. A DoH transaction has a
+five-second timeout when no request or connection timeout applies. An
+applicable user-set timeout takes precedence.
 
 ```sh
 # Cloudflare DoH
