@@ -1628,36 +1628,41 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert!(res.stderr.contains("no such host"));
     assert!(!res.stderr.contains("For more information"));
 
-    let res = run_fetch_opts(
-        FetchOpts {
-            env: vec![(
-                "SSL_CERT_FILE".to_string(),
-                doh.ca_cert_path.display().to_string(),
-            )],
-            ..Default::default()
-        },
-        &[
-            "--inspect-dns",
-            "--dns-server",
-            &format!("{}/dns-query", doh.url),
-            "https://example.com",
-        ],
-    );
-    assert_exit(&res, 0);
-    assert!(res.stdout.is_empty());
-    assert!(res.stderr.contains("DNS lookup: example.com"));
-    assert!(
-        res.stderr
-            .contains(&format!("Resolver: {}/dns-query", doh.url))
-    );
-    assert!(res.stderr.contains("A\n"));
-    assert!(res.stderr.contains("192.0.2.1 (TTL 1m)"));
-    assert!(res.stderr.contains("AAAA\n"));
-    assert!(res.stderr.contains("2001:db8::1 (TTL 5m)"));
-    assert!(res.stderr.contains("alias.example.com. (TTL 2m)"));
-    assert!(res.stderr.contains("v=spf1 -all (TTL 3m)"));
-    assert!(res.stderr.contains("Addresses: 2"));
-    assert!(res.stderr.contains("Records:"));
+    // rustls-native-certs honors SSL_CERT_FILE on Linux. The macOS and
+    // Windows platform stores do not provide a process-local trust override.
+    #[cfg(target_os = "linux")]
+    {
+        let res = run_fetch_opts(
+            FetchOpts {
+                env: vec![(
+                    "SSL_CERT_FILE".to_string(),
+                    doh.ca_cert_path.display().to_string(),
+                )],
+                ..Default::default()
+            },
+            &[
+                "--inspect-dns",
+                "--dns-server",
+                &format!("{}/dns-query", doh.url),
+                "https://example.com",
+            ],
+        );
+        assert_exit(&res, 0);
+        assert!(res.stdout.is_empty());
+        assert!(res.stderr.contains("DNS lookup: example.com"));
+        assert!(
+            res.stderr
+                .contains(&format!("Resolver: {}/dns-query", doh.url))
+        );
+        assert!(res.stderr.contains("A\n"));
+        assert!(res.stderr.contains("192.0.2.1 (TTL 1m)"));
+        assert!(res.stderr.contains("AAAA\n"));
+        assert!(res.stderr.contains("2001:db8::1 (TTL 5m)"));
+        assert!(res.stderr.contains("alias.example.com. (TTL 2m)"));
+        assert!(res.stderr.contains("v=spf1 -all (TTL 3m)"));
+        assert!(res.stderr.contains("Addresses: 2"));
+        assert!(res.stderr.contains("Records:"));
+    }
 
     let res = run_fetch(&[
         "--inspect-dns",
@@ -1713,35 +1718,38 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert_exit(&res, 1);
     assert!(res.stderr.contains("request timed out after 50ms"));
 
-    let res = run_fetch_opts(
-        FetchOpts {
-            env: vec![(
-                "SSL_CERT_FILE".to_string(),
-                doh.ca_cert_path.display().to_string(),
-            )],
-            ..Default::default()
-        },
-        &[
-            "--inspect-dns",
-            "--dns-server",
-            &format!("{}/dns-query", doh.url),
-            "--color",
-            "on",
-            "https://example.com",
-        ],
-    );
-    assert_exit(&res, 0);
-    assert!(res.stdout.is_empty());
-    assert!(
-        res.stderr
-            .contains("\x1b[2m* \x1b[0m\x1b[1m\x1b[36mDNS lookup\x1b[0m")
-    );
-    assert!(
-        res.stderr
-            .contains(&format!("\x1b[3m{}/dns-query\x1b[0m", doh.url))
-    );
-    assert!(res.stderr.contains("\x1b[32m192.0.2.1\x1b[0m"));
-    assert!(res.stderr.contains("\x1b[2m(TTL 1m)\x1b[0m"));
+    #[cfg(target_os = "linux")]
+    {
+        let res = run_fetch_opts(
+            FetchOpts {
+                env: vec![(
+                    "SSL_CERT_FILE".to_string(),
+                    doh.ca_cert_path.display().to_string(),
+                )],
+                ..Default::default()
+            },
+            &[
+                "--inspect-dns",
+                "--dns-server",
+                &format!("{}/dns-query", doh.url),
+                "--color",
+                "on",
+                "https://example.com",
+            ],
+        );
+        assert_exit(&res, 0);
+        assert!(res.stdout.is_empty());
+        assert!(
+            res.stderr
+                .contains("\x1b[2m* \x1b[0m\x1b[1m\x1b[36mDNS lookup\x1b[0m")
+        );
+        assert!(
+            res.stderr
+                .contains(&format!("\x1b[3m{}/dns-query\x1b[0m", doh.url))
+        );
+        assert!(res.stderr.contains("\x1b[32m192.0.2.1\x1b[0m"));
+        assert!(res.stderr.contains("\x1b[2m(TTL 1m)\x1b[0m"));
+    }
 
     let target = TestServer::start(|req| {
         if req.header("host").starts_with("fetch-dns.test:") {
