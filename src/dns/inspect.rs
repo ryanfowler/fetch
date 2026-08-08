@@ -930,15 +930,15 @@ mod tests {
                 .unwrap_or_default()
             {
                 "A" => http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":5,"data":"alias.example.com.","TTL":120},{"type":1,"data":"192.0.2.1","TTL":60}]}"#
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":5,"data":"alias.example.com.","TTL":120},{"name":"alias.example.com.","type":1,"data":"192.0.2.1","TTL":60}]}"#
                         .to_string(),
                 ),
                 "AAAA" => http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":28,"data":"2001:db8::1","TTL":300}]}"#
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":28,"data":"2001:db8::1","TTL":300}]}"#
                         .to_string(),
                 ),
                 "TXT" => http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":16,"data":"v=spf1 -all","TTL":180}]}"#
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":16,"data":"v=spf1 -all","TTL":180}]}"#
                         .to_string(),
                 ),
                 _ => http::Response::new(r#"{"Status":0}"#.to_string()),
@@ -985,9 +985,9 @@ mod tests {
             if query_type == "A" {
                 return http::Response::new(
                     r#"{"Status":0,"Answer":[
-                        {"type":1,"data":"192.0.2.1"},
-                        {"type":1,"data":"192.0.2.2","TTL":0},
-                        {"type":1,"data":"192.0.2.3","TTL":60}
+                        {"name":"example.com.","type":1,"data":"192.0.2.1"},
+                        {"name":"example.com.","type":1,"data":"192.0.2.2","TTL":0},
+                        {"name":"example.com.","type":1,"data":"192.0.2.3","TTL":60}
                     ]}"#
                     .to_string(),
                 );
@@ -1022,7 +1022,7 @@ mod tests {
                 .unwrap_or_default()
             {
                 "A" => http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":1,"data":"192.0.2.1","TTL":60}]}"#.to_string(),
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"192.0.2.1","TTL":60}]}"#.to_string(),
                 ),
                 "AAAA" => http::Response::new(r#"{"Status":3}"#.to_string()),
                 _ => http::Response::new(r#"{"Status":0}"#.to_string()),
@@ -1058,7 +1058,7 @@ mod tests {
                 .contains("type=TXT")
             {
                 return http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":16,"data":"txt \u001b[2J\r\nforged","TTL":60}]}"#
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":16,"data":"txt \u001b[2J\r\nforged","TTL":60}]}"#
                         .to_string(),
                 );
             }
@@ -1161,7 +1161,7 @@ mod tests {
                 .unwrap_or_default()
             {
                 "A" => http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":1,"data":"192.0.2.1","TTL":60}]}"#.to_string(),
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"192.0.2.1","TTL":60}]}"#.to_string(),
                 ),
                 _ => http::Response::new(r#"{"Status":0}"#.to_string()),
             }
@@ -1196,11 +1196,11 @@ mod tests {
                 .unwrap_or_default()
             {
                 "A" => http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":5,"data":"alias.example.com.","TTL":120},{"type":1,"data":"192.0.2.1","TTL":60}]}"#
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":5,"data":"alias.example.com.","TTL":120},{"name":"alias.example.com.","type":1,"data":"192.0.2.1","TTL":60}]}"#
                         .to_string(),
                 ),
                 "AAAA" => http::Response::new(
-                    r#"{"Status":0,"Answer":[{"type":5,"data":"alias.example.com.","TTL":119}]}"#
+                    r#"{"Status":0,"Answer":[{"name":"example.com.","type":5,"data":"alias.example.com.","TTL":119}]}"#
                         .to_string(),
                 ),
                 _ => http::Response::new(r#"{"Status":0}"#.to_string()),
