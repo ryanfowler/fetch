@@ -186,7 +186,8 @@ pub(crate) fn is_transient_local_server_error(res: &FetchOutput) -> bool {
             .contains("connection closed before message completed")
             || res.stderr.contains("connection was not ready")
             || res.stderr.contains("Connection reset by peer")
-            || res.stderr.contains("Connection refused"))
+            || res.stderr.contains("Connection refused")
+            || res.stderr.contains("os error 10061"))
 }
 
 pub(crate) fn assert_exit(res: &FetchOutput, code: i32) {
