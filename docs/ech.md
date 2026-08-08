@@ -55,10 +55,13 @@ automatically and requires no extra flags.
    server that holds the corresponding private key decrypts the inner
    ClientHello.
 
-3. **DNS privacy**: ECH is most effective when paired with encrypted DNS
-   (`--dns-server` with DoH, DoT, or DoQ). Without encrypted DNS, the
-   SVCB query for the ECH config leaks the hostname. fetch emits a warning
-   in verbose mode when ECH is used with plaintext DNS.
+3. **DNS privacy**: ECH is most effective when paired with verified encrypted
+   DNS (`--dns-server` with HTTPS DoH, DoT, or DoQ). In `-vvv` mode, fetch
+   warns once when ECH discovery uses system DNS, UDP, TCP, an HTTPS DoH
+   endpoint with certificate verification disabled, or a plaintext HTTP
+   endpoint in a build that permits one. System DNS is included because fetch
+   cannot verify its
+   transport protection. `--silent` suppresses this warning.
 
 ## Configuration
 

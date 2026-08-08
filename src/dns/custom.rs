@@ -11,6 +11,13 @@ const DEFAULT_DNS_PORT: u16 = 53;
 const DEFAULT_DNS_OVER_TLS_PORT: u16 = 853;
 const DEFAULT_DNS_OVER_QUIC_PORT: u16 = 853;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DnsTransportSecurity {
+    Verified,
+    Plaintext,
+    Unknown,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum ParsedDnsServer {
     Udp(SocketAddr),
@@ -29,18 +36,33 @@ pub(crate) enum ParsedDnsServer {
 }
 
 impl ParsedDnsServer {
-    /// Returns whether DNS responses have transport authentication.
+    /// Classifies the transport protection for DNS queries.
     ///
     /// DoT and DoQ always verify the configured resolver identity. HTTPS DoH
-    /// is authenticated unless certificate verification was disabled by the
-    /// caller. Plain HTTP, UDP, and TCP do not authenticate responses.
-    pub(crate) fn is_authenticated(&self, verify_doh_certificate: bool) -> bool {
+    /// is verified unless certificate verification was disabled by the caller.
+    /// Plain HTTP, UDP, and TCP do not protect the DNS query transport.
+    pub(crate) fn transport_security(&self, verify_doh_certificate: bool) -> DnsTransportSecurity {
         match self {
-            Self::Tls { .. } | Self::Quic { .. } => true,
-            Self::Doh(url) => url.scheme() == "https" && verify_doh_certificate,
-            Self::Udp(_) | Self::Tcp(_) => false,
+            Self::Tls { .. } | Self::Quic { .. } => DnsTransportSecurity::Verified,
+            Self::Doh(url) if url.scheme() == "https" && verify_doh_certificate => {
+                DnsTransportSecurity::Verified
+            }
+            Self::Doh(_) | Self::Udp(_) | Self::Tcp(_) => DnsTransportSecurity::Plaintext,
         }
     }
+
+    pub(crate) fn is_authenticated(&self, verify_doh_certificate: bool) -> bool {
+        self.transport_security(verify_doh_certificate) == DnsTransportSecurity::Verified
+    }
+}
+
+pub(crate) fn dns_transport_security(
+    value: Option<&str>,
+    verify_doh_certificate: bool,
+) -> Result<DnsTransportSecurity, FetchError> {
+    value.map_or(Ok(DnsTransportSecurity::Unknown), |value| {
+        Ok(parse_dns_server(value)?.transport_security(verify_doh_certificate))
+    })
 }
 
 pub(crate) fn dns_server_is_authenticated(
@@ -607,6 +629,38 @@ mod tests {
         let parsed = parse_dns_server("http://127.0.0.1:8080/dns-query").unwrap();
 
         assert!(matches!(parsed, ParsedDnsServer::Doh(_)));
+    }
+
+    #[test]
+    fn dns_transport_security_classifies_system_and_custom_transports() {
+        assert_eq!(
+            dns_transport_security(None, true).unwrap(),
+            DnsTransportSecurity::Unknown
+        );
+        for value in ["1.1.1.1", "tcp://1.1.1.1"] {
+            assert_eq!(
+                dns_transport_security(Some(value), true).unwrap(),
+                DnsTransportSecurity::Plaintext
+            );
+        }
+        for value in [
+            "tls://dns.example",
+            "doq://dns.example",
+            "https://dns.example/dns-query",
+        ] {
+            assert_eq!(
+                dns_transport_security(Some(value), true).unwrap(),
+                DnsTransportSecurity::Verified
+            );
+        }
+        assert_eq!(
+            dns_transport_security(Some("https://dns.example/dns-query"), false).unwrap(),
+            DnsTransportSecurity::Plaintext
+        );
+        assert_eq!(
+            dns_transport_security(Some("http://127.0.0.1:8080/dns-query"), true).unwrap(),
+            DnsTransportSecurity::Plaintext
+        );
     }
 
     #[test]

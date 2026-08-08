@@ -79,6 +79,7 @@ pub(crate) struct ClientBuildContext<'a> {
     pub(crate) session: Option<&'a crate::session::Session>,
     pub(crate) connect_timing: Option<&'a ConnectionTiming>,
     pub(crate) har: Option<&'a crate::har::Recorder>,
+    pub(crate) ech_dns_warning_emitted: &'a std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +116,18 @@ pub(crate) async fn build_client_for_url(
     });
     let dns_timeout = connect_budget.remaining()?;
     let effective_proxy = effective_proxy_for_url(cli.proxy.as_deref(), http_version, url)?;
+    let ech_discovery = should_configure_tls(cli, url)
+        && is_ech_active(cli)
+        && cli.unix.is_none()
+        && url
+            .host_str()
+            .is_some_and(|host| host.parse::<IpAddr>().is_err());
+    if ech_discovery {
+        crate::tls::ech::warn_for_unverified_dns_transport(
+            cli,
+            Some(context.ech_dns_warning_emitted),
+        )?;
+    }
     let auto_http3 = auto_http3_allowed(context.mode, url, cli.unix.as_deref(), effective_proxy);
     let discovery = if dynamic_dns_for_client(cli, url, effective_proxy, auto_http3)? {
         let debug_dns = cli.timing || cli.har.is_some() || (cli.verbose >= 3 && !cli.silent);
@@ -789,6 +802,7 @@ pub(crate) async fn resolve_websocket_ech_mode(
     if host.parse::<IpAddr>().is_ok() {
         return Ok(None);
     }
+    crate::tls::ech::warn_for_unverified_dns_transport(cli, None)?;
     let (records, _) =
         lookup_ech_https_records(cli, cli.dns_server.as_deref(), host, timeout).await?;
     let candidates = ech_candidates_from_records(&records.records);

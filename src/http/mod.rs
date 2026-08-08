@@ -152,6 +152,7 @@ async fn execute_request(
     crate::tls::install_default_crypto_provider();
 
     let connect_timing = client::ConnectionTiming::default();
+    let ech_dns_warning_emitted = std::sync::atomic::AtomicBool::new(false);
     let client_build = client::ClientBuildContext {
         mode: client::ClientMode::Request(http_version),
         request_timeout,
@@ -160,6 +161,7 @@ async fn execute_request(
         session,
         connect_timing: Some(&connect_timing),
         har: har_recorder.as_ref(),
+        ech_dns_warning_emitted: &ech_dns_warning_emitted,
     };
     let mut initial_client = None;
     if cli.grpc && grpc_method.is_none() {
