@@ -167,11 +167,7 @@ fn ech_dns_discovery_failure_is_reported_and_auto_falls_back() {
         &url,
     ]);
     assert_exit(&required, 1);
-    assert!(
-        required.stderr.contains("ServerFailure"),
-        "{}",
-        required.stderr
-    );
+    assert!(required.stderr.contains("SERVFAIL"), "{}", required.stderr);
     assert!(!required.stderr.contains("does not advertise ECH"));
 
     let inspected = run_fetch(&[
@@ -1636,7 +1632,7 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
         doh.ca_cert_path.to_str().unwrap(),
     ]);
     assert_exit(&res, 1);
-    assert!(res.stderr.contains("no such host"));
+    assert!(res.stderr.contains("NXDOMAIN"));
     assert!(!res.stderr.contains("For more information"));
 
     // rustls-native-certs honors SSL_CERT_FILE on Linux. The macOS and

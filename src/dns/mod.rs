@@ -1,5 +1,6 @@
 pub(crate) mod custom;
 pub mod doh;
+pub(crate) mod error;
 pub mod inspect;
 pub mod resolver;
 pub(crate) mod svcb;

@@ -15,15 +15,41 @@ use crate::duration::TimeoutBudget;
 use crate::error::FetchError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DnsTransportError(String);
+pub(crate) struct DnsTransportError {
+    kind: crate::dns::error::DnsErrorKind,
+    detail: Option<String>,
+}
 
 impl fmt::Display for DnsTransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match &self.detail {
+            Some(detail) => f.write_str(detail),
+            None => self.kind.fmt(f),
+        }
     }
 }
 
 impl std::error::Error for DnsTransportError {}
+
+impl DnsTransportError {
+    fn timeout() -> Self {
+        Self {
+            kind: crate::dns::error::DnsErrorKind::Timeout,
+            detail: None,
+        }
+    }
+
+    fn other(detail: impl Into<String>) -> Self {
+        Self {
+            kind: crate::dns::error::DnsErrorKind::Other,
+            detail: Some(detail.into()),
+        }
+    }
+
+    pub(crate) fn kind(&self) -> crate::dns::error::DnsErrorKind {
+        self.kind
+    }
+}
 
 const UDP_MAX_ATTEMPTS: usize = 3;
 const UDP_INITIAL_RETRANSMIT_DELAY: Duration = Duration::from_millis(100);
@@ -120,7 +146,7 @@ fn udp_remaining(budget: TimeoutBudget) -> Result<Duration, DnsTransportError> {
 }
 
 fn udp_timeout_error() -> DnsTransportError {
-    DnsTransportError("DNS lookup timed out".to_string())
+    DnsTransportError::timeout()
 }
 
 pub(crate) async fn query_tcp(
@@ -136,7 +162,7 @@ pub(crate) async fn query_tcp(
         read_framed_response(&mut stream).await
     })
     .await
-    .map_err(|_| DnsTransportError("DNS lookup timed out".to_string()))?
+    .map_err(|_| DnsTransportError::timeout())?
 }
 
 pub(crate) async fn tcp_connection(
@@ -145,7 +171,7 @@ pub(crate) async fn tcp_connection(
 ) -> Result<TcpStream, DnsTransportError> {
     tokio::time::timeout(timeout, TcpStream::connect(server_addr))
         .await
-        .map_err(|_| DnsTransportError("DNS lookup timed out".to_string()))?
+        .map_err(|_| DnsTransportError::timeout())?
         .map_err(transport_error)
 }
 
@@ -154,7 +180,7 @@ pub(crate) async fn write_framed_query<W: AsyncWrite + Unpin>(
     query: &[u8],
 ) -> Result<(), DnsTransportError> {
     if query.len() > usize::from(u16::MAX) {
-        return Err(DnsTransportError("DNS query is too large".to_string()));
+        return Err(DnsTransportError::other("DNS query is too large"));
     }
     let mut framed = Vec::with_capacity(query.len() + 2);
     framed.extend_from_slice(&(query.len() as u16).to_be_bytes());
@@ -209,8 +235,8 @@ pub(crate) async fn tls_connection(
         ),
     )
     .await
-    .map_err(|_| DnsTransportError("DNS lookup timed out".to_string()))?
-    .map_err(|err| DnsTransportError(err.to_string()))
+    .map_err(|_| DnsTransportError::timeout())?
+    .map_err(|err| DnsTransportError::other(err.to_string()))
 }
 
 async fn tls_connector(insecure: bool) -> Result<TlsConnector, DnsTransportError> {
@@ -223,7 +249,7 @@ async fn tls_connector(insecure: bool) -> Result<TlsConnector, DnsTransportError
         None,
         None,
     )
-    .map_err(|err| DnsTransportError(err.to_string()))?;
+    .map_err(|err| DnsTransportError::other(err.to_string()))?;
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
@@ -243,10 +269,11 @@ pub(crate) async fn quic_connection(
         None,
         None,
     )
-    .map_err(|err| DnsTransportError(err.to_string()))?;
+    .map_err(|err| DnsTransportError::other(err.to_string()))?;
     tls.alpn_protocols = vec![b"doq".to_vec()];
-    let client_config = QuicClientConfig::try_from(tls)
-        .map_err(|err| DnsTransportError(format!("invalid QUIC TLS configuration: {err}")))?;
+    let client_config = QuicClientConfig::try_from(tls).map_err(|err| {
+        DnsTransportError::other(format!("invalid QUIC TLS configuration: {err}"))
+    })?;
     endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(client_config)));
     tokio::time::timeout(
         timeout,
@@ -270,8 +297,8 @@ pub(crate) async fn quic_connection(
         ),
     )
     .await
-    .map_err(|_| DnsTransportError("DNS lookup timed out".to_string()))?
-    .map_err(|err| DnsTransportError(err.to_string()))
+    .map_err(|_| DnsTransportError::timeout())?
+    .map_err(|err| DnsTransportError::other(err.to_string()))
 }
 
 fn quinn_client_endpoint() -> Result<quinn::Endpoint, DnsTransportError> {
@@ -281,7 +308,7 @@ fn quinn_client_endpoint() -> Result<quinn::Endpoint, DnsTransportError> {
         Err(err) => {
             let fallback_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
             quinn::Endpoint::client(fallback_addr).map_err(|fallback_err| {
-                DnsTransportError(format!(
+                DnsTransportError::other(format!(
                     "failed to bind QUIC endpoint to {local_addr}: {err}; \
                      IPv4 fallback {fallback_addr} also failed: {fallback_err}"
                 ))
@@ -305,15 +332,15 @@ pub(crate) async fn quic_query(
     let (mut send, mut recv) = connection
         .open_bi()
         .await
-        .map_err(|err| DnsTransportError(format!("dns over quic open stream: {err}")))?;
+        .map_err(|err| DnsTransportError::other(format!("dns over quic open stream: {err}")))?;
     write_framed_query(&mut send, query).await?;
     send.finish()
-        .map_err(|err| DnsTransportError(format!("dns over quic finish stream: {err}")))?;
+        .map_err(|err| DnsTransportError::other(format!("dns over quic finish stream: {err}")))?;
     read_framed_response(&mut recv).await
 }
 
 fn transport_error(err: impl ToString) -> DnsTransportError {
-    DnsTransportError(err.to_string())
+    DnsTransportError::other(err.to_string())
 }
 
 #[cfg(test)]

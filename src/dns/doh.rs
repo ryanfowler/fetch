@@ -31,19 +31,36 @@ const APPLICATION_DNS_MESSAGE: &str = "application/dns-message";
 const APPLICATION_DNS_JSON: &str = "application/dns-json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DnsError(String);
+pub struct DnsError {
+    kind: crate::dns::error::DnsErrorKind,
+    detail: Option<String>,
+}
 
 impl fmt::Display for DnsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match &self.detail {
+            Some(detail) => f.write_str(detail),
+            None => self.kind.fmt(f),
+        }
     }
 }
 
 impl std::error::Error for DnsError {}
 
 impl DnsError {
+    fn dns(kind: crate::dns::error::DnsErrorKind) -> Self {
+        Self { kind, detail: None }
+    }
+
+    fn other(detail: impl Into<String>) -> Self {
+        Self {
+            kind: crate::dns::error::DnsErrorKind::Other,
+            detail: Some(detail.into()),
+        }
+    }
+
     pub(crate) fn is_nxdomain(&self) -> bool {
-        self.0 == "no such host: NXDomain"
+        self.kind == crate::dns::error::DnsErrorKind::NxDomain
     }
 }
 
@@ -79,7 +96,7 @@ pub async fn lookup_doh(
         lookup_doh_type_with_client(&client, server_url, host, "A", DNS_TYPE_A),
         lookup_doh_type_with_client(&client, server_url, host, "AAAA", DNS_TYPE_AAAA),
         crate::net::HAPPY_EYEBALLS_RESOLUTION_DELAY,
-        DnsError("no such host".to_string()),
+        DnsError::dns(crate::dns::error::DnsErrorKind::NoData),
     )
     .await
     .map(|records| records.into_iter().map(|record| record.ip).collect())
@@ -111,14 +128,13 @@ pub(crate) fn client_with_budget_and_tls_config(
     let budget = dns_transaction_budget(budget);
     let tls_config = match tls_config {
         Some(config) => config,
-        None => {
-            crate::tls::rustls_platform_client_config().map_err(|err| DnsError(err.to_string()))?
-        }
+        None => crate::tls::rustls_platform_client_config()
+            .map_err(|err| DnsError::other(err.to_string()))?,
     };
     let client = Client::builder()
         .tls_config(tls_config)
         .build()
-        .map_err(|err| DnsError(err.to_string()))?;
+        .map_err(|err| DnsError::other(err.to_string()))?;
     Ok(DohClient { budget, client })
 }
 
@@ -160,7 +176,7 @@ async fn lookup_doh_wire_records_with_client(
     // HTTP cache reuse and avoid carrying unnecessary entropy in the query.
     const DOH_QUERY_ID: u16 = 0;
     let query = wire::build_query(DOH_QUERY_ID, host, dns_type)
-        .map_err(|err| WireDohError::Fatal(DnsError(err.to_string())))?;
+        .map_err(|err| WireDohError::Fatal(DnsError::other(err.to_string())))?;
 
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static(APPLICATION_DNS_MESSAGE));
@@ -255,24 +271,34 @@ impl DohClient {
     ) -> Result<DohResponseBody, DnsError> {
         validate_doh_endpoint(&url)?;
         let wire_request = method == Method::POST;
-        self.budget
-            .run(Box::pin(async {
-                let mut request = self.client.request(method, url).headers(headers);
-                if let Some(body) = body {
-                    request = request.body(body);
-                }
-                let response = Box::pin(request.send()).await?;
-                if wire_request && wire_status_may_support_json(response.status()) {
-                    return Ok(DohResponseBody {
-                        status: response.status(),
-                        headers: response.headers().clone(),
-                        body: Bytes::new(),
-                    });
-                }
-                Box::pin(buffer_doh_response(response, wire_request)).await
-            }))
-            .await
-            .map_err(|err| DnsError(err.to_string()))
+        let operation = Box::pin(async {
+            let mut request = self.client.request(method, url).headers(headers);
+            if let Some(body) = body {
+                request = request.body(body);
+            }
+            let response = Box::pin(request.send()).await?;
+            if wire_request && wire_status_may_support_json(response.status()) {
+                return Ok(DohResponseBody {
+                    status: response.status(),
+                    headers: response.headers().clone(),
+                    body: Bytes::new(),
+                });
+            }
+            Box::pin(buffer_doh_response(response, wire_request)).await
+        });
+        let remaining = self
+            .budget
+            .remaining()
+            .map_err(|_| DnsError::dns(crate::dns::error::DnsErrorKind::Timeout))?;
+        match remaining {
+            Some(remaining) => tokio::time::timeout(remaining, operation)
+                .await
+                .map_err(|_| DnsError::dns(crate::dns::error::DnsErrorKind::Timeout))?
+                .map_err(|err| DnsError::other(err.to_string())),
+            None => operation
+                .await
+                .map_err(|err| DnsError::other(err.to_string())),
+        }
     }
 }
 
@@ -312,7 +338,7 @@ fn validate_doh_endpoint(url: &Url) -> Result<(), DnsError> {
     {
         return Ok(());
     }
-    Err(DnsError("DoH endpoints must use HTTPS".to_string()))
+    Err(DnsError::other("DoH endpoints must use HTTPS".to_string()))
 }
 
 async fn buffer_doh_response(
@@ -366,24 +392,30 @@ fn doh_records_from_json_response(
     raw: &[u8],
     expected_name: &str,
 ) -> Result<Vec<DohRecord>, DnsError> {
-    let body =
-        serde_json::from_slice::<DohResponse>(raw).map_err(|err| DnsError(err.to_string()))?;
+    let body = serde_json::from_slice::<DohResponse>(raw)
+        .map_err(|err| DnsError::other(err.to_string()))?;
     if body.status != 0 {
-        let name = rcode_name(body.status);
-        if name.is_empty() {
-            return Err(DnsError("no such host".to_string()));
-        }
-        return Err(DnsError(format!("no such host: {name}")));
+        let rcode = u16::try_from(body.status)
+            .map_err(|_| DnsError::dns(crate::dns::error::DnsErrorKind::Malformed))?;
+        let kind = if rcode == 16 {
+            // JSON responses do not carry an OPT record. In this context,
+            // extended RCODE 16 is the TSIG status BADSIG, not EDNS BADVERS.
+            crate::dns::error::DnsErrorKind::BadSig
+        } else {
+            crate::dns::error::DnsErrorKind::from_rcode(rcode)
+                .expect("nonzero RCODE has an error kind")
+        };
+        return Err(DnsError::dns(kind));
     }
 
-    let expected =
-        wire::parse_presentation_name(expected_name).map_err(|err| DnsError(err.to_string()))?;
+    let expected = wire::parse_presentation_name(expected_name)
+        .map_err(|err| DnsError::other(err.to_string()))?;
     let owners = body
         .answer
         .iter()
         .map(|answer| wire::parse_presentation_name(&answer.name))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| DnsError(err.to_string()))?;
+        .map_err(|err| DnsError::other(err.to_string()))?;
     let types = body
         .answer
         .iter()
@@ -393,7 +425,7 @@ fn doh_records_from_json_response(
         wire::parse_presentation_name(&body.answer[index].data)
             .map_err(|_| wire::malformed_rdata(wire::TYPE_CNAME))
     })
-    .map_err(|err| DnsError(err.to_string()))?;
+    .map_err(|err| DnsError::other(err.to_string()))?;
 
     Ok(body
         .answer
@@ -443,7 +475,7 @@ fn ip_records(records: Vec<DohRecord>, answer_type: u16) -> Result<Vec<DnsRecord
         })
         .collect();
     if records.is_empty() {
-        return Err(DnsError("no such host".to_string()));
+        return Err(DnsError::dns(crate::dns::error::DnsErrorKind::NoData));
     }
 
     Ok(records)
@@ -457,7 +489,7 @@ fn doh_records_from_wire_response(
 ) -> Result<Vec<DohRecord>, DnsError> {
     let records =
         wire::parse_response(raw, expected_id, expected_name, expected_type, DNS_CLASS_IN)
-            .map_err(|err| DnsError(err.to_string()))?;
+            .map_err(DnsError::from)?;
     let mut out = Vec::new();
     for record in records {
         if record.class != DNS_CLASS_IN {
@@ -474,7 +506,7 @@ fn doh_records_from_wire_response(
 
 fn wire_record_data(packet: &[u8], record: &wire::ResourceRecord<'_>) -> Result<String, DnsError> {
     let decoded = wire::decode_rdata(packet, record.typ, record.data_offset, record.data.len())
-        .map_err(|err| DnsError(err.to_string()))?;
+        .map_err(|err| DnsError::other(err.to_string()))?;
     let value = match decoded {
         wire::DecodedRdata::Address(address) => address.to_string(),
         wire::DecodedRdata::Name(name) => name,
@@ -524,14 +556,14 @@ fn doh_status_error(response: &DohResponseBody) -> DnsError {
     if let Ok(err_response) = serde_json::from_slice::<DohErrorResponse>(response.body())
         && let Some(message) = err_response.error.filter(|message| !message.is_empty())
     {
-        return DnsError(format!(
+        return DnsError::other(format!(
             "{}: {}",
             status.as_u16(),
             doh_error_excerpt(&message),
         ));
     }
     let body = String::from_utf8_lossy(response.body());
-    DnsError(format!("{}: {}", status.as_u16(), doh_error_excerpt(&body),))
+    DnsError::other(format!("{}: {}", status.as_u16(), doh_error_excerpt(&body),))
 }
 
 fn doh_error_excerpt(body: &str) -> String {
@@ -602,7 +634,10 @@ fn wire_status_may_support_json(status: StatusCode) -> bool {
 }
 
 fn is_dns_wire_error(err: &DnsError) -> bool {
-    err.0.starts_with("no such host") || err.0 == "DNS response was truncated"
+    !matches!(
+        err.kind,
+        crate::dns::error::DnsErrorKind::Other | crate::dns::error::DnsErrorKind::Malformed
+    )
 }
 
 fn dns_type_code(dns_type: &str) -> Option<u16> {
@@ -642,29 +677,17 @@ enum WireDohError {
     Fatal(DnsError),
 }
 
-fn rcode_name(code: i32) -> &'static str {
-    match code {
-        0 => "NoError",
-        1 => "FormErr",
-        2 => "ServFail",
-        3 => "NXDomain",
-        4 => "NotImp",
-        5 => "Refused",
-        6 => "YXDomain",
-        7 => "YXRRSet",
-        8 => "NXRRSet",
-        9 => "NotAuth",
-        10 => "NotZone",
-        11 => "DSOTYPENI",
-        16 => "BADSIG",
-        17 => "BADKEY",
-        18 => "BADTIME",
-        19 => "BADMODE",
-        20 => "BADNAME",
-        21 => "BADALG",
-        22 => "BADTRUNC",
-        23 => "BADCOOKIE",
-        _ => "",
+impl From<wire::WireError> for DnsError {
+    fn from(error: wire::WireError) -> Self {
+        let kind = error.kind();
+        match kind {
+            crate::dns::error::DnsErrorKind::Other => Self::other(error.to_string()),
+            crate::dns::error::DnsErrorKind::Malformed => Self {
+                kind,
+                detail: Some(error.to_string()),
+            },
+            _ => Self::dns(kind),
+        }
     }
 }
 
@@ -1108,7 +1131,10 @@ mod tests {
         let err =
             doh_records_from_wire_response(&response, 0, "example.com", wire::TYPE_A).unwrap_err();
 
-        assert_eq!(err.to_string(), "mismatched DNS response ID");
+        assert_eq!(
+            err.to_string(),
+            "malformed DNS response: mismatched response ID"
+        );
     }
 
     #[test]
@@ -1128,6 +1154,20 @@ mod tests {
             doh_records_from_wire_response(&response, 0x1234, "example.com", wire::TYPE_A).unwrap();
 
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn json_response_status_codes_use_json_context() {
+        let cases = [
+            (16, crate::dns::error::DnsErrorKind::BadSig),
+            (99, crate::dns::error::DnsErrorKind::OtherRcode(99)),
+        ];
+
+        for (status, expected) in cases {
+            let raw = format!(r#"{{"Status":{status}}}"#);
+            let error = doh_records_from_json_response(raw.as_bytes(), "example.com").unwrap_err();
+            assert_eq!(error.kind, expected);
+        }
     }
 
     #[test]
@@ -1407,7 +1447,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.to_string(), "request timed out after 5s");
+        assert_eq!(err.to_string(), "DNS lookup timed out");
         assert!(
             start.elapsed() < Duration::from_secs(7),
             "DoH response headers exceeded the default timeout"
@@ -1424,7 +1464,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(err.to_string(), "request timed out after 5s");
+        assert_eq!(err.to_string(), "DNS lookup timed out");
         assert!(
             start.elapsed() < Duration::from_secs(7),
             "DoH response body exceeded the default timeout"
@@ -1443,7 +1483,7 @@ mod tests {
             .unwrap_err();
         let elapsed = start.elapsed();
 
-        assert_eq!(err.to_string(), "request timed out after 250ms");
+        assert_eq!(err.to_string(), "DNS lookup timed out");
         assert!(
             elapsed < Duration::from_millis(350),
             "lookup took {elapsed:?}, expected timeout to cover POST and JSON fallback"
@@ -1485,7 +1525,7 @@ mod tests {
 
         let err = lookup_doh(&url, "missing.example", None).await.unwrap_err();
 
-        assert!(err.to_string().contains("NXDomain"));
+        assert!(err.to_string().contains("NXDOMAIN"));
         task.abort();
     }
 
