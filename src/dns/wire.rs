@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::net::IpAddr;
 
@@ -40,7 +41,7 @@ impl WireError {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResourceRecord<'a> {
-    pub(crate) name: String,
+    canonical_name: CanonicalName,
     pub(crate) typ: u16,
     pub(crate) class: u16,
     pub(crate) ttl: u32,
@@ -304,12 +305,13 @@ fn parse_response_inner<'a>(
         return Err(WireError("unexpected DNS question count".to_string()));
     }
     let mut offset = 12;
-    let (question_name, next) = read_name(raw, offset)?;
-    offset = next;
+    let question_name = read_parsed_name_bounded(raw, offset, raw.len())?;
+    offset = question_name.next;
     let question_type = read_u16(raw, offset)?;
     let question_class = read_u16(raw, offset + 2)?;
     offset += 4;
-    if !names_equal(&question_name, expected_name)
+    let expected_canonical = CanonicalName::from_text(expected_name);
+    if question_name.canonical != expected_canonical
         || question_type != expected_type
         || question_class != expected_class
     {
@@ -318,8 +320,8 @@ fn parse_response_inner<'a>(
 
     let mut records = Vec::new();
     for _ in 0..answer_count {
-        let (name, next) = read_name(raw, offset)?;
-        offset = next;
+        let name = read_parsed_name_bounded(raw, offset, raw.len())?;
+        offset = name.next;
         let typ = read_u16(raw, offset)?;
         let class = read_u16(raw, offset + 2)?;
         let ttl = read_u32(raw, offset + 4)?;
@@ -331,7 +333,7 @@ fn parse_response_inner<'a>(
         let data_offset = offset;
         offset += rdlen;
         records.push(ResourceRecord {
-            name,
+            canonical_name: name.canonical,
             typ,
             class,
             ttl,
@@ -341,41 +343,72 @@ fn parse_response_inner<'a>(
     }
 
     // Answer records are relevant only when their owner is the queried name or
-    // is reachable from it through an IN-class CNAME chain. Records can appear
-    // in any order, so expand the reachable set to a fixed point first.
-    let mut reachable = vec![expected_name.to_string()];
+    // is reachable from it through a valid IN-class CNAME chain. Use canonical
+    // label bytes here. Presentation strings can map distinct invalid octets to
+    // the same text and are not safe for authorization decisions.
+    let mut reachable = HashSet::from([expected_canonical]);
+    let mut processed = HashSet::new();
     loop {
         let mut changed = false;
         for record in &records {
             if record.class != expected_class
                 || record.typ != TYPE_CNAME
-                || !reachable.iter().any(|name| names_equal(name, &record.name))
+                || !reachable.contains(&record.canonical_name)
+                || processed.contains(&record.canonical_name)
             {
                 continue;
             }
-            let (target, _) = read_name_bounded(
-                raw,
-                record.data_offset,
-                record.data_offset + record.data.len(),
-            )?;
-            if !reachable.iter().any(|name| names_equal(name, &target)) {
-                reachable.push(target);
-                changed = true;
+
+            let owner = record.canonical_name.clone();
+            if records.iter().any(|candidate| {
+                candidate.class == expected_class
+                    && candidate.canonical_name == owner
+                    && candidate.typ != TYPE_CNAME
+            }) {
+                return Err(WireError(
+                    "DNS CNAME owner has conflicting answer data".to_string(),
+                ));
             }
+
+            let mut target = None;
+            for cname in records.iter().filter(|candidate| {
+                candidate.class == expected_class
+                    && candidate.typ == TYPE_CNAME
+                    && candidate.canonical_name == owner
+            }) {
+                let end = cname.data_offset + cname.data.len();
+                let parsed = read_parsed_name_bounded(raw, cname.data_offset, end)?;
+                if parsed.next != end {
+                    return Err(malformed_rdata(TYPE_CNAME));
+                }
+                if target
+                    .as_ref()
+                    .is_some_and(|prior| prior != &parsed.canonical)
+                {
+                    return Err(WireError(
+                        "DNS CNAME owner has conflicting targets".to_string(),
+                    ));
+                }
+                target = Some(parsed.canonical);
+            }
+
+            let target = target.expect("CNAME owner has at least one record");
+            processed.insert(owner);
+            if reachable.contains(&target) {
+                return Err(WireError("DNS CNAME chain contains a cycle".to_string()));
+            }
+            reachable.insert(target);
+            changed = true;
         }
         if !changed {
             break;
         }
     }
-    records.retain(|record| reachable.iter().any(|name| names_equal(name, &record.name)));
+    records.retain(|record| reachable.contains(&record.canonical_name));
     Ok(records)
 }
 
-pub(crate) fn names_equal(left: &str, right: &str) -> bool {
-    left.trim_end_matches('.')
-        .eq_ignore_ascii_case(right.trim_end_matches('.'))
-}
-
+#[cfg(test)]
 pub(crate) fn read_name(packet: &[u8], offset: usize) -> Result<(String, usize), WireError> {
     read_name_bounded(packet, offset, packet.len())
 }
@@ -385,6 +418,38 @@ fn read_name_bounded(
     offset: usize,
     end: usize,
 ) -> Result<(String, usize), WireError> {
+    let name = read_parsed_name_bounded(packet, offset, end)?;
+    Ok((name.presentation, name.next))
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CanonicalName(Vec<Vec<u8>>);
+
+impl CanonicalName {
+    fn from_text(name: &str) -> Self {
+        let name = name.trim_end_matches('.');
+        if name.is_empty() {
+            return Self(Vec::new());
+        }
+        Self(
+            name.split('.')
+                .map(|label| label.bytes().map(ascii_lowercase).collect())
+                .collect(),
+        )
+    }
+}
+
+struct ParsedName {
+    presentation: String,
+    canonical: CanonicalName,
+    next: usize,
+}
+
+fn read_parsed_name_bounded(
+    packet: &[u8],
+    offset: usize,
+    end: usize,
+) -> Result<ParsedName, WireError> {
     if offset > end || end > packet.len() {
         return Err(WireError("short DNS name".to_string()));
     }
@@ -429,19 +494,56 @@ fn read_name_bounded(
         if pos + len > end {
             return Err(WireError("short DNS name label".to_string()));
         }
-        labels.push(String::from_utf8_lossy(&packet[pos..pos + len]).into_owned());
+        labels.push(packet[pos..pos + len].to_vec());
         pos += len;
         if !jumped {
             next = pos;
         }
     }
 
-    let name = if labels.is_empty() {
+    let presentation = if labels.is_empty() {
         ".".to_string()
     } else {
+        let labels = labels
+            .iter()
+            .map(|label| format_label(label))
+            .collect::<Vec<_>>();
         format!("{}.", labels.join("."))
     };
-    Ok((name, next))
+    let canonical = CanonicalName(
+        labels
+            .into_iter()
+            .map(|label| label.into_iter().map(ascii_lowercase).collect())
+            .collect(),
+    );
+    Ok(ParsedName {
+        presentation,
+        canonical,
+        next,
+    })
+}
+
+fn ascii_lowercase(octet: u8) -> u8 {
+    if octet.is_ascii_uppercase() {
+        octet + (b'a' - b'A')
+    } else {
+        octet
+    }
+}
+
+fn format_label(label: &[u8]) -> String {
+    let mut output = String::new();
+    for &octet in label {
+        match octet {
+            b'!'..=b'~' if octet != b'.' && octet != b'\\' => output.push(char::from(octet)),
+            b'.' | b'\\' => {
+                output.push('\\');
+                output.push(char::from(octet));
+            }
+            _ => output.push_str(&format!("\\{octet:03}")),
+        }
+    }
+    output
 }
 
 pub(crate) fn read_u16(raw: &[u8], offset: usize) -> Result<u16, WireError> {
@@ -590,6 +692,159 @@ mod tests {
         let raw = [0, 0, 0xc0, 0x0c];
 
         assert!(decode_rdata(&raw, TYPE_CNAME, 0, raw.len()).is_err());
+    }
+
+    #[test]
+    fn cname_with_trailing_rdata_cannot_authorize_address() {
+        let response = response_with_answers(&[
+            (encoded_name(b"example", b"com"), TYPE_CNAME, {
+                let mut target = encoded_name(b"alias", b"example");
+                target.push(0xff);
+                target
+            }),
+            (
+                encoded_name(b"alias", b"example"),
+                TYPE_A,
+                vec![192, 0, 2, 1],
+            ),
+        ]);
+
+        let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+        assert!(err.to_string().contains("malformed DNS RDATA"));
+    }
+
+    #[test]
+    fn canonical_names_compare_label_bytes_without_lossy_utf8() {
+        let response = response_with_answers(&[
+            (
+                encoded_name(b"example", b"com"),
+                TYPE_CNAME,
+                encoded_name(&[0xff], b"example"),
+            ),
+            (
+                encoded_name(&[0xfe], b"example"),
+                TYPE_A,
+                vec![192, 0, 2, 1],
+            ),
+        ]);
+
+        let records = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].typ, TYPE_CNAME);
+        let (target, _) = read_name(&response, records[0].data_offset).unwrap();
+        assert_eq!(target, r"\255.example.");
+    }
+
+    #[test]
+    fn canonical_names_fold_ascii_case_only() {
+        let response = response_with_answers(&[
+            (
+                encoded_name(b"EXAMPLE", b"COM"),
+                TYPE_CNAME,
+                encoded_name(b"Alias", b"Example"),
+            ),
+            (
+                encoded_name(b"aLIAS", b"eXAMPLE"),
+                TYPE_A,
+                vec![192, 0, 2, 1],
+            ),
+        ]);
+
+        let records = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].typ, TYPE_A);
+    }
+
+    #[test]
+    fn rejects_conflicting_cname_targets() {
+        let response = response_with_answers(&[
+            (
+                encoded_name(b"example", b"com"),
+                TYPE_CNAME,
+                encoded_name(b"one", b"example"),
+            ),
+            (
+                encoded_name(b"example", b"com"),
+                TYPE_CNAME,
+                encoded_name(b"two", b"example"),
+            ),
+            (encoded_name(b"one", b"example"), TYPE_A, vec![192, 0, 2, 1]),
+        ]);
+
+        let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+        assert!(err.to_string().contains("conflicting targets"));
+    }
+
+    #[test]
+    fn rejects_cname_with_other_answer_data_at_owner() {
+        let response = response_with_answers(&[
+            (
+                encoded_name(b"example", b"com"),
+                TYPE_CNAME,
+                encoded_name(b"alias", b"example"),
+            ),
+            (encoded_name(b"example", b"com"), TYPE_A, vec![192, 0, 2, 1]),
+        ]);
+
+        let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+        assert!(err.to_string().contains("conflicting answer data"));
+    }
+
+    #[test]
+    fn rejects_cname_cycle_without_authorizing_unrelated_address() {
+        let response = response_with_answers(&[
+            (
+                encoded_name(b"example", b"com"),
+                TYPE_CNAME,
+                encoded_name(b"alias", b"example"),
+            ),
+            (
+                encoded_name(b"alias", b"example"),
+                TYPE_CNAME,
+                encoded_name(b"example", b"com"),
+            ),
+            (
+                encoded_name(b"unrelated", b"example"),
+                TYPE_A,
+                vec![192, 0, 2, 1],
+            ),
+        ]);
+
+        let err = parse_response(&response, 0x1234, "example.com", TYPE_A, CLASS_IN).unwrap_err();
+        assert!(err.to_string().contains("contains a cycle"));
+    }
+
+    fn response_with_answers(answers: &[(Vec<u8>, u16, Vec<u8>)]) -> Vec<u8> {
+        let query = build_query(0x1234, "example.com", TYPE_A).unwrap();
+        let (_, question_end) = read_name(&query, 12).unwrap();
+        let mut response = Vec::new();
+        response.extend_from_slice(&0x1234u16.to_be_bytes());
+        response.extend_from_slice(&0x8180u16.to_be_bytes());
+        response.extend_from_slice(&1u16.to_be_bytes());
+        response.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        response.extend_from_slice(&0u32.to_be_bytes());
+        response.extend_from_slice(&query[12..question_end + 4]);
+        for (owner, typ, data) in answers {
+            response.extend_from_slice(owner);
+            response.extend_from_slice(&typ.to_be_bytes());
+            response.extend_from_slice(&CLASS_IN.to_be_bytes());
+            response.extend_from_slice(&30u32.to_be_bytes());
+            response.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            response.extend_from_slice(data);
+        }
+        response
+    }
+
+    fn encoded_name(first: &[u8], second: &[u8]) -> Vec<u8> {
+        let mut name = Vec::new();
+        for label in [first, second] {
+            name.push(label.len() as u8);
+            name.extend_from_slice(label);
+        }
+        name.push(0);
+        name
     }
 
     #[test]
