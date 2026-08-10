@@ -31,7 +31,8 @@ Run the full CI-equivalent suite before PRs and for shared transport/request/res
 cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features --lib --bins
-cargo test --release --locked --all-features --test cli --test formatting --test grpc --test har --test http --test install --test network --test terminal --test update --test websocket -- --test-threads=2
+cargo test --locked --all-features --test cli --test formatting --test grpc --test har --test http --test install --test network --test terminal --test update --test websocket -- --test-threads=2
+# Windows CI runs this suite with --release to reduce child-process startup cost.
 ```
 
 For docs-only changes, skip Cargo unless examples or generated CLI output changed:
