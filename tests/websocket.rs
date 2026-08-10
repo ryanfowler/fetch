@@ -36,52 +36,44 @@ const WEBSOCKET_RECEIVE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 fn start_ws_frame_server(reply: Vec<u8>) -> (String, mpsc::Receiver<(u8, Vec<u8>)>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket frame server");
-    listener.set_nonblocking(true).unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let (seen_tx, seen_rx) = mpsc::channel();
     thread::spawn(move || {
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let reply = reply.clone();
-                    let seen_tx = seen_tx.clone();
-                    thread::spawn(move || {
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        let mut reader = BufReader::new(&mut stream);
-                        let Some(req) = read_request(&mut reader) else {
-                            return;
-                        };
-                        let key = req.header("sec-websocket-key");
-                        let mut sha = Sha1::new();
-                        sha.update(key.as_bytes());
-                        sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-                        let accept =
-                            base64::engine::general_purpose::STANDARD.encode(sha.finalize());
-                        let response = format!(
-                            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
-                        );
-                        if reader
-                            .get_mut()
-                            .write_all(response.as_bytes())
-                            .and_then(|()| reader.get_mut().flush())
-                            .is_err()
-                        {
-                            return;
-                        }
-                        if let Some(frame) = read_ws_frame(&mut reader) {
-                            let _ = seen_tx.send(frame);
-                        }
-                        let stream = reader.into_inner();
-                        let _ = stream.write_all(&ws_binary_frame(&reply));
-                        write_ws_close_and_drain(stream, b"done");
-                    });
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                break;
+            };
+            let reply = reply.clone();
+            let seen_tx = seen_tx.clone();
+            thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut reader = BufReader::new(&mut stream);
+                let Some(req) = read_request(&mut reader) else {
+                    return;
+                };
+                let key = req.header("sec-websocket-key");
+                let mut sha = Sha1::new();
+                sha.update(key.as_bytes());
+                sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                let accept = base64::engine::general_purpose::STANDARD.encode(sha.finalize());
+                let response = format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                );
+                if reader
+                    .get_mut()
+                    .write_all(response.as_bytes())
+                    .and_then(|()| reader.get_mut().flush())
+                    .is_err()
+                {
+                    return;
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
+                if let Some(frame) = read_ws_frame(&mut reader) {
+                    let _ = seen_tx.send(frame);
                 }
-                Err(_) => break,
-            }
+                let stream = reader.into_inner();
+                let _ = stream.write_all(&ws_binary_frame(&reply));
+                write_ws_close_and_drain(stream, b"done");
+            });
         }
     });
     (url, seen_rx)
@@ -149,51 +141,43 @@ fn start_ws_abnormal_close_server() -> String {
 
 fn start_ws_session_server() -> (String, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind websocket session server");
-    listener.set_nonblocking(true).unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let (seen_tx, seen_rx) = mpsc::channel();
     thread::spawn(move || {
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let seen_tx = seen_tx.clone();
-                    thread::spawn(move || {
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                        let mut reader = BufReader::new(stream.try_clone().unwrap());
-                        let Some(req) = read_request(&mut reader) else {
-                            return;
-                        };
-                        if !req.header("cookie").contains("sid=abc") {
-                            write_response(
-                                &mut stream,
-                                TestResponse::status(401, "Unauthorized", "missing session"),
-                            );
-                            return;
-                        }
-                        let key = req.header("sec-websocket-key");
-                        let mut sha = Sha1::new();
-                        sha.update(key.as_bytes());
-                        sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-                        let accept =
-                            base64::engine::general_purpose::STANDARD.encode(sha.finalize());
-                        let response = format!(
-                            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSet-Cookie: wsid=upgraded; Path=/\r\n\r\n"
-                        );
-                        if stream.write_all(response.as_bytes()).is_err() {
-                            return;
-                        }
-                        let msg = read_ws_text(&mut stream);
-                        let _ = seen_tx.send(msg.clone());
-                        let _ = stream.write_all(&ws_text_frame(msg.as_bytes()));
-                        write_ws_close_and_drain(&mut stream, b"done");
-                    });
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                break;
+            };
+            let seen_tx = seen_tx.clone();
+            thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let Some(req) = read_request(&mut reader) else {
+                    return;
+                };
+                if !req.header("cookie").contains("sid=abc") {
+                    write_response(
+                        &mut stream,
+                        TestResponse::status(401, "Unauthorized", "missing session"),
+                    );
+                    return;
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
+                let key = req.header("sec-websocket-key");
+                let mut sha = Sha1::new();
+                sha.update(key.as_bytes());
+                sha.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+                let accept = base64::engine::general_purpose::STANDARD.encode(sha.finalize());
+                let response = format!(
+                    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nSet-Cookie: wsid=upgraded; Path=/\r\n\r\n"
+                );
+                if stream.write_all(response.as_bytes()).is_err() {
+                    return;
                 }
-                Err(_) => break,
-            }
+                let msg = read_ws_text(&mut stream);
+                let _ = seen_tx.send(msg.clone());
+                let _ = stream.write_all(&ws_text_frame(msg.as_bytes()));
+                write_ws_close_and_drain(&mut stream, b"done");
+            });
         }
     });
     (url, seen_rx)

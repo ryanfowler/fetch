@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpListener};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,6 +87,7 @@ pub(crate) struct TestServer {
     pub(crate) requests: Arc<Mutex<Vec<TestRequest>>>,
     request_notify: mpsc::Receiver<()>,
     shutdown: Option<mpsc::Sender<()>>,
+    shutdown_addr: String,
     join: Option<thread::JoinHandle<()>>,
 }
 
@@ -101,46 +102,38 @@ impl TestServer {
         handler: impl Fn(TestRequest) -> TestResponse + Send + Sync + 'static,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        listener
-            .set_nonblocking(true)
-            .expect("set test listener nonblocking");
-        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let addr = listener.local_addr().expect("local addr");
+        let url = format!("http://{addr}");
         let requests = Arc::new(Mutex::new(Vec::new()));
         let handler = Arc::new(handler);
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let (notify_tx, notify_rx) = mpsc::channel();
         let request_log = Arc::clone(&requests);
         let join = thread::spawn(move || {
-            loop {
+            for stream in listener.incoming() {
                 if shutdown_rx.try_recv().is_ok() {
                     break;
                 }
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let _ = stream.set_nonblocking(false);
-                        let handler = Arc::clone(&handler);
-                        let request_log = Arc::clone(&request_log);
-                        let notify = notify_tx.clone();
-                        thread::spawn(move || {
-                            let mut writer = stream.try_clone().expect("clone response stream");
-                            let mut reader = BufReader::new(stream);
-                            while let Some(req) = read_request(&mut reader) {
-                                let close = req.header("connection").eq_ignore_ascii_case("close");
-                                request_log.lock().unwrap().push(req.clone());
-                                let _ = notify.send(());
-                                let resp = handler(req);
-                                write_response(&mut writer, resp);
-                                if close {
-                                    break;
-                                }
-                            }
-                        });
+                let Ok(stream) = stream else {
+                    break;
+                };
+                let handler = Arc::clone(&handler);
+                let request_log = Arc::clone(&request_log);
+                let notify = notify_tx.clone();
+                thread::spawn(move || {
+                    let mut writer = stream.try_clone().expect("clone response stream");
+                    let mut reader = BufReader::new(stream);
+                    while let Some(req) = read_request(&mut reader) {
+                        let close = req.header("connection").eq_ignore_ascii_case("close");
+                        request_log.lock().unwrap().push(req.clone());
+                        let _ = notify.send(());
+                        let resp = handler(req);
+                        write_response(&mut writer, resp);
+                        if close {
+                            break;
+                        }
                     }
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
-                }
+                });
             }
         });
         Self {
@@ -148,6 +141,7 @@ impl TestServer {
             requests,
             request_notify: notify_rx,
             shutdown: Some(shutdown_tx),
+            shutdown_addr: addr.to_string(),
             join: Some(join),
         }
     }
@@ -161,6 +155,7 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
+            let _ = TcpStream::connect(&self.shutdown_addr);
         }
         if let Some(join) = self.join.take() {
             let _ = join.join();
