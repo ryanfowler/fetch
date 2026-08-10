@@ -19,6 +19,15 @@ fn file_id(path: &Path) -> u64 {
     fs::metadata(path).unwrap().ino()
 }
 
+fn update_cache_env(dir: &TempDir) -> (String, String) {
+    let key = if cfg!(target_os = "macos") {
+        "HOME"
+    } else {
+        "XDG_CACHE_HOME"
+    };
+    (key.to_string(), dir.path().to_str().unwrap().to_string())
+}
+
 #[cfg(not(windows))]
 #[test]
 fn self_update_go_harness_cases() {
@@ -54,7 +63,9 @@ fn self_update_go_harness_cases() {
     });
     *server_url.lock().unwrap() = server.url.clone();
 
-    let env = vec![("FETCH_INTERNAL_UPDATE_URL".to_string(), server.url.clone())];
+    let update_cache = TempDir::new().unwrap();
+    let mut env = vec![("FETCH_INTERNAL_UPDATE_URL".to_string(), server.url.clone())];
+    env.push(update_cache_env(&update_cache));
     let opts = |bin: &Path, env: Vec<(String, String)>| FetchOpts {
         bin: Some(bin.to_path_buf()),
         env,
@@ -171,6 +182,7 @@ fn auto_update_preserves_explicit_config_proxy() {
 
     let update_base = "http://127.0.0.1:1".to_string();
     let latest_version = "v1001.0.0-config-proxy".to_string();
+    let update_cache = TempDir::new().unwrap();
     let artifact_name = update_artifact_name(&latest_version);
     let artifact = make_update_artifact(&latest_version);
     let checksum = update_artifact_checksum_line(&artifact_name, &artifact);
@@ -206,16 +218,18 @@ fn auto_update_preserves_explicit_config_proxy() {
     let config = dir.path().join("config");
     fs::write(&config, format!("format = off\nproxy = {}\n", proxy.url)).unwrap();
     let before_file_id = file_id(&auto_update_bin);
+    let mut env = vec![
+        ("FETCH_INTERNAL_UPDATE_URL".to_string(), update_base),
+        (
+            "FETCH_INTERNAL_SYNC_AUTO_UPDATE".to_string(),
+            "1".to_string(),
+        ),
+    ];
+    env.push(update_cache_env(&update_cache));
     let res = run_fetch_opts(
         FetchOpts {
             bin: Some(auto_update_bin.clone()),
-            env: vec![
-                ("FETCH_INTERNAL_UPDATE_URL".to_string(), update_base),
-                (
-                    "FETCH_INTERNAL_SYNC_AUTO_UPDATE".to_string(),
-                    "1".to_string(),
-                ),
-            ],
+            env,
             ..Default::default()
         },
         &[
