@@ -18,6 +18,7 @@ pub(crate) struct TlsTestServer {
     pub(crate) url: String,
     pub(crate) ca_cert_path: PathBuf,
     pub(crate) shutdown: Option<mpsc::Sender<()>>,
+    pub(crate) shutdown_addr: String,
     pub(crate) join: Option<thread::JoinHandle<()>>,
 }
 
@@ -28,6 +29,7 @@ pub(crate) struct MtlsTestServer {
     pub(crate) client_key_path: PathBuf,
     pub(crate) client_combined_path: PathBuf,
     pub(crate) shutdown: Option<mpsc::Sender<()>>,
+    pub(crate) shutdown_addr: String,
     pub(crate) join: Option<thread::JoinHandle<()>>,
 }
 
@@ -35,6 +37,7 @@ impl Drop for TlsTestServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
+            let _ = std::net::TcpStream::connect(&self.shutdown_addr);
         }
         if let Some(join) = self.join.take() {
             let _ = join.join();
@@ -46,6 +49,7 @@ impl Drop for MtlsTestServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
+            let _ = std::net::TcpStream::connect(&self.shutdown_addr);
         }
         if let Some(join) = self.join.take() {
             let _ = join.join();
@@ -73,46 +77,41 @@ pub(crate) fn start_tls_server(
         .unwrap();
     let config = Arc::new(config);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind tls server");
-    listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let shutdown_addr = format!("127.0.0.1:{port}");
     let url = format!("https://localhost:{port}");
     let handler = Arc::new(handler);
     let (tx, rx) = mpsc::channel();
     let join = thread::spawn(move || {
-        loop {
+        for stream in listener.incoming() {
             if rx.try_recv().is_ok() {
                 break;
             }
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let config = Arc::clone(&config);
-                    let handler = Arc::clone(&handler);
-                    thread::spawn(move || {
-                        let Ok(conn) = rustls::ServerConnection::new(config) else {
-                            return;
-                        };
-                        let mut tls = rustls::StreamOwned::new(conn, stream);
-                        let mut reader = BufReader::new(&mut tls);
-                        let Some(req) = read_request(&mut reader) else {
-                            return;
-                        };
-                        let resp = handler(req);
-                        let tls = reader.into_inner();
-                        write_response(tls, resp);
-                    });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => break,
-            }
+            let Ok(stream) = stream else {
+                break;
+            };
+            let config = Arc::clone(&config);
+            let handler = Arc::clone(&handler);
+            thread::spawn(move || {
+                let Ok(conn) = rustls::ServerConnection::new(config) else {
+                    return;
+                };
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                let mut reader = BufReader::new(&mut tls);
+                let Some(req) = read_request(&mut reader) else {
+                    return;
+                };
+                let resp = handler(req);
+                let tls = reader.into_inner();
+                write_response(tls, resp);
+            });
         }
     });
     TlsTestServer {
         url,
         ca_cert_path,
         shutdown: Some(tx),
+        shutdown_addr,
         join: Some(join),
     }
 }
@@ -178,42 +177,38 @@ pub(crate) fn start_invalid_certificate_verify_server() -> TlsTestServer {
         .with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)));
     let config = Arc::new(config);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind invalid signature TLS server");
-    listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let shutdown_addr = format!("127.0.0.1:{port}");
     let url = format!("https://localhost:{port}");
     let (tx, rx) = mpsc::channel();
     let join = thread::spawn(move || {
-        loop {
+        for stream in listener.incoming() {
             if rx.try_recv().is_ok() {
                 break;
             }
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let config = Arc::clone(&config);
-                    thread::spawn(move || {
-                        let Ok(conn) = rustls::ServerConnection::new(config) else {
-                            return;
-                        };
-                        let mut tls = rustls::StreamOwned::new(conn, stream);
-                        let mut reader = BufReader::new(&mut tls);
-                        let Some(_) = read_request(&mut reader) else {
-                            return;
-                        };
-                        let tls = reader.into_inner();
-                        write_response(tls, TestResponse::ok("invalid signature accepted"));
-                    });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => break,
-            }
+            let Ok(stream) = stream else {
+                break;
+            };
+            let config = Arc::clone(&config);
+            thread::spawn(move || {
+                let Ok(conn) = rustls::ServerConnection::new(config) else {
+                    return;
+                };
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                let mut reader = BufReader::new(&mut tls);
+                let Some(_) = read_request(&mut reader) else {
+                    return;
+                };
+                let tls = reader.into_inner();
+                write_response(tls, TestResponse::ok("invalid signature accepted"));
+            });
         }
     });
     TlsTestServer {
         url,
         ca_cert_path,
         shutdown: Some(tx),
+        shutdown_addr,
         join: Some(join),
     }
 }
@@ -246,8 +241,8 @@ pub(crate) fn start_h2_tls_server_with_accept_delay(
     config.alpn_protocols = vec![b"h2".to_vec()];
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind h2 tls server");
-    listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let shutdown_addr = format!("127.0.0.1:{port}");
     let url = format!("https://localhost:{port}");
     let handler: Arc<dyn Fn(TestRequest) -> TestResponse + Send + Sync> = Arc::new(handler);
     let (tx, rx) = mpsc::channel();
@@ -256,39 +251,35 @@ pub(crate) fn start_h2_tls_server_with_accept_delay(
             .enable_all()
             .build()
             .unwrap();
-        loop {
+        for stream in listener.incoming() {
             if rx.try_recv().is_ok() {
                 break;
             }
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let _ = stream.set_nonblocking(true);
-                    let acceptor = acceptor.clone();
-                    let handler = Arc::clone(&handler);
-                    runtime.block_on(async move {
-                        let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
-                            return;
-                        };
-                        if !accept_delay.is_zero() {
-                            tokio::time::sleep(accept_delay).await;
-                        }
-                        let Ok(tls) = acceptor.accept(stream).await else {
-                            return;
-                        };
-                        serve_test_h2_connection(tls, handler).await;
-                    });
+            let Ok(stream) = stream else {
+                break;
+            };
+            let _ = stream.set_nonblocking(true);
+            let acceptor = acceptor.clone();
+            let handler = Arc::clone(&handler);
+            runtime.block_on(async move {
+                let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
+                    return;
+                };
+                if !accept_delay.is_zero() {
+                    tokio::time::sleep(accept_delay).await;
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => break,
-            }
+                let Ok(tls) = acceptor.accept(stream).await else {
+                    return;
+                };
+                serve_test_h2_connection(tls, handler).await;
+            });
         }
     });
     TlsTestServer {
         url,
         ca_cert_path,
         shutdown: Some(tx),
+        shutdown_addr,
         join: Some(join),
     }
 }
@@ -451,42 +442,36 @@ pub(crate) fn start_mtls_server() -> MtlsTestServer {
         .unwrap();
     let config = Arc::new(config);
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mtls server");
-    listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let shutdown_addr = format!("127.0.0.1:{port}");
     let url = format!("https://localhost:{port}");
     let (tx, rx) = mpsc::channel();
     let join = thread::spawn(move || {
-        loop {
+        for stream in listener.incoming() {
             if rx.try_recv().is_ok() {
                 break;
             }
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let config = Arc::clone(&config);
-                    thread::spawn(move || {
-                        let Ok(conn) = rustls::ServerConnection::new(config) else {
-                            return;
-                        };
-                        let mut tls = rustls::StreamOwned::new(conn, stream);
-                        let mut reader = BufReader::new(&mut tls);
-                        let Some(req) = read_request(&mut reader) else {
-                            return;
-                        };
-                        let resp = if req.path == "/" {
-                            TestResponse::ok("mtls-success")
-                        } else {
-                            TestResponse::status(404, "Not Found", "")
-                        };
-                        let tls = reader.into_inner();
-                        write_response(tls, resp);
-                    });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => break,
-            }
+            let Ok(stream) = stream else {
+                break;
+            };
+            let config = Arc::clone(&config);
+            thread::spawn(move || {
+                let Ok(conn) = rustls::ServerConnection::new(config) else {
+                    return;
+                };
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                let mut reader = BufReader::new(&mut tls);
+                let Some(req) = read_request(&mut reader) else {
+                    return;
+                };
+                let resp = if req.path == "/" {
+                    TestResponse::ok("mtls-success")
+                } else {
+                    TestResponse::status(404, "Not Found", "")
+                };
+                let tls = reader.into_inner();
+                write_response(tls, resp);
+            });
         }
     });
 
@@ -497,6 +482,7 @@ pub(crate) fn start_mtls_server() -> MtlsTestServer {
         client_key_path,
         client_combined_path,
         shutdown: Some(tx),
+        shutdown_addr,
         join: Some(join),
     }
 }

@@ -17,6 +17,7 @@ pub(crate) struct HttpsProxyTestServer {
     pub(crate) client_key_path: PathBuf,
     pub(crate) requests: Arc<Mutex<Vec<TestRequest>>>,
     pub(crate) shutdown: Option<mpsc::Sender<()>>,
+    shutdown_addr: String,
     pub(crate) join: Option<thread::JoinHandle<()>>,
 }
 
@@ -30,6 +31,7 @@ impl Drop for HttpsProxyTestServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
+            let _ = TcpStream::connect(&self.shutdown_addr);
         }
         if let Some(join) = self.join.take() {
             let _ = join.join();
@@ -232,41 +234,35 @@ pub(crate) fn start_https_proxy(require_client_auth: bool) -> HttpsProxyTestServ
     let config = Arc::new(config);
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTPS proxy");
-    listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
+    let shutdown_addr = format!("127.0.0.1:{port}");
     let url = format!("https://localhost:{port}");
     let requests = Arc::new(Mutex::new(Vec::new()));
     let requests_for_thread = Arc::clone(&requests);
     let (tx, rx) = mpsc::channel();
     let join = thread::spawn(move || {
-        loop {
+        for stream in listener.incoming() {
             if rx.try_recv().is_ok() {
                 break;
             }
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let config = Arc::clone(&config);
-                    let requests = Arc::clone(&requests_for_thread);
-                    thread::spawn(move || {
-                        let Ok(conn) = rustls::ServerConnection::new(config) else {
-                            return;
-                        };
-                        let mut tls = rustls::StreamOwned::new(conn, stream);
-                        let mut reader = BufReader::new(&mut tls);
-                        let Some(req) = read_request(&mut reader) else {
-                            return;
-                        };
-                        requests.lock().unwrap().push(req);
-                        let tls = reader.into_inner();
-                        write_response(tls, TestResponse::ok("proxied"));
-                    });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => break,
-            }
+            let Ok(stream) = stream else {
+                break;
+            };
+            let config = Arc::clone(&config);
+            let requests = Arc::clone(&requests_for_thread);
+            thread::spawn(move || {
+                let Ok(conn) = rustls::ServerConnection::new(config) else {
+                    return;
+                };
+                let mut tls = rustls::StreamOwned::new(conn, stream);
+                let mut reader = BufReader::new(&mut tls);
+                let Some(req) = read_request(&mut reader) else {
+                    return;
+                };
+                requests.lock().unwrap().push(req);
+                let tls = reader.into_inner();
+                write_response(tls, TestResponse::ok("proxied"));
+            });
         }
     });
 
@@ -277,6 +273,7 @@ pub(crate) fn start_https_proxy(require_client_auth: bool) -> HttpsProxyTestServ
         client_key_path,
         requests,
         shutdown: Some(tx),
+        shutdown_addr,
         join: Some(join),
     }
 }
