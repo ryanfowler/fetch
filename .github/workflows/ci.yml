@@ -70,4 +70,6 @@ jobs:
         run: choco install protoc -y
 
       - name: Rust integration tests against Rust binary
-        run: cargo test --locked --all-features --test cli --test formatting --test grpc --test har --test http --test install --test network --test terminal --test update --test websocket -- --test-threads=2
+        # Each test case launches fetch as a child process. Use the optimized
+        # binary to avoid repeatedly loading the large debuggable Windows binary.
+        run: cargo test --release --locked --all-features --test cli --test formatting --test grpc --test har --test http --test install --test network --test terminal --test update --test websocket -- --test-threads=2
