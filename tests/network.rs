@@ -1697,7 +1697,9 @@ fn dns_over_https_udp_and_inspect_dns_cases() {
     assert_exit(&res, 0);
     assert!(res.stderr.contains("204 No Content"));
     let wire_requests = wire_requests.lock().unwrap();
-    assert_eq!(wire_requests.len(), 2);
+    // A positive family can complete before the other DoH exchange reaches
+    // the server. The resolver then cancels the pending exchange by design.
+    assert!((1..=2).contains(&wire_requests.len()));
     assert!(wire_requests.iter().all(|req| req.method == "POST"));
     assert!(wire_requests.iter().all(|req| req.path == "/dns-query"));
     drop(wire_requests);
