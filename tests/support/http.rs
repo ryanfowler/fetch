@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub(crate) const PARTIAL_REPLAY_BODY_PREFIX_BYTES: usize = 1024 * 1024;
+pub(crate) const PARTIAL_REPLAY_BODY_PREFIX_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct TestRequest {
@@ -183,6 +183,9 @@ impl PartialBodyReplayServer {
             while Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream
+                            .set_nonblocking(false)
+                            .expect("set partial body stream blocking");
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
                         let reader_stream = stream.try_clone().expect("clone request stream");
@@ -202,6 +205,8 @@ impl PartialBodyReplayServer {
                                 stream,
                                 "Content-Length: 1073741824\r\nConnection: close\r\n\r\n"
                             );
+                            // The declared body is huge. A small prefix keeps the response
+                            // incomplete without blocking the macOS test server on a large write.
                             let body = vec![b'x'; PARTIAL_REPLAY_BODY_PREFIX_BYTES];
                             let _ = stream.write_all(&body);
                             let _ = stream.flush();
