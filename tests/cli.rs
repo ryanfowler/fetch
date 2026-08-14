@@ -608,11 +608,13 @@ fn skill_uninstall_rechecks_modifications_after_confirmation() {
 
     let pair = open_pty(24, 100, 0, 0);
     let capture = start_pty_capture(&pair.master);
+    drop(pair.master);
     let mut command = Command::new(fetch_bin());
     command.args(["--uninstall-skill", "pi"]);
     command.env("HOME", &home_value).env("NO_COLOR", "");
     configure_pty_child(&mut command, &pair.slave);
     let mut child = command.spawn().unwrap();
+    drop(command);
     drop(pair.slave);
 
     capture.wait_for("Uninstall the fetch skill? [y/N]", Duration::from_secs(5));
@@ -620,12 +622,16 @@ fn skill_uninstall_rechecks_modifications_after_confirmation() {
     fs::write(&skill, "modified while confirmation was pending\n").unwrap();
     let mut input = capture.file.try_clone().unwrap();
     input.write_all(b"y\n").unwrap();
+    drop(input);
 
     let status = child.wait().unwrap();
+    let output = capture.finish();
     assert!(!status.success());
     assert!(skill.exists(), "modified installation was removed");
-    assert!(capture.output().contains("refusing to remove modified"));
-    capture.close();
+    assert!(
+        output.contains("refusing to remove modified"),
+        "PTY output did not contain the modification guard error:\n{output}"
+    );
 }
 
 #[test]
