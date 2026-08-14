@@ -84,6 +84,6 @@ windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Netw
 [dev-dependencies]
 assert_cmd = "=2.2.2"
 predicates = "=3.1.4"
-rcgen = { version = "=0.14.8", features = ["aws_lc_rs"] }
+rcgen = { version = "=0.14.9", features = ["aws_lc_rs"] }
 tempfile = "=3.27.0"
 wait-timeout = "=0.2.1"
