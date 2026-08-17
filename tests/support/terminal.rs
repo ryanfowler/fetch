@@ -72,6 +72,9 @@ pub(crate) fn run_image_render_pty(env: Vec<(String, String)>) -> String {
     }
     configure_pty_child(&mut cmd, &pty.slave);
     let mut child = cmd.spawn().expect("spawn fetch under PTY");
+    // Close the parent-owned slave handles so the capture thread can observe
+    // EOF after the child exits.
+    drop(cmd);
     drop(pty.slave);
     let capture = start_pty_capture(&pty.master);
     let status = wait_child(&mut child, Duration::from_secs(3))
@@ -88,10 +91,8 @@ pub(crate) fn run_image_render_pty(env: Vec<(String, String)>) -> String {
         "fetch exited with {status}; PTY output:\n{}",
         capture.output()
     );
-    let output = capture.output();
     drop(pty.master);
-    capture.close();
-    output
+    capture.finish()
 }
 
 #[cfg(unix)]
