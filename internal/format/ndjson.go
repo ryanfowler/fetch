@@ -30,22 +30,30 @@ func FormatJSONLine(buf []byte, p *core.Printer) error {
 	return nil
 }
 
-// FormatNDJSON streams the provided newline-delimited JSON to the Printer,
-// flushing every line.
+// FormatNDJSON streams newline-delimited JSON to the Printer, flushing after
+// each record. It uses explicit line boundaries so a partial record never
+// causes the decoder to retain an unbounded stream prefix.
 func FormatNDJSON(r io.Reader, p *core.Printer) error {
-	dec := json.NewDecoder(r)
-	dec.UseNumber()
+	lines := newLineReader(r)
+	lineNumber := 0
 	for {
-		err := formatNDJSONValue(dec, p)
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
+		line, ok, err := lines.next()
 		if err != nil {
 			p.Discard()
-			return err
+			return formatStreamingError("NDJSON", lineNumber+1, err)
+		}
+		if !ok {
+			return nil
+		}
+		lineNumber++
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
 		}
 
-		p.WriteString("\n")
+		if err := FormatJSONLine(line, p); err != nil {
+			p.Discard()
+			return formatStreamingError("NDJSON", lineNumber, err)
+		}
 		if err := p.Flush(); err != nil {
 			p.Discard()
 			return err

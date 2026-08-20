@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -41,6 +42,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 	}
 
 	var hadRedirects bool
+	var compressedSSERetried bool
 	for attempt := range maxAttempts {
 		// Check for cancellation before each attempt.
 		if err := ctx.Err(); err != nil {
@@ -97,6 +99,32 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 		}
 
 		resp, doErr := doOnce(r, c, attemptReq, replayer)
+
+		// Some servers and intermediaries buffer compressed event streams until
+		// the response is complete. In automatic compression mode, retry a
+		// safe SSE request once without the generated Accept-Encoding header so
+		// events can be delivered incrementally. This retry uses the current
+		// attempt context, so it cannot reset the request timeout budget.
+		if !compressedSSERetried && isCompressedSSEResponse(resp) {
+			compressedSSERetried = true
+			if isSafeStreamingMethod(attemptReq.Method) {
+				if retryReq, ok := client.UncompressedRequest(attemptReq); ok {
+					drainCompressedSSE(resp.Body, attemptReq.Context())
+					_ = resp.Body.Close()
+					if err := attemptReq.Context().Err(); err != nil {
+						cancelAttempt()
+						return 0, context.Cause(attemptReq.Context())
+					}
+					if err := signAWSRequest(r, retryReq); err != nil {
+						cancelAttempt()
+						return 0, err
+					}
+					resp, doErr = doOnce(r, c, retryReq, replayer)
+				}
+			} else if client.AutomaticCompressionEnabled(attemptReq) {
+				warnCompressedSSE(r)
+			}
+		}
 
 		retryable, retryAfter := shouldRetry(resp, doErr)
 		isLastAttempt := attempt == maxAttempts-1
@@ -286,6 +314,58 @@ func isKnownScheme(s string) bool {
 		}
 	}
 	return false
+}
+
+const (
+	maxCompressedSSEDrainBytes = 64 << 10
+	compressedSSEDrainTimeout  = 100 * time.Millisecond
+)
+
+func isSafeStreamingMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
+}
+
+func isCompressedSSEResponse(resp *http.Response) bool {
+	if resp == nil || resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+		return false
+	}
+	for _, value := range resp.Header.Values("Content-Encoding") {
+		for encoding := range strings.SplitSeq(value, ",") {
+			switch strings.ToLower(strings.TrimSpace(encoding)) {
+			case "gzip", "br", "zstd":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// drainCompressedSSE reads only a small prefix before closing the first
+// response. The short child deadline is important for a live stream: waiting
+// for EOF would defeat the retry and could leave a request goroutine blocked.
+func drainCompressedSSE(body io.Reader, parent context.Context) {
+	closer, ok := body.(io.Closer)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, compressedSSEDrainTimeout)
+	defer cancel()
+	stop := closeReaderOnContext(ctx, body)
+	defer stop()
+
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxCompressedSSEDrainBytes))
+	_ = closer.Close()
+}
+
+func warnCompressedSSE(r *Request) {
+	if r == nil || r.Verbosity == core.VSilent {
+		return
+	}
+	core.WriteWarningMsg(r.PrinterHandle.Stderr(), "compressed SSE was not retried without Accept-Encoding because the request method is not safe")
 }
 
 // shouldRetry determines if a request should be retried based on the response
