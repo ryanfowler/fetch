@@ -262,6 +262,10 @@ func Parse(args []string) (*App, error) {
 			return &app, err
 		}
 	}
+	if app.Method == "" && app.hasRequestBody() {
+		app.Method = "POST"
+	}
+
 	if err := validateSkillMode(&app, cli); err != nil {
 		return &app, err
 	}
@@ -547,6 +551,7 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 	if r.URL == "" {
 		return fmt.Errorf("no URL provided")
 	}
+	a.SchemelessURL = !hasAuthorityScheme(r.URL)
 	u, isWS, err := parseURL(r.URL)
 	if err != nil {
 		return err
@@ -556,14 +561,16 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 	// Apply --proto restrictions.
 	if r.AllowedProto != "" {
 		allowHTTP, allowHTTPS := curl.ParseAllowedProto(r.AllowedProto)
-		switch u.Scheme {
-		case "":
-			// No explicit scheme: pick the most restrictive allowed one.
+		if a.SchemelessURL {
+			// A schemeless URL may be forced to the only protocol allowed by
+			// curl's --proto setting.
 			if allowHTTPS && !allowHTTP {
 				u.Scheme = "https"
 			} else if allowHTTP && !allowHTTPS {
 				u.Scheme = "http"
 			}
+		}
+		switch u.Scheme {
 		case "http":
 			if !allowHTTP {
 				return fmt.Errorf("protocol 'http' not allowed by --proto %q", r.AllowedProto)

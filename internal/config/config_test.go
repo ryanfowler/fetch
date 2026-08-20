@@ -101,6 +101,28 @@ func TestMergeCombinesCertificateAndKeyFromDifferentScopes(t *testing.T) {
 	}
 }
 
+func TestParseHeaderPreservesValueWhitespace(t *testing.T) {
+	c := &Config{}
+	if err := c.ParseHeader(" X-Test :  value  "); err != nil {
+		t.Fatal(err)
+	}
+	want := []core.KeyVal[string]{{Key: "X-Test", Val: " value  "}}
+	if !reflect.DeepEqual(c.Headers, want) {
+		t.Fatalf("headers = %+v, want %+v", c.Headers, want)
+	}
+}
+
+func TestParseQueryPreservesParameterValueWhitespace(t *testing.T) {
+	c := &Config{}
+	if err := c.ParseQuery(" key = hello "); err != nil {
+		t.Fatal(err)
+	}
+	want := []core.KeyVal[string]{{Key: "key", Val: " hello "}}
+	if !reflect.DeepEqual(c.QueryParams, want) {
+		t.Fatalf("query params = %+v, want %+v", c.QueryParams, want)
+	}
+}
+
 func TestParseRetry(t *testing.T) {
 	t.Run("negative value", func(t *testing.T) {
 		c := &Config{}

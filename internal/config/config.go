@@ -730,9 +730,13 @@ func (c *Config) ParseFormat(value string) error {
 }
 
 func (c *Config) ParseHeader(value string) error {
-	key, val, ok := core.CutTrimmed(value, ":")
+	key, val, ok := strings.Cut(value, ":")
+	key = strings.TrimSpace(key)
 	if !ok || key == "" || !httpguts.ValidHeaderFieldName(key) {
 		return core.NewValueError("header", value, "must be in the format NAME:VALUE with a valid non-empty header name", c.isFile)
+	}
+	if len(val) > 0 && (val[0] == ' ' || val[0] == '\t') {
+		val = val[1:]
 	}
 	c.Headers = append(c.Headers, core.KeyVal[string]{Key: key, Val: val})
 	return nil
@@ -861,8 +865,8 @@ func (c *Config) ParseProxy(value string) error {
 }
 
 func (c *Config) ParseQuery(value string) error {
-	key, val, _ := core.CutTrimmed(value, "=")
-	c.QueryParams = append(c.QueryParams, core.KeyVal[string]{Key: key, Val: val})
+	key, val, _ := strings.Cut(value, "=")
+	c.QueryParams = append(c.QueryParams, core.KeyVal[string]{Key: strings.TrimSpace(key), Val: val})
 	return nil
 }
 

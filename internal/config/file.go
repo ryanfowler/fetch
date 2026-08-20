@@ -118,8 +118,8 @@ func parseFile(path, s string) (*File, error) {
 	hostLines := make(map[string]int)
 
 	config := f.Global
-	for num, line := range lines(s) {
-		line = strings.TrimSpace(line)
+	for num, rawLine := range lines(s) {
+		line := strings.TrimSpace(rawLine)
 
 		if line == "" || line[0] == '#' {
 			// Skip empty lines and comments.
@@ -154,12 +154,17 @@ func parseFile(path, s string) (*File, error) {
 			continue
 		}
 
-		// Pares a key and value pair.
-		key, val, ok := strings.Cut(line, "=")
+		// Parse a key and value pair. Keep value whitespace for headers and
+		// queries; other config values retain their historical trimming.
+		key, val, ok := strings.Cut(strings.TrimLeft(rawLine, " \t"), "=")
 		if !ok {
 			return nil, newFileError(path, num, fmt.Errorf("invalid key/value pair '%s'", line))
 		}
-		key, val = strings.TrimSpace(key), strings.TrimSpace(val)
+		key = strings.TrimSpace(key)
+		val = strings.TrimLeft(val, " \t")
+		if key != "header" && key != "query" {
+			val = strings.TrimSpace(val)
+		}
 
 		err := config.Set(key, val)
 		if err != nil {

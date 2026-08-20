@@ -163,6 +163,7 @@ func main() {
 		ClientCert:       clientCert,
 		Clobber:          app.Clobber,
 		ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
+		Article:          app.Article,
 		ContentType:      app.ContentType,
 		Copy:             getValue(app.Cfg.Copy),
 		Data:             app.Data,
@@ -208,6 +209,7 @@ func main() {
 		Verbosity:        verbosity,
 		WS:               app.WS,
 		WSInteractive:    app.WSInteractive,
+		SchemelessURL:    app.SchemelessURL,
 	}
 	if app.HasGRPCDiscovery() {
 		status := fetch.DiscoverGRPC(ctx, &req)

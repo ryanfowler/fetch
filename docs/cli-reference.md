@@ -10,7 +10,7 @@ fetch [OPTIONS] [URL]
 
 ## URL Handling
 
-When no scheme is provided, `fetch` defaults to HTTPS. Loopback addresses (`localhost`, `127.0.0.1`) default to HTTP.
+When no scheme is provided, `fetch` defaults to HTTPS for hostnames. `localhost` and all IP literals default to HTTP. Dry-run output includes the normalized absolute URL. If a schemeless HTTPS connection fails during setup, `fetch` suggests the equivalent `http://` URL for plaintext services.
 
 ```sh
 fetch example.com          # https://example.com
@@ -18,11 +18,15 @@ fetch localhost:3000       # http://localhost:3000
 fetch http://example.com   # Force HTTP
 ```
 
+A timeout value of `0` disables that deadline. `--timeout 0` removes the
+request deadline, and `--connect-timeout 0` removes the connection setup
+deadline.
+
 ## HTTP Method
 
 ### `-m, --method METHOD`
 
-Specify the HTTP method. Default: `GET`.
+Specify the HTTP method. Default: `GET`, or `POST` when a request-body flag is used without an explicit method.
 
 **Alias**: `-X`
 
@@ -44,7 +48,7 @@ fetch -H "X-Custom: value" -H "Accept: application/json" example.com
 
 ### `-q, --query KEY=VALUE`
 
-Append query parameters to the URL. Can be used multiple times.
+Append query parameters to the URL in input order. Duplicate parameters are preserved. Can be used multiple times.
 
 ```sh
 fetch -q page=1 -q limit=50 example.com

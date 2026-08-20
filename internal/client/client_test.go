@@ -9,12 +9,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ryanfowler/fetch/internal/core"
 	imultipart "github.com/ryanfowler/fetch/internal/multipart"
 
+	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 )
@@ -156,6 +158,89 @@ func TestNewRequestUsesLazyReplayableFileBody(t *testing.T) {
 	}
 }
 
+func TestCLI003RequestDefaultsAndOrdering(t *testing.T) {
+	u, err := url.Parse("https://example.com/path?z=old&space=hello+world")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(ClientConfig{})
+
+	req, err := c.NewRequest(context.Background(), RequestConfig{
+		Data: strings.NewReader("body"),
+		Headers: []core.KeyVal[string]{
+			{Key: "X-Test", Val: "one"},
+			{Key: "Accept", Val: "application/xml"},
+			{Key: "X-Test", Val: "two"},
+		},
+		QueryParams: []core.KeyVal[string]{
+			{Key: "a", Val: "one"},
+			{Key: "z", Val: "two"},
+			{Key: "space", Val: " hello "},
+		},
+		URL: u,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer req.Body.Close()
+
+	if req.Method != http.MethodPost {
+		t.Fatalf("method = %q, want POST", req.Method)
+	}
+	if got := req.Header.Values("X-Test"); !slices.Equal(got, []string{"one", "two"}) {
+		t.Fatalf("X-Test values = %q, want [one two]", got)
+	}
+	if got := req.Header.Get("Accept"); got != "application/xml" {
+		t.Fatalf("Accept = %q, want explicit value", got)
+	}
+	if got := req.Header.Get("Accept-Encoding"); got != "gzip, br, zstd" {
+		t.Fatalf("Accept-Encoding = %q, want gzip, br, zstd", got)
+	}
+	withoutEncoding, err := c.NewRequest(context.Background(), RequestConfig{
+		Headers: []core.KeyVal[string]{{Key: "Accept-Encoding", Val: ""}},
+		URL:     mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := withoutEncoding.Header.Values("Accept-Encoding"); !slices.Equal(got, []string{""}) {
+		t.Fatalf("explicit empty Accept-Encoding = %q, want empty value", got)
+	}
+	if got := req.URL.RawQuery; got != "z=old&space=hello+world&a=one&z=two&space=+hello+" {
+		t.Fatalf("RawQuery = %q, want appended order and preserved spaces", got)
+	}
+
+	article, err := c.NewRequest(context.Background(), RequestConfig{Article: true, URL: mustURL(t, "https://example.com")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := article.Header.Get("Accept"); got != "text/html, application/xhtml+xml;q=0.9, text/markdown;q=0.8, */*;q=0.1" {
+		t.Fatalf("article Accept = %q", got)
+	}
+
+	explicitGet, err := c.NewRequest(context.Background(), RequestConfig{
+		Data:   strings.NewReader("body"),
+		Method: http.MethodGet,
+		URL:    mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer explicitGet.Body.Close()
+	if explicitGet.Method != http.MethodGet {
+		t.Fatalf("explicit method = %q, want GET", explicitGet.Method)
+	}
+}
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
 func TestDoClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
 	body := &trackingReadCloser{
 		Reader: bytes.NewReader([]byte("not a valid compressed body")),
@@ -196,6 +281,37 @@ func TestDoClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
 	}
 	if !body.closed {
 		t.Fatal("response body was not closed")
+	}
+}
+
+func TestDoDecodesBrotliContentEncoding(t *testing.T) {
+	const data = "this is Brotli encoded data"
+	body := brotliEncode(t, []byte(data))
+	c := &Client{
+		c: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header: http.Header{
+						"Content-Encoding": []string{"br"},
+					},
+					Body:    io.NopCloser(bytes.NewReader(body)),
+					Request: req,
+				}, nil
+			}),
+		},
+	}
+	resp, err := c.Do(newEncodingRequestedRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	decoded, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != data {
+		t.Fatalf("decoded body = %q, want %q", decoded, data)
 	}
 }
 
@@ -267,7 +383,7 @@ func TestDoDecodesMultipleContentEncodingHeaderValues(t *testing.T) {
 	}
 }
 
-func TestDoLeavesUnsupportedStackedContentEncodingUntouched(t *testing.T) {
+func TestDoLeavesUnknownStackedContentEncodingUntouched(t *testing.T) {
 	body := []byte("not decoded")
 	c := &Client{
 		c: &http.Client{
@@ -275,7 +391,7 @@ func TestDoLeavesUnsupportedStackedContentEncodingUntouched(t *testing.T) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Header: http.Header{
-						"Content-Encoding": []string{"br, gzip"},
+						"Content-Encoding": []string{"unknown, gzip"},
 					},
 					Body:    io.NopCloser(bytes.NewReader(body)),
 					Request: req,
@@ -530,6 +646,20 @@ func gzipEncode(t *testing.T, data []byte) []byte {
 		t.Fatal(err)
 	}
 	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func brotliEncode(t *testing.T, data []byte) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	bw := brotli.NewWriter(&buf)
+	if _, err := bw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := bw.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes()

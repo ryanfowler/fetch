@@ -59,14 +59,15 @@ HTTP/2.0 200 OK
 }
 ```
 
-When no scheme is provided, `fetch` defaults to HTTPS:
+When no scheme is provided, `fetch` defaults to HTTPS for hostnames. All IP
+literals default to HTTP:
 
 ```sh
 fetch example.com        # Uses https://example.com
-fetch 192.168.1.1:8080   # Uses https://192.168.1.1:8080
+fetch 192.168.1.1:8080   # Uses http://192.168.1.1:8080
 ```
 
-Loopback addresses default to HTTP for local development:
+`localhost` also defaults to HTTP for local development:
 
 ```sh
 fetch localhost:3000     # Uses http://localhost:3000
@@ -152,8 +153,8 @@ fetch -vv httpbin.org/json
 
 ```
 > GET /json HTTP/1.1
-> accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
-> accept-encoding: gzip, zstd
+> accept: application/json, */*;q=0.5
+> accept-encoding: gzip, br, zstd
 > host: httpbin.org
 > user-agent: fetch/v0.17.3
 >
@@ -186,8 +187,8 @@ fetch -vvv httpbin.org/json
 
 ```
 > GET /json HTTP/1.1
-> accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
-> accept-encoding: gzip, zstd
+> accept: application/json, */*;q=0.5
+> accept-encoding: gzip, br, zstd
 > host: httpbin.org
 > user-agent: fetch/v0.17.3
 >
@@ -217,13 +218,14 @@ This is useful for diagnosing latency issues, verifying TLS configuration, and u
 Preview the exact request that would be sent without actually making the HTTP call:
 
 ```sh
-fetch --dry-run -vv -j '{"hello":"world"}' -m POST httpbin.org/post
+fetch --dry-run -vv -j '{"hello":"world"}' httpbin.org/post
 ```
 
 ```
 > POST /post HTTP/1.1
-> accept: application/json,application/vnd.msgpack,application/xml,image/webp,*/*
-> accept-encoding: gzip, zstd
+> url: https://httpbin.org/post
+> accept: application/json, */*;q=0.5
+> accept-encoding: gzip, br, zstd
 > content-length: 17
 > content-type: application/json
 > host: httpbin.org

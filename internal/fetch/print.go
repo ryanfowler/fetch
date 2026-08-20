@@ -15,6 +15,10 @@ import (
 )
 
 func printRequestMetadata(p *core.Printer, req *http.Request, httpVersion core.HTTPVersion, verbosity core.Verbosity) {
+	printRequestMetadataWithURL(p, req, httpVersion, verbosity, false)
+}
+
+func printRequestMetadataWithURL(p *core.Printer, req *http.Request, httpVersion core.HTTPVersion, verbosity core.Verbosity, showURL bool) {
 	debug := verbosity >= core.VExtraVerbose
 
 	if debug {
@@ -59,6 +63,22 @@ func printRequestMetadata(p *core.Printer, req *http.Request, httpVersion core.H
 	p.Reset()
 
 	p.WriteString("\n")
+	if showURL {
+		if debug {
+			p.WriteRequestPrefix()
+		}
+		p.Set(core.Bold)
+		p.Set(core.Blue)
+		p.WriteString("url")
+		p.Reset()
+		p.WriteString(": ")
+		normalizedURL := *req.URL
+		if normalizedURL.Path == "" && normalizedURL.Host != "" {
+			normalizedURL.Path = "/"
+		}
+		p.WriteString(core.RedactedURL(&normalizedURL))
+		p.WriteString("\n")
+	}
 
 	headers := slices.DeleteFunc(getHeaders(req.Header), func(kv core.KeyVal[string]) bool {
 		return strings.EqualFold(kv.Key, "Host")
