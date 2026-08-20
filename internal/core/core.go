@@ -55,6 +55,39 @@ func (v HTTPVersion) String() string {
 	}
 }
 
+// CompressionMode controls request content-encoding negotiation and response
+// decoding. Unknown means no explicit setting was supplied.
+type CompressionMode int
+
+const (
+	CompressionUnknown CompressionMode = iota
+	CompressionAuto
+	CompressionBrotli
+	CompressionGzip
+	CompressionZstd
+	CompressionOff
+)
+
+// ECHMode controls Encrypted ClientHello discovery and use.
+type ECHMode int
+
+const (
+	ECHUnknown ECHMode = iota
+	ECHAuto
+	ECHOn
+	ECHOff
+)
+
+// PagerMode controls whether formatted terminal output may use a pager.
+type PagerMode int
+
+const (
+	PagerUnknown PagerMode = iota
+	PagerAuto
+	PagerOn
+	PagerOff
+)
+
 // ImageSetting represents the options for displaying images.
 type ImageSetting int
 
@@ -62,7 +95,17 @@ const (
 	ImageUnknown ImageSetting = iota
 	ImageAuto
 	ImageNative
+	ImageExternal
 	ImageOff
+)
+
+// WSMessageMode controls how WebSocket payloads are interpreted.
+type WSMessageMode int
+
+const (
+	WSMessageAuto WSMessageMode = iota
+	WSMessageText
+	WSMessageBinary
 )
 
 // Verbosity represents how verbose the output should be.

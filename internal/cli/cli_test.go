@@ -48,6 +48,124 @@ func TestTLSFlags(t *testing.T) {
 	})
 }
 
+func TestCLI002TargetFlags(t *testing.T) {
+	t.Run("article", func(t *testing.T) {
+		app, err := Parse([]string{"--article", "https://example.com"})
+		if err != nil || !app.Article {
+			t.Fatalf("Parse() = app=%+v, err=%v", app, err)
+		}
+	})
+
+	for _, mode := range []struct {
+		name string
+		want core.CompressionMode
+	}{
+		{"auto", core.CompressionAuto}, {"br", core.CompressionBrotli},
+		{"brotli", core.CompressionBrotli}, {"gzip", core.CompressionGzip},
+		{"zstd", core.CompressionZstd}, {"off", core.CompressionOff},
+	} {
+		t.Run("compress/"+mode.name, func(t *testing.T) {
+			app, err := Parse([]string{"--compress", mode.name, "https://example.com"})
+			if err != nil || app.Cfg.Compress != mode.want {
+				t.Fatalf("Parse() = compress=%v, err=%v; want %v", app.Cfg.Compress, err, mode.want)
+			}
+		})
+	}
+
+	for _, mode := range []string{"auto", "on", "off"} {
+		t.Run("ech/"+mode, func(t *testing.T) {
+			app, err := Parse([]string{"--ech", mode, "https://example.com"})
+			if err != nil || app.Cfg.ECH == core.ECHUnknown {
+				t.Fatalf("Parse() = ech=%v, err=%v", app.Cfg.ECH, err)
+			}
+		})
+	}
+
+	for _, version := range []struct {
+		flag string
+		want core.HTTPVersion
+	}{
+		{"--http1", core.HTTP1}, {"--http2", core.HTTP2}, {"--http3", core.HTTP3},
+	} {
+		t.Run(version.flag, func(t *testing.T) {
+			app, err := Parse([]string{version.flag, "https://example.com"})
+			if err != nil || app.Cfg.HTTP != version.want {
+				t.Fatalf("Parse() = http=%v, err=%v; want %v", app.Cfg.HTTP, err, version.want)
+			}
+		})
+	}
+
+	app, err := Parse([]string{
+		"--har", "capture.har", "--image", "external", "--pager", "on",
+		"--sort-headers",
+		"https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if app.HAR != "capture.har" || app.Cfg.Image != core.ImageExternal || app.Cfg.Pager != core.PagerOn ||
+		app.Cfg.SortHeaders == nil || !*app.Cfg.SortHeaders {
+		t.Fatalf("parsed target flags were not retained: %+v", app)
+	}
+	if app, err := Parse([]string{"--ws-message-mode", "binary", "ws://example.com"}); err != nil || app.WSMessageMode != core.WSMessageBinary {
+		t.Fatalf("WebSocket message mode = %v, err %v", app.WSMessageMode, err)
+	}
+	if app, err := Parse([]string{"--install-skill", "--scope", "project", "--force"}); err != nil || app.InstallSkill != "auto" || app.Scope != "project" || !app.Force {
+		t.Fatalf("skill options = %+v, err %v", app, err)
+	}
+
+	for _, args := range [][]string{
+		{"--install-skill"},
+		{"--install-skill", "codex"},
+		{"--uninstall-skill=all"},
+		{"--skill"},
+	} {
+		if _, err := Parse(args); err != nil {
+			t.Errorf("Parse(%v) error = %v", args, err)
+		}
+	}
+
+	if app, err := Parse([]string{"--no-encode", "https://example.com"}); err != nil || app.Cfg.Compress != core.CompressionOff {
+		t.Fatalf("--no-encode = compress %v, err %v; want off", app.Cfg.Compress, err)
+	}
+	if app, err := Parse([]string{"--compress", "off", "--no-encode", "https://example.com"}); err != nil || app.Cfg.Compress != core.CompressionOff {
+		t.Fatalf("equivalent compression aliases = compress %v, err %v; want off", app.Cfg.Compress, err)
+	}
+	if app, err := Parse([]string{"--pager", "off", "--no-pager", "https://example.com"}); err != nil || app.Cfg.Pager != core.PagerOff {
+		t.Fatalf("equivalent pager aliases = pager %v, err %v; want off", app.Cfg.Pager, err)
+	}
+}
+
+func TestCLI002Validation(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"invalid compress", []string{"--compress", "deflate", "https://example.com"}, "compress"},
+		{"invalid scope", []string{"--scope", "global"}, "scope"},
+		{"scope requires operation", []string{"--scope", "project"}, "requires"},
+		{"force requires operation", []string{"--force"}, "requires"},
+		{"article discard", []string{"--article", "--discard", "https://example.com"}, "article"},
+		{"har stdout", []string{"--har", "-", "https://example.com"}, "har"},
+		{"har empty", []string{"--har=", "https://example.com"}, "har"},
+		{"compression conflict", []string{"--compress", "gzip", "--no-encode", "https://example.com"}, "compress"},
+		{"pager conflict", []string{"--pager", "on", "--no-pager", "https://example.com"}, "pager"},
+		{"repeated compression conflict", []string{"--compress", "gzip", "--compress", "zstd", "https://example.com"}, "compress"},
+		{"invalid skill agent", []string{"--install-skill", "bogus"}, "install-skill"},
+		{"skill URL", []string{"--skill", "https://example.com"}, "skill"},
+		{"message mode URL", []string{"--ws-message-mode", "auto", "https://example.com"}, "ws://"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := Parse(test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse(%v) error = %v, want text containing %q", test.args, err, test.want)
+			}
+		})
+	}
+}
+
 func TestFlagsAlphabeticalOrder(t *testing.T) {
 	app, err := Parse(nil)
 	if err != nil {

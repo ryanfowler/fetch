@@ -52,6 +52,14 @@ func Complete(shell Shell, args []string) string {
 			if !ok {
 				continue
 			}
+			if _, fixed := flag.AliasValues[name]; fixed {
+				if hasVal {
+					return shell.Complete(nil)
+				}
+				if len(args) == 1 {
+					return shell.Complete(nil)
+				}
+			}
 			if flag.Args == "" {
 				// Skip the arg if no arguments are expected.
 				continue
@@ -147,6 +155,9 @@ func completeLongFlag(flags []cli.Flag, long map[string]cli.Flag, value string) 
 		if !ok {
 			return nil
 		}
+		if _, fixed := flag.AliasValues[key]; fixed {
+			return nil
+		}
 		prefix := "--" + key + "="
 		return completeValue(flag, prefix, val)
 	}
@@ -158,6 +169,17 @@ func completeLongFlag(flags []cli.Flag, long map[string]cli.Flag, value string) 
 				Key: "--" + flag.Long,
 				Val: flag.Description,
 			})
+		}
+		for _, alias := range flag.Aliases {
+			if len(flag.AliasValues) == 0 {
+				continue
+			}
+			if len(alias) > 1 && strings.HasPrefix(alias, value) {
+				out = append(out, core.KeyVal[string]{
+					Key: "--" + alias,
+					Val: flag.Description,
+				})
+			}
 		}
 	}
 	return out
@@ -303,6 +325,17 @@ func allFlags(flags []cli.Flag) []core.KeyVal[string] {
 			Key: "--" + flag.Long,
 			Val: flag.Description,
 		})
+		for _, alias := range flag.Aliases {
+			if len(flag.AliasValues) == 0 {
+				continue
+			}
+			if len(alias) > 1 {
+				kvs = append(kvs, core.KeyVal[string]{
+					Key: "--" + alias,
+					Val: flag.Description,
+				})
+			}
+		}
 	}
 	return kvs
 }

@@ -349,6 +349,24 @@ var fromCurlOptions = map[string]bool{
 }
 
 var flagDefinitions = map[string]Flag{
+	"article":   {Conflicts: []string{"discard", "remote-name", "remote-header-name"}},
+	"compress":  {},
+	"no-encode": {},
+	"ech":       {},
+	"har":       {},
+	"pager":     {},
+	"no-pager":  {},
+	"skill":     {Conflicts: []string{"install-skill", "uninstall-skill"}},
+	"install-skill": {
+		Conflicts: []string{"skill", "uninstall-skill"},
+	},
+	"uninstall-skill": {
+		Conflicts: []string{"skill", "install-skill"},
+	},
+	"scope":           {Requires: []string{"install-skill", "uninstall-skill"}},
+	"force":           {Requires: []string{"install-skill", "uninstall-skill"}},
+	"ws-message-mode": {Modes: []OptionMode{ModeWebSocket}},
+
 	"aws-sigv4": {Conflicts: []string{"basic", "bearer", "digest"}, IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
 	"basic":     {Conflicts: []string{"aws-sigv4", "bearer", "digest"}, IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
 	"bearer":    {Conflicts: []string{"aws-sigv4", "basic", "digest"}, IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},

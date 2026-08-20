@@ -236,6 +236,31 @@ fetch --format off example.com   # Disable formatting
 fetch --format on example.com    # Force formatting
 ```
 
+### `--article`
+
+Extract readable HTML as Markdown with YAML frontmatter. Article mode cannot
+be combined with `--discard`, `--remote-name`, or `--remote-header-name`.
+
+```sh
+fetch --article https://example.com/story
+```
+
+### `--compress MODE`
+
+Select content-encoding negotiation and decoding: `auto`, `br` (alias
+`brotli`), `gzip`, `zstd`, or `off`. The compatibility flag `--no-encode` is
+equivalent to `--compress off`; selecting conflicting explicit modes is an
+error.
+
+### `--ech MODE`
+
+Configure Encrypted ClientHello with `auto`, `on`, or `off`.
+
+### `--har PATH`
+
+Record the final HTTP exchange in a HAR 1.2 sidecar at `PATH`. Standard output
+(`-`) is not a valid HAR destination.
+
 ### `--color OPTION`
 
 Control colored output. Values: `auto`, `on`, `off`.
@@ -248,7 +273,8 @@ fetch --color off example.com
 
 ### `--image OPTION`
 
-Control image rendering. Values: `auto`, `native`, `off`.
+Control image rendering. Values: `auto`, `external`, or `off`. The legacy
+`native` spelling remains accepted for compatibility.
 
 - `auto` - Try optimal protocol, fallback to external tools
 - `native` - Use only built-in decoders (JPEG, PNG, TIFF, WebP)
@@ -258,6 +284,34 @@ Control image rendering. Values: `auto`, `native`, `off`.
 fetch --image native example.com/image.png
 fetch --image off example.com/photo.jpg
 ```
+
+### `--pager MODE`
+
+Choose pager behavior with `auto`, `on`, or `off`. `--no-pager` remains a
+compatibility alias for `--pager off`.
+
+### `--sort-headers`
+
+Accepted for compatibility. The Go implementation keeps deterministic
+alphabetical header rendering, so this option is currently a no-op.
+
+### `--ws-message-mode MODE`
+
+Set WebSocket input handling to `auto`, `text`, or `binary`. This option is
+valid only with a `ws://` or `wss://` URL.
+
+## Agent Skill Options
+
+### `--skill`
+
+Print the portable Agent Skill without requiring a URL.
+
+### `--install-skill [AGENT]` / `--uninstall-skill [AGENT]`
+
+Manage the portable skill for `auto`, `agents`, `codex`, `claude`, `gemini`,
+`pi`, or `all`. Use `--scope user|project` to select the destination and
+`--force` to permit replacement/removal of modified files. `--scope` and
+`--force` require an install or uninstall operation.
 
 ### `--no-pager`
 
@@ -449,11 +503,15 @@ fetch --http 3 example.com
 fetch --grpc --http 2 http://localhost:50051/pkg.Svc/Method  # uses h2c
 ```
 
+The compatibility aliases `--http1`, `--http2`, and `--http3` select the
+corresponding version without a value argument.
+
 ## Compression
 
 ### `--no-encode`
 
-Disable automatic gzip/zstd compression.
+Disable automatic content-encoding negotiation and decoding. This is
+equivalent to `--compress off`.
 
 ```sh
 fetch --no-encode example.com

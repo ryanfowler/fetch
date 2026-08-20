@@ -69,6 +69,14 @@ func (f Flag) WithAliases(aliases ...string) Flag {
 	return f
 }
 
+// WithAliasValues gives aliases that normally take an argument a fixed value.
+// It is used for compatibility shorthands such as --http2, which is exactly
+// equivalent to --http 2 but has no separate argument.
+func (f Flag) WithAliasValues(values map[string]string) Flag {
+	f.AliasValues = values
+	return f
+}
+
 // WithValues sets the accepted values for the Flag.
 func (f Flag) WithValues(values []core.KeyVal[string]) Flag {
 	f.Values = values
