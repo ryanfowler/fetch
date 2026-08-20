@@ -60,6 +60,9 @@ func TestIsBrokenPipe(t *testing.T) {
 	if !IsBrokenPipe(errors.New("write failed: broken pipe")) {
 		t.Fatal("broken pipe text was not recognized")
 	}
+	if !IsBrokenPipe(errors.New("write |1: The pipe has been ended.")) {
+		t.Fatal("Windows broken pipe text was not recognized")
+	}
 	if IsBrokenPipe(errors.New("other output error")) {
 		t.Fatal("unrelated error was recognized as broken pipe")
 	}

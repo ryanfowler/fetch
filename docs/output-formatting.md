@@ -327,22 +327,23 @@ fetch -o output.json --clobber example.com/data
 
 ## Pager
 
-When stdout is a terminal and output is large, `fetch` pipes output through `less` for easier navigation.
-
-### Disable Pager
+Use `--pager auto|on|off` to control paging. In `auto` mode, formatted text
+is paged only when stdout is a terminal. `on` forces a pager for text output,
+and `off` disables it. Images bypass the pager. `--no-pager` remains a
+compatibility alias for `--pager off`.
 
 ```sh
-fetch --no-pager example.com/large-response
+fetch --pager off example.com/large-response
+fetch --pager on --format on example.com/large-response
 ```
 
-### Pager Environment
+In automatic mode, `NO_PAGER` disables paging. If `PAGER` is set, fetch parses
+its executable and arguments without a shell. Shell operators are not
+interpreted. If `PAGER` is unset, fetch uses `less -FIRX`; when `LESS` is set,
+fetch invokes `less` without adding default flags.
 
-The pager uses these flags: `less -FIRX`
-
-- `-F` - Quit if output fits on screen
-- `-I` - Case-insensitive search
-- `-R` - Handle ANSI colors
-- `-X` - Don't clear screen on exit
+A pager that exits early is treated as a clean output termination. Startup or
+other nonzero pager failures are reported.
 
 ## Binary Detection
 

@@ -61,6 +61,7 @@ prettier -w .
 - **internal/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
 - **internal/image** - Multipart form implementation.
 - **internal/proto** - Protocol buffer compilation and message handling for gRPC support.
+- **internal/pager** - Shell-free `$PAGER` parsing and bounded pager process lifecycle for help and response output.
 - **internal/resolver** - Shared DNS resolution and dialing for system DNS, UDP DNS, and DNS-over-HTTPS across HTTP, HTTP/3, gRPC, and TLS inspection.
 - **internal/session** - Named cookie sessions with persistent storage across invocations.
 - **internal/update** - Check for updates, download from Github, and self-update.
@@ -87,6 +88,8 @@ prettier -w .
 - Shared timeout budgets and resource-bound helpers live in `internal/core`; finite child operations must reuse the parent budget's absolute deadline, while zero or absent timeouts remain unlimited.
 - Request replayability is explicit: one-shot sources such as stdin are rejected before retry or Digest replay, regular files are reopened with identity/length checks, and dry-run previews do not consume request bytes.
 - Brotli response decoding uses the decoder-only `github.com/google/brotli/go/brotli` module; tests use fixed Brotli fixtures.
+- `-v --help` renders the embedded Markdown CLI reference and uses the configured pager. Pager commands are parsed without a shell, and `NO_PAGER` disables automatic paging.
+- Build information includes target OS/architecture and Go settings; dependency versions appear with `--buildinfo -v`. Ctrl-C exits with status 130, and broken-pipe output exits cleanly.
 5. HTTP client executes request
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 

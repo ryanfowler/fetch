@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 	"runtime/debug"
 )
 
@@ -67,8 +68,12 @@ func GetVCSRevision() string {
 	return ""
 }
 
-// GetBuildInfo returns the JSON encoded build information for the executable.
-func GetBuildInfo() []byte {
+// GetBuildInfo returns JSON encoded build information for the executable.
+// Dependencies are included only when verbose is true. The variadic argument
+// preserves the old internal call form while allowing metadata commands to
+// match the concise and verbose build-info modes.
+func GetBuildInfo(verbose ...bool) []byte {
+	includeDeps := len(verbose) > 0 && verbose[0]
 	type BuildInfo struct {
 		Fetch    string            `json:"fetch"`
 		Go       string            `json:"go,omitzero"`
@@ -76,25 +81,35 @@ func GetBuildInfo() []byte {
 		Deps     map[string]string `json:"deps,omitzero"`
 	}
 
-	bi := BuildInfo{Fetch: Version}
+	bi := BuildInfo{
+		Fetch: Version,
+		Settings: map[string]string{
+			"target_arch": runtime.GOARCH,
+			"target_os":   runtime.GOOS,
+		},
+	}
 	if buildInfo != nil {
 		bi.Go = buildInfo.GoVersion
 
-		if len(buildInfo.Deps) > 0 {
-			bi.Deps = make(map[string]string, len(buildInfo.Deps))
-			for _, dep := range buildInfo.Deps {
-				bi.Deps[dep.Path] = dep.Version
-			}
+		for _, setting := range buildInfo.Settings {
+			bi.Settings[setting.Key] = setting.Value
 		}
 
-		if len(buildInfo.Settings) > 0 {
-			bi.Settings = make(map[string]string, len(buildInfo.Settings))
-			for _, setting := range buildInfo.Settings {
-				bi.Settings[setting.Key] = setting.Value
+		if includeDeps && len(buildInfo.Deps) > 0 {
+			bi.Deps = make(map[string]string, len(buildInfo.Deps))
+			for _, dep := range buildInfo.Deps {
+				version := dep.Version
+				if dep.Replace != nil && dep.Replace.Version != "" {
+					version = dep.Replace.Version
+				}
+				bi.Deps[dep.Path] = version
 			}
 		}
 	}
 
+	if !includeDeps {
+		bi.Deps = nil
+	}
 	out, _ := json.Marshal(bi)
 	return out
 }

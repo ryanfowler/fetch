@@ -125,5 +125,8 @@ func IsBrokenPipe(err error) bool {
 	if err == nil {
 		return false
 	}
-	return errors.Is(err, syscall.EPIPE) || strings.Contains(strings.ToLower(err.Error()), "broken pipe")
+	message := strings.ToLower(err.Error())
+	return errors.Is(err, syscall.EPIPE) ||
+		strings.Contains(message, "broken pipe") ||
+		strings.Contains(message, "pipe has been ended")
 }

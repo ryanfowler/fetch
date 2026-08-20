@@ -16,6 +16,38 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
+func TestHelpVerboseRequested(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "ordinary help", args: []string{"--help"}},
+		{name: "long flags", args: []string{"--verbose", "--help"}, want: true},
+		{name: "short flags", args: []string{"-vh"}, want: true},
+		{name: "clustered verbose flags", args: []string{"-vv", "-h"}, want: true},
+		{name: "after positional", args: []string{"example.com", "--help", "-v"}, want: true},
+		{name: "after separator", args: []string{"--", "--help", "-v"}},
+	}
+	app, err := cli.Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := helpVerboseRequested(test.args, app); got != test.want {
+				t.Fatalf("helpVerboseRequested(%q) = %t, want %t", test.args, got, test.want)
+			}
+		})
+	}
+
+	t.Run("does not treat an option value as verbose", func(t *testing.T) {
+		if helpVerboseRequested([]string{"--method", "-v", "--help"}, app) {
+			t.Fatal("method value was treated as a verbosity flag")
+		}
+	})
+}
+
 func TestParseConfigFileMergesScopesAndRecordsProvenance(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config")
 	configData := []byte("header = X-Global: global\nquery = scope=global\n\n[example.com]\nheader = X-Host: host\nquery = scope=host\n")
@@ -57,6 +89,33 @@ func TestParseConfigFileMergesScopesAndRecordsProvenance(t *testing.T) {
 				t.Fatalf("%s provenance = %v, missing %v", name, provenance.Sources, source)
 			}
 		}
+	}
+}
+
+func TestMetadataPresentationFlags(t *testing.T) {
+	app, err := cli.Parse([]string{"--pager", "on", "-v", "--help"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if app.Cfg.Pager != core.PagerOn {
+		t.Fatalf("pager mode = %v, want on", app.Cfg.Pager)
+	}
+	if getValue(app.Cfg.NoPager) {
+		t.Fatal("--pager on unexpectedly enabled no-pager")
+	}
+}
+
+func TestBuildInfoIncludesTargetSettingsAndOptionalDependencies(t *testing.T) {
+	compact := string(core.GetBuildInfo())
+	if !strings.Contains(compact, `"target_os"`) || !strings.Contains(compact, `"target_arch"`) {
+		t.Fatalf("compact build info lacks target settings: %s", compact)
+	}
+	if strings.Contains(compact, `"deps"`) {
+		t.Fatalf("compact build info unexpectedly includes dependencies: %s", compact)
+	}
+	verbose := string(core.GetBuildInfo(true))
+	if !strings.Contains(verbose, `"deps"`) {
+		t.Fatalf("verbose build info lacks dependencies: %s", verbose)
 	}
 }
 
