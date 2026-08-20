@@ -105,6 +105,7 @@ func parseShortFlags(r *Result, flags string, rest []string) (int, error) {
 				return 0, fmt.Errorf("invalid -m value: %s", v)
 			}
 			r.Timeout = secs
+			r.TimeoutSet = true
 			total += n
 		case 'r':
 			v, n, err := consumeArg()

@@ -34,6 +34,11 @@ type CLI struct {
 	// FromCurlExclusiveFlags lists flags that cannot be used alongside
 	// --from-curl.
 	FromCurlExclusiveFlags []string
+
+	// OnOptionSet receives the canonical option name after a successful
+	// explicit CLI parse. It is used to preserve source provenance.
+	OnOptionSet func(canonical string)
+	registry    *OptionRegistry
 }
 
 type Arguments struct {
@@ -54,37 +59,28 @@ type Flag struct {
 	IsSet       func() bool
 	OS          []string
 	Fn          func(value string) error
+
+	// Registry metadata. These fields keep the option contract next to the
+	// parser definition so validation, help, completion, and diagnostics share
+	// the same source of truth.
+	ConfigKey     string
+	Repeatable    bool
+	Schemes       []string
+	Modes         []OptionMode
+	Conflicts     []string
+	Requires      []string
+	IgnoredIn     []OptionMode
+	IgnoreLabel   string
+	FromCurl      bool
+	UnsupportedIn []OptionMode
 }
 
 // parseWithFlags parses the CLI arguments and returns the long flag map for
 // use in post-parse validation.
 func parseWithFlags(cli *CLI, args []string) (map[string]Flag, error) {
-	short := make(map[string]Flag)
-	long := make(map[string]Flag)
-	for _, flag := range cli.Flags {
-		if !isFlagVisibleOnOS(flag.OS) {
-			continue
-		}
-
-		if flag.Short != "" {
-			assertFlagNotExists(short, flag.Short)
-			short[flag.Short] = flag
-		}
-		if flag.Long != "" {
-			assertFlagNotExists(long, flag.Long)
-			long[flag.Long] = flag
-		}
-
-		for _, alias := range flag.Aliases {
-			if len(alias) == 1 {
-				assertFlagNotExists(short, alias)
-				short[alias] = flag
-			} else {
-				assertFlagNotExists(long, alias)
-				long[alias] = flag
-			}
-		}
-	}
+	registry := cli.Options()
+	short := registry.ShortFlags()
+	long := registry.LongFlags()
 
 	var err error
 	for len(args) > 0 {
@@ -102,7 +98,7 @@ func parseWithFlags(cli *CLI, args []string) (map[string]Flag, error) {
 
 		// Parse short flag(s).
 		if arg[1] != '-' {
-			args, err = parseShortFlag(arg, args, short)
+			args, err = parseShortFlag(cli, arg, args, short)
 			if err != nil {
 				return nil, err
 			}
@@ -111,7 +107,7 @@ func parseWithFlags(cli *CLI, args []string) (map[string]Flag, error) {
 
 		// Parse long flag.
 		if len(arg) > 2 {
-			args, err = parseLongFlag(arg, args, long)
+			args, err = parseLongFlag(cli, arg, args, long)
 			if err != nil {
 				return nil, err
 			}
@@ -132,26 +128,14 @@ func parseWithFlags(cli *CLI, args []string) (map[string]Flag, error) {
 		break
 	}
 
-	// Check exclusive flags.
-	for _, exc := range cli.ExclusiveFlags {
-		err = validateExclusives(exc, long)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Check required flags.
-	for _, req := range cli.RequiredFlags {
-		err = validateRequired(req, long)
-		if err != nil {
-			return nil, err
-		}
+	if err = registry.Validate(); err != nil {
+		return nil, err
 	}
 
 	return long, nil
 }
 
-func parseShortFlag(arg string, args []string, short map[string]Flag) ([]string, error) {
+func parseShortFlag(cli *CLI, arg string, args []string, short map[string]Flag) ([]string, error) {
 	arg = arg[1:]
 
 	for arg != "" {
@@ -188,12 +172,15 @@ func parseShortFlag(arg string, args []string, short map[string]Flag) ([]string,
 		if err := flag.Fn(value); err != nil {
 			return nil, err
 		}
+		if cli.OnOptionSet != nil {
+			cli.OnOptionSet(flag.Long)
+		}
 	}
 
 	return args, nil
 }
 
-func parseLongFlag(arg string, args []string, long map[string]Flag) ([]string, error) {
+func parseLongFlag(cli *CLI, arg string, args []string, long map[string]Flag) ([]string, error) {
 	name, value, ok := strings.Cut(arg[2:], "=")
 
 	flag, exists := long[name]
@@ -217,8 +204,21 @@ func parseLongFlag(arg string, args []string, long map[string]Flag) ([]string, e
 	if err := flag.Fn(value); err != nil {
 		return nil, err
 	}
+	if cli.OnOptionSet != nil {
+		cli.OnOptionSet(flag.Long)
+	}
 
 	return args, nil
+}
+
+// Options returns the registry for this CLI definition. The registry is
+// cached so all consumers of one definition see the same enriched metadata.
+func (cli *CLI) Options() *OptionRegistry {
+	if cli.registry == nil {
+		cli.registry = newOptionRegistry(cli)
+		cli.Flags = cli.registry.Flags()
+	}
+	return cli.registry
 }
 
 func validateExclusives(exc []string, long map[string]Flag) error {
@@ -289,7 +289,7 @@ func Parse(args []string) (*App, error) {
 	if app.URL != nil && !app.WS && app.WSInteractive != core.WSInteractiveAuto {
 		return &app, fmt.Errorf("'--ws-interactive' requires a ws:// or wss:// URL")
 	}
-	if err := validateGRPCModes(&app, long); err != nil {
+	if err := validateGRPCModes(&app, cli, long); err != nil {
 		return &app, err
 	}
 
@@ -310,16 +310,10 @@ func validateSchemeExclusives(app *App, cli *CLI, long map[string]Flag) error {
 		scheme = "wss"
 	}
 
-	exclusives := cli.SchemeExclusiveFlags[scheme]
-	for _, name := range exclusives {
-		if flag, ok := long[name]; ok && flag.IsSet() {
-			return schemeExclusiveError{scheme: scheme, flag: name}
-		}
-	}
-	return nil
+	return cli.Options().ValidateScheme(scheme)
 }
 
-func validateGRPCModes(app *App, long map[string]Flag) error {
+func validateGRPCModes(app *App, cli *CLI, long map[string]Flag) error {
 	if !app.HasProtoSchema() && !app.HasGRPCMode() {
 		return nil
 	}
@@ -332,37 +326,23 @@ func validateGRPCModes(app *App, long map[string]Flag) error {
 		return newRequiredFlagError(name, []string{"grpc", "grpc-list", "grpc-describe"})
 	}
 
-	if app.GRPC && app.GRPCDescribe != "" {
-		return newExclusiveFlagsError("grpc", "grpc-describe")
-	}
-	if app.GRPC && app.GRPCList {
-		return newExclusiveFlagsError("grpc", "grpc-list")
-	}
-	if app.GRPCDescribe != "" && app.GRPCList {
-		return newExclusiveFlagsError("grpc-describe", "grpc-list")
-	}
-
 	if !app.HasGRPCDiscovery() {
 		return nil
 	}
 
-	for _, name := range []string{
-		"data", "json", "xml", "form", "multipart",
-		"edit", "output", "remote-name", "remote-header-name",
-		"discard", "method",
-	} {
-		if flag, ok := long[name]; ok && flag.IsSet() {
-			if app.GRPCDescribe != "" {
-				return newExclusiveFlagsError("grpc-describe", name)
-			}
-			return newExclusiveFlagsError("grpc-list", name)
+	if name, ok := cli.Options().Unsupported(ModeGRPCDiscovery); ok {
+		base := "grpc-list"
+		if app.GRPCDescribe != "" {
+			base = "grpc-describe"
 		}
+		return newExclusiveFlagsError(base, name)
 	}
 
 	return nil
 }
 
 func printHelp(cli *CLI, p *core.Printer) {
+	flags := cli.Options().Flags()
 	p.WriteString(cli.Description)
 	p.WriteString("\n\n")
 
@@ -376,7 +356,7 @@ func printHelp(cli *CLI, p *core.Printer) {
 	p.WriteString("fetch")
 	p.Reset()
 
-	if len(cli.Flags) > 0 {
+	if len(flags) > 0 {
 		p.WriteString(" [OPTIONS]")
 	}
 
@@ -405,7 +385,7 @@ func printHelp(cli *CLI, p *core.Printer) {
 		}
 	}
 
-	if len(cli.Flags) > 0 {
+	if len(flags) > 0 {
 		p.WriteString("\n")
 
 		p.Set(core.Bold)
@@ -414,8 +394,8 @@ func printHelp(cli *CLI, p *core.Printer) {
 		p.Reset()
 		p.WriteString(":\n")
 
-		maxLen := maxFlagLength(cli.Flags)
-		for _, flag := range cli.Flags {
+		maxLen := maxFlagLength(flags)
+		for _, flag := range flags {
 			if flag.IsHidden {
 				continue
 			}
@@ -508,9 +488,9 @@ func validateFromCurlExclusives(app *App, cli *CLI, long map[string]Flag) error 
 		return fromCurlExclusiveError{flag: "URL", positional: true}
 	}
 
-	for _, name := range cli.FromCurlExclusiveFlags {
-		if flag, ok := long[name]; ok && flag.IsSet() {
-			return fromCurlExclusiveError{flag: name}
+	for _, flag := range cli.Options().Flags() {
+		if flag.FromCurl && flag.IsSet() {
+			return fromCurlExclusiveError{flag: flag.Long}
 		}
 	}
 	return nil
@@ -719,12 +699,12 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		}
 	}
 	a.Cfg.Redirects = &redirects
-	if r.Timeout > 0 {
+	if r.TimeoutSet {
 		if err := a.Cfg.ParseTimeout(strconv.FormatFloat(r.Timeout, 'f', -1, 64)); err != nil {
 			return err
 		}
 	}
-	if r.ConnectTimeout > 0 {
+	if r.ConnectTimeoutSet {
 		if err := a.Cfg.ParseConnectTimeout(strconv.FormatFloat(r.ConnectTimeout, 'f', -1, 64)); err != nil {
 			return err
 		}
@@ -742,10 +722,10 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 			return err
 		}
 	}
-	if r.Retry > 0 {
+	if r.RetrySet {
 		a.Cfg.Retry = &r.Retry
 	}
-	if r.RetryDelay > 0 {
+	if r.RetryDelaySet {
 		a.Cfg.RetryDelay = new(time.Duration(float64(time.Second) * r.RetryDelay))
 	}
 
@@ -774,6 +754,8 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		v := true
 		a.Cfg.Silent = &v
 	}
+
+	a.markCurlOptions(r)
 
 	return nil
 }

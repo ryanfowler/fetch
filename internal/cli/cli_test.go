@@ -63,6 +63,72 @@ func TestFlagsAlphabeticalOrder(t *testing.T) {
 	}
 }
 
+func TestOptionRegistryMetadataAndAliases(t *testing.T) {
+	var app App
+	registry := app.CLI().Options()
+	flags := registry.Flags()
+	if len(flags) == 0 {
+		t.Fatal("option registry is empty")
+	}
+
+	for _, flag := range flags {
+		if flag.Long == "" {
+			t.Fatal("registry contains an option without a canonical name")
+		}
+		if flag.ConfigKey == "" {
+			t.Fatalf("--%s has no config key metadata", flag.Long)
+		}
+		if len(flag.Modes) == 0 {
+			t.Fatalf("--%s has no mode metadata", flag.Long)
+		}
+		got, ok := registry.Lookup(flag.Long)
+		if !ok || got.Long != flag.Long {
+			t.Fatalf("registry lookup for --%s = %+v, %v", flag.Long, got, ok)
+		}
+		for _, alias := range flag.Aliases {
+			got, ok := registry.Lookup(alias)
+			if !ok || got.Long != flag.Long {
+				t.Fatalf("alias %q resolved to %+v, %v; want --%s", alias, got, ok, flag.Long)
+			}
+		}
+	}
+
+	if !registry.byName["header"].Repeatable || !registry.byName["query"].Repeatable {
+		t.Fatal("repeatable options are not represented in the registry")
+	}
+}
+
+func TestOptionProvenance(t *testing.T) {
+	app, err := Parse([]string{"-X", "POST", "https://example.com"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !app.OptionProvenance("method").Has(SourceCLI) {
+		t.Fatal("method alias did not record explicit CLI provenance")
+	}
+	if app.OptionProvenance("method").Has(SourceGlobalConfig) {
+		t.Fatal("method unexpectedly recorded config provenance")
+	}
+
+	tlsApp, err := Parse([]string{"--tls", "1.2", "https://example.com"})
+	if err != nil {
+		t.Fatalf("Parse(--tls) error = %v", err)
+	}
+	if !tlsApp.OptionProvenance("tls").Has(SourceCLI) || !tlsApp.OptionProvenance("min-tls").Has(SourceCLI) {
+		t.Fatal("TLS alias provenance was not canonicalized")
+	}
+}
+
+func TestRegistryConflictsUseCanonicalNames(t *testing.T) {
+	_, err := Parse([]string{"--basic", "user:pass", "--bearer", "token", "https://example.com"})
+	if err == nil {
+		t.Fatal("expected auth conflict")
+	}
+	if got := err.Error(); got != "flags '--basic' and '--bearer' cannot be used together" {
+		t.Fatalf("error = %q, want canonical conflict names", got)
+	}
+}
+
 func TestEndOfOptions(t *testing.T) {
 	t.Run("normal parse treats remaining args as positional", func(t *testing.T) {
 		app, err := Parse([]string{"--", "https://example.com"})
