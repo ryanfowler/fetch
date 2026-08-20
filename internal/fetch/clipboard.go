@@ -3,17 +3,17 @@ package fetch
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"net/http"
 	"os/exec"
 	"runtime"
 
+	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
-// limitedBuffer is an io.Writer that captures up to max bytes into buf,
-// then silently discards overflow. It always returns len(p), nil so that
-// an io.TeeReader using this writer never sees a write error.
+// limitedBuffer captures up to max bytes into buf, then silently discards
+// overflow. It always reports the full write so the response stream can keep
+// delivering bytes after the clipboard cap is reached.
 type limitedBuffer struct {
 	buf      bytes.Buffer
 	max      int64
@@ -74,9 +74,12 @@ func newClipboardCopier(r *Request, resp *http.Response) *clipboardCopier {
 	}
 
 	buf := &limitedBuffer{max: maxBodyBytes}
-	resp.Body = readCloserTee{
-		Reader: io.TeeReader(resp.Body, buf),
-		Closer: resp.Body,
+	if stream, ok := resp.Body.(*body.Stream); ok {
+		stream.AddTee(buf)
+	} else {
+		stream := body.NewStream(resp.Body)
+		stream.AddTee(buf)
+		resp.Body = stream
 	}
 	return &clipboardCopier{cmd: cmd, buf: buf}
 }
@@ -135,12 +138,4 @@ func copyToClipboard(clip *clipboardCmd, data []byte) error {
 		return fmt.Errorf("clipboard command failed: %w", err)
 	}
 	return nil
-}
-
-// readCloserTee wraps a Reader and a separate Closer, allowing the
-// underlying reader to be replaced (e.g. with a TeeReader) while
-// preserving the original Closer.
-type readCloserTee struct {
-	io.Reader
-	io.Closer
 }

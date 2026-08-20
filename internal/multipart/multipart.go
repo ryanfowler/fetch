@@ -1,6 +1,7 @@
 package multipart
 
 import (
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/textproto"
@@ -14,8 +15,15 @@ import (
 // Multipart builds replayable multipart request bodies.
 type Multipart struct {
 	fields      []core.KeyVal[string]
+	files       []fileSnapshot
+	initErr     error
 	boundary    string
 	contentType string
+}
+
+type fileSnapshot struct {
+	path string
+	info os.FileInfo
 }
 
 // NewMultipart returns a Multipart using the provided key/values.
@@ -27,9 +35,29 @@ func NewMultipart(kvs []core.KeyVal[string]) *Multipart {
 	mpw := multipart.NewWriter(io.Discard)
 	fields := append([]core.KeyVal[string](nil), kvs...)
 	boundary := mpw.Boundary()
+	files := make([]fileSnapshot, len(fields))
+	var initErr error
+	for i, field := range fields {
+		if !strings.HasPrefix(field.Val, "@") {
+			continue
+		}
+		path := field.Val[1:]
+		info, err := os.Stat(path)
+		if err != nil {
+			initErr = err
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			initErr = fmt.Errorf("multipart file is not a regular file: %s", path)
+			continue
+		}
+		files[i] = fileSnapshot{path: path, info: info}
+	}
 
 	return &Multipart{
 		fields:      fields,
+		files:       files,
+		initErr:     initErr,
 		boundary:    boundary,
 		contentType: mpw.FormDataContentType(),
 	}
@@ -37,6 +65,9 @@ func NewMultipart(kvs []core.KeyVal[string]) *Multipart {
 
 // Open returns a fresh multipart request body stream.
 func (m *Multipart) Open() (io.ReadCloser, error) {
+	if m.initErr != nil {
+		return nil, m.initErr
+	}
 	// Create a pipe and asynchronously write to it in a goroutine.
 	reader, writer := io.Pipe()
 	mpw := multipart.NewWriter(writer)
@@ -60,7 +91,7 @@ func (m *Multipart) Open() (io.ReadCloser, error) {
 			_ = writer.Close()
 		}()
 
-		for _, kv := range m.fields {
+		for i, kv := range m.fields {
 			if !strings.HasPrefix(kv.Val, "@") {
 				if err = mpw.WriteField(kv.Key, kv.Val); err != nil {
 					return
@@ -69,7 +100,7 @@ func (m *Multipart) Open() (io.ReadCloser, error) {
 			}
 
 			// Form part is a file.
-			if err = writeFilePart(mpw, kv.Key, kv.Val[1:]); err != nil {
+			if err = writeFilePart(mpw, kv.Key, m.files[i]); err != nil {
 				return
 			}
 		}
@@ -84,15 +115,33 @@ func (m *Multipart) ContentType() string {
 }
 
 // writes the multipart file part and returns any error encountered.
-func writeFilePart(mpw *multipart.Writer, key, filename string) error {
+func writeFilePart(mpw *multipart.Writer, key string, snapshot fileSnapshot) error {
+	filename := snapshot.path
+	current, err := os.Stat(filename)
+	if err != nil {
+		return err
+	}
+	if !current.Mode().IsRegular() || !os.SameFile(snapshot.info, current) || current.Size() != snapshot.info.Size() {
+		return fmt.Errorf("multipart file changed: %s", filename)
+	}
 	f, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-
-	r, ct, err := core.DetectContentType(f, filename)
+	opened, err := f.Stat()
 	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(snapshot.info, opened) || opened.Size() != snapshot.info.Size() {
+		return fmt.Errorf("multipart file changed: %s", filename)
+	}
+
+	_, ct, err := core.DetectContentType(f, filename)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 
@@ -105,6 +154,42 @@ func writeFilePart(mpw *multipart.Writer, key, filename string) error {
 		return err
 	}
 
-	_, err = io.Copy(w, r)
+	_, err = io.Copy(w, &exactFileReader{
+		file:      f,
+		remaining: snapshot.info.Size(),
+		expected:  snapshot.info.Size(),
+		path:      filename,
+		identity:  snapshot.info,
+	})
 	return err
+}
+
+type exactFileReader struct {
+	file      *os.File
+	remaining int64
+	expected  int64
+	path      string
+	identity  os.FileInfo
+}
+
+func (r *exactFileReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		info, err := os.Stat(r.path)
+		if err != nil {
+			return 0, err
+		}
+		if info.Size() != r.expected || !info.Mode().IsRegular() || !os.SameFile(r.identity, info) {
+			return 0, fmt.Errorf("multipart file changed while reading: %s", r.path)
+		}
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.file.Read(p)
+	r.remaining -= int64(n)
+	if err == io.EOF && r.remaining > 0 {
+		return n, fmt.Errorf("multipart file ended before its expected length: %s", r.path)
+	}
+	return n, err
 }

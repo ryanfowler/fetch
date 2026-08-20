@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	requestbody "github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	imultipart "github.com/ryanfowler/fetch/internal/multipart"
@@ -462,6 +464,17 @@ func digestAuthParam(auth, key string) string {
 }
 
 func TestReplayableBody(t *testing.T) {
+	t.Run("one-shot source is rejected before replay", func(t *testing.T) {
+		req := &http.Request{Body: io.NopCloser(strings.NewReader("stdin"))}
+		source := requestbody.NewReader(req.Body, -1, "")
+		requestbody.Attach(req, source)
+
+		_, err := newReplayableBody(req)
+		if !errors.Is(err, requestbody.ErrNotReplayable) {
+			t.Fatalf("newReplayableBody error = %v, want ErrNotReplayable", err)
+		}
+	})
+
 	t.Run("getbody body", func(t *testing.T) {
 		req := &http.Request{
 			Body: io.NopCloser(bytes.NewReader([]byte("hello"))),
@@ -473,10 +486,6 @@ func TestReplayableBody(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if rb.tempPath != "" {
-			t.Fatal("expected GetBody path to avoid temp spool")
-		}
-
 		for range 3 {
 			rc, err := rb.reset()
 			if err != nil {
@@ -511,9 +520,6 @@ func TestReplayableBody(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		defer rb.close()
-		if rb.tempPath != "" {
-			t.Fatal("expected file-backed body to replay without temp spool")
-		}
 		if _, err := f.Read(make([]byte, 1)); !isClosedFileErr(err) {
 			t.Fatalf("expected original file to be closed, got %v", err)
 		}
@@ -536,41 +542,15 @@ func TestReplayableBody(t *testing.T) {
 		}
 	})
 
-	t.Run("large streamed body", func(t *testing.T) {
-		const size = 8 << 20
-		body := &streamingReadCloser{remaining: size, fill: 'x'}
+	t.Run("unknown streamed body is rejected without buffering", func(t *testing.T) {
+		body := &streamingReadCloser{remaining: 8 << 20, fill: 'x'}
 		req := &http.Request{Body: body}
-		rb, err := newReplayableBody(req)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		_, err := newReplayableBody(req)
+		if !errors.Is(err, requestbody.ErrNotReplayable) {
+			t.Fatalf("newReplayableBody error = %v, want ErrNotReplayable", err)
 		}
-		defer rb.close()
-		if rb.tempPath == "" {
-			t.Fatal("expected temp spool for streamed body")
-		}
-		info, err := os.Stat(rb.tempPath)
-		if err != nil {
-			t.Fatalf("stat temp spool: %v", err)
-		}
-		if info.Size() != size {
-			t.Fatalf("expected temp spool size %d, got %d", size, info.Size())
-		}
-
-		for range 3 {
-			rc, err := rb.reset()
-			if err != nil {
-				t.Fatalf("reset error: %v", err)
-			}
-			n, err := io.Copy(io.Discard, rc)
-			if err != nil {
-				t.Fatalf("read error: %v", err)
-			}
-			if n != size {
-				t.Fatalf("expected %d bytes, got %d", size, n)
-			}
-			if err := rc.Close(); err != nil {
-				t.Fatalf("close error: %v", err)
-			}
+		if body.reads != 0 {
+			t.Fatalf("body reads = %d, want 0", body.reads)
 		}
 	})
 
@@ -678,9 +658,11 @@ type streamingReadCloser struct {
 	remaining int64
 	fill      byte
 	closed    bool
+	reads     int
 }
 
 func (r *streamingReadCloser) Read(p []byte) (int, error) {
+	r.reads++
 	if r.closed {
 		return 0, os.ErrClosed
 	}

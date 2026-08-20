@@ -1,7 +1,6 @@
 package fetch
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +9,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/ryanfowler/fetch/internal/body"
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 // editRequestBody opens an editor and allows the user to modify the request
@@ -75,7 +77,12 @@ func editRequestBody(req *http.Request) error {
 	}
 
 	// Read the file that was just modified.
-	buf, err := os.ReadFile(path)
+	edited, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer edited.Close()
+	buf, err := core.ReadAllLimited(edited, core.MaxCompositeMaterialization, "edited request body")
 	if err != nil {
 		return err
 	}
@@ -85,12 +92,9 @@ func editRequestBody(req *http.Request) error {
 		return errors.New("aborting request due to empty request body after editing")
 	}
 
-	// Set the new body for the request.
-	req.Body = io.NopCloser(bytes.NewReader(buf))
-	req.ContentLength = int64(len(buf))
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(buf)), nil
-	}
+	// Replace the source as well as http.Request's fields. Otherwise retry,
+	// Digest, or dry-run would consult the pre-edit source in the context.
+	body.Attach(req, body.NewBytes(buf, req.Header.Get("Content-Type")))
 	return nil
 }
 

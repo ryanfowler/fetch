@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/aws"
+	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/format"
@@ -33,11 +34,7 @@ import (
 const maxBodyBytes = core.MaxFormattedBodyBytes
 
 func setReplayableBody(req *http.Request, data []byte) {
-	req.Body = io.NopCloser(bytes.NewReader(data))
-	req.ContentLength = int64(len(data))
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(data)), nil
-	}
+	body.Attach(req, body.NewBytes(data, req.Header.Get("Content-Type")))
 }
 
 type Request struct {
@@ -259,13 +256,26 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			}
 			errPrinter.Flush()
 
-			ok, rdr, err := isPrintable(req.Body)
+			source, ok := body.SourceFromContext(req.Context())
+			if !ok {
+				return 0, errors.New("request body preview is unavailable")
+			}
+			preview, err := source.Preview(core.MaxDryRunBodyPreview)
 			if err != nil {
 				return 0, err
 			}
-			if ok {
-				_, err = io.Copy(os.Stderr, rdr)
+			printable, _, err := isPrintable(bytes.NewReader(preview.Data))
+			if err != nil {
 				return 0, err
+			}
+			if printable {
+				if _, err = os.Stderr.Write(preview.Data); err != nil {
+					return 0, err
+				}
+				if preview.Truncated {
+					core.WriteWarningMsg(errPrinter, "request body preview truncated at 1024 bytes")
+				}
+				return 0, nil
 			}
 
 			msg := "the request body appears to be binary"
@@ -325,6 +335,9 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 		bodyTimer = newTimedReader(resp.Body)
 		resp.Body = bodyTimer
 	}
+	// Install one response pipeline before any output mode can consume the
+	// body. This allows clipboard/HAR/progress observers to share one read.
+	resp.Body = body.NewStream(resp.Body)
 
 	if r.Discard {
 		_, err := io.Copy(io.Discard, resp.Body)

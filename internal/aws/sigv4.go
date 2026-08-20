@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
@@ -129,6 +130,30 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 	// Use the empty sha256 if the request has no body.
 	if req.Body == nil || req.Body == http.NoBody {
 		return emptySha256, nil
+	}
+
+	if source, ok := body.SourceFromContext(req.Context()); ok {
+		if source.Replayable() {
+			stream, err := source.Replay()
+			if err != nil {
+				return "", err
+			}
+			defer stream.Close()
+			return hexSha256Reader(stream)
+		}
+		if service == "s3" {
+			return "UNSIGNED-PAYLOAD", nil
+		}
+		if _, err := source.Materialize(core.MaxCompositeMaterialization); err != nil {
+			return "", err
+		}
+		body.Attach(req, source)
+		stream, err := source.Replay()
+		if err != nil {
+			return "", err
+		}
+		defer stream.Close()
+		return hexSha256Reader(stream)
 	}
 
 	// Attempt to utilize the GetBody function if it exists.
