@@ -354,6 +354,15 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 	// Install one response pipeline before any output mode can consume the
 	// body. This allows clipboard/HAR/progress observers to share one read.
 	resp.Body = body.NewStream(resp.Body)
+	// Every consumer below can block on a body read. Tie the original response
+	// stream to the request context so cancellation closes it promptly, even
+	// when a formatter, file writer, or discard path owns the read loop.
+	responseContext := ctx
+	if resp.Request != nil {
+		responseContext = resp.Request.Context()
+	}
+	stopBodyClose := closeReaderOnContext(responseContext, resp.Body)
+	defer stopBodyClose()
 
 	if r.Discard {
 		_, err := io.Copy(io.Discard, resp.Body)
@@ -381,7 +390,11 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 
 	if body != nil {
 		p := r.PrinterHandle.Stderr()
-		err = streamToStdoutWithPager(ctx, body, p, r.Output == "-", r.NoPager, cc != nil, r.Verbosity == core.VSilent, r.Pager)
+		// Explicit raw formatting is an opt-in terminal bypass, just like
+		// -o -. Pipes are already safe because they are not terminals.
+		forceRaw := r.Output == "-" || r.Format == core.FormatOff
+		contentType := resp.Header.Get("Content-Type")
+		err = streamToStdoutWithPagerContent(ctx, body, p, forceRaw, r.NoPager, cc != nil, r.Verbosity == core.VSilent, r.Pager, contentType)
 		if err != nil {
 			return 0, err
 		}
@@ -444,24 +457,32 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		return resp.Body, nil
 	}
 
-	buf, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+	// An unknown content type only needs a bounded prefix for sniffing. If it
+	// is not a formatter, return that prefix immediately and keep the rest of
+	// the response streaming instead of buffering a formatting-sized body.
+	var prefix []byte
+	if contentType == format.TypeUnknown {
+		prefix, err = io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if err != nil {
+			return nil, err
+		}
+		contentType = format.SniffContentType(prefix)
+		if contentType == format.TypeUnknown || (contentType == format.TypeImage && r.Image == core.ImageOff) {
+			return io.MultiReader(bytes.NewReader(prefix), resp.Body), nil
+		}
+	}
+
+	formatInput := io.Reader(resp.Body)
+	if len(prefix) > 0 {
+		formatInput = io.MultiReader(bytes.NewReader(prefix), resp.Body)
+	}
+	buf, err := io.ReadAll(io.LimitReader(formatInput, maxBodyBytes+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(buf) > maxBodyBytes {
 		// We've read past the in-memory formatting limit, skip formatting.
 		return io.MultiReader(bytes.NewReader(buf), resp.Body), nil
-	}
-
-	// If the Content-Type is unknown, attempt to sniff the body.
-	if contentType == format.TypeUnknown {
-		contentType = format.SniffContentType(buf)
-		if contentType == format.TypeUnknown {
-			return bytes.NewReader(buf), nil
-		}
-		if contentType == format.TypeImage && r.Image == core.ImageOff {
-			return bytes.NewReader(buf), nil
-		}
 	}
 
 	// Transcode non-UTF-8 text to UTF-8, skipping binary formats.
@@ -493,32 +514,55 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 }
 
 func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary bool) error {
-	return streamToStdoutWithPager(context.Background(), r, p, forceOutput, noPager, drainSuppressedBinary, false, core.PagerUnknown)
+	return streamToStdoutWithPagerContent(context.Background(), r, p, forceOutput, noPager, drainSuppressedBinary, false, core.PagerUnknown, "")
 }
 
-func streamToStdoutWithPager(ctx context.Context, r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary, silent bool, pagerMode core.PagerMode) error {
-	// Check output to see if it's likely safe to print to stdout.
-	if core.IsStdoutTerm && !forceOutput {
-		var ok bool
-		var err error
-		ok, r, err = isPrintable(r)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			printBinaryWarning(p, silent)
-			if drainSuppressedBinary {
-				_, err = io.Copy(io.Discard, r)
-				return err
-			}
-			return nil
-		}
-	}
-
+func streamToStdoutWithPagerContent(ctx context.Context, r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary, silent bool, pagerMode core.PagerMode, contentType string) error {
 	if noPager {
 		pagerMode = core.PagerOff
 	}
-	return pager.StreamContext(ctx, r, pagerMode, core.IsStdoutTerm, false, os.Stdout)
+
+	// A terminal must not receive a response chunk until that chunk has
+	// passed the binary classifier. The guard continues checking later chunks,
+	// so a binary response cannot hide behind an initial text prefix.
+	if core.IsStdoutTerm && !forceOutput {
+		guard := newBinaryGuardReader(r, drainSuppressedBinary, nil)
+		stopClosing := closeReaderOnContext(ctx, guard)
+		first := make([]byte, 64*1024)
+		n, err := guard.Read(first)
+		if n == 0 && guard.Triggered() {
+			stopClosing()
+			if err != nil && !errors.Is(err, io.EOF) {
+				return err
+			}
+			printBinaryWarningContentType(p, silent, contentType)
+			return nil
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			stopClosing()
+			return err
+		}
+		if n == 0 {
+			stopClosing()
+			return nil
+		}
+
+		r = io.MultiReader(bytes.NewReader(first[:n]), guard)
+		err = pager.StreamContext(ctx, r, pagerMode, core.IsStdoutTerm, false, os.Stdout)
+		stopClosing()
+		if err != nil {
+			return err
+		}
+		if guard.Triggered() {
+			printBinaryWarningAfterBody(p, silent, contentType)
+		}
+		return nil
+	}
+
+	stopClosing := closeReaderOnContext(ctx, r)
+	err := pager.StreamContext(ctx, r, pagerMode, core.IsStdoutTerm, false, os.Stdout)
+	stopClosing()
+	return err
 }
 
 func getExitCodeForStatus(status int) int {

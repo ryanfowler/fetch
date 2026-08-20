@@ -46,6 +46,9 @@ func FormatGRPCStream(r io.Reader, md protoreflect.MessageDescriptor, p *core.Pr
 			return err
 		}
 
-		p.Flush()
+		if err := p.Flush(); err != nil {
+			p.Discard()
+			return err
+		}
 	}
 }

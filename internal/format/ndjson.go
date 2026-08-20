@@ -46,7 +46,10 @@ func FormatNDJSON(r io.Reader, p *core.Printer) error {
 		}
 
 		p.WriteString("\n")
-		p.Flush()
+		if err := p.Flush(); err != nil {
+			p.Discard()
+			return err
+		}
 	}
 }
 
