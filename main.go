@@ -173,6 +173,7 @@ func main() {
 		ClientCert:       clientCert,
 		Clobber:          app.Clobber,
 		ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
+		Compression:      app.Cfg.Compress,
 		Article:          app.Article,
 		ContentType:      app.ContentType,
 		Copy:             getValue(app.Cfg.Copy),

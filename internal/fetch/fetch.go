@@ -47,6 +47,7 @@ type Request struct {
 	Clobber          bool
 	ConnectTimeout   time.Duration
 	ContentType      string
+	Compression      core.CompressionMode
 	Copy             bool
 	Data             io.Reader
 	Digest           *core.KeyVal[string]
@@ -188,6 +189,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		Article:     r.Article,
 		Basic:       r.Basic,
 		Bearer:      r.Bearer,
+		Compression: r.Compression,
 		ContentType: r.ContentType,
 		Data:        r.Data,
 		Form:        r.Form,
@@ -415,7 +417,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	}
 
 	if output != "" && r.Output != "-" {
-		size := resp.ContentLength
+		size := client.WireContentLength(resp)
 		p := r.PrinterHandle.Stderr()
 		return nil, writeOutputToFile(output, resp.Body, size, p, r.Verbosity, r.Clobber)
 	}

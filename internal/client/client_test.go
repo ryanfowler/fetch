@@ -302,7 +302,14 @@ func TestDoDecodesBrotliContentEncoding(t *testing.T) {
 			}),
 		},
 	}
-	resp, err := c.Do(newEncodingRequestedRequest(t))
+	req, err := c.NewRequest(context.Background(), RequestConfig{
+		Compression: core.CompressionAuto,
+		URL:         mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +340,13 @@ func TestDoDecodesStackedContentEncodingInReverseOrder(t *testing.T) {
 			}),
 		},
 	}
-	req := newEncodingRequestedRequest(t)
+	req, err := c.NewRequest(context.Background(), RequestConfig{
+		Compression: core.CompressionAuto,
+		URL:         mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := c.Do(req)
 	if err != nil {
@@ -367,7 +380,13 @@ func TestDoDecodesMultipleContentEncodingHeaderValues(t *testing.T) {
 			}),
 		},
 	}
-	req := newEncodingRequestedRequest(t)
+	req, err := c.NewRequest(context.Background(), RequestConfig{
+		Compression: core.CompressionAuto,
+		URL:         mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	resp, err := c.Do(req)
 	if err != nil {
@@ -667,4 +686,242 @@ func zstdEncode(t *testing.T, data []byte) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+func TestNewRequestCompressionModes(t *testing.T) {
+	tests := []struct {
+		name   string
+		mode   core.CompressionMode
+		accept string
+	}{
+		{name: "auto", mode: core.CompressionAuto, accept: "gzip, br, zstd"},
+		{name: "brotli", mode: core.CompressionBrotli, accept: "br"},
+		{name: "gzip", mode: core.CompressionGzip, accept: "gzip"},
+		{name: "zstd", mode: core.CompressionZstd, accept: "zstd"},
+		{name: "off", mode: core.CompressionOff},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+				Compression: tt.mode,
+				URL:         mustURL(t, "https://example.com"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := req.Header.Get("Accept-Encoding"); got != tt.accept {
+				t.Fatalf("Accept-Encoding = %q, want %q", got, tt.accept)
+			}
+			if _, ok := responseEncodingPolicyFromRequest(req); !ok {
+				t.Fatal("request has no response encoding policy")
+			}
+		})
+	}
+}
+
+func TestNewRequestDoesNotReplaceExplicitAcceptEncoding(t *testing.T) {
+	req, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+		Compression: core.CompressionAuto,
+		Headers:     []core.KeyVal[string]{{Key: "Accept-Encoding", Val: "gzip;q=0.8"}},
+		URL:         mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Accept-Encoding"); got != "gzip;q=0.8" {
+		t.Fatalf("Accept-Encoding = %q, want explicit value", got)
+	}
+}
+
+func TestDoOnlyDecodesAllowedCompression(t *testing.T) {
+	const data = "gzip body"
+	c := &Client{c: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			ContentLength: 42,
+			Header:        http.Header{"Content-Encoding": {"gzip"}},
+			Body:          io.NopCloser(bytes.NewReader(gzipEncode(t, []byte(data)))),
+			Request:       req,
+		}, nil
+	})}}
+
+	req, err := c.NewRequest(context.Background(), RequestConfig{
+		Compression: core.CompressionGzip,
+		URL:         mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != data {
+		t.Fatalf("decoded body = %q, want %q", got, data)
+	}
+	if resp.ContentLength != -1 || WireContentLength(resp) != 42 {
+		t.Fatalf("content lengths = decoded %d, wire %d; want -1 and 42", resp.ContentLength, WireContentLength(resp))
+	}
+}
+
+func TestDoRejectsDisallowedAndMalformedContentEncoding(t *testing.T) {
+	tests := []struct {
+		name     string
+		encoding string
+		want     string
+	}{
+		{name: "disallowed", encoding: "br", want: "unsupported response content encoding: br"},
+		{name: "empty token", encoding: "gzip,", want: "malformed Content-Encoding header"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			closed := false
+			c := &Client{c: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Encoding": {tt.encoding}},
+					Body:       &closeFlagReadCloser{Reader: bytes.NewReader([]byte("body")), closedPtr: &closed},
+					Request:    req,
+				}, nil
+			})}}
+			req, err := c.NewRequest(context.Background(), RequestConfig{
+				Compression: core.CompressionGzip,
+				URL:         mustURL(t, "https://example.com"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Do(req); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Do error = %v, want text %q", err, tt.want)
+			}
+			if !closed {
+				t.Fatal("response body was not closed")
+			}
+		})
+	}
+}
+
+func TestDoPrefixesStreamingDecoderErrors(t *testing.T) {
+	c := &Client{c: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Encoding": {"gzip"}},
+			Body:       io.NopCloser(bytes.NewReader(gzipEncode(t, []byte("truncated"))[:20])),
+			Request:    req,
+		}, nil
+	})}}
+	req, err := c.NewRequest(context.Background(), RequestConfig{
+		Compression: core.CompressionGzip,
+		URL:         mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.ReadAll(resp.Body); err == nil || !strings.Contains(err.Error(), "gzip:") {
+		t.Fatalf("ReadAll error = %v, want gzip context", err)
+	}
+}
+
+type closeFlagReadCloser struct {
+	*bytes.Reader
+	closedPtr *bool
+}
+
+func (r *closeFlagReadCloser) Close() error {
+	*r.closedPtr = true
+	return nil
+}
+
+func TestCompressionModeDecodersReportTruncation(t *testing.T) {
+	tests := []struct {
+		name     string
+		encoding string
+		body     func() []byte
+	}{
+		{
+			name:     "brotli",
+			encoding: "br",
+			body: func() []byte {
+				return []byte("\x0b\x0a\x80this is the test data\x03")
+			},
+		},
+		{
+			name:     "zstd",
+			encoding: "zstd",
+			body: func() []byte {
+				return zstdEncode(t, []byte("truncated zstd"))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded := tt.body()
+			encoded = encoded[:len(encoded)-1]
+			c := &Client{c: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Encoding": {tt.encoding}},
+					Body:       io.NopCloser(bytes.NewReader(encoded)),
+					Request:    req,
+				}, nil
+			})}}
+			req, err := c.NewRequest(context.Background(), RequestConfig{
+				Compression: core.CompressionAuto,
+				URL:         mustURL(t, "https://example.com"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := c.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if _, err := io.ReadAll(resp.Body); err == nil || !strings.Contains(err.Error(), tt.encoding+":") {
+				t.Fatalf("ReadAll error = %v, want %s context", err, tt.encoding)
+			}
+		})
+	}
+}
+
+func TestDoPreservesEncodedBytesWhenCompressionIsOff(t *testing.T) {
+	encoded := gzipEncode(t, []byte("raw gzip"))
+	c := &Client{c: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Encoding": {"gzip"}},
+			Body:       io.NopCloser(bytes.NewReader(encoded)),
+			Request:    req,
+		}, nil
+	})}}
+	req, err := c.NewRequest(context.Background(), RequestConfig{
+		Compression: core.CompressionOff,
+		URL:         mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, encoded) {
+		t.Fatal("compression off changed response bytes")
+	}
 }

@@ -281,24 +281,30 @@ insecure = true
 
 ## Compression
 
-### `--no-encode`
-
-Disable automatic compression negotiation:
+Use `--compress` to select response compression negotiation and streaming
+decoding:
 
 ```sh
-fetch --no-encode example.com
+fetch --compress auto example.com
+fetch --compress br example.com
+fetch --compress gzip example.com
+fetch --compress zstd example.com
+fetch --compress off example.com
 ```
 
-By default, `fetch`:
+The modes send these automatic `Accept-Encoding` values:
 
-- Sends `Accept-Encoding: gzip, br, zstd` header
-- Automatically decompresses responses
+- `auto`: `gzip, br, zstd`
+- `br` (or `brotli`): `br`
+- `gzip`: `gzip`
+- `zstd`: `zstd`
+- `off`: no automatic encoding header
 
-Disabling is useful when:
-
-- Testing compression behavior
-- Server has compression bugs
-- You want to see raw compressed data
+Supported response encodings are decoded as they stream. Stacked encodings
+are decoded in reverse order. `--compress off` preserves encoded response
+bytes, including when writing to a file. An explicit `Accept-Encoding` header
+is never replaced. Use `--no-encode` as a compatibility alias for
+`--compress off`.
 
 ## Range Requests
 

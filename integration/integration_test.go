@@ -1038,6 +1038,38 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "request timed out after 100ns")
 	})
 
+	t.Run("timeout while consuming compressed response", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.WriteHeader(http.StatusOK)
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Errorf("response writer does not support flushing")
+				return
+			}
+			gzipWriter := gzip.NewWriter(w)
+			if _, err := gzipWriter.Write([]byte("prefix")); err != nil {
+				t.Errorf("write compressed prefix: %v", err)
+				return
+			}
+			if err := gzipWriter.Flush(); err != nil {
+				t.Errorf("flush compressed prefix: %v", err)
+				return
+			}
+			flusher.Flush()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(500 * time.Millisecond):
+			}
+			_ = gzipWriter.Close()
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--compress", "gzip", "--timeout", "0.05", "--format", "off")
+		assertExitCode(t, 1, res)
+	})
+
 	t.Run("connect timeout", func(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
@@ -1356,6 +1388,90 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, data)
 		assertBufNotContains(t, res.stderr, "zstd")
+	})
+
+	t.Run("selected compression modes and output files", func(t *testing.T) {
+		t.Parallel()
+		const data = "this is the test data"
+		const brData = "\x0b\x0a\x80this is the test data\x03"
+
+		var gzipData bytes.Buffer
+		gzipWriter := gzip.NewWriter(&gzipData)
+		if _, err := gzipWriter.Write([]byte(data)); err != nil {
+			t.Fatal(err)
+		}
+		if err := gzipWriter.Close(); err != nil {
+			t.Fatal(err)
+		}
+		gzipBytes := append([]byte(nil), gzipData.Bytes()...)
+
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			var encoded []byte
+			switch r.URL.Path {
+			case "/gzip":
+				if got := r.Header.Get("Accept-Encoding"); got != "gzip" {
+					t.Errorf("gzip Accept-Encoding = %q, want gzip", got)
+				}
+				encoded = gzipBytes
+				w.Header().Set("Content-Encoding", "gzip")
+			case "/br":
+				if got := r.Header.Get("Accept-Encoding"); got != "br" {
+					t.Errorf("br Accept-Encoding = %q, want br", got)
+				}
+				encoded = []byte(brData)
+				w.Header().Set("Content-Encoding", "br")
+			case "/zstd":
+				if got := r.Header.Get("Accept-Encoding"); got != "zstd" {
+					t.Errorf("zstd Accept-Encoding = %q, want zstd", got)
+				}
+				var zstdData bytes.Buffer
+				zstdWriter, err := zstd.NewWriter(&zstdData)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := zstdWriter.Write([]byte(data)); err != nil {
+					t.Fatal(err)
+				}
+				if err := zstdWriter.Close(); err != nil {
+					t.Fatal(err)
+				}
+				encoded = zstdData.Bytes()
+				w.Header().Set("Content-Encoding", "zstd")
+			default:
+				encoded = gzipBytes
+				w.Header().Set("Content-Encoding", "gzip")
+			}
+			_, _ = w.Write(encoded)
+		})
+		defer server.Close()
+
+		for _, mode := range []string{"gzip", "br", "zstd"} {
+			res := runFetch(t, fetchPath, server.URL+"/"+mode, "--compress", mode, "--format", "off")
+			assertExitCode(t, 0, res)
+			assertBufEquals(t, res.stdout, data)
+		}
+
+		outputPath := filepath.Join(t.TempDir(), "decoded-output")
+		res := runFetch(t, fetchPath, server.URL+"/gzip", "--compress", "gzip", "--output", outputPath)
+		assertExitCode(t, 0, res)
+		decoded, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(decoded) != data {
+			t.Fatalf("decoded output = %q, want %q", decoded, data)
+		}
+
+		rawPath := filepath.Join(t.TempDir(), "raw-output")
+		res = runFetch(t, fetchPath, server.URL+"/raw", "--compress", "off", "--output", rawPath)
+		assertExitCode(t, 0, res)
+		raw, err := os.ReadFile(rawPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(raw, gzipBytes) {
+			t.Fatal("compress off output was not byte exact")
+		}
 	})
 
 	t.Run("protobuf response formatting", func(t *testing.T) {
