@@ -521,7 +521,7 @@ func printRetryMsg(r *Request, nextAttempt, total int, delay time.Duration, reas
 	p.WriteString(" ")
 	p.Set(core.Dim)
 	p.WriteString("(")
-	p.WriteString(reason)
+	p.WriteString(core.TerminalSafeText(reason))
 	p.WriteString(")")
 	p.Reset()
 	p.WriteString("\n")

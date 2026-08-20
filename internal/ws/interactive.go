@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -508,27 +506,7 @@ func (im *interactiveMode) messageRowCount(msg messageEntry) int {
 func sanitizeMessageText(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
-
-	var b strings.Builder
-	for _, r := range strings.ToValidUTF8(s, "\uFFFD") {
-		switch {
-		case r == '\n':
-			b.WriteRune(r)
-		case r == '\t':
-			b.WriteString("    ")
-		case r == 0x1b:
-			b.WriteString(`\x1b`)
-		case unicode.IsControl(r):
-			if r <= 0xff {
-				fmt.Fprintf(&b, `\x%02x`, r)
-			} else {
-				b.WriteString(strconv.QuoteRuneToASCII(r))
-			}
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	return strings.ReplaceAll(core.TerminalSafeText(s), "\t", "    ")
 }
 
 func wrapDisplayLines(s string, width int) []string {

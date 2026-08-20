@@ -112,6 +112,9 @@ func Fetch(ctx context.Context, r *Request) int {
 	if err == nil {
 		return code
 	}
+	if core.IsBrokenPipe(err) {
+		return 0
+	}
 
 	p := r.PrinterHandle.Stderr()
 	core.WriteErrorMsgNoFlush(p, err)
@@ -162,7 +165,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			// Session file was corrupted; warn and start fresh.
 			p := r.PrinterHandle.Stderr()
 			msg := fmt.Sprintf("session '%s' is corrupted, starting fresh: %s", r.Session, loadErr.Error())
-			core.WriteWarningMsg(p, msg)
+			core.WriteWarningMsgIf(p, msg, r.Verbosity == core.VSilent)
 		}
 		c.SetJar(sess.Jar())
 	}
@@ -273,13 +276,13 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 					return 0, err
 				}
 				if preview.Truncated {
-					core.WriteWarningMsg(errPrinter, "request body preview truncated at 1024 bytes")
+					core.WriteWarningMsgIf(errPrinter, "request body preview truncated at 1024 bytes", r.Verbosity == core.VSilent)
 				}
 				return 0, nil
 			}
 
 			msg := "the request body appears to be binary"
-			core.WriteWarningMsg(errPrinter, msg)
+			core.WriteWarningMsgIf(errPrinter, msg, r.Verbosity == core.VSilent)
 			return 0, nil
 		}
 
@@ -295,7 +298,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		if saveErr := sess.Save(); saveErr != nil {
 			p := r.PrinterHandle.Stderr()
 			msg := fmt.Sprintf("unable to save session '%s': %s", sess.Name, saveErr.Error())
-			core.WriteWarningMsg(p, msg)
+			core.WriteWarningMsgIf(p, msg, r.Verbosity == core.VSilent)
 		}
 	}
 
@@ -365,7 +368,7 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 
 	if body != nil {
 		p := r.PrinterHandle.Stderr()
-		err = streamToStdout(body, p, r.Output == "-", r.NoPager, cc != nil)
+		err = streamToStdoutWithSilent(body, p, r.Output == "-", r.NoPager, cc != nil, r.Verbosity == core.VSilent)
 		if err != nil {
 			return 0, err
 		}
@@ -477,6 +480,10 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 }
 
 func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary bool) error {
+	return streamToStdoutWithSilent(r, p, forceOutput, noPager, drainSuppressedBinary, false)
+}
+
+func streamToStdoutWithSilent(r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary, silent bool) error {
 	// Check output to see if it's likely safe to print to stdout.
 	if core.IsStdoutTerm && !forceOutput {
 		var ok bool
@@ -486,7 +493,7 @@ func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager, drainSup
 			return err
 		}
 		if !ok {
-			printBinaryWarning(p)
+			printBinaryWarning(p, silent)
 			if drainSuppressedBinary {
 				_, err = io.Copy(io.Discard, r)
 				return err
@@ -532,7 +539,8 @@ func getHeaders(headers http.Header) []core.KeyVal[string] {
 	out := make([]core.KeyVal[string], 0, len(headers))
 	for k, v := range headers {
 		k = strings.ToLower(k)
-		out = append(out, core.KeyVal[string]{Key: k, Val: strings.Join(v, ",")})
+		value := core.RedactHeaderValue(k, strings.Join(v, ","))
+		out = append(out, core.KeyVal[string]{Key: k, Val: value})
 	}
 	slices.SortFunc(out, func(a, b core.KeyVal[string]) int {
 		return strings.Compare(a.Key, b.Key)

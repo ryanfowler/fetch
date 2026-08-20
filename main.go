@@ -83,7 +83,7 @@ func main() {
 
 	// Start async update, if necessary.
 	if !app.Update && !core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
-		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate)
+		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate, getValue(app.Cfg.Silent))
 	}
 
 	// Attempt to update the current executable.
@@ -330,12 +330,12 @@ func getVerbosity(app *cli.App) core.Verbosity {
 	}
 }
 
-func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration) {
+func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration, silent bool) {
 	// Check the metadata file to see if we should start an async update.
 	ok, err := update.ShouldAttemptUpdate(ctx, p, dur)
 	if err != nil {
 		msg := fmt.Sprintf("unable to check if update is needed: %s", err.Error())
-		core.WriteWarningMsg(p, msg)
+		core.WriteWarningMsgIf(p, msg, silent)
 		return
 	}
 	if !ok {
@@ -483,18 +483,19 @@ func ignoredInspectionFlags(app *cli.App, mode inspectionMode) []string {
 	return ignored
 }
 
-func warnIgnoredInspectionFlags(p *core.Printer, mode inspectionMode, ignored []string) {
+func warnIgnoredInspectionFlags(p *core.Printer, mode inspectionMode, ignored []string, silentMode ...bool) {
 	if len(ignored) == 0 {
 		return
 	}
-	core.WriteWarningMsg(p, string(mode)+" ignores: "+strings.Join(ignored, ", "))
+	silent := len(silentMode) > 0 && silentMode[0]
+	core.WriteWarningMsgIf(p, string(mode)+" ignores: "+strings.Join(ignored, ", "), silent)
 }
 
 // inspectDNS performs DNS resolution only and renders the resolved records.
 func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 	p := handle.Stderr()
 
-	warnIgnoredInspectionFlags(p, inspectionDNS, ignoredInspectionFlags(app, inspectionDNS))
+	warnIgnoredInspectionFlags(p, inspectionDNS, ignoredInspectionFlags(app, inspectionDNS), getValue(app.Cfg.Silent))
 
 	return dnsinspect.Inspect(ctx, p, &dnsinspect.Config{
 		DNSServer: app.Cfg.DNSServer,
@@ -544,7 +545,7 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		return 1
 	}
 
-	warnIgnoredInspectionFlags(p, inspectionTLS, ignoredInspectionFlags(app, inspectionTLS))
+	warnIgnoredInspectionFlags(p, inspectionTLS, ignoredInspectionFlags(app, inspectionTLS), getValue(app.Cfg.Silent))
 
 	// Parse client certificate for mTLS.
 	clientCert, err := app.Cfg.ClientCert()

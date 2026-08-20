@@ -22,14 +22,14 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	// WebSocket requires GET for the upgrade handshake.
 	if req.Method != "GET" {
 		p := r.PrinterHandle.Stderr()
-		core.WriteWarningMsg(p, "WebSocket requires GET; ignoring method "+req.Method)
+		core.WriteWarningMsgIf(p, "WebSocket requires GET; ignoring method "+req.Method, r.Verbosity == core.VSilent)
 		req.Method = "GET"
 	}
 
 	// Timing waterfall is not supported for persistent WebSocket connections.
 	if r.Timing {
 		p := r.PrinterHandle.Stderr()
-		core.WriteWarningMsg(p, "--timing is not supported for WebSocket connections")
+		core.WriteWarningMsgIf(p, "--timing is not supported for WebSocket connections", r.Verbosity == core.VSilent)
 	}
 
 	// Prepare the initial message from -d or -j flags. It is sent after the

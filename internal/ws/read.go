@@ -34,6 +34,9 @@ func readLoop(ctx context.Context, cfg Config) error {
 // writeTextMessage writes a text message to stdout, attempting JSON
 // formatting if applicable.
 func writeTextMessage(data []byte, p *core.Printer, f core.Format) {
+	if core.IsStdoutTerm {
+		data = []byte(core.TerminalSafeText(string(data)))
+	}
 	if shouldFormat(f) && json.Valid(data) && format.FormatJSONLine(data, p) == nil {
 		p.Flush()
 		return

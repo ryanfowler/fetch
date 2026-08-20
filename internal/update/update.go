@@ -46,7 +46,7 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	if err != nil {
 		return err
 	}
-	unlock, err := acquireLock(ctx, p, cacheDir, true)
+	unlock, err := acquireLock(ctx, p, cacheDir, true, silent)
 	if err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 		err = updateLastAttemptTime(cacheDir, time.Now())
 		if err != nil {
 			msg := fmt.Sprintf("unable to record the 'last update attempt' timestamp: %s", err.Error())
-			core.WriteWarningMsg(p, msg)
+			core.WriteWarningMsgIf(p, msg, silent)
 		}
 	}()
 
@@ -433,7 +433,7 @@ func ShouldAttemptUpdate(ctx context.Context, p *core.Printer, dur time.Duration
 		return false, err
 	}
 
-	unlock, err := acquireLock(ctx, p, dir, false)
+	unlock, err := acquireLock(ctx, p, dir, false, true)
 	if err != nil {
 		return false, err
 	}
@@ -507,7 +507,7 @@ func updateLastAttemptTime(dir string, now time.Time) error {
 	return err
 }
 
-func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool) (func(), error) {
+func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool, silent bool) (func(), error) {
 	path := filepath.Join(dir, ".update-lock")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
@@ -532,7 +532,7 @@ func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool) (
 		}
 
 		if i == 0 {
-			core.WriteWarningMsg(p, "waiting on lock to begin updating\n")
+			core.WriteWarningMsgIf(p, "waiting on lock to begin updating\n", silent)
 		}
 
 		mult := time.Duration(min(i+1, 10))
