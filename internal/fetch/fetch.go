@@ -28,9 +28,9 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// maxBodyBytes is the maximum number of bytes read into memory for
-// formatting a response body or copying it to the clipboard.
-const maxBodyBytes = 1 << 20 // 1MiB
+// maxBodyBytes is retained as a local compatibility name for existing fetch
+// code and tests; the limit itself is centralized in core.
+const maxBodyBytes = core.MaxFormattedBodyBytes
 
 func setReplayableBody(req *http.Request, data []byte) {
 	req.Body = io.NopCloser(bytes.NewReader(data))
