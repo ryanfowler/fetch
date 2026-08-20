@@ -1239,6 +1239,49 @@ func TestMain(t *testing.T) {
 		assertBufNotContains(t, res.stderr, "gzip")
 	})
 
+	t.Run("brotli compression", func(t *testing.T) {
+		t.Parallel()
+		const data = "this is the test data"
+		// The google/brotli module only provides a decoder, so use a fixed
+		// Brotli stream for the integration server response.
+		const encoded = "\x0b\x0a\x80this is the test data\x03"
+
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("no-encode") == "1" {
+				w.Write([]byte(data))
+				return
+			}
+			if encoding := r.Header.Get("Accept-Encoding"); encoding != "gzip, br, zstd" {
+				t.Errorf("Accept-Encoding = %q, want gzip, br, zstd", encoding)
+				w.Write([]byte(data))
+				return
+			}
+
+			if r.URL.Path == "/chunked" {
+				w.Header().Set("Content-Encoding", "aws-chunked, br")
+			} else {
+				w.Header().Set("Content-Encoding", "br")
+			}
+			w.Write([]byte(encoded))
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "-v")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
+		assertBufContains(t, res.stderr, "br")
+
+		res = runFetch(t, fetchPath, server.URL+"/chunked", "-v")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
+		assertBufContains(t, res.stderr, "aws-chunked, br")
+
+		res = runFetch(t, fetchPath, server.URL+"?no-encode=1", "-v", "--no-encode")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, data)
+		assertBufNotContains(t, res.stderr, "br")
+	})
+
 	t.Run("zstd compression", func(t *testing.T) {
 		t.Parallel()
 		const data = "this is the test data"

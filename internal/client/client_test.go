@@ -16,7 +16,6 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 	imultipart "github.com/ryanfowler/fetch/internal/multipart"
 
-	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 )
@@ -286,7 +285,9 @@ func TestDoClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
 
 func TestDoDecodesBrotliContentEncoding(t *testing.T) {
 	const data = "this is Brotli encoded data"
-	body := brotliEncode(t, []byte(data))
+	// The google/brotli module only provides a decoder. Keep the encoded
+	// fixture constant so this test does not need a second Brotli dependency.
+	body := []byte("\x0b\x0d\x80this is Brotli encoded data\x03")
 	c := &Client{
 		c: &http.Client{
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -646,20 +647,6 @@ func gzipEncode(t *testing.T, data []byte) []byte {
 		t.Fatal(err)
 	}
 	if err := gw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
-func brotliEncode(t *testing.T, data []byte) []byte {
-	t.Helper()
-
-	var buf bytes.Buffer
-	bw := brotli.NewWriter(&buf)
-	if _, err := bw.Write(data); err != nil {
-		t.Fatal(err)
-	}
-	if err := bw.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
