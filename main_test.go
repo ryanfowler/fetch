@@ -4,6 +4,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +15,50 @@ import (
 	"github.com/ryanfowler/fetch/internal/config"
 	"github.com/ryanfowler/fetch/internal/core"
 )
+
+func TestParseConfigFileMergesScopesAndRecordsProvenance(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config")
+	configData := []byte("header = X-Global: global\nquery = scope=global\n\n[example.com]\nheader = X-Host: host\nquery = scope=host\n")
+	if err := os.WriteFile(configPath, configData, 0600); err != nil {
+		t.Fatalf("unable to write config: %v", err)
+	}
+
+	app, err := cli.Parse([]string{
+		"--config", configPath,
+		"--header", "X-CLI: cli",
+		"--query", "scope=cli",
+		"https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if _, err := parseConfigFile(app); err != nil {
+		t.Fatalf("parseConfigFile() error = %v", err)
+	}
+
+	if got := app.Cfg.Headers; !slices.Equal(got, []core.KeyVal[string]{
+		{Key: "X-Global", Val: "global"},
+		{Key: "X-Host", Val: "host"},
+		{Key: "X-CLI", Val: "cli"},
+	}) {
+		t.Fatalf("headers = %+v", got)
+	}
+	if got := app.Cfg.QueryParams; !slices.Equal(got, []core.KeyVal[string]{
+		{Key: "scope", Val: "global"},
+		{Key: "scope", Val: "host"},
+		{Key: "scope", Val: "cli"},
+	}) {
+		t.Fatalf("query params = %+v", got)
+	}
+	for _, name := range []string{"header", "query"} {
+		provenance := app.OptionProvenance(name)
+		for _, source := range []cli.OptionSource{cli.SourceGlobalConfig, cli.SourceHostConfig, cli.SourceCLI} {
+			if !provenance.Has(source) {
+				t.Fatalf("%s provenance = %v, missing %v", name, provenance.Sources, source)
+			}
+		}
+	}
+}
 
 func TestIgnoredInspectionFlags(t *testing.T) {
 	app := inspectionFlagTestApp(t)

@@ -1900,6 +1900,18 @@ func TestMain(t *testing.T) {
 			assertBufEquals(t, res.stdout, "mtls-success")
 		})
 
+		t.Run("CLI key pairs with configured certificate", func(t *testing.T) {
+			configPath := filepath.Join(mtlsDir, "client-config")
+			configData := []byte("ca-cert = " + caCertPath + "\ncert = " + clientCertPath + "\n")
+			if err := os.WriteFile(configPath, configData, 0600); err != nil {
+				t.Fatalf("unable to write client config: %s", err)
+			}
+			res := runFetch(t, fetchPath, "--config", configPath, "--key", clientKeyPath, server.URL)
+			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "200 OK")
+			assertBufEquals(t, res.stdout, "mtls-success")
+		})
+
 		t.Run("successful mtls with combined cert+key file", func(t *testing.T) {
 			t.Parallel()
 			res := runFetch(t, fetchPath, server.URL,

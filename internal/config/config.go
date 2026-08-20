@@ -6,6 +6,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"net"
 	"net/url"
 	"os"
@@ -367,6 +369,13 @@ func (c *Config) Validate() error {
 	if c.TLSMin != nil && c.TLSMax != nil && *c.TLSMin > *c.TLSMax {
 		return fmt.Errorf("min-tls must be less than or equal to max-tls")
 	}
+	if c.KeyData != nil && c.CertData == nil {
+		return missingClientCertError{keyPath: c.KeyPath}
+	}
+	if c.CertData != nil {
+		_, err := c.ClientCert()
+		return err
+	}
 	return nil
 }
 
@@ -457,13 +466,98 @@ func (c *Config) ParseAutoUpdate(value string) error {
 		return nil
 	}
 
-	t, err := time.ParseDuration(value)
+	t, err := parseAutoUpdateDuration(value)
 	if err != nil {
 		usage := "must be either a boolean or interval"
 		return core.NewValueError("auto-update", value, usage, c.isFile)
 	}
 	c.AutoUpdate = &t
 	return nil
+}
+
+// parseAutoUpdateDuration accepts time.ParseDuration-style values and the
+// day unit used by the configuration format. It uses exact rational
+// arithmetic so a value near the time.Duration limit is not accepted or
+// rejected due to floating-point rounding.
+func parseAutoUpdateDuration(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, errors.New("empty duration")
+	}
+	if value[0] == '+' {
+		value = value[1:]
+	}
+	if value == "" || value[0] == '-' {
+		return 0, errors.New("duration must be non-negative")
+	}
+
+	units := []struct {
+		name  string
+		nanos int64
+	}{
+		{name: "ns", nanos: int64(time.Nanosecond)},
+		{name: "us", nanos: int64(time.Microsecond)},
+		{name: "µs", nanos: int64(time.Microsecond)},
+		{name: "μs", nanos: int64(time.Microsecond)},
+		{name: "ms", nanos: int64(time.Millisecond)},
+		{name: "s", nanos: int64(time.Second)},
+		{name: "m", nanos: int64(time.Minute)},
+		{name: "h", nanos: int64(time.Hour)},
+		{name: "d", nanos: int64(24 * time.Hour)},
+	}
+
+	total := new(big.Rat)
+	for len(value) > 0 {
+		start := 0
+		digits := 0
+		dot := false
+		for start < len(value) {
+			ch := value[start]
+			switch {
+			case ch >= '0' && ch <= '9':
+				digits++
+			case ch == '.' && !dot:
+				dot = true
+			default:
+				goto numberDone
+			}
+			start++
+		}
+	numberDone:
+		if digits == 0 {
+			return 0, errors.New("missing duration value")
+		}
+		number := value[:start]
+		if number[0] == '.' {
+			number = "0" + number
+		} else if number[len(number)-1] == '.' {
+			number += "0"
+		}
+		rational, ok := new(big.Rat).SetString(number)
+		if !ok {
+			return 0, errors.New("invalid duration value")
+		}
+
+		matched := false
+		for _, unit := range units {
+			if strings.HasPrefix(value[start:], unit.name) {
+				term := new(big.Rat).Mul(rational, new(big.Rat).SetInt64(unit.nanos))
+				total.Add(total, term)
+				value = value[start+len(unit.name):]
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return 0, errors.New("missing or invalid duration unit")
+		}
+	}
+
+	max := new(big.Rat).SetInt64(math.MaxInt64)
+	if total.Cmp(max) > 0 {
+		return 0, errors.New("duration overflows time.Duration")
+	}
+	return time.Duration(new(big.Int).Quo(total.Num(), total.Denom()).Int64()), nil
 }
 
 func (c *Config) ParseCACerts(value string) error {
@@ -913,6 +1007,9 @@ func parseDurationSeconds(flag, value, usage string, isFile bool) (*time.Duratio
 
 func (c *Config) ClientCert() (*tls.Certificate, error) {
 	if c.CertData == nil {
+		if c.KeyData != nil {
+			return nil, missingClientCertError{keyPath: c.KeyPath}
+		}
 		return nil, nil
 	}
 
@@ -1002,6 +1099,26 @@ func (err invalidClientKeyError) PrintTo(p *core.Printer) {
 	p.Reset()
 	p.WriteString("': ")
 	p.WriteString(err.err.Error())
+}
+
+type missingClientCertError struct {
+	keyPath string
+}
+
+func (err missingClientCertError) Error() string {
+	return "flag '--key' requires '--cert'"
+}
+
+func (err missingClientCertError) PrintTo(p *core.Printer) {
+	p.WriteString("flag '")
+	p.Set(core.Bold)
+	p.WriteString("--key")
+	p.Reset()
+	p.WriteString("' requires '")
+	p.Set(core.Bold)
+	p.WriteString("--cert")
+	p.Reset()
+	p.WriteString("'")
 }
 
 type missingClientKeyError struct {

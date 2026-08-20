@@ -3,6 +3,7 @@ package config
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -51,6 +52,52 @@ func TestParseHeader(t *testing.T) {
 				t.Fatalf("headers = %+v, want none", c.Headers)
 			}
 		})
+	}
+}
+
+func TestParseAutoUpdateDurationSupportsDaysFractionsAndLeadingPlus(t *testing.T) {
+	tests := []struct {
+		value string
+		want  time.Duration
+	}{
+		{value: "+1.5d", want: 36 * time.Hour},
+		{value: "1d2h30m", want: 26*time.Hour + 30*time.Minute},
+		{value: ".5h", want: 30 * time.Minute},
+		{value: "2μs", want: 2 * time.Microsecond},
+	}
+	for _, test := range tests {
+		t.Run(test.value, func(t *testing.T) {
+			c := &Config{}
+			if err := c.ParseAutoUpdate(test.value); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if c.AutoUpdate == nil || *c.AutoUpdate != test.want {
+				t.Fatalf("auto-update = %v, want %s", c.AutoUpdate, test.want)
+			}
+		})
+	}
+}
+
+func TestParseAutoUpdateDurationRejectsOverflowAndNegative(t *testing.T) {
+	for _, value := range []string{"+9223372036854775808ns", "-1d", "1x", "+"} {
+		t.Run(value, func(t *testing.T) {
+			c := &Config{}
+			if err := c.ParseAutoUpdate(value); err == nil {
+				t.Fatal("expected invalid auto-update duration")
+			}
+		})
+	}
+}
+
+func TestMergeCombinesCertificateAndKeyFromDifferentScopes(t *testing.T) {
+	cli := &Config{KeyData: []byte("cli-key"), KeyPath: "cli.key"}
+	global := &Config{CertData: []byte("configured-cert"), CertPath: "configured.crt"}
+	cli.Merge(global)
+	if string(cli.KeyData) != "cli-key" || cli.KeyPath != "cli.key" {
+		t.Fatalf("key was replaced: path=%q data=%q", cli.KeyPath, cli.KeyData)
+	}
+	if string(cli.CertData) != "configured-cert" || cli.CertPath != "configured.crt" {
+		t.Fatalf("certificate was not merged: path=%q data=%q", cli.CertPath, cli.CertData)
 	}
 }
 
