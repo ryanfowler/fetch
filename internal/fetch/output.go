@@ -203,7 +203,7 @@ func (err errInvalidFilename) Error() string {
 func (err errInvalidFilename) PrintTo(p *core.Printer) {
 	p.WriteString("invalid filename: '")
 	p.Set(core.Dim)
-	p.WriteString(err.filename)
+	p.WriteString(core.TerminalSafeText(err.filename))
 	p.Reset()
 	p.WriteString("'")
 }
@@ -219,7 +219,7 @@ func (err errFileExists) Error() string {
 func (err errFileExists) PrintTo(p *core.Printer) {
 	p.WriteString("file '")
 	p.Set(core.Dim)
-	p.WriteString(err.path)
+	p.WriteString(core.TerminalSafeText(err.path))
 	p.Reset()
 	p.WriteString("' already exists\n\n")
 
@@ -246,8 +246,8 @@ func (err errFileCheck) Unwrap() error {
 func (err errFileCheck) PrintTo(p *core.Printer) {
 	p.WriteString("unable to check output file '")
 	p.Set(core.Dim)
-	p.WriteString(err.path)
+	p.WriteString(core.TerminalSafeText(err.path))
 	p.Reset()
 	p.WriteString("': ")
-	p.WriteString(err.err.Error())
+	p.WriteString(core.TerminalSafeText(err.err.Error()))
 }

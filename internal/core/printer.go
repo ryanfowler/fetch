@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -118,8 +119,12 @@ func (p *Printer) Reset() {
 
 // Flush writes any buffered data to the underlying file.
 func (p *Printer) Flush() error {
-	_, err := p.file.Write(p.buf.Bytes())
+	data := p.buf.Bytes()
+	n, err := p.file.Write(data)
 	p.buf.Reset()
+	if err == nil && n != len(data) {
+		return io.ErrShortWrite
+	}
 	return err
 }
 
@@ -206,22 +211,32 @@ func WriteErrorMsgNoFlush(p *Printer, err error) {
 	if pt, ok := err.(PrinterTo); ok {
 		pt.PrintTo(p)
 	} else {
-		p.WriteString(err.Error())
+		p.WriteString(TerminalSafeText(err.Error()))
 	}
 	p.WriteString("\n")
 }
 
 // WriteWarningMsg writes the provided warning msg to the printer.
 func WriteWarningMsg(p *Printer, msg string) {
+	_ = NewWarningWriter(p, false).Write(msg)
+}
+
+// WriteWarningMsgIf writes a warning unless silent mode is enabled.
+func WriteWarningMsgIf(p *Printer, msg string, silent bool) {
+	_ = NewWarningWriter(p, silent).Write(msg)
+}
+
+func writeWarningMsg(p *Printer, msg string) error {
+	msg = strings.TrimRight(msg, "\r\n")
 	p.Set(Bold)
 	p.Set(Yellow)
 	p.WriteString("warning")
 	p.Reset()
 	p.WriteString(": ")
 
-	p.WriteString(msg)
+	p.WriteString(TerminalSafeText(msg))
 	p.WriteString("\n")
-	p.Flush()
+	return p.Flush()
 }
 
 // WriteInfoMsg writes the provided info msg to the printer.
@@ -232,7 +247,7 @@ func WriteInfoMsg(p *Printer, msg string) {
 	p.Reset()
 	p.WriteString(": ")
 
-	p.WriteString(msg)
+	p.WriteString(TerminalSafeText(msg))
 	p.WriteString("\n")
 	p.Flush()
 }

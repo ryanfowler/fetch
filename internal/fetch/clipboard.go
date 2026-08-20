@@ -44,8 +44,9 @@ func (lb *limitedBuffer) Write(p []byte) (int, error) {
 // to the system clipboard. Use newClipboardCopier to set up body wrapping,
 // then call finish after the response has been consumed.
 type clipboardCopier struct {
-	cmd *clipboardCmd
-	buf *limitedBuffer
+	cmd    *clipboardCmd
+	buf    *limitedBuffer
+	silent bool
 }
 
 // newClipboardCopier sets up clipboard copying for the response. If copying
@@ -69,7 +70,7 @@ func newClipboardCopier(r *Request, resp *http.Response) *clipboardCopier {
 		default:
 			msg = "no clipboard command found; install xclip, xsel, or wl-copy"
 		}
-		core.WriteWarningMsg(p, msg)
+		core.WriteWarningMsgIf(p, msg, r.Verbosity == core.VSilent)
 		return nil
 	}
 
@@ -81,7 +82,7 @@ func newClipboardCopier(r *Request, resp *http.Response) *clipboardCopier {
 		stream.AddTee(buf)
 		resp.Body = stream
 	}
-	return &clipboardCopier{cmd: cmd, buf: buf}
+	return &clipboardCopier{cmd: cmd, buf: buf, silent: r.Verbosity == core.VSilent}
 }
 
 // finish copies the captured bytes to the system clipboard. It writes a
@@ -91,11 +92,11 @@ func (cc *clipboardCopier) finish(p *core.Printer) {
 		return
 	}
 	if cc.buf.overflow {
-		core.WriteWarningMsg(p, "--copy: response body too large to copy to clipboard")
+		core.WriteWarningMsgIf(p, "--copy: response body too large to copy to clipboard", cc.silent)
 		return
 	}
 	if err := copyToClipboard(cc.cmd, cc.buf.buf.Bytes()); err != nil {
-		core.WriteWarningMsg(p, "unable to copy to clipboard: "+err.Error())
+		core.WriteWarningMsgIf(p, "unable to copy to clipboard: "+err.Error(), cc.silent)
 	}
 }
 

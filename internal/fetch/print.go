@@ -157,9 +157,9 @@ func printResponseHeaders(p *core.Printer, resp *http.Response, usePrefix bool) 
 	}
 }
 
-func printBinaryWarning(p *core.Printer) {
+func printBinaryWarning(p *core.Printer, silent bool) {
 	msg := "the response body appears to be binary\n\nTo output to the terminal anyway, use '--output -'"
-	core.WriteWarningMsg(p, msg)
+	core.WriteWarningMsgIf(p, msg, silent)
 }
 
 // printRedirectHop prints a single redirect hop based on verbosity level.
@@ -191,7 +191,7 @@ func printRedirectHopSummary(p *core.Printer, hop client.RedirectHop) {
 
 	// Print source URL
 	p.Set(core.Dim)
-	p.WriteString(hop.Request.URL.String())
+	p.WriteString(core.RedactedURL(hop.Request.URL))
 	p.Reset()
 
 	// Print arrow and location
@@ -199,7 +199,7 @@ func printRedirectHopSummary(p *core.Printer, hop client.RedirectHop) {
 	location := hop.Response.Header.Get("Location")
 	if location != "" {
 		p.Set(core.Cyan)
-		p.WriteString(location)
+		p.WriteString(core.TerminalSafeText(location))
 		p.Reset()
 	}
 

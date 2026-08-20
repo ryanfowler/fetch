@@ -191,7 +191,7 @@ func render(p *core.Printer, cs *tls.ConnectionState) {
 		p.WriteInfoPrefix()
 		p.WriteString("ALPN: ")
 		p.Set(core.Italic)
-		p.WriteString(cs.NegotiatedProtocol)
+		p.WriteString(core.TerminalSafeText(cs.NegotiatedProtocol))
 		p.Reset()
 		p.WriteString("\n")
 	}
@@ -237,7 +237,7 @@ func renderCertChain(p *core.Printer, chain []*x509.Certificate) {
 
 		name := certDisplayName(cert)
 		p.Set(core.Bold)
-		p.WriteString(name)
+		p.WriteString(core.TerminalSafeText(name))
 		p.Reset()
 
 		expiryText, expiryColor := certExpiryInfo(cert)
@@ -315,7 +315,7 @@ func renderSANs(p *core.Printer, leaf *x509.Certificate) {
 	p.WriteInfoPrefix()
 	p.WriteString("SANs: ")
 	p.Set(core.Italic)
-	p.WriteString(strings.Join(sans, ", "))
+	p.WriteString(core.TerminalSafeText(strings.Join(sans, ", ")))
 	p.Reset()
 	p.WriteString("\n")
 }

@@ -628,14 +628,14 @@ func renderIPLiteral(p *core.Printer, host string, ip net.IP, resolver string, d
 	p.Reset()
 	p.WriteString(": ")
 	p.Set(core.Bold)
-	p.WriteString(host)
+	p.WriteString(core.TerminalSafeText(host))
 	p.Reset()
 	p.WriteString("\n")
 
 	p.WriteInfoPrefix()
 	p.WriteString("Resolver: ")
 	p.Set(core.Italic)
-	p.WriteString(resolver)
+	p.WriteString(core.TerminalSafeText(resolver))
 	p.Reset()
 	p.WriteString("\n\n")
 
@@ -662,14 +662,14 @@ func render(p *core.Printer, res *result) {
 	p.Reset()
 	p.WriteString(": ")
 	p.Set(core.Bold)
-	p.WriteString(res.host)
+	p.WriteString(core.TerminalSafeText(res.host))
 	p.Reset()
 	p.WriteString("\n")
 
 	p.WriteInfoPrefix()
 	p.WriteString("Resolver: ")
 	p.Set(core.Italic)
-	p.WriteString(res.resolver)
+	p.WriteString(core.TerminalSafeText(res.resolver))
 	p.Reset()
 	p.WriteString("\n")
 	p.WriteInfoPrefix()
@@ -752,7 +752,7 @@ func renderSection(p *core.Printer, name string, records []record) {
 			p.WriteString("  \u251c\u2500 ")
 		}
 		p.Set(core.Green)
-		p.WriteString(rec.value)
+		p.WriteString(core.TerminalSafeText(rec.value))
 		p.Reset()
 		if rec.hasTTL {
 			p.WriteString(" ")
