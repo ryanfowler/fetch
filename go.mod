@@ -6,7 +6,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/goccy/go-yaml v1.19.2
 	github.com/klauspost/compress v1.19.2
-	github.com/mattn/go-runewidth v0.0.23
+	github.com/mattn/go-runewidth v0.0.27
 	github.com/quic-go/quic-go v0.59.1
 	github.com/tinylib/msgp v1.6.4
 	github.com/yuin/goldmark v1.8.5
