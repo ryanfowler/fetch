@@ -209,12 +209,16 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stdout, `"fetch"`)
 		assertBufNotContains(t, res.stdout, "\n")
 
-		res = runFetchOpts(t, fetchPath, fetchOpts{env: []string{"PAGER=cat"}}, "--pager", "on", "-v", "--help")
+		pagerCommand, failedPagerCommand := "cat", "false"
+		if runtime.GOOS == "windows" {
+			pagerCommand, failedPagerCommand = "more", "cmd /c exit 1"
+		}
+		res = runFetchOpts(t, fetchPath, fetchOpts{env: []string{"PAGER=" + pagerCommand}}, "--pager", "on", "-v", "--help")
 		assertExitCode(t, 0, res)
-		assertBufContains(t, res.stdout, "# CLI Reference")
+		assertBufContains(t, res.stdout, "CLI Reference")
 		assertBufEmpty(t, res.stderr)
 
-		res = runFetchOpts(t, fetchPath, fetchOpts{env: []string{"PAGER=false"}}, "--pager", "on", "-v", "--help")
+		res = runFetchOpts(t, fetchPath, fetchOpts{env: []string{"PAGER=" + failedPagerCommand}}, "--pager", "on", "-v", "--help")
 		assertExitCode(t, 1, res)
 		assertBufContains(t, res.stderr, "pager exited unsuccessfully")
 	})
