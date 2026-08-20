@@ -46,6 +46,7 @@ prettier -w .
 ### Key Packages
 
 - **internal/aws** - AWS Signature V4 request signing.
+- **internal/body** - Lazy request-body sources and single-read response tee pipelines, including replay, bounded preview/materialization, and exact file checks.
 - **internal/cli** - Command-line argument parsing. `App` struct holds all parsed options.
 - **internal/client** - HTTP client wrapper and HTTP version-specific transport setup.
 - **internal/complete** - Shell completion implementation.
@@ -83,6 +84,7 @@ prettier -w .
 - WebSocket terminal sessions use the interactive prompt by default and can be controlled with `--ws-interactive auto|on|off`; output-file/clipboard/retry flags are rejected because the WebSocket path streams through the message loop instead of the normal response pipeline.
 - Metadata-only commands (`--help`, `--version`, `--buildinfo`) perform best-effort config parsing for presentation settings, but config errors and background auto-updates cannot block them.
 - Shared timeout budgets and resource-bound helpers live in `internal/core`; finite child operations must reuse the parent budget's absolute deadline, while zero or absent timeouts remain unlimited.
+- Request replayability is explicit: one-shot sources such as stdin are rejected before retry or Digest replay, regular files are reopened with identity/length checks, and dry-run previews do not consume request bytes.
 5. HTTP client executes request
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 

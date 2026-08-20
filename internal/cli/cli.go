@@ -604,7 +604,7 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 				if err != nil {
 					return err
 				}
-				b, err := io.ReadAll(reader)
+				b, err := core.ReadAllLimited(reader, core.MaxCompositeMaterialization, "curl request body")
 				if c, ok := reader.(io.Closer); ok {
 					c.Close()
 				}
@@ -837,7 +837,7 @@ func readFileForURLEncode(path string) (string, error) {
 	if c, ok := reader.(io.Closer); ok {
 		defer c.Close()
 	}
-	b, err := io.ReadAll(reader)
+	b, err := core.ReadAllLimited(reader, core.MaxCompositeMaterialization, "curl request body")
 	if err != nil {
 		return "", err
 	}

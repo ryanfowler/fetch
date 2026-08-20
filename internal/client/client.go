@@ -11,9 +11,11 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/resolver"
@@ -145,6 +147,11 @@ func NewClient(cfg ClientConfig) *Client {
 					NextRequest: req,
 				})
 			}
+		}
+		if len(via) > 0 && req.Response != nil &&
+			(req.Response.StatusCode == http.StatusTemporaryRedirect || req.Response.StatusCode == http.StatusPermanentRedirect) &&
+			req.GetBody == nil && req.Body != nil && req.Body != http.NoBody {
+			return fmt.Errorf("cannot replay request body for redirect: %w", body.ErrNotReplayable)
 		}
 
 		// Check redirect limits.
@@ -425,23 +432,29 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		cfg.URL.RawQuery = q.Encode()
 	}
 
-	// Set any form or multipart bodies.
-	var body io.Reader
+	// Build a lazy body source. The request receives the source itself so that
+	// files and stdin are not opened/consumed until the transport reads them.
+	var source *body.Body
+	var requestBody io.Reader
 	switch {
 	case cfg.Data != nil:
-		body = cfg.Data
+		var err error
+		source, err = requestBodySource(cfg.Data, cfg.ContentType)
+		if err != nil {
+			return nil, err
+		}
+		requestBody = source
 	case len(cfg.Form) > 0:
 		q := make(url.Values, len(cfg.Form))
 		for _, f := range cfg.Form {
 			q.Add(f.Key, f.Val)
 		}
-		body = strings.NewReader(q.Encode())
+		formBody := strings.NewReader(q.Encode())
+		source = newSeekableBody(formBody, "application/x-www-form-urlencoded")
+		requestBody = source
 	case cfg.Multipart != nil:
-		var err error
-		body, err = cfg.Multipart.Open()
-		if err != nil {
-			return nil, err
-		}
+		source = body.NewFactory(cfg.Multipart.Open, -1, cfg.Multipart.ContentType(), true)
+		requestBody = source
 	}
 
 	// If no scheme was provided, default to HTTPS except for loopback
@@ -460,12 +473,15 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	// Create the initial HTTP request.
-	req, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL.String(), body)
+	req, err := http.NewRequestWithContext(ctx, cfg.Method, cfg.URL.String(), requestBody)
 	if err != nil {
-		if closer, ok := body.(io.Closer); ok {
-			_ = closer.Close()
+		if source != nil {
+			_ = source.Close()
 		}
 		return nil, err
+	}
+	if source != nil {
+		body.Attach(req, source)
 	}
 
 	// Set the accept and user-agent headers.
@@ -494,26 +510,33 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 			continue
 		}
 		req.Header.Set(kv.Key, kv.Val)
+		switch strings.ToLower(kv.Key) {
+		case "content-length":
+			length, err := strconv.ParseInt(strings.TrimSpace(kv.Val), 10, 64)
+			if err != nil || length < 0 {
+				return nil, fmt.Errorf("invalid Content-Length header %q", kv.Val)
+			}
+			req.ContentLength = length
+		case "transfer-encoding":
+			var encodings []string
+			for encoding := range strings.SplitSeq(kv.Val, ",") {
+				encoding = strings.TrimSpace(encoding)
+				if encoding != "" {
+					encodings = append(encodings, encoding)
+				}
+			}
+			req.TransferEncoding = encodings
+			if len(encodings) > 0 {
+				req.ContentLength = -1
+			}
+		}
 	}
 
 	// Optionally request gzip encoding.
 	if !cfg.NoEncode && req.Method != "HEAD" && req.Header.Get("Accept-Encoding") == "" {
 		req.Header.Set("Accept-Encoding", "gzip, zstd")
-		ctx = context.WithValue(ctx, ctxEncodingRequestedKey, true)
-		req = req.WithContext(ctx)
-	}
-
-	// Set the content-length header if the body is a file.
-	setFileContentLength(req)
-
-	// Set GetBody for replayable request bodies.
-	if cfg.Multipart != nil {
-		req.GetBody = cfg.Multipart.Open
-	} else if f, ok := body.(*os.File); ok && f != os.Stdin {
-		path := f.Name()
-		req.GetBody = func() (io.ReadCloser, error) {
-			return os.Open(path)
-		}
+		requestContext := context.WithValue(req.Context(), ctxEncodingRequestedKey, true)
+		req = req.WithContext(requestContext)
 	}
 
 	// Optionally set the authorization header.
@@ -525,6 +548,32 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	return req, nil
+}
+
+func requestBodySource(r io.Reader, contentType string) (*body.Body, error) {
+	if f, ok := r.(*os.File); ok && f != os.Stdin {
+		return body.NewFileFromOpenFile(f, contentType)
+	}
+	if rs, ok := r.(io.ReadSeeker); ok {
+		return newSeekableBody(rs, contentType), nil
+	}
+	return body.NewReader(r, -1, contentType), nil
+}
+
+func newSeekableBody(rs io.ReadSeeker, contentType string) *body.Body {
+	if r, ok := rs.(interface {
+		io.ReadSeeker
+		io.ReaderAt
+		Size() int64
+	}); ok {
+		offset, err := r.Seek(0, io.SeekCurrent)
+		if err == nil && offset >= 0 && r.Size() >= offset {
+			return body.NewReaderAt(r, offset, r.Size()-offset, contentType)
+		}
+	}
+	// An arbitrary ReadSeeker may not provide independent cursors. Treat it as
+	// one-shot rather than allowing a replay to reset the active request.
+	return body.NewReader(rs, -1, contentType)
 }
 
 // Do performs the provided http Request, returning the response.
@@ -608,23 +657,6 @@ func contentEncodings(h http.Header) []string {
 		}
 	}
 	return encodings
-}
-
-// setFileContentLength sets the content-length of a request if the body is an
-// *os.File that we can read of the size of.
-func setFileContentLength(req *http.Request) {
-	if req.ContentLength > 0 {
-		return
-	}
-
-	f, ok := req.Body.(*os.File)
-	if !ok {
-		return
-	}
-
-	if info, err := f.Stat(); err == nil {
-		req.ContentLength = info.Size()
-	}
 }
 
 // ctxEncodingRequestedKeyType represents the type for storing whether response

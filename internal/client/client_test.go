@@ -111,6 +111,51 @@ func TestNewRequestSetsGetBodyForMultipart(t *testing.T) {
 	}
 }
 
+func TestNewRequestUsesLazyReplayableFileBody(t *testing.T) {
+	path := t.TempDir() + "/upload.txt"
+	if err := os.WriteFile(path, []byte("file body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	u, err := url.Parse("https://example.com/upload")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+		Data:   f,
+		Method: http.MethodPut,
+		URL:    u,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer req.Body.Close()
+
+	if req.ContentLength != int64(len("file body")) || req.GetBody == nil {
+		t.Fatalf("length=%d getBody=%v, want known replayable file", req.ContentLength, req.GetBody != nil)
+	}
+	first, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := req.GetBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := io.ReadAll(replay)
+	replay.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("first=%q replay=%q", first, second)
+	}
+}
+
 func TestDoClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
 	body := &trackingReadCloser{
 		Reader: bytes.NewReader([]byte("not a valid compressed body")),

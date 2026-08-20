@@ -2,11 +2,14 @@ package fetch
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
+	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/core"
 	fetchgrpc "github.com/ryanfowler/fetch/internal/grpc"
 	"github.com/ryanfowler/fetch/internal/proto"
@@ -91,8 +94,10 @@ func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor
 func convertJSONToProtobuf(data io.ReadCloser, desc protoreflect.MessageDescriptor) ([]byte, error) {
 	defer data.Close()
 
-	// Read all the JSON data.
-	jsonData, err := io.ReadAll(data)
+	// JSON-to-protobuf conversion is one of the explicitly materializing
+	// protocol paths. Keep it bounded rather than turning generated input into
+	// an unbounded in-memory upload.
+	jsonData, err := core.ReadAllLimited(data, core.MaxCompositeMaterialization, "gRPC request body")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read request body: %w", err)
 	}
@@ -114,7 +119,7 @@ func frameGRPCRequest(data io.ReadCloser) ([]byte, error) {
 		defer data.Close()
 
 		var err error
-		rawData, err = io.ReadAll(data)
+		rawData, err = core.ReadAllLimited(data, core.MaxCompositeMaterialization, "gRPC request body")
 		if err != nil {
 			return nil, fmt.Errorf("failed to read request body: %w", err)
 		}
@@ -130,12 +135,13 @@ func frameGRPCRequest(data io.ReadCloser) ([]byte, error) {
 // Returns an io.ReadCloser to use as the request body.
 func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) io.ReadCloser {
 	pr, pw := io.Pipe()
+	input := &closeOnceReadCloser{ReadCloser: data}
 	go func() {
 		defer pw.Close()
-		defer data.Close()
+		defer input.Close()
 
-		decoder := json.NewDecoder(data)
 		for {
+			decoder := json.NewDecoder(&boundedJSONReader{r: input, max: core.MaxCompositeMaterialization})
 			var raw json.RawMessage
 			err := decoder.Decode(&raw)
 			if err == io.EOF {
@@ -143,6 +149,10 @@ func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) 
 			}
 			if err != nil {
 				pw.CloseWithError(fmt.Errorf("failed to decode JSON message: %w", err))
+				return
+			}
+			if int64(len(raw)) > core.MaxCompositeMaterialization {
+				pw.CloseWithError(core.LimitError{Subsystem: "gRPC request body", Limit: core.MaxCompositeMaterialization})
 				return
 			}
 			protoData, err := proto.JSONToProtobuf(raw, desc)
@@ -156,22 +166,69 @@ func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) 
 			}
 		}
 	}()
-	return pr
+	return &grpcPipeReader{PipeReader: pr, input: input}
+}
+
+type closeOnceReadCloser struct {
+	io.ReadCloser
+	once sync.Once
+	err  error
+}
+
+func (r *closeOnceReadCloser) Close() error {
+	r.once.Do(func() { r.err = r.ReadCloser.Close() })
+	return r.err
+}
+
+type grpcPipeReader struct {
+	*io.PipeReader
+	input *closeOnceReadCloser
+}
+
+func (r *grpcPipeReader) Close() error {
+	return errors.Join(r.PipeReader.Close(), r.input.Close())
+}
+
+type boundedJSONReader struct {
+	r     io.Reader
+	max   int64
+	bytes int64
+}
+
+func (r *boundedJSONReader) Read(p []byte) (int, error) {
+	if r.bytes >= r.max+1 {
+		return 0, core.LimitError{Subsystem: "gRPC request body", Limit: r.max}
+	}
+	if len(p) > 1 {
+		p = p[:1]
+	}
+	n, err := r.r.Read(p)
+	r.bytes += int64(n)
+	return n, err
 }
 
 func setStreamingGRPCBody(req *http.Request, desc protoreflect.MessageDescriptor) {
+	first := req.Body
 	getBody := req.GetBody
-	req.Body = streamGRPCRequest(req.Body, desc)
-	req.ContentLength = -1
-	if getBody == nil {
-		req.GetBody = nil
-		return
-	}
-	req.GetBody = func() (io.ReadCloser, error) {
-		body, err := getBody()
+	var openMu sync.Mutex
+	usedFirst := false
+	open := func() (io.ReadCloser, error) {
+		openMu.Lock()
+		if !usedFirst {
+			usedFirst = true
+			openMu.Unlock()
+			return streamGRPCRequest(first, desc), nil
+		}
+		openMu.Unlock()
+		if getBody == nil {
+			return nil, body.ErrNotReplayable
+		}
+		raw, err := getBody()
 		if err != nil {
 			return nil, err
 		}
-		return streamGRPCRequest(body, desc), nil
+		return streamGRPCRequest(raw, desc), nil
 	}
+	source := body.NewFactory(open, -1, req.Header.Get("Content-Type"), getBody != nil)
+	body.Attach(req, source)
 }
