@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -61,11 +63,13 @@ func Stream(src io.Reader, mode core.PagerMode, stdoutTerminal, image bool, dst 
 // StreamContext is Stream with cancellation for the pager subprocess.
 func StreamContext(ctx context.Context, src io.Reader, mode core.PagerMode, stdoutTerminal, image bool, dst io.Writer) error {
 	if !ShouldPage(mode, stdoutTerminal, image) {
-		_, err := io.Copy(dst, src)
-		return err
+		return copyContext(ctx, src, dst)
 	}
 
-	command := CommandFromEnv(os.Getenv)
+	command, err := commandFromLookup(os.LookupEnv)
+	if err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -78,92 +82,174 @@ func StreamContext(ctx context.Context, src io.Reader, mode core.PagerMode, stdo
 		return err
 	}
 	if err := cmd.Start(); err != nil {
-		if command.Fallback && errors.Is(err, exec.ErrNotFound) {
-			return copyDirect(src, dst)
-		}
 		return fmt.Errorf("unable to start pager: %w", err)
 	}
 
-	copyDone := make(chan struct{})
-	var copyErr, closeErr error
-	go func() {
-		_, copyErr = io.Copy(stdin, src)
-		closeErr = stdin.Close()
-		close(copyDone)
-	}()
-
-	select {
-	case <-copyDone:
-	case <-ctx.Done():
+	// A non-closable reader cannot be interrupted by this package. Keep its
+	// copy synchronous so cancellation cannot strand a producer goroutine.
+	// All response-body paths use closable readers, which take the concurrent
+	// path below and can be stopped when the pager exits.
+	if _, ok := src.(io.Closer); !ok {
+		_, copyErr := io.Copy(stdin, src)
 		_ = stdin.Close()
-		terminateProcessTree(cmd)
-		<-copyDone
-		return ctx.Err()
+		waitDone := make(chan error, 1)
+		go func() { waitDone <- cmd.Wait() }()
+		select {
+		case waitErr := <-waitDone:
+			return pagerResult(copyErr, waitErr, false)
+		case <-ctx.Done():
+			terminateProcessTree(cmd)
+			<-waitDone
+			return ctx.Err()
+		}
 	}
 
+	copyDone := make(chan copyResult, 1)
+	go func() {
+		_, copyErr := io.Copy(stdin, src)
+		_ = stdin.Close()
+		copyDone <- copyResult{copyErr: copyErr}
+	}()
+
+	// Wait concurrently with the producer. A pager such as `less` or `head`
+	// may exit before the response body reaches EOF. Waiting for the producer
+	// first would then keep a network response (and its goroutine) alive until
+	// the remote peer closes it.
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
+
+	var result copyResult
 	var waitErr error
+	sourceClosed := false
 	select {
+	case result = <-copyDone:
+		select {
+		case waitErr = <-waitDone:
+		case <-ctx.Done():
+			closeReader(src)
+			_ = stdin.Close()
+			terminateProcessTree(cmd)
+			<-waitDone
+			return ctx.Err()
+		}
 	case waitErr = <-waitDone:
+		sourceClosed = true
+		closeReader(src)
+		result = waitForCopy(copyDone)
 	case <-ctx.Done():
+		closeReader(src)
+		_ = stdin.Close()
 		terminateProcessTree(cmd)
 		<-waitDone
 		return ctx.Err()
 	}
-	if copyErr != nil && !core.IsBrokenPipe(copyErr) {
+
+	return pagerResult(result.copyErr, waitErr, sourceClosed)
+}
+
+func pagerResult(copyErr, waitErr error, sourceClosed bool) error {
+	if copyErr != nil && waitErr == nil && !core.IsBrokenPipe(copyErr) && !(sourceClosed && isClosedPagerInput(copyErr)) {
 		return copyErr
 	}
-	if closeErr != nil && !core.IsBrokenPipe(closeErr) {
-		return closeErr
-	}
-	if waitErr != nil {
-		// A broken pipe is harmless only when the pager itself exited
-		// successfully. Preserve failures from a pager that closed its
-		// input and then reported an error.
+	if waitErr != nil && !isEarlyPagerExit(waitErr) {
 		return fmt.Errorf("pager exited unsuccessfully: %w", waitErr)
 	}
 	return nil
 }
 
-func copyDirect(src io.Reader, dst io.Writer) error {
-	_, err := io.Copy(dst, src)
-	return err
+type copyResult struct {
+	copyErr error
+}
+
+func copyContext(ctx context.Context, src io.Reader, dst io.Writer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, ok := src.(io.Closer); !ok {
+		_, err := io.Copy(dst, src)
+		return err
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(dst, src)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		closeReader(src)
+		return ctx.Err()
+	}
+}
+
+func closeReader(src io.Reader) {
+	if closer, ok := src.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+func waitForCopy(done <-chan copyResult) copyResult {
+	return <-done
+}
+
+func isEarlyPagerExit(err error) bool {
+	return err == nil || pagerExitWasSIGPIPE(err)
+}
+
+func isClosedPagerInput(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, io.ErrClosedPipe) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, os.ErrClosed) ||
+		strings.Contains(strings.ToLower(err.Error()), "closed")
 }
 
 // Command describes a pager executable and its arguments.
 type Command struct {
-	Program  string
-	Args     []string
-	Fallback bool
+	Program string
+	Args    []string
 }
 
-// CommandFromEnv parses PAGER without invoking a shell. Invalid or empty PAGER
-// values use the less fallback, matching the command's safe default.
+// CommandFromEnv parses PAGER without invoking a shell. It keeps the legacy
+// fallback behavior for callers that only need to inspect the selected command;
+// StreamContext uses commandFromLookup so malformed user input is reported.
 func CommandFromEnv(getenv func(string) string) Command {
-	if value, ok := lookupEnv(getenv, "PAGER"); ok {
-		if words, err := splitWords(value); err == nil && len(words) > 0 {
-			return Command{Program: words[0], Args: words[1:]}
+	command, err := commandFromLookup(func(name string) (string, bool) {
+		if getenv == nil {
+			return "", false
 		}
-	}
-
-	command := Command{Program: "less", Fallback: true}
-	if _, ok := lookupEnv(getenv, "LESS"); !ok {
-		command.Args = []string{"-FIRX"}
+		value := getenv(name)
+		return value, value != ""
+	})
+	if err != nil {
+		return defaultCommand(func(string) (string, bool) { return "", false })
 	}
 	return command
 }
 
-// lookupEnv lets tests use os.Getenv while retaining the distinction between
-// an unset variable and an explicitly empty one.
-func lookupEnv(getenv func(string) string, name string) (string, bool) {
-	if getenv == nil {
-		return "", false
+func commandFromLookup(lookup func(string) (string, bool)) (Command, error) {
+	if value, ok := lookup("PAGER"); ok && value != "" {
+		words, err := splitWords(value)
+		if err != nil {
+			return Command{}, fmt.Errorf("invalid PAGER: %w", err)
+		}
+		if len(words) == 0 {
+			return Command{}, errors.New("invalid PAGER: command is empty")
+		}
+		return Command{Program: words[0], Args: words[1:]}, nil
 	}
-	value := getenv(name)
-	// os.Getenv cannot distinguish unset from empty. An empty value is not a
-	// useful pager command in either case, so treating it as unset is safe.
-	return value, value != ""
+	return defaultCommand(lookup), nil
+}
+
+func defaultCommand(lookup func(string) (string, bool)) Command {
+	command := Command{Program: "less"}
+	if _, ok := lookup("LESS"); !ok {
+		command.Args = []string{"-FIRX"}
+	}
+	return command
 }
 
 // splitWords is a small POSIX-style word parser for PAGER. Quotes and
@@ -206,7 +292,17 @@ func splitWords(input string) ([]string, error) {
 			case '"':
 				quote = 0
 			case '\\':
-				escaped = true
+				// POSIX shells treat backslash as special for only these
+				// characters inside double quotes. Preserve it for all others.
+				if i+1 < len(input) {
+					next := input[i+1]
+					if next == '$' || next == '`' || next == '"' || next == '\\' || next == '\n' {
+						escaped = true
+						continue
+					}
+				}
+				word.WriteByte(c)
+				inWord = true
 			default:
 				word.WriteByte(c)
 				inWord = true
@@ -221,10 +317,22 @@ func splitWords(input string) ([]string, error) {
 		case c == '\'' || c == '"':
 			quote = c
 			inWord = true
-		case unicode.IsSpace(rune(c)):
-			flush()
-		default:
+		case c < utf8.RuneSelf:
+			if unicode.IsSpace(rune(c)) {
+				flush()
+				continue
+			}
 			word.WriteByte(c)
+			inWord = true
+		default:
+			r, size := utf8.DecodeRuneInString(input[i:])
+			if unicode.IsSpace(r) {
+				flush()
+				i += size - 1
+				continue
+			}
+			word.WriteString(input[i : i+size])
+			i += size - 1
 			inWord = true
 		}
 	}

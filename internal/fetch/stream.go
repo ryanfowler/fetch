@@ -9,6 +9,25 @@ import (
 // the output sink. It keeps an incomplete UTF-8 suffix until the next read so
 // a rune split at a transport boundary is not mistaken for binary data.
 // Once binary data is found, the current chunk is never returned to the sink.
+type readerWithCloser struct {
+	io.Reader
+	closers []io.Closer
+}
+
+func newReaderWithCloser(reader io.Reader, closers ...io.Closer) io.ReadCloser {
+	return readerWithCloser{Reader: reader, closers: closers}
+}
+
+func (r readerWithCloser) Close() error {
+	var firstErr error
+	for _, closer := range r.closers {
+		if err := closer.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 type binaryGuardReader struct {
 	source   io.Reader
 	drain    bool

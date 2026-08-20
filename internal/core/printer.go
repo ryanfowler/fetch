@@ -60,6 +60,13 @@ func (h *Handle) Stdout() *Printer {
 	return h.stdout
 }
 
+// NewWriter returns a printer with the same color policy as p and a different
+// output writer. It is useful for streaming formatters that must write through
+// an intermediate sink, such as a pager, without buffering the response.
+func (p *Printer) NewWriter(w io.Writer) *Printer {
+	return &Printer{file: w, useColor: p.useColor}
+}
+
 // Printer allows for writing data with optional ANSI escape sequences based on
 // the color settings for a target.
 type Printer struct {

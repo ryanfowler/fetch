@@ -26,6 +26,32 @@ func TestFormatResponseFormatsExactMaxBodyBytes(t *testing.T) {
 	}
 }
 
+func TestFormatResponseStreamsNDJSONThroughReader(t *testing.T) {
+	resp := &http.Response{
+		Body:   io.NopCloser(strings.NewReader("{\"value\":1}\n{\"value\":2}\n")),
+		Header: http.Header{"Content-Type": {"application/x-ndjson"}},
+		Request: &http.Request{
+			Method: "GET",
+		},
+	}
+	r := &Request{
+		Format:        core.FormatOn,
+		PrinterHandle: core.NewHandle(core.ColorOff),
+	}
+
+	reader, err := formatResponse(context.Background(), r, resp)
+	if err != nil {
+		t.Fatalf("formatResponse returned error: %v", err)
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("reading streamed response: %v", err)
+	}
+	if !strings.Contains(string(got), "value") || !strings.Contains(string(got), "1") {
+		t.Fatalf("streamed NDJSON output = %q", got)
+	}
+}
+
 func TestFormatResponseSkipsFormattingOverMaxBodyBytes(t *testing.T) {
 	body := []byte(`{"a":"` + strings.Repeat("x", maxBodyBytes-len(`{"a":""}`)) + `"}`)
 	body = append(body, ' ')

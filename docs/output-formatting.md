@@ -349,9 +349,11 @@ fetch --pager on --format on example.com/large-response
 
 In automatic mode, `NO_PAGER` disables paging. If `PAGER` is set, fetch parses
 its executable and arguments without a shell. Shell operators are not
-interpreted. If `PAGER` is unset, fetch uses `less -FIRX`; when `LESS` is set,
-fetch invokes `less` without adding default flags.
+interpreted. Invalid pager quoting is an error. If `PAGER` is unset, fetch uses
+`less -FIRX`; when `LESS` is set, fetch invokes `less` without adding default
+flags.
 
+Raw output (`--format off` or `--output -`) and image bytes bypass the pager.
 A pager that exits early is treated as a clean output termination. Startup or
 other nonzero pager failures are reported.
 

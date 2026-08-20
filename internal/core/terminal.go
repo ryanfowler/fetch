@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"strings"
 	"syscall"
@@ -127,6 +128,7 @@ func IsBrokenPipe(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, io.ErrClosedPipe) ||
 		strings.Contains(message, "broken pipe") ||
 		strings.Contains(message, "pipe has been ended")
 }
