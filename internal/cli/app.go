@@ -384,7 +384,7 @@ func (a *App) CLI() *CLI {
 				Fn:          a.parseMultipartFlag,
 			},
 
-			Flag{
+			{
 				Long:        "no-encode",
 				Description: "Avoid requesting gzip/zstd encoding",
 				IsSet:       func() bool { return a.noEncodeSet },
@@ -399,7 +399,7 @@ func (a *App) CLI() *CLI {
 					return nil
 				},
 			},
-			Flag{
+			{
 				Long:        "no-pager",
 				Description: "Avoid using a pager for the output",
 				IsSet:       func() bool { return a.noPagerSet },
