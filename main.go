@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -21,9 +23,17 @@ import (
 	"github.com/ryanfowler/fetch/internal/fetch"
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/multipart"
+	"github.com/ryanfowler/fetch/internal/pager"
 	"github.com/ryanfowler/fetch/internal/tlsinspect"
 	"github.com/ryanfowler/fetch/internal/update"
 )
+
+// verboseHelp is the detailed, Markdown-formatted reference shown by
+// `fetch -v --help`. Embedding it keeps metadata commands offline and makes
+// the output match the documentation shipped with the binary.
+//
+//go:embed docs/cli-reference.md
+var verboseHelp []byte
 
 func main() {
 	// Cancel the context when one of the below signals are caught.
@@ -60,8 +70,8 @@ func main() {
 	// settings like color and buildinfo formatting continue to apply.
 	if app.Help || app.Version || app.BuildInfo {
 		_, _ = parseConfigFile(app)
-		handleMetadataCommand(app, core.NewHandle(app.Cfg.Color))
-		os.Exit(0)
+		status := handleMetadataCommand(ctx, app, core.NewHandle(app.Cfg.Color), os.Args[1:])
+		os.Exit(statusForContext(ctx, status))
 	}
 
 	// Parse any config file with the CLI color setting for parse errors, then
@@ -97,7 +107,7 @@ func main() {
 		p := handle.Stderr()
 		timeout := getValue(app.Cfg.Timeout)
 		status := update.Update(ctx, p, timeout, verbosity == core.VSilent, app.DryRun)
-		os.Exit(status)
+		os.Exit(statusForContext(ctx, status))
 	}
 
 	// gRPC discovery can run offline when a local schema is provided.
@@ -116,12 +126,12 @@ func main() {
 
 	// Handle --inspect-dns: resolve the URL hostname only, no HTTP request.
 	if app.InspectDNS {
-		os.Exit(inspectDNS(ctx, app, handle))
+		os.Exit(statusForContext(ctx, inspectDNS(ctx, app, handle)))
 	}
 
 	// Handle --inspect-tls: perform TLS handshake only, no HTTP request.
 	if app.InspectTLS {
-		os.Exit(inspectTLS(ctx, app, handle))
+		os.Exit(statusForContext(ctx, inspectTLS(ctx, app, handle)))
 	}
 
 	// Respond with an error if a proxy is specified with HTTP/2 or higher.
@@ -185,7 +195,8 @@ func main() {
 		Method:           app.Method,
 		Multipart:        multipart.NewMultipart(app.Multipart),
 		NoEncode:         getValue(app.Cfg.NoEncode),
-		NoPager:          getValue(app.Cfg.NoPager),
+		NoPager:          app.Cfg.Pager == core.PagerUnknown && getValue(app.Cfg.NoPager),
+		Pager:            app.Cfg.Pager,
 		Output:           app.Output,
 		PrinterHandle:    handle,
 		ProtoDesc:        app.ProtoDesc,
@@ -213,39 +224,184 @@ func main() {
 	}
 	if app.HasGRPCDiscovery() {
 		status := fetch.DiscoverGRPC(ctx, &req)
-		os.Exit(status)
+		os.Exit(statusForContext(ctx, status))
 	}
 	status := fetch.Fetch(ctx, &req)
-	os.Exit(status)
+	os.Exit(statusForContext(ctx, status))
 }
 
-func handleMetadataCommand(app *cli.App, handle *core.Handle) {
-	// Print help to stdout.
+func handleMetadataCommand(ctx context.Context, app *cli.App, handle *core.Handle, args []string) int {
+	// Help is intentionally split into a concise command synopsis and a
+	// detailed Markdown reference. Only an explicitly supplied -v/--verbose
+	// changes help mode; a config default must not make scripts unexpectedly
+	// receive a large document.
 	if app.Help {
-		p := handle.Stdout()
-		app.PrintHelp(p)
-		p.Flush()
-		return
+		if helpVerboseRequested(args, app) {
+			return printVerboseHelp(ctx, app)
+		}
+		printConciseHelp(app, handle.Stdout())
+		return flushMetadata(handle)
 	}
 
-	// Print version to stdout.
 	if app.Version {
-		fmt.Fprintln(os.Stdout, "fetch", core.Version)
-		return
+		p := handle.Stdout()
+		p.WriteString("fetch ")
+		p.WriteString(core.Version)
+		p.WriteString("\n")
+		return flushMetadata(handle)
 	}
 
-	// Print build info to stdout.
 	if app.BuildInfo {
 		p := handle.Stdout()
-		info := core.GetBuildInfo()
+		info := core.GetBuildInfo(getValue(app.Cfg.Verbosity) > 0)
 		if app.Cfg.Format != core.FormatOff {
-			format.FormatJSON(info, p)
+			if err := format.FormatJSON(info, p); err != nil {
+				return handleMetadataOutputError(handle, err)
+			}
 		} else {
-			p.Write(info)
+			if _, err := p.Write(info); err != nil {
+				return handleMetadataOutputError(handle, err)
+			}
 		}
-		p.Flush()
-		return
+		return flushMetadata(handle)
 	}
+	return 0
+}
+
+func printConciseHelp(app *cli.App, p *core.Printer) {
+	p.WriteString("fetch is a modern HTTP(S) client for the command line\n\n")
+	p.Set(core.Bold)
+	p.Set(core.Underline)
+	p.WriteString("Usage")
+	p.Reset()
+	p.WriteString(": fetch [OPTIONS] [URL]\n\n")
+	p.WriteString("Common options:\n")
+	p.WriteString("  --help, -h       Show this concise help\n")
+	p.WriteString("  --verbose, -v    Increase output detail\n")
+	p.WriteString("  --version, -V    Print the version\n")
+	p.WriteString("  --buildinfo      Print build information\n")
+	p.WriteString("  --config PATH    Read a configuration file\n")
+	p.WriteString("  --complete SHELL Print shell completion\n")
+	p.WriteString("\nRequest and output options:\n")
+	p.WriteString("  --method METHOD  Set the HTTP method\n")
+	p.WriteString("  --header NAME:VALUE  Add a request header\n")
+	p.WriteString("  --data VALUE     Send a request body\n")
+	p.WriteString("  --format MODE    Select response formatting\n")
+	p.WriteString("  --article        Extract readable page content\n")
+	p.WriteString("  --output PATH    Write the response to a file\n")
+	p.WriteString("  --pager MODE     Select pager behavior\n")
+	p.WriteString("  --compress MODE  Select response compression\n")
+	p.WriteString("\nNetworking and diagnostics:\n")
+	p.WriteString("  --http VERSION   Select HTTP/1.1, HTTP/2, or HTTP/3\n")
+	p.WriteString("  --proxy PROXY    Use a proxy\n")
+	p.WriteString("  --timeout SECONDS  Set the request timeout\n")
+	p.WriteString("  --inspect-dns    Inspect DNS resolution\n")
+	p.WriteString("  --inspect-tls   Inspect the TLS handshake\n")
+	p.WriteString("  --grpc           Use gRPC mode\n")
+	if runtime.GOOS != "windows" {
+		p.WriteString("  --unix PATH      Use a Unix socket\n")
+	}
+	p.WriteString("\nUse `fetch -v --help` for the full Markdown reference.\n")
+}
+
+func printVerboseHelp(ctx context.Context, app *cli.App) int {
+	useColor := app.Cfg.Color == core.ColorOn ||
+		(app.Cfg.Color != core.ColorOff && core.IsStdoutTerm)
+	p := core.TestPrinter(useColor)
+	if err := format.FormatMarkdown(verboseHelp, p); err != nil {
+		return handleMetadataOutputError(core.NewHandle(app.Cfg.Color), err)
+	}
+	data := append([]byte(nil), p.Bytes()...)
+	if len(data) == 0 || data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	mode := app.Cfg.Pager
+	if app.Cfg.Pager == core.PagerUnknown && getValue(app.Cfg.NoPager) {
+		mode = core.PagerOff
+	}
+	if err := pager.WriteTextContext(ctx, data, mode, core.IsStdoutTerm); err != nil {
+		if code, ok := core.SignalExitCode(context.Cause(ctx)); ok {
+			return code
+		}
+		return handleMetadataOutputError(core.NewHandle(app.Cfg.Color), err)
+	}
+	return 0
+}
+
+func flushMetadata(handle *core.Handle) int {
+	if err := handle.Stdout().Flush(); err != nil {
+		if core.IsBrokenPipe(err) {
+			return 0
+		}
+		return handleMetadataOutputError(handle, err)
+	}
+	return 0
+}
+
+func handleMetadataOutputError(handle *core.Handle, err error) int {
+	if core.IsBrokenPipe(err) {
+		return 0
+	}
+	core.WriteErrorMsg(handle.Stderr(), err)
+	return 1
+}
+
+func helpVerboseRequested(args []string, app *cli.App) bool {
+	var help, verbose bool
+	options := app.CLI().Options()
+	skipNext := false
+	for _, arg := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "--") {
+			name, _, hasValue := strings.Cut(arg[2:], "=")
+			flag, known := options.Lookup(name)
+			if name == "help" {
+				help = true
+			} else if name == "verbose" {
+				verbose = true
+			}
+			if known && flag.Args != "" && !hasValue {
+				if !flag.OptionalArg {
+					skipNext = true
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && len(arg) > 1 {
+			shorts := arg[1:]
+			for i := 0; i < len(shorts); i++ {
+				name := shorts[i : i+1]
+				flag, known := options.Lookup(name)
+				if name == "h" {
+					help = true
+				} else if name == "v" {
+					verbose = true
+				}
+				if known && flag.Args != "" {
+					// The remainder of a short cluster is the value. If
+					// there is no remainder, the next argument is the value.
+					if i+1 == len(shorts) && !flag.OptionalArg {
+						skipNext = true
+					}
+					break
+				}
+			}
+		}
+	}
+	return help && verbose
+}
+
+func statusForContext(ctx context.Context, status int) int {
+	if code, ok := core.SignalExitCode(context.Cause(ctx)); ok {
+		return code
+	}
+	return status
 }
 
 func handleCompletion(name string, args []string) error {

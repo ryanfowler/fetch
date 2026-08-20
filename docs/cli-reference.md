@@ -708,7 +708,10 @@ Unknown curl flags return an error.
 
 ### `-h, --help`
 
-Print help information.
+Print concise help information. Use `-v --help` for the full Markdown
+reference. The detailed form uses the configured pager when appropriate.
+`--pager on` forces paging, `--pager off` disables it, and `NO_PAGER` disables
+automatic paging.
 
 ### `-V, --version`
 
@@ -716,7 +719,11 @@ Print version.
 
 ### `--buildinfo`
 
-Print detailed build information.
+Print build information as JSON. The output includes the fetch version, Go
+version, target operating system and architecture, and build settings. Add
+`-v` to include module dependency versions. Metadata commands read
+configuration on a best-effort basis; an invalid config does not prevent help,
+version, or build information output.
 
 ### `--update`
 

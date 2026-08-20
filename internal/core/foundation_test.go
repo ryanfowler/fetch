@@ -167,6 +167,18 @@ func TestCheckedArithmetic(t *testing.T) {
 	}
 }
 
+func TestSignalExitCode(t *testing.T) {
+	if code, ok := SignalExitCode(SignalError("interrupt")); !ok || code != InterruptedExitCode {
+		t.Fatalf("interrupt exit = %d, %t, want %d, true", code, ok, InterruptedExitCode)
+	}
+	if code, ok := SignalExitCode(SignalError("terminated")); !ok || code != 1 {
+		t.Fatalf("terminate exit = %d, %t, want 1, true", code, ok)
+	}
+	if code, ok := SignalExitCode(errors.New("ordinary error")); ok || code != 0 {
+		t.Fatalf("ordinary error exit = %d, %t, want 0, false", code, ok)
+	}
+}
+
 func TestErrorCategoriesPreserveCause(t *testing.T) {
 	cause := io.ErrUnexpectedEOF
 	err := NewCategoryError(CategoryNetwork, cause)

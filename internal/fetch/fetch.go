@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/image"
 	"github.com/ryanfowler/fetch/internal/multipart"
+	"github.com/ryanfowler/fetch/internal/pager"
 	iproto "github.com/ryanfowler/fetch/internal/proto"
 	"github.com/ryanfowler/fetch/internal/session"
 
@@ -66,6 +66,7 @@ type Request struct {
 	Insecure         bool
 	NoEncode         bool
 	NoPager          bool
+	Pager            core.PagerMode
 	Method           string
 	Multipart        *multipart.Multipart
 	Output           string
@@ -112,6 +113,9 @@ func (r *Request) HasLocalProtoSchema() bool {
 
 func Fetch(ctx context.Context, r *Request) int {
 	code, err := fetch(ctx, r)
+	if signalCode, ok := core.SignalExitCode(context.Cause(ctx)); ok {
+		return signalCode
+	}
 	if err == nil {
 		return code
 	}
@@ -375,7 +379,7 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 
 	if body != nil {
 		p := r.PrinterHandle.Stderr()
-		err = streamToStdoutWithSilent(body, p, r.Output == "-", r.NoPager, cc != nil, r.Verbosity == core.VSilent)
+		err = streamToStdoutWithPager(ctx, body, p, r.Output == "-", r.NoPager, cc != nil, r.Verbosity == core.VSilent, r.Pager)
 		if err != nil {
 			return 0, err
 		}
@@ -487,10 +491,10 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 }
 
 func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary bool) error {
-	return streamToStdoutWithSilent(r, p, forceOutput, noPager, drainSuppressedBinary, false)
+	return streamToStdoutWithPager(context.Background(), r, p, forceOutput, noPager, drainSuppressedBinary, false, core.PagerUnknown)
 }
 
-func streamToStdoutWithSilent(r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary, silent bool) error {
+func streamToStdoutWithPager(ctx context.Context, r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary, silent bool, pagerMode core.PagerMode) error {
 	// Check output to see if it's likely safe to print to stdout.
 	if core.IsStdoutTerm && !forceOutput {
 		var ok bool
@@ -509,24 +513,10 @@ func streamToStdoutWithSilent(r io.Reader, p *core.Printer, forceOutput, noPager
 		}
 	}
 
-	// Optionally stream output to a pager.
-	if !noPager && core.IsStdoutTerm {
-		path, err := exec.LookPath("less")
-		if err == nil {
-			return streamToPager(r, path)
-		}
+	if noPager {
+		pagerMode = core.PagerOff
 	}
-
-	_, err := io.Copy(os.Stdout, r)
-	return err
-}
-
-func streamToPager(r io.Reader, path string) error {
-	cmd := exec.Command(path, "-FIRX")
-	cmd.Stdin = r
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = os.Stdout
-	return cmd.Run()
+	return pager.StreamContext(ctx, r, pagerMode, core.IsStdoutTerm, false, os.Stdout)
 }
 
 func getExitCodeForStatus(status int) int {

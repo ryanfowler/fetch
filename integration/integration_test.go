@@ -208,6 +208,32 @@ func TestMain(t *testing.T) {
 		assertBufEmpty(t, res.stderr)
 		assertBufContains(t, res.stdout, `"fetch"`)
 		assertBufNotContains(t, res.stdout, "\n")
+
+		res = runFetchOpts(t, fetchPath, fetchOpts{env: []string{"PAGER=cat"}}, "--pager", "on", "-v", "--help")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "# CLI Reference")
+		assertBufEmpty(t, res.stderr)
+
+		res = runFetchOpts(t, fetchPath, fetchOpts{env: []string{"PAGER=false"}}, "--pager", "on", "-v", "--help")
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "pager exited unsuccessfully")
+	})
+
+	t.Run("stripped buildinfo", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), getExeName())
+		workingDir, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", path, filepath.Dir(workingDir))
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("stripped build failed: %v: %s", err, output)
+		}
+		res := runFetch(t, path, "--buildinfo")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, `"target_os"`)
+		assertBufContains(t, res.stdout, `"target_arch"`)
+		assertBufContains(t, res.stdout, `"go"`)
 	})
 
 	t.Run("aws-sigv4 auth", func(t *testing.T) {
@@ -3065,8 +3091,17 @@ func TestMain(t *testing.T) {
 			done <- cmd.Wait()
 		}()
 		select {
-		case <-done:
-			// Process exited — success.
+		case err := <-done:
+			if err == nil {
+				t.Fatal("Ctrl-C exited successfully; want status 130")
+			}
+			exitErr, ok := errors.AsType[*exec.ExitError](err)
+			if !ok {
+				t.Fatalf("Ctrl-C error = %v; want exit status 130", err)
+			}
+			if exitErr.ExitCode() != 130 {
+				t.Fatalf("Ctrl-C exit code = %d; want 130", exitErr.ExitCode())
+			}
 		case <-time.After(5 * time.Second):
 			cmd.Process.Kill()
 			t.Fatal("process did not exit after SIGINT")

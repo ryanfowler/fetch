@@ -426,6 +426,9 @@ func DiscoverGRPC(ctx context.Context, r *Request) int {
 		return code
 	}
 
+	if core.IsBrokenPipe(err) {
+		return 0
+	}
 	p := r.PrinterHandle.Stderr()
 	core.WriteErrorMsgNoFlush(p, err)
 	p.Flush()
@@ -457,7 +460,11 @@ func discoverGRPC(ctx context.Context, r *Request) (int, error) {
 			p.WriteString(name)
 			p.WriteString("\n")
 		}
-		return 0, p.Flush()
+		if err := p.Flush(); err != nil && core.IsBrokenPipe(err) {
+			return 0, nil
+		} else {
+			return 0, err
+		}
 	}
 
 	desc, err := lookupDescribeSymbol(schema, r.GRPCDescribe)
@@ -465,7 +472,11 @@ func discoverGRPC(ctx context.Context, r *Request) (int, error) {
 		return 0, err
 	}
 	renderDescribe(p, desc)
-	return 0, p.Flush()
+	if err := p.Flush(); err != nil && core.IsBrokenPipe(err) {
+		return 0, nil
+	} else {
+		return 0, err
+	}
 }
 
 func loadDiscoverySchema(ctx context.Context, r *Request) (*iproto.Schema, bool, *client.Client, error) {

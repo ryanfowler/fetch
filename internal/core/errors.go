@@ -1,7 +1,9 @@
 package core
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -150,8 +152,27 @@ func (err TimeoutError) Temporary() bool { return true }
 // SignalError represents the error when a signal is caught.
 type SignalError string
 
+const InterruptedExitCode = 130
+
 func (err SignalError) Error() string {
 	return fmt.Sprintf("received signal: %s", string(err))
+}
+
+// SignalExitCode returns the stable process status for a signal cause.
+// Ctrl-C follows the conventional shell status 128+SIGINT; termination
+// signals remain ordinary runtime failures.
+func SignalExitCode(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	var signal SignalError
+	if !errors.As(err, &signal) {
+		return 0, false
+	}
+	if strings.EqualFold(string(signal), "interrupt") || strings.EqualFold(string(signal), "sigint") {
+		return InterruptedExitCode, true
+	}
+	return 1, true
 }
 
 type ValueError struct {
