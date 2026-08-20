@@ -383,9 +383,11 @@ var flagDefinitions = map[string]Flag{
 	"output":      {Conflicts: []string{"discard", "remote-name"}, IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}, FromCurl: true, UnsupportedIn: []OptionMode{ModeGRPCDiscovery}},
 	"remote-name": {Conflicts: []string{"discard", "output"}, IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}, FromCurl: true, UnsupportedIn: []OptionMode{ModeGRPCDiscovery}},
 
-	"proto-file":         {Conflicts: []string{"proto-desc"}},
-	"proto-desc":         {Conflicts: []string{"proto-file"}},
-	"key":                {Requires: []string{"cert"}, IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
+	"proto-file": {Conflicts: []string{"proto-desc"}},
+	"proto-desc": {Conflicts: []string{"proto-file"}},
+	// Certificate/key pairing is validated after config scopes merge. A CLI
+	// key may intentionally pair with a certificate from host or global config.
+	"key":                {IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
 	"proto-import":       {Requires: []string{"proto-file"}},
 	"remote-header-name": {Requires: []string{"remote-name"}, IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}, FromCurl: true, UnsupportedIn: []OptionMode{ModeGRPCDiscovery}},
 	"ca-cert":            {ConfigKey: "ca-cert", IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},

@@ -2,6 +2,9 @@ package config
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"math/big"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -125,6 +128,103 @@ func TestParseFile(t *testing.T) {
 				t.Fatalf("unexpected file: %+v\n", *f)
 			}
 		})
+	}
+}
+
+func TestParseFileRejectsDuplicateHostSectionsWithBothLines(t *testing.T) {
+	_, err := parseFile("test/config", "[Example.com]\ncolor = off\n\n[example.COM]\ncolor = on\n")
+	if err == nil {
+		t.Fatal("expected duplicate host section error")
+	}
+	message := err.Error()
+	for _, want := range []string{"duplicate host section 'example.com'", "lines 1 and 4", "line 4"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error = %q, want substring %q", message, want)
+		}
+	}
+}
+
+func TestGetConfigFileExplicitMissingPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "fetch.conf")
+	_, _, err := getConfigFile(path)
+	if err == nil {
+		t.Fatal("expected missing config error")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error = %q, want path %q", err, path)
+	}
+}
+
+func TestConfigSearchPathsWindowsIncludesXDGAndHomeBeforeAppData(t *testing.T) {
+	env := map[string]string{
+		"XDG_CONFIG_HOME": "/xdg",
+		"HOME":            "/home/user",
+		"USERPROFILE":     `C:\\Users\\user`,
+		"AppData":         `C:\\Users\\user\\AppData\\Roaming`,
+	}
+	paths := configSearchPaths("windows", func(name string) string { return env[name] })
+	want := []string{
+		filepath.Join("/xdg", "fetch", "config"),
+		filepath.Join("/home/user", ".config", "fetch", "config"),
+		filepath.Join(`C:\\Users\\user\\AppData\\Roaming`, "fetch", "config"),
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestConfigSearchPathsDoesNotUseWindowsVariablesOnUnix(t *testing.T) {
+	env := map[string]string{
+		"USERPROFILE": `C:\\Users\\user`,
+		"AppData":     `C:\\Users\\user\\AppData\\Roaming`,
+	}
+	if paths := configSearchPaths("linux", func(name string) string { return env[name] }); len(paths) != 0 {
+		t.Fatalf("paths = %#v, want no paths", paths)
+	}
+}
+
+func TestConfigSearchPathsSkipsUnsetAppData(t *testing.T) {
+	env := map[string]string{"HOME": "/home/user"}
+	paths := configSearchPaths("windows", func(name string) string { return env[name] })
+	want := []string{filepath.Join("/home/user", ".config", "fetch", "config")}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestMergePreservesListOrderAcrossScopes(t *testing.T) {
+	cli := &Config{
+		Headers:     []core.KeyVal[string]{{Key: "X-CLI", Val: "1"}},
+		QueryParams: []core.KeyVal[string]{{Key: "q", Val: "cli"}},
+		CACerts:     []*x509.Certificate{{SerialNumber: big.NewInt(3)}},
+	}
+	host := &Config{
+		Headers:     []core.KeyVal[string]{{Key: "X-Host", Val: "1"}},
+		QueryParams: []core.KeyVal[string]{{Key: "q", Val: "host"}},
+		CACerts:     []*x509.Certificate{{SerialNumber: big.NewInt(2)}},
+	}
+	global := &Config{
+		Headers:     []core.KeyVal[string]{{Key: "X-Global", Val: "1"}},
+		QueryParams: []core.KeyVal[string]{{Key: "q", Val: "global"}},
+		CACerts:     []*x509.Certificate{{SerialNumber: big.NewInt(1)}},
+	}
+
+	cli.Merge(host)
+	cli.Merge(global)
+	if got := cli.Headers; !reflect.DeepEqual(got, []core.KeyVal[string]{
+		{Key: "X-Global", Val: "1"}, {Key: "X-Host", Val: "1"}, {Key: "X-CLI", Val: "1"},
+	}) {
+		t.Fatalf("headers = %+v", got)
+	}
+	if got := cli.QueryParams; !reflect.DeepEqual(got, []core.KeyVal[string]{
+		{Key: "q", Val: "global"}, {Key: "q", Val: "host"}, {Key: "q", Val: "cli"},
+	}) {
+		t.Fatalf("query params = %+v", got)
+	}
+	for i, cert := range cli.CACerts {
+		if cert.SerialNumber.Int64() != int64(i+1) {
+			t.Fatalf("CA certificate %d serial = %d", i, cert.SerialNumber.Int64())
+		}
 	}
 }
 

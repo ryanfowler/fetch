@@ -39,45 +39,69 @@ func getConfigFile(path string) (string, []byte, error) {
 			if err != nil {
 				return "", nil, err
 			}
-			path = home + path[1:]
+			path = filepath.Join(home, path[2:])
 		}
-		// Direct config path was provided.
+
+		// An explicit path is authoritative. Do not turn a missing file into a
+		// silent "no config" result, and report the normalized path so callers
+		// can identify the file that was requested.
 		abs, err := filepath.Abs(path)
 		if err != nil {
 			return "", nil, err
 		}
-		return readFile(abs)
-	}
-
-	if runtime.GOOS == "windows" {
-		appData := os.Getenv("AppData")
-		if appData == "" {
-			return "", nil, nil
-		}
-		path, buf, err := readFile(filepath.Join(appData, "fetch", "config"))
+		buf, err := os.ReadFile(abs)
 		if err != nil {
-			return "", nil, nil
+			if os.IsNotExist(err) {
+				return "", nil, core.FileNotExistsError(abs)
+			}
+			return "", nil, err
 		}
-		return path, buf, nil
+		return abs, buf, nil
 	}
 
-	xdgHome := os.Getenv("XDG_CONFIG_HOME")
-	if xdgHome != "" {
-		path, buf, err := readFile(xdgHome + "/fetch/config")
+	for _, candidate := range configSearchPaths(runtime.GOOS, os.Getenv) {
+		path, buf, err := readFile(candidate)
 		if err == nil {
 			return path, buf, nil
 		}
 	}
-
-	home := os.Getenv("HOME")
-	if home != "" {
-		path, buf, err := readFile(home + "/.config/fetch/config")
-		if err == nil {
-			return path, buf, nil
-		}
-	}
-
 	return "", nil, nil
+}
+
+// configSearchPaths returns candidates in precedence order. Keep this small
+// and injectable so Windows path precedence can be tested on every platform.
+func configSearchPaths(goos string, getenv func(string) string) []string {
+	var paths []string
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		for _, existing := range paths {
+			if existing == path {
+				return
+			}
+		}
+		paths = append(paths, path)
+	}
+
+	if xdgHome := getenv("XDG_CONFIG_HOME"); xdgHome != "" {
+		add(filepath.Join(xdgHome, "fetch", "config"))
+	}
+
+	home := getenv("HOME")
+	if home == "" && goos == "windows" {
+		home = getenv("USERPROFILE")
+	}
+	if home != "" {
+		add(filepath.Join(home, ".config", "fetch", "config"))
+	}
+
+	if goos == "windows" {
+		if appData := getenv("AppData"); appData != "" {
+			add(filepath.Join(appData, "fetch", "config"))
+		}
+	}
+	return paths
 }
 
 func readFile(path string) (string, []byte, error) {
@@ -91,6 +115,7 @@ func readFile(path string) (string, []byte, error) {
 // parseFile parses the provided File, returning any error encountered.
 func parseFile(path, s string) (*File, error) {
 	f := File{Global: &Config{isFile: true}, Path: path}
+	hostLines := make(map[string]int)
 
 	config := f.Global
 	for num, line := range lines(s) {
@@ -114,6 +139,12 @@ func parseFile(path, s string) (*File, error) {
 					return nil, newFileError(path, num, err)
 				}
 			}
+
+			if previousLine, exists := hostLines[hostStr]; exists {
+				err := fmt.Errorf("duplicate host section '%s' (lines %d and %d)", hostStr, previousLine, num)
+				return nil, newFileError(path, num, err)
+			}
+			hostLines[hostStr] = num
 
 			config = &Config{isFile: true}
 			if f.Hosts == nil {
