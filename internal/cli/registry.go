@@ -51,15 +51,20 @@ func (p OptionProvenance) Has(source OptionSource) bool {
 // resolve to the canonical long name while retaining the original Flag for
 // parsing and completion.
 type OptionRegistry struct {
-	flags  []Flag
-	short  map[string]Flag
-	long   map[string]Flag
-	byName map[string]Flag
+	flags    []Flag
+	allFlags []Flag
+	short    map[string]Flag
+	long     map[string]Flag
+	byName   map[string]Flag
 }
 
 func newOptionRegistry(cli *CLI) *OptionRegistry {
-	flags := make([]Flag, 0, len(cli.Flags))
-	for _, flag := range cli.Flags {
+	allFlags := append([]Flag(nil), cli.Flags...)
+	for i := range allFlags {
+		applyFlagDefinition(&allFlags[i])
+	}
+	flags := make([]Flag, 0, len(allFlags))
+	for _, flag := range allFlags {
 		if isFlagVisibleOnOS(flag.OS) {
 			flags = append(flags, flag)
 		}
@@ -72,7 +77,6 @@ func newOptionRegistry(cli *CLI) *OptionRegistry {
 
 	for i := range flags {
 		flag := &flags[i]
-		applyFlagDefinition(flag)
 		registry.byName[flag.Long] = *flag
 		registry.long[flag.Long] = *flag
 		if flag.Short != "" {
@@ -136,6 +140,12 @@ func newOptionRegistry(cli *CLI) *OptionRegistry {
 		flags[i] = registry.byName[flags[i].Long]
 	}
 	registry.flags = flags
+	for i := range allFlags {
+		if flag, ok := registry.byName[allFlags[i].Long]; ok {
+			allFlags[i] = flag
+		}
+	}
+	registry.allFlags = allFlags
 	return registry
 }
 
@@ -231,7 +241,11 @@ func (r *OptionRegistry) ValidateScheme(scheme string) error {
 func (r *OptionRegistry) Ignored(mode OptionMode, explicit func(string) bool) []string {
 	seen := make(map[string]struct{})
 	var out []string
-	for _, flag := range r.flags {
+	flags := r.allFlags
+	if len(flags) == 0 {
+		flags = r.flags
+	}
+	for _, flag := range flags {
 		if !flag.IsSet() || !slices.Contains(flag.IgnoredIn, mode) || !explicit(flag.Long) {
 			continue
 		}

@@ -221,42 +221,6 @@ func (cli *CLI) Options() *OptionRegistry {
 	return cli.registry
 }
 
-func validateExclusives(exc []string, long map[string]Flag) error {
-	var lastSet string
-	for _, name := range exc {
-		flag := long[name]
-		if !flag.IsSet() {
-			continue
-		}
-
-		if lastSet == "" {
-			lastSet = name
-			continue
-		}
-
-		return newExclusiveFlagsError(lastSet, name)
-	}
-	return nil
-}
-
-func validateRequired(req core.KeyVal[[]string], long map[string]Flag) error {
-	flag := long[req.Key]
-	if !flag.IsSet() {
-		return nil
-	}
-
-	// Check if ANY of the required flags is set (OR logic).
-	for _, required := range req.Val {
-		requiredFlag := long[required]
-		if requiredFlag.IsSet() {
-			return nil
-		}
-	}
-
-	// None of the required flags are set.
-	return newRequiredFlagError(req.Key, req.Val)
-}
-
 func isFlagVisibleOnOS(flagOS []string) bool {
 	return len(flagOS) == 0 || slices.Contains(flagOS, runtime.GOOS)
 }
@@ -473,12 +437,6 @@ func flagLength(f Flag) int {
 		out += 3 + len(f.Args)
 	}
 	return out
-}
-
-func assertFlagNotExists(m map[string]Flag, value string) {
-	if _, ok := m[value]; ok {
-		panic(fmt.Sprintf("flag '%s' defined multiple times", value))
-	}
 }
 
 // validateFromCurlExclusives checks that no request-specifying flags are used
