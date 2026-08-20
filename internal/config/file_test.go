@@ -128,6 +128,41 @@ func TestParseFile(t *testing.T) {
 	}
 }
 
+func TestMergeReportsOnlyContributingOptions(t *testing.T) {
+	cliTimeout := 3 * time.Second
+	hostTimeout := 2 * time.Second
+	globalTimeout := 1 * time.Second
+	cli := &Config{
+		Timeout: &cliTimeout,
+		Headers: []core.KeyVal[string]{{Key: "X-CLI", Val: "1"}},
+	}
+	host := &Config{
+		Timeout: &hostTimeout,
+		Headers: []core.KeyVal[string]{{Key: "X-Host", Val: "1"}},
+	}
+	global := &Config{
+		Timeout: &globalTimeout,
+		Headers: []core.KeyVal[string]{{Key: "X-Global", Val: "1"}},
+	}
+
+	if got := cli.Merge(host); !reflect.DeepEqual(got, []string{"header"}) {
+		t.Fatalf("host merge keys = %v, want [header]", got)
+	}
+	if got := cli.Merge(global); !reflect.DeepEqual(got, []string{"header"}) {
+		t.Fatalf("global merge keys = %v, want [header]", got)
+	}
+	if *cli.Timeout != cliTimeout {
+		t.Fatalf("timeout = %s, want CLI timeout %s", *cli.Timeout, cliTimeout)
+	}
+	if !reflect.DeepEqual(cli.Headers, []core.KeyVal[string]{
+		{Key: "X-Global", Val: "1"},
+		{Key: "X-Host", Val: "1"},
+		{Key: "X-CLI", Val: "1"},
+	}) {
+		t.Fatalf("merged headers = %+v", cli.Headers)
+	}
+}
+
 func TestFileHostConfig(t *testing.T) {
 	exactCfg := &Config{isFile: true, Insecure: new(true)}
 	wildcardCfg := &Config{isFile: true, Insecure: new(false)}

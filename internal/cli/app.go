@@ -58,6 +58,8 @@ type App struct {
 	dataSet bool
 	jsonSet bool
 	xmlSet  bool
+
+	provenance map[string]OptionProvenance
 }
 
 func (a *App) PrintHelp(p *core.Printer) {
@@ -78,8 +80,9 @@ func (a *App) HasProtoSchema() bool {
 
 func (a *App) CLI() *CLI {
 	var extraArgs bool
-	return &CLI{
+	cli := &CLI{
 		Description: "fetch is a modern HTTP(S) client for the command line",
+		OnOptionSet: a.markCLIOption,
 		Args: []Arguments{
 			{Name: "URL", Description: "The URL to make a request to"},
 		},
@@ -106,39 +109,6 @@ func (a *App) CLI() *CLI {
 			a.URL = u
 			a.WS = a.WS || isWS
 			return nil
-		},
-		ExclusiveFlags: [][]string{
-			{"aws-sigv4", "basic", "bearer", "digest"},
-			{"data", "form", "json", "multipart", "xml"},
-			{"discard", "copy"},
-			{"discard", "output"},
-			{"discard", "remote-name"},
-			{"output", "remote-name"},
-			{"proto-file", "proto-desc"},
-		},
-		RequiredFlags: []core.KeyVal[[]string]{
-			{Key: "key", Val: []string{"cert"}},
-			{Key: "proto-import", Val: []string{"proto-file"}},
-			{Key: "remote-header-name", Val: []string{"remote-name"}},
-		},
-		SchemeExclusiveFlags: map[string][]string{
-			"ws": {
-				"clobber", "copy", "discard", "edit", "form", "grpc", "grpc-describe", "grpc-list",
-				"multipart", "output", "remote-header-name", "remote-name", "retry", "retry-delay", "xml",
-			},
-			"wss": {
-				"clobber", "copy", "discard", "edit", "form", "grpc", "grpc-describe", "grpc-list",
-				"multipart", "output", "remote-header-name", "remote-name", "retry", "retry-delay", "xml",
-			},
-		},
-		FromCurlExclusiveFlags: []string{
-			"method", "header", "data", "json", "xml",
-			"form", "multipart", "basic", "bearer", "digest", "aws-sigv4",
-			"output", "remote-name", "remote-header-name",
-			"range", "unix", "timeout", "connect-timeout",
-			"redirects", "proxy", "insecure", "max-tls", "min-tls", "tls", "http",
-			"cert", "key", "ca-cert", "dns-server",
-			"retry", "retry-delay", "grpc", "grpc-describe", "grpc-list", "query",
 		},
 		Flags: []Flag{
 			// cfgFlag: delegates to config parser
@@ -211,7 +181,7 @@ func (a *App) CLI() *CLI {
 				Long:        "data",
 				Args:        "[@]VALUE",
 				Description: "Send a request body",
-				IsSet:       func() bool { return a.dataSet },
+				IsSet:       func() bool { return a.dataSet || (!a.jsonSet && !a.xmlSet && a.Data != nil) },
 				Fn:          a.parseDataFlag,
 			},
 
@@ -311,7 +281,8 @@ func (a *App) CLI() *CLI {
 
 			cfgFlag("min-tls", "", "VERSION", "Minimum TLS version",
 				func() bool { return a.Cfg.TLSMin != nil }, a.Cfg.ParseMinTLS).
-				WithValues(tlsValues()),
+				WithValues(tlsValues()).
+				WithAliases("tls"),
 
 			// Custom: multipart with file validation
 			{
@@ -390,11 +361,6 @@ func (a *App) CLI() *CLI {
 
 			ptrBoolFlag(&a.Cfg.Timing, "timing", "T", "Display a timing waterfall chart"),
 
-			cfgFlag("tls", "", "VERSION", "Minimum TLS version",
-				func() bool { return a.Cfg.TLSMin != nil }, a.Cfg.ParseTLS).
-				WithValues(tlsValues()).
-				WithHidden(true),
-
 			stringFlag(&a.UnixSocket, "unix", "", "PATH", "Make the request over a unix socket").
 				WithOS(unixOS),
 
@@ -435,6 +401,8 @@ func (a *App) CLI() *CLI {
 			},
 		},
 	}
+	cli.Options()
+	return cli
 }
 
 func tlsValues() []core.KeyVal[string] {

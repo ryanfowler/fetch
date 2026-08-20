@@ -229,6 +229,7 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 			return 0, fmt.Errorf("invalid --max-time value: %s", v)
 		}
 		r.Timeout = secs
+		r.TimeoutSet = true
 		return n, nil
 	case "connect-timeout":
 		v, n, err := consumeArg()
@@ -240,6 +241,7 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 			return 0, fmt.Errorf("invalid --connect-timeout value: %s", v)
 		}
 		r.ConnectTimeout = secs
+		r.ConnectTimeoutSet = true
 		return n, nil
 	case "proxy":
 		v, n, err := consumeArg()
@@ -272,6 +274,7 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 			return 0, fmt.Errorf("invalid --retry value: %s", v)
 		}
 		r.Retry = num
+		r.RetrySet = true
 		return n, nil
 	case "retry-delay":
 		v, n, err := consumeArg()
@@ -283,6 +286,7 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 			return 0, fmt.Errorf("invalid --retry-delay value: %s", v)
 		}
 		r.RetryDelay = secs
+		r.RetryDelaySet = true
 		return n, nil
 	case "range":
 		v, n, err := consumeArg()

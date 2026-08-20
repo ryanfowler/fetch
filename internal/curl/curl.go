@@ -25,47 +25,51 @@ type DataValue struct {
 
 // Result is the intermediate representation of a parsed curl command.
 type Result struct {
-	URL              string
-	Method           string
-	Headers          []header
-	DataValues       []DataValue
-	BasicAuth        string
-	DigestAuth       bool
-	AWSSigv4         string
-	Bearer           string
-	FormFields       []formField
-	UploadFile       string
-	Head             bool
-	Insecure         bool
-	Output           string
-	RemoteName       bool
-	RemoteHeaderName bool
-	FollowRedirects  bool
-	MaxRedirects     int
-	MaxRedirectsSet  bool
-	Timeout          float64
-	ConnectTimeout   float64
-	Proxy            string
-	DoHURL           string
-	HTTPVersion      string
-	TLSMaxVersion    string
-	TLSVersion       string
-	CACert           string
-	Cert             string
-	Key              string
-	UnixSocket       string
-	Ranges           []string
-	Retry            int
-	RetryDelay       float64
-	GetFlag          bool
-	Verbose          int
-	Silent           bool
-	UserAgent        string
-	Referer          string
-	Cookie           string
-	HasContentType   bool
-	HasAccept        bool
-	AllowedProto     string // raw --proto value, e.g. "=https" or "http,https"
+	URL               string
+	Method            string
+	Headers           []header
+	DataValues        []DataValue
+	BasicAuth         string
+	DigestAuth        bool
+	AWSSigv4          string
+	Bearer            string
+	FormFields        []formField
+	UploadFile        string
+	Head              bool
+	Insecure          bool
+	Output            string
+	RemoteName        bool
+	RemoteHeaderName  bool
+	FollowRedirects   bool
+	MaxRedirects      int
+	MaxRedirectsSet   bool
+	Timeout           float64
+	TimeoutSet        bool
+	ConnectTimeout    float64
+	ConnectTimeoutSet bool
+	Proxy             string
+	DoHURL            string
+	HTTPVersion       string
+	TLSMaxVersion     string
+	TLSVersion        string
+	CACert            string
+	Cert              string
+	Key               string
+	UnixSocket        string
+	Ranges            []string
+	Retry             int
+	RetrySet          bool
+	RetryDelay        float64
+	RetryDelaySet     bool
+	GetFlag           bool
+	Verbose           int
+	Silent            bool
+	UserAgent         string
+	Referer           string
+	Cookie            string
+	HasContentType    bool
+	HasAccept         bool
+	AllowedProto      string // raw --proto value, e.g. "=https" or "http,https"
 }
 
 // Parse parses a curl command string and returns a Result.

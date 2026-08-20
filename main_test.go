@@ -77,6 +77,40 @@ func TestWarnIgnoredInspectionFlagsDoesNotAddBlankLine(t *testing.T) {
 	}
 }
 
+func TestIgnoredInspectionFlagsRequireExplicitProvenance(t *testing.T) {
+	configOnly := &cli.App{Cfg: config.Config{
+		Headers: []core.KeyVal[string]{{Key: "X-Config", Val: "yes"}},
+	}}
+	configOnly.RecordConfigSource(&configOnly.Cfg, cli.SourceGlobalConfig)
+	if got := ignoredInspectionFlags(configOnly, inspectionDNS); len(got) != 0 {
+		t.Fatalf("config-only inspection flags = %v, want none", got)
+	}
+
+	explicit, err := cli.Parse([]string{"--header", "X-CLI: yes", "https://example.com"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got := ignoredInspectionFlags(explicit, inspectionDNS); !slices.Equal(got, []string{"--header"}) {
+		t.Fatalf("explicit inspection flags = %v, want [--header]", got)
+	}
+
+	fromCurl, err := cli.Parse([]string{"--from-curl", "curl -H 'X-Curl: yes' https://example.com"})
+	if err != nil {
+		t.Fatalf("Parse(--from-curl) error = %v", err)
+	}
+	if got := ignoredInspectionFlags(fromCurl, inspectionDNS); !slices.Equal(got, []string{"--header"}) {
+		t.Fatalf("curl inspection flags = %v, want [--header]", got)
+	}
+
+	fromCurlMultipart, err := cli.Parse([]string{"--from-curl", "curl -F field=value https://example.com"})
+	if err != nil {
+		t.Fatalf("Parse(--from-curl multipart) error = %v", err)
+	}
+	if got := ignoredInspectionFlags(fromCurlMultipart, inspectionDNS); !slices.Equal(got, []string{"--multipart", "--method"}) {
+		t.Fatalf("curl multipart inspection flags = %v, want [--multipart --method]", got)
+	}
+}
+
 func inspectionFlagTestApp(t *testing.T) *cli.App {
 	t.Helper()
 

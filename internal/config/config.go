@@ -55,94 +55,270 @@ type Config struct {
 	Verbosity      *int
 }
 
+// OptionKeys returns canonical CLI option names represented by populated
+// config fields. It is used by the CLI provenance layer after each config
+// scope is merged.
+func (c *Config) OptionKeys() []string {
+	var keys []string
+	if c.AutoUpdate != nil {
+		keys = append(keys, "auto-update")
+	}
+	if len(c.CACerts) > 0 {
+		keys = append(keys, "ca-cert")
+	}
+	if c.CertPath != "" || c.CertData != nil {
+		keys = append(keys, "cert")
+	}
+	if c.Color != core.ColorUnknown {
+		keys = append(keys, "color")
+	}
+	if c.ConnectTimeout != nil {
+		keys = append(keys, "connect-timeout")
+	}
+	if c.Copy != nil {
+		keys = append(keys, "copy")
+	}
+	if c.DNSServer != nil {
+		keys = append(keys, "dns-server")
+	}
+	if c.Format != core.FormatUnknown {
+		keys = append(keys, "format")
+	}
+	if len(c.Headers) > 0 {
+		keys = append(keys, "header")
+	}
+	if c.HTTP != core.HTTPDefault {
+		keys = append(keys, "http")
+	}
+	if c.IgnoreStatus != nil {
+		keys = append(keys, "ignore-status")
+	}
+	if c.Image != core.ImageUnknown {
+		keys = append(keys, "image")
+	}
+	if c.Insecure != nil {
+		keys = append(keys, "insecure")
+	}
+	if c.KeyPath != "" || c.KeyData != nil {
+		keys = append(keys, "key")
+	}
+	if c.NoEncode != nil {
+		keys = append(keys, "no-encode")
+	}
+	if c.NoPager != nil {
+		keys = append(keys, "no-pager")
+	}
+	if c.Proxy != nil {
+		keys = append(keys, "proxy")
+	}
+	if len(c.QueryParams) > 0 {
+		keys = append(keys, "query")
+	}
+	if c.Redirects != nil {
+		keys = append(keys, "redirects")
+	}
+	if c.Retry != nil {
+		keys = append(keys, "retry")
+	}
+	if c.RetryDelay != nil {
+		keys = append(keys, "retry-delay")
+	}
+	if c.Session != nil {
+		keys = append(keys, "session")
+	}
+	if c.Silent != nil {
+		keys = append(keys, "silent")
+	}
+	if c.Timeout != nil {
+		keys = append(keys, "timeout")
+	}
+	if c.Timing != nil {
+		keys = append(keys, "timing")
+	}
+	if c.TLSMax != nil {
+		keys = append(keys, "max-tls")
+	}
+	if c.TLSMin != nil {
+		keys = append(keys, "min-tls")
+	}
+	if c.Verbosity != nil {
+		keys = append(keys, "verbose")
+	}
+	return keys
+}
+
 // Merge merges the two Configs together, with "c" taking priority.
-func (c *Config) Merge(c2 *Config) {
+func (c *Config) Merge(c2 *Config) []string {
+	if c2 == nil {
+		return nil
+	}
+	var applied []string
+	add := func(name string) { applied = append(applied, name) }
 	if c.AutoUpdate == nil {
 		c.AutoUpdate = c2.AutoUpdate
+		if c2.AutoUpdate != nil {
+			add("auto-update")
+		}
 	}
 	if len(c2.CACerts) > 0 {
 		c.CACerts = append(c2.CACerts, c.CACerts...)
+		add("ca-cert")
 	}
 	if c.CertPath == "" && c.CertData == nil {
 		c.CertData = c2.CertData
 		c.CertPath = c2.CertPath
+		if c2.CertPath != "" || c2.CertData != nil {
+			add("cert")
+		}
 	}
 	if c.Color == core.ColorUnknown {
 		c.Color = c2.Color
+		if c2.Color != core.ColorUnknown {
+			add("color")
+		}
 	}
 	if c.ConnectTimeout == nil {
 		c.ConnectTimeout = c2.ConnectTimeout
+		if c2.ConnectTimeout != nil {
+			add("connect-timeout")
+		}
 	}
 	if c.Copy == nil {
 		c.Copy = c2.Copy
+		if c2.Copy != nil {
+			add("copy")
+		}
 	}
 	if c.DNSServer == nil {
 		c.DNSServer = c2.DNSServer
+		if c2.DNSServer != nil {
+			add("dns-server")
+		}
 	}
 	if c.Format == core.FormatUnknown {
 		c.Format = c2.Format
+		if c2.Format != core.FormatUnknown {
+			add("format")
+		}
 	}
 	if len(c2.Headers) > 0 {
 		c.Headers = append(c2.Headers, c.Headers...)
+		add("header")
 	}
 	if c.HTTP == core.HTTPDefault {
 		c.HTTP = c2.HTTP
+		if c2.HTTP != core.HTTPDefault {
+			add("http")
+		}
 	}
 	if c.IgnoreStatus == nil {
 		c.IgnoreStatus = c2.IgnoreStatus
+		if c2.IgnoreStatus != nil {
+			add("ignore-status")
+		}
 	}
 	if c.Image == core.ImageUnknown {
 		c.Image = c2.Image
+		if c2.Image != core.ImageUnknown {
+			add("image")
+		}
 	}
 	if c.Insecure == nil {
 		c.Insecure = c2.Insecure
+		if c2.Insecure != nil {
+			add("insecure")
+		}
 	}
 	if c.KeyPath == "" && c.KeyData == nil {
 		c.KeyData = c2.KeyData
 		c.KeyPath = c2.KeyPath
+		if c2.KeyPath != "" || c2.KeyData != nil {
+			add("key")
+		}
 	}
 	if c.NoEncode == nil {
 		c.NoEncode = c2.NoEncode
+		if c2.NoEncode != nil {
+			add("no-encode")
+		}
 	}
 	if c.NoPager == nil {
 		c.NoPager = c2.NoPager
+		if c2.NoPager != nil {
+			add("no-pager")
+		}
 	}
 	if c.Proxy == nil {
 		c.Proxy = c2.Proxy
+		if c2.Proxy != nil {
+			add("proxy")
+		}
 	}
 	if len(c2.QueryParams) > 0 {
 		c.QueryParams = append(c2.QueryParams, c.QueryParams...)
+		add("query")
 	}
 	if c.Redirects == nil {
 		c.Redirects = c2.Redirects
+		if c2.Redirects != nil {
+			add("redirects")
+		}
 	}
 	if c.Retry == nil {
 		c.Retry = c2.Retry
+		if c2.Retry != nil {
+			add("retry")
+		}
 	}
 	if c.RetryDelay == nil {
 		c.RetryDelay = c2.RetryDelay
+		if c2.RetryDelay != nil {
+			add("retry-delay")
+		}
 	}
 	if c.Session == nil {
 		c.Session = c2.Session
+		if c2.Session != nil {
+			add("session")
+		}
 	}
 	if c.Silent == nil {
 		c.Silent = c2.Silent
+		if c2.Silent != nil {
+			add("silent")
+		}
 	}
 	if c.Timeout == nil {
 		c.Timeout = c2.Timeout
+		if c2.Timeout != nil {
+			add("timeout")
+		}
 	}
 	if c.Timing == nil {
 		c.Timing = c2.Timing
+		if c2.Timing != nil {
+			add("timing")
+		}
 	}
 	if c.TLSMax == nil {
 		c.TLSMax = c2.TLSMax
+		if c2.TLSMax != nil {
+			add("max-tls")
+		}
 	}
 	if c.TLSMin == nil {
 		c.TLSMin = c2.TLSMin
+		if c2.TLSMin != nil {
+			add("min-tls")
+		}
 	}
 	if c.Verbosity == nil {
 		c.Verbosity = c2.Verbosity
+		if c2.Verbosity != nil {
+			add("verbose")
+		}
 	}
+	return applied
 }
 
 // Validate checks cross-option constraints that can only be evaluated after

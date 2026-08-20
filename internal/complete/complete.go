@@ -108,7 +108,7 @@ func Complete(shell Shell, args []string) string {
 
 func getFlags() []cli.Flag {
 	var app cli.App
-	flags := app.CLI().Flags
+	flags := app.CLI().Options().Flags()
 
 	out := make([]cli.Flag, 0, len(flags))
 	for _, flag := range flags {
