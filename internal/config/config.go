@@ -29,8 +29,10 @@ type Config struct {
 	CertPath       string
 	Color          core.Color
 	ConnectTimeout *time.Duration
+	Compress       core.CompressionMode
 	Copy           *bool
 	DNSServer      *url.URL
+	ECH            core.ECHMode
 	Format         core.Format
 	Headers        []core.KeyVal[string]
 	HTTP           core.HTTPVersion
@@ -41,6 +43,7 @@ type Config struct {
 	KeyPath        string
 	NoEncode       *bool
 	NoPager        *bool
+	Pager          core.PagerMode
 	Proxy          *url.URL
 	QueryParams    []core.KeyVal[string]
 	Redirects      *int
@@ -53,6 +56,7 @@ type Config struct {
 	TLSMax         *uint16
 	TLSMin         *uint16
 	Verbosity      *int
+	SortHeaders    *bool
 }
 
 // OptionKeys returns canonical CLI option names represented by populated
@@ -75,11 +79,17 @@ func (c *Config) OptionKeys() []string {
 	if c.ConnectTimeout != nil {
 		keys = append(keys, "connect-timeout")
 	}
+	if c.Compress != core.CompressionUnknown {
+		keys = append(keys, "compress")
+	}
 	if c.Copy != nil {
 		keys = append(keys, "copy")
 	}
 	if c.DNSServer != nil {
 		keys = append(keys, "dns-server")
+	}
+	if c.ECH != core.ECHUnknown {
+		keys = append(keys, "ech")
 	}
 	if c.Format != core.FormatUnknown {
 		keys = append(keys, "format")
@@ -107,6 +117,9 @@ func (c *Config) OptionKeys() []string {
 	}
 	if c.NoPager != nil {
 		keys = append(keys, "no-pager")
+	}
+	if c.Pager != core.PagerUnknown {
+		keys = append(keys, "pager")
 	}
 	if c.Proxy != nil {
 		keys = append(keys, "proxy")
@@ -143,6 +156,9 @@ func (c *Config) OptionKeys() []string {
 	}
 	if c.Verbosity != nil {
 		keys = append(keys, "verbose")
+	}
+	if c.SortHeaders != nil {
+		keys = append(keys, "sort-headers")
 	}
 	return keys
 }
@@ -183,6 +199,12 @@ func (c *Config) Merge(c2 *Config) []string {
 			add("connect-timeout")
 		}
 	}
+	if c.Compress == core.CompressionUnknown {
+		c.Compress = c2.Compress
+		if c2.Compress != core.CompressionUnknown {
+			add("compress")
+		}
+	}
 	if c.Copy == nil {
 		c.Copy = c2.Copy
 		if c2.Copy != nil {
@@ -193,6 +215,12 @@ func (c *Config) Merge(c2 *Config) []string {
 		c.DNSServer = c2.DNSServer
 		if c2.DNSServer != nil {
 			add("dns-server")
+		}
+	}
+	if c.ECH == core.ECHUnknown {
+		c.ECH = c2.ECH
+		if c2.ECH != core.ECHUnknown {
+			add("ech")
 		}
 	}
 	if c.Format == core.FormatUnknown {
@@ -246,6 +274,12 @@ func (c *Config) Merge(c2 *Config) []string {
 		c.NoPager = c2.NoPager
 		if c2.NoPager != nil {
 			add("no-pager")
+		}
+	}
+	if c.Pager == core.PagerUnknown {
+		c.Pager = c2.Pager
+		if c2.Pager != core.PagerUnknown {
+			add("pager")
 		}
 	}
 	if c.Proxy == nil {
@@ -318,6 +352,12 @@ func (c *Config) Merge(c2 *Config) []string {
 			add("verbose")
 		}
 	}
+	if c.SortHeaders == nil {
+		c.SortHeaders = c2.SortHeaders
+		if c2.SortHeaders != nil {
+			add("sort-headers")
+		}
+	}
 	return applied
 }
 
@@ -344,10 +384,14 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseColor(val)
 	case "connect-timeout":
 		err = c.ParseConnectTimeout(val)
+	case "compress":
+		err = c.ParseCompress(val)
 	case "copy":
 		err = c.ParseCopy(val)
 	case "dns-server":
 		err = c.ParseDNSServer(val)
+	case "ech":
+		err = c.ParseECH(val)
 	case "format":
 		err = c.ParseFormat(val)
 	case "header":
@@ -366,6 +410,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseNoEncode(val)
 	case "no-pager":
 		err = c.ParseNoPager(val)
+	case "pager":
+		err = c.ParsePager(val)
 	case "proxy":
 		err = c.ParseProxy(val)
 	case "query":
@@ -388,6 +434,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseMaxTLS(val)
 	case "min-tls":
 		err = c.ParseMinTLS(val)
+	case "sort-headers":
+		err = c.ParseSortHeaders(val)
 	case "tls":
 		err = c.ParseTLS(val)
 	case "verbosity":
@@ -509,6 +557,25 @@ func (c *Config) ParseConnectTimeout(value string) error {
 	return nil
 }
 
+func (c *Config) ParseCompress(value string) error {
+	switch value {
+	case "auto":
+		c.Compress = core.CompressionAuto
+	case "br", "brotli":
+		c.Compress = core.CompressionBrotli
+	case "gzip":
+		c.Compress = core.CompressionGzip
+	case "zstd":
+		c.Compress = core.CompressionZstd
+	case "off":
+		c.Compress = core.CompressionOff
+	default:
+		const usage = "must be one of [auto, br, brotli, gzip, zstd, off]"
+		return core.NewValueError("compress", value, usage, c.isFile)
+	}
+	return nil
+}
+
 func (c *Config) ParseDNSServer(value string) error {
 	if strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") {
 		u, err := url.Parse(value)
@@ -535,6 +602,21 @@ func (c *Config) ParseDNSServer(value string) error {
 
 	u := url.URL{Host: net.JoinHostPort(host, port)}
 	c.DNSServer = &u
+	return nil
+}
+
+func (c *Config) ParseECH(value string) error {
+	switch value {
+	case "auto":
+		c.ECH = core.ECHAuto
+	case "on":
+		c.ECH = core.ECHOn
+	case "off":
+		c.ECH = core.ECHOff
+	default:
+		const usage = "must be one of [auto, on, off]"
+		return core.NewValueError("ech", value, usage, c.isFile)
+	}
 	return nil
 }
 
@@ -590,12 +672,14 @@ func (c *Config) ParseImageSetting(value string) error {
 	switch value {
 	case "auto":
 		c.Image = core.ImageAuto
-	case "native":
+	case "native": // Compatibility spelling retained by the Go baseline.
 		c.Image = core.ImageNative
+	case "external":
+		c.Image = core.ImageExternal
 	case "off":
 		c.Image = core.ImageOff
 	default:
-		const usage = "must be one of [auto, native, off]"
+		const usage = "must be one of [auto, external, native, off]"
 		return core.NewValueError("image", value, usage, c.isFile)
 	}
 	return nil
@@ -655,6 +739,21 @@ func (c *Config) ParseNoPager(value string) error {
 		return core.NewValueError("no-pager", value, "must be a boolean", c.isFile)
 	}
 	c.NoPager = &v
+	return nil
+}
+
+func (c *Config) ParsePager(value string) error {
+	switch value {
+	case "auto":
+		c.Pager = core.PagerAuto
+	case "on":
+		c.Pager = core.PagerOn
+	case "off":
+		c.Pager = core.PagerOff
+	default:
+		const usage = "must be one of [auto, on, off]"
+		return core.NewValueError("pager", value, usage, c.isFile)
+	}
 	return nil
 }
 
@@ -735,6 +834,15 @@ func (c *Config) ParseTiming(value string) error {
 		return core.NewValueError("timing", value, "must be a boolean", c.isFile)
 	}
 	c.Timing = &v
+	return nil
+}
+
+func (c *Config) ParseSortHeaders(value string) error {
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return core.NewValueError("sort-headers", value, "must be a boolean", c.isFile)
+	}
+	c.SortHeaders = &v
 	return nil
 }
 

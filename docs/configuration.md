@@ -119,7 +119,7 @@ format = on
 #### `image`
 
 **Type**: String
-**Values**: `auto`, `native`, `off`
+**Values**: `auto`, `external`, `native`, `off`
 **Default**: `auto`
 
 Control image rendering in the terminal.
@@ -134,6 +134,39 @@ image = native
 # Disable image rendering
 image = off
 ```
+
+#### `compress`
+
+**Type**: String
+**Values**: `auto`, `br`, `brotli`, `gzip`, `zstd`, `off`
+
+Select automatic content-encoding negotiation and response decoding.
+
+```ini
+compress = auto
+```
+
+#### `ech`
+
+**Type**: String
+**Values**: `auto`, `on`, `off`
+
+Configure Encrypted ClientHello behavior.
+
+#### `pager`
+
+**Type**: String
+**Values**: `auto`, `on`, `off`
+
+Select automatic, forced, or disabled paging. The legacy `no-pager` boolean
+remains supported and disables paging when true.
+
+#### `sort-headers`
+
+**Type**: Boolean
+
+Compatibility no-op; Go output remains deterministic and alphabetically
+rendered.
 
 #### `no-pager`
 
@@ -457,7 +490,8 @@ ca-cert = /path/to/api-ca.crt
 **Type**: Boolean
 **Default**: `false`
 
-Disable automatic gzip and zstd compression for requests and responses.
+Disable automatic response compression. This is equivalent to
+`compress = off`.
 
 ```ini
 # Disable compression

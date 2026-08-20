@@ -150,3 +150,22 @@ func TestCompleteFish(t *testing.T) {
 		})
 	}
 }
+
+func TestCompleteCLI002AliasesAndValues(t *testing.T) {
+	got := Complete(Bash{}, []string{"fetch", "--http"})
+	for _, want := range []string{"--http ", "--http1 ", "--http2 ", "--http3 "} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("HTTP completion %q does not contain %q", got, want)
+		}
+	}
+	if got := Complete(Bash{}, []string{"fetch", "--http1", ""}); got != "" {
+		t.Fatalf("fixed HTTP alias offered values: %q", got)
+	}
+
+	got = Complete(Bash{}, []string{"fetch", "--install-skill", ""})
+	for _, want := range []string{"auto", "agents", "codex", "claude", "gemini", "pi", "all"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("skill completion %q does not contain %q", got, want)
+		}
+	}
+}

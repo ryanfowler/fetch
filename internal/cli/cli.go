@@ -50,7 +50,9 @@ type Flag struct {
 	Short       string
 	Long        string
 	Aliases     []string
+	AliasValues map[string]string
 	Args        string
+	OptionalArg bool
 	Description string
 	Default     string
 	Values      []core.KeyVal[string]
@@ -188,17 +190,28 @@ func parseLongFlag(cli *CLI, arg string, args []string, long map[string]Flag) ([
 		return nil, unknownFlagError("--" + name)
 	}
 
+	fixedValue, fixedAlias := flag.AliasValues[name]
+	if fixedAlias && (ok || value != "") {
+		return nil, flagNoArgsError("--" + name)
+	}
 	if (ok || value != "") && flag.Args == "" {
 		return nil, flagNoArgsError("--" + name)
 	}
 
-	if flag.Args != "" && !ok {
+	if fixedAlias {
+		value = fixedValue
+	} else if flag.Args != "" && !ok && !flag.OptionalArg {
 		if len(args) == 0 {
 			return nil, argRequiredError("--" + name)
 		}
 
 		value = args[0]
 		args = args[1:]
+	} else if flag.Args != "" && !ok && flag.OptionalArg && len(args) > 0 {
+		if args[0] != "--" && (len(args[0]) == 0 || args[0][0] != '-') {
+			value = args[0]
+			args = args[1:]
+		}
 	}
 
 	if err := flag.Fn(value); err != nil {
@@ -233,6 +246,9 @@ func Parse(args []string) (*App, error) {
 	if err != nil {
 		return &app, err
 	}
+	if err := validateEquivalentAliases(&app); err != nil {
+		return &app, err
+	}
 
 	if app.FromCurl != "" {
 		if err := validateFromCurlExclusives(&app, cli, long); err != nil {
@@ -246,6 +262,12 @@ func Parse(args []string) (*App, error) {
 			return &app, err
 		}
 	}
+	if err := validateSkillMode(&app, cli); err != nil {
+		return &app, err
+	}
+	if app.wsMessageModeSet && !app.WS {
+		return &app, fmt.Errorf("'--ws-message-mode' requires a ws:// or wss:// URL")
+	}
 
 	if err := validateSchemeExclusives(&app, cli, long); err != nil {
 		return &app, err
@@ -258,6 +280,41 @@ func Parse(args []string) (*App, error) {
 	}
 
 	return &app, nil
+}
+
+func validateEquivalentAliases(app *App) error {
+	if app.compressSet && app.noEncodeSet && app.explicitCompress != core.CompressionOff {
+		return newExclusiveFlagsError("compress", "no-encode")
+	}
+	if app.pagerSet && app.noPagerSet && app.Cfg.Pager != core.PagerOff {
+		return newExclusiveFlagsError("no-pager", "pager")
+	}
+	return nil
+}
+
+func validateSkillMode(app *App, cli *CLI) error {
+	if !app.Skill && app.InstallSkill == "" && app.UninstallSkill == "" {
+		return nil
+	}
+	if app.URL != nil {
+		return fmt.Errorf("skill commands cannot be combined with a URL")
+	}
+	requestOnly := map[string]bool{
+		"article": true, "compress": true, "data": true, "digest": true, "dns-server": true,
+		"ech": true, "edit": true, "form": true, "grpc": true, "grpc-describe": true,
+		"grpc-list": true, "har": true, "header": true, "http": true, "image": true,
+		"inspect-dns": true, "inspect-tls": true, "method": true, "multipart": true,
+		"output": true, "query": true, "range": true, "redirects": true, "remote-header-name": true,
+		"remote-name": true, "retry": true, "retry-delay": true, "session": true, "unix": true,
+		"ws-message-mode": true, "ws-interactive": true, "basic": true, "bearer": true,
+		"aws-sigv4": true, "ca-cert": true, "cert": true, "key": true, "insecure": true,
+	}
+	for _, flag := range cli.Options().Flags() {
+		if flag.IsSet() && requestOnly[flag.Long] {
+			return newExclusiveFlagsError(flag.Long, "skill command")
+		}
+	}
+	return nil
 }
 
 // validateSchemeExclusives checks that scheme-specific exclusive flags
@@ -383,9 +440,16 @@ func printHelp(cli *CLI, p *core.Printer) {
 			p.Reset()
 
 			if flag.Args != "" {
-				p.WriteString(" <")
+				if flag.OptionalArg {
+					p.WriteString(" [<")
+				} else {
+					p.WriteString(" <")
+				}
 				p.WriteString(flag.Args)
 				p.WriteString(">")
+				if flag.OptionalArg {
+					p.WriteString("]")
+				}
 			}
 
 			p.WriteString("  ")
@@ -396,14 +460,24 @@ func printHelp(cli *CLI, p *core.Printer) {
 			p.WriteString(flag.Description)
 
 			if !flag.HideValues && len(flag.Values) > 0 {
-				p.WriteString(" [")
-				for i, kv := range flag.Values {
-					if i > 0 {
-						p.WriteString(", ")
-					}
-					p.WriteString(kv.Key)
+				suffix := flagValuesSuffix(flag)
+				lineLength := 2 + 4 + 2 + len(flag.Long)
+				if flag.Short != "" {
+					lineLength = 2 + len(flag.Short) + 4 + 2 + len(flag.Long)
 				}
-				p.WriteString("]")
+				if flag.Args != "" {
+					lineLength += 3 + len(flag.Args)
+					if flag.OptionalArg {
+						lineLength++
+					}
+				}
+				lineLength += 2 + maxLen - flagLength(flag) + len(flag.Description)
+				if lineLength+len(suffix) > 80 {
+					p.WriteString("\n          values: ")
+					p.WriteString(suffix[1:])
+				} else {
+					p.WriteString(suffix)
+				}
 			}
 
 			if flag.Default != "" {
@@ -415,6 +489,19 @@ func printHelp(cli *CLI, p *core.Printer) {
 			p.WriteString("\n")
 		}
 	}
+}
+
+func flagValuesSuffix(flag Flag) string {
+	var values strings.Builder
+	values.WriteString(" [")
+	for i, kv := range flag.Values {
+		if i > 0 {
+			values.WriteString(", ")
+		}
+		values.WriteString(kv.Key)
+	}
+	values.WriteByte(']')
+	return values.String()
 }
 
 func maxFlagLength(fs []Flag) int {

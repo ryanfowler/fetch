@@ -32,14 +32,22 @@ type App struct {
 	Discard          bool
 	DryRun           bool
 	Edit             bool
+	Article          bool
 	Form             []core.KeyVal[string]
 	FromCurl         string
 	GRPC             bool
 	GRPCDescribe     string
 	GRPCList         bool
+	HAR              string
 	Help             bool
 	InspectDNS       bool
 	InspectTLS       bool
+	Skill            bool
+	InstallSkill     string
+	UninstallSkill   string
+	Scope            string
+	Force            bool
+	SortHeaders      bool
 	WS               bool // set when URL scheme is ws:// or wss://
 	Method           string
 	Multipart        []core.KeyVal[string]
@@ -54,10 +62,17 @@ type App struct {
 	Update           bool
 	Version          bool
 	WSInteractive    core.WSInteractiveMode
+	WSMessageMode    core.WSMessageMode
 
-	dataSet bool
-	jsonSet bool
-	xmlSet  bool
+	dataSet          bool
+	jsonSet          bool
+	xmlSet           bool
+	compressSet      bool
+	explicitCompress core.CompressionMode
+	noEncodeSet      bool
+	pagerSet         bool
+	noPagerSet       bool
+	wsMessageModeSet bool
 
 	provenance map[string]OptionProvenance
 }
@@ -111,6 +126,8 @@ func (a *App) CLI() *CLI {
 			return nil
 		},
 		Flags: []Flag{
+			boolFlag(&a.Article, "article", "", "Extract readable article content"),
+
 			// cfgFlag: delegates to config parser
 			cfgFlag("auto-update", "", "(ENABLED|INTERVAL)", "Enable/disable auto-updates",
 				func() bool { return a.Cfg.AutoUpdate != nil }, a.Cfg.ParseAutoUpdate).
@@ -168,6 +185,34 @@ func (a *App) CLI() *CLI {
 				}).
 				WithHideValues(),
 
+			Flag{
+				Long:        "compress",
+				Args:        "MODE",
+				Description: "Response compression",
+				IsSet:       func() bool { return a.compressSet },
+				Fn: func(value string) error {
+					previous := a.Cfg.Compress
+					if err := a.Cfg.ParseCompress(value); err != nil {
+						return err
+					}
+					if a.compressSet && a.explicitCompress != a.Cfg.Compress {
+						a.Cfg.Compress = previous
+						return core.NewValueError("compress", value, "conflicts with the previously selected compression mode", false)
+					}
+					a.compressSet = true
+					a.explicitCompress = a.Cfg.Compress
+					return nil
+				},
+			}.
+				WithValues([]core.KeyVal[string]{
+					{Key: "auto", Val: "Request and decode gzip, Brotli, and zstd"},
+					{Key: "br", Val: "Request and decode Brotli"},
+					{Key: "brotli", Val: "Alias for br"},
+					{Key: "gzip", Val: "Request and decode gzip"},
+					{Key: "zstd", Val: "Request and decode zstd"},
+					{Key: "off", Val: "Do not negotiate or decode compression"},
+				}),
+
 			stringFlag(&a.ConfigPath, "config", "c", "PATH", "Path to config file"),
 
 			cfgFlag("connect-timeout", "", "SECONDS", "Timeout for connection establishment",
@@ -200,7 +245,17 @@ func (a *App) CLI() *CLI {
 				func() bool { return a.Cfg.DNSServer != nil }, a.Cfg.ParseDNSServer),
 
 			boolFlag(&a.DryRun, "dry-run", "", "Print out the request info and exit"),
+
+			cfgFlag("ech", "", "OPTION", "Configure Encrypted ClientHello",
+				func() bool { return a.Cfg.ECH != core.ECHUnknown }, a.Cfg.ParseECH).
+				WithValues([]core.KeyVal[string]{
+					{Key: "auto", Val: "Use ECH when available"},
+					{Key: "on", Val: "Require ECH"},
+					{Key: "off", Val: "Disable ECH"},
+				}),
+
 			boolFlag(&a.Edit, "edit", "e", "Use an editor to modify the request body"),
+			boolFlag(&a.Force, "force", "", "Force skill installation or removal"),
 
 			// Custom: form key=value parsing
 			{
@@ -225,6 +280,20 @@ func (a *App) CLI() *CLI {
 			stringFlag(&a.GRPCDescribe, "grpc-describe", "", "NAME", "Describe a gRPC service, method, or message"),
 			boolFlag(&a.GRPCList, "grpc-list", "", "List available gRPC services"),
 
+			{
+				Long:        "har",
+				Args:        "PATH",
+				Description: "Record the final exchange as HAR 1.2",
+				IsSet:       func() bool { return a.HAR != "" },
+				Fn: func(value string) error {
+					if value == "" || value == "-" {
+						return core.NewValueError("har", value, "must name a non-empty file path (standard output is not supported)", false)
+					}
+					a.HAR = value
+					return nil
+				},
+			},
+
 			cfgFlag("header", "H", "NAME:VALUE", "Set headers for the request",
 				func() bool { return len(a.Cfg.Headers) > 0 }, a.Cfg.ParseHeader),
 
@@ -236,7 +305,9 @@ func (a *App) CLI() *CLI {
 					{Key: "1", Val: "HTTP/1.1"},
 					{Key: "2", Val: "HTTP/2.0"},
 					{Key: "3", Val: "HTTP/3.0"},
-				}),
+				}).
+				WithAliases("http1", "http2", "http3").
+				WithAliasValues(map[string]string{"http1": "1", "http2": "2", "http3": "3"}),
 
 			ptrBoolFlag(&a.Cfg.IgnoreStatus, "ignore-status", "", "Exit code unaffected by HTTP status"),
 
@@ -244,13 +315,32 @@ func (a *App) CLI() *CLI {
 				func() bool { return a.Cfg.Image != core.ImageUnknown }, a.Cfg.ParseImageSetting).
 				WithValues([]core.KeyVal[string]{
 					{Key: "auto", Val: "Automatically decide image display"},
+					{Key: "external", Val: "Allow external image adapters"},
 					{Key: "native", Val: "Only use builtin decoders"},
 					{Key: "off", Val: "Disable image display"},
 				}),
 
 			ptrBoolFlag(&a.Cfg.Insecure, "insecure", "", "Accept invalid TLS certs (!)"),
+
 			boolFlag(&a.InspectDNS, "inspect-dns", "", "Inspect DNS resolution"),
 			boolFlag(&a.InspectTLS, "inspect-tls", "", "Inspect the TLS certificate chain"),
+
+			{
+				Long:        "install-skill",
+				Args:        "AGENT",
+				OptionalArg: true,
+				Description: "Install the portable Agent Skill",
+				Values:      skillAgentValues(),
+				IsSet:       func() bool { return a.InstallSkill != "" },
+				Fn: func(value string) error {
+					parsed, err := parseSkillAgent("install-skill", value)
+					if err != nil {
+						return err
+					}
+					a.InstallSkill = parsed
+					return nil
+				},
+			},
 
 			// Custom: JSON body
 			{
@@ -294,9 +384,57 @@ func (a *App) CLI() *CLI {
 				Fn:          a.parseMultipartFlag,
 			},
 
-			ptrBoolFlag(&a.Cfg.NoEncode, "no-encode", "", "Avoid requesting gzip/zstd encoding"),
-			ptrBoolFlag(&a.Cfg.NoPager, "no-pager", "", "Avoid using a pager for the output"),
+			{
+				Long:        "no-encode",
+				Description: "Avoid requesting gzip/zstd encoding",
+				IsSet:       func() bool { return a.noEncodeSet },
+				Fn: func(string) error {
+					if err := a.Cfg.ParseNoEncode("true"); err != nil {
+						return err
+					}
+					if !a.compressSet {
+						a.Cfg.Compress = core.CompressionOff
+					}
+					a.noEncodeSet = true
+					return nil
+				},
+			},
+			{
+				Long:        "no-pager",
+				Description: "Avoid using a pager for the output",
+				IsSet:       func() bool { return a.noPagerSet },
+				Fn: func(string) error {
+					if err := a.Cfg.ParseNoPager("true"); err != nil {
+						return err
+					}
+					if !a.pagerSet {
+						a.Cfg.Pager = core.PagerOff
+					}
+					a.noPagerSet = true
+					return nil
+				},
+			},
+
 			stringFlag(&a.Output, "output", "o", "PATH", "Write the response body to a file"),
+
+			Flag{
+				Long:        "pager",
+				Args:        "MODE",
+				Description: "Pager behavior",
+				IsSet:       func() bool { return a.pagerSet },
+				Fn: func(value string) error {
+					if err := a.Cfg.ParsePager(value); err != nil {
+						return err
+					}
+					a.pagerSet = true
+					return nil
+				},
+			}.
+				WithValues([]core.KeyVal[string]{
+					{Key: "auto", Val: "Page formatted terminal output automatically"},
+					{Key: "on", Val: "Force a pager when output is suitable"},
+					{Key: "off", Val: "Disable paging"},
+				}),
 
 			// Custom: proto flags with file validation
 			{
@@ -351,15 +489,53 @@ func (a *App) CLI() *CLI {
 				func() bool { return a.Cfg.RetryDelay != nil }, a.Cfg.ParseRetryDelay).
 				WithDefault("1"),
 
+			Flag{
+				Long:        "scope",
+				Args:        "SCOPE",
+				Description: "Skill installation scope",
+				IsSet:       func() bool { return a.Scope != "" },
+				Fn:          a.parseScopeFlag,
+			}.WithValues([]core.KeyVal[string]{
+				{Key: "user", Val: "Install in the user skill directory"},
+				{Key: "project", Val: "Install in the current project"},
+			}),
+
 			cfgFlag("session", "S", "NAME", "Use a named session for cookies",
 				func() bool { return a.Cfg.Session != nil }, a.Cfg.ParseSession),
 
 			ptrBoolFlag(&a.Cfg.Silent, "silent", "s", "Print only errors to stderr"),
+			{
+				Long:        "skill",
+				Description: "Print the portable Agent Skill",
+				IsSet:       func() bool { return a.Skill },
+				Fn: func(string) error {
+					a.Skill = true
+					return nil
+				},
+			},
+			ptrBoolFlag(&a.Cfg.SortHeaders, "sort-headers", "", "Compatibility no-op for header ordering"),
 
 			cfgFlag("timeout", "t", "SECONDS", "Timeout applied to the request",
 				func() bool { return a.Cfg.Timeout != nil }, a.Cfg.ParseTimeout),
 
 			ptrBoolFlag(&a.Cfg.Timing, "timing", "T", "Display a timing waterfall chart"),
+
+			{
+				Long:        "uninstall-skill",
+				Args:        "AGENT",
+				OptionalArg: true,
+				Description: "Uninstall the portable Agent Skill",
+				Values:      skillAgentValues(),
+				IsSet:       func() bool { return a.UninstallSkill != "" },
+				Fn: func(value string) error {
+					parsed, err := parseSkillAgent("uninstall-skill", value)
+					if err != nil {
+						return err
+					}
+					a.UninstallSkill = parsed
+					return nil
+				},
+			},
 
 			stringFlag(&a.UnixSocket, "unix", "", "PATH", "Make the request over a unix socket").
 				WithOS(unixOS),
@@ -388,6 +564,21 @@ func (a *App) CLI() *CLI {
 				{Key: "auto", Val: "Use interactive prompt when attached to a terminal"},
 				{Key: "on", Val: "Require interactive prompt"},
 				{Key: "off", Val: "Disable interactive prompt"},
+			}),
+
+			Flag{
+				Long:        "ws-message-mode",
+				Args:        "MODE",
+				Description: "WebSocket message mode",
+				IsSet:       func() bool { return a.wsMessageModeSet },
+				Fn: func(value string) error {
+					a.wsMessageModeSet = true
+					return a.parseWSMessageModeFlag(value)
+				},
+			}.WithValues([]core.KeyVal[string]{
+				{Key: "auto", Val: "Detect text versus binary"},
+				{Key: "text", Val: "Require UTF-8 text messages"},
+				{Key: "binary", Val: "Send binary messages"},
 			}),
 
 			// Custom: XML body
@@ -602,6 +793,54 @@ func (a *App) parseWSInteractiveFlag(value string) error {
 		return core.NewValueError("ws-interactive", value, "must be one of [auto, on, off]", false)
 	}
 	return nil
+}
+
+func (a *App) parseWSMessageModeFlag(value string) error {
+	switch value {
+	case "auto":
+		a.WSMessageMode = core.WSMessageAuto
+	case "text":
+		a.WSMessageMode = core.WSMessageText
+	case "binary":
+		a.WSMessageMode = core.WSMessageBinary
+	default:
+		return core.NewValueError("ws-message-mode", value, "must be one of [auto, text, binary]", false)
+	}
+	return nil
+}
+
+func (a *App) parseScopeFlag(value string) error {
+	switch value {
+	case "user", "project":
+		a.Scope = value
+		return nil
+	default:
+		return core.NewValueError("scope", value, "must be one of [user, project]", false)
+	}
+}
+
+func skillAgentValues() []core.KeyVal[string] {
+	return []core.KeyVal[string]{
+		{Key: "auto", Val: "Choose the default Agents location"},
+		{Key: "agents", Val: "Generic Agents skill directory"},
+		{Key: "codex", Val: "Codex skill directory"},
+		{Key: "claude", Val: "Claude skill directory"},
+		{Key: "gemini", Val: "Gemini skill directory"},
+		{Key: "pi", Val: "Pi skill directory"},
+		{Key: "all", Val: "Install or remove all supported skill directories"},
+	}
+}
+
+func parseSkillAgent(option, value string) (string, error) {
+	if value == "" {
+		return "auto", nil
+	}
+	for _, accepted := range skillAgentValues() {
+		if value == accepted.Key {
+			return value, nil
+		}
+	}
+	return "", core.NewValueError(option, value, "must be one of [auto, agents, codex, claude, gemini, pi, all]", false)
 }
 
 // buildAWSConfig creates an AWS configuration from region and service.
