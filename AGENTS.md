@@ -86,6 +86,7 @@ prettier -w .
 - Schemeless hostnames default to HTTPS, while `localhost` and all IP literals default to HTTP. Body-producing flags infer POST unless the method is explicit, dry-run shows the normalized absolute URL, and failed schemeless HTTPS connection setup suggests the equivalent HTTP URL when safe.
 - Shared timeout budgets and resource-bound helpers live in `internal/core`; finite child operations must reuse the parent budget's absolute deadline, while zero or absent timeouts remain unlimited.
 - Request replayability is explicit: one-shot sources such as stdin are rejected before retry or Digest replay, regular files are reopened with identity/length checks, and dry-run previews do not consume request bytes.
+- Brotli response decoding uses the decoder-only `github.com/google/brotli/go/brotli` module; tests use fixed Brotli fixtures.
 5. HTTP client executes request
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 

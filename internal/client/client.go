@@ -20,7 +20,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/resolver"
 
-	"github.com/andybalholm/brotli"
+	"github.com/google/brotli/go/brotli"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 	"github.com/quic-go/quic-go"
@@ -669,7 +669,7 @@ func contentEncodingDecoders(h http.Header) ([]namedResponseBodyDecoder, bool) {
 			decoders = append(decoders, namedResponseBodyDecoder{
 				name: "br",
 				decoder: func(rc io.ReadCloser) (io.ReadCloser, error) {
-					return &brotliReader{Reader: brotli.NewReader(rc), c: rc}, nil
+					return &brotliReader{ReadCloser: brotli.NewReader(rc), c: rc}, nil
 				},
 			})
 		case "gzip":
@@ -722,12 +722,17 @@ func encodingRequested(r *http.Request) bool {
 }
 
 type brotliReader struct {
-	*brotli.Reader
+	io.ReadCloser
 	c io.Closer
 }
 
 func (r *brotliReader) Close() error {
-	return r.c.Close()
+	err := r.ReadCloser.Close()
+	err2 := r.c.Close()
+	if err != nil {
+		return err
+	}
+	return err2
 }
 
 type gzipReader struct {
