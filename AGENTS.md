@@ -50,7 +50,7 @@ prettier -w .
 - **internal/client** - HTTP client wrapper and HTTP version-specific transport setup.
 - **internal/complete** - Shell completion implementation.
 - **internal/config** - INI-format config file parsing with host-specific overrides.
-- **internal/core** - Shared types (`Printer`, `Color`, `Format`, `HTTPVersion`) and utilities.
+- **internal/core** - Shared types (`Printer`, `Color`, `Format`, `HTTPVersion`), timeout budgets, checked arithmetic, bounded readers/buffers, resource limits, and error categories.
 - **internal/curl** - Curl command parser for `--from-curl` flag. Tokenizes and parses curl command strings into an intermediate `Result` struct.
 - **internal/digest** - HTTP Digest Authentication challenge parsing and response computation (RFC 7616).
 - **internal/fetch** - Core HTTP request execution. `fetch.go:Fetch()` is the main entry point that builds requests, handles gRPC framing/reflection/discovery, and routes to formatters.
@@ -82,6 +82,7 @@ prettier -w .
 - `--tls` remains a compatibility alias for setting the minimum TLS version; prefer `--min-tls` in new docs/examples, and use `--max-tls` to cap negotiation or combine min/max for an exact TLS version.
 - WebSocket terminal sessions use the interactive prompt by default and can be controlled with `--ws-interactive auto|on|off`; output-file/clipboard/retry flags are rejected because the WebSocket path streams through the message loop instead of the normal response pipeline.
 - Metadata-only commands (`--help`, `--version`, `--buildinfo`) perform best-effort config parsing for presentation settings, but config errors and background auto-updates cannot block them.
+- Shared timeout budgets and resource-bound helpers live in `internal/core`; finite child operations must reuse the parent budget's absolute deadline, while zero or absent timeouts remain unlimited.
 5. HTTP client executes request
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 
