@@ -114,6 +114,12 @@ func newProgressStatic(r io.Reader, p *core.Printer) *progressStatic {
 
 func (ps *progressStatic) Read(p []byte) (int, error) {
 	n, err := ps.r.Read(p)
+	if counter, ok := ps.r.(interface{ ProgressBytes() (int64, bool) }); ok {
+		if bytesRead, valid := counter.ProgressBytes(); valid {
+			ps.bytesRead = bytesRead
+			return n, err
+		}
+	}
 	ps.bytesRead += int64(n)
 	return n, err
 }

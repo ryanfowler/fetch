@@ -40,3 +40,14 @@ func (s *Stream) Read(p []byte) (int, error) {
 }
 
 func (s *Stream) Close() error { return s.source.Close() }
+
+// ProgressBytes forwards an optional byte counter from the source. Decoding
+// response bodies can expose wire-byte progress even though Stream returns
+// decoded bytes to its consumer.
+func (s *Stream) ProgressBytes() (int64, bool) {
+	counter, ok := s.source.(interface{ ProgressBytes() (int64, bool) })
+	if !ok {
+		return 0, false
+	}
+	return counter.ProgressBytes()
+}

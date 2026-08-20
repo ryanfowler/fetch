@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/body"
@@ -410,6 +412,7 @@ type RequestConfig struct {
 	Article     bool
 	Basic       *core.KeyVal[string]
 	Bearer      string
+	Compression core.CompressionMode
 	ContentType string
 	Data        io.Reader
 	Form        []core.KeyVal[string]
@@ -417,7 +420,7 @@ type RequestConfig struct {
 	HTTP        core.HTTPVersion
 	Method      string
 	Multipart   *multipart.Multipart
-	NoEncode    bool
+	NoEncode    bool // Compatibility override for --no-encode.
 	QueryParams []core.KeyVal[string]
 	Range       []string
 	URL         *url.URL
@@ -553,11 +556,24 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		}
 	}
 
-	// Optionally request gzip, Brotli, and zstd encoding.
-	if !cfg.NoEncode && !acceptEncodingSet && req.Method != "HEAD" {
-		req.Header.Set("Accept-Encoding", "gzip, br, zstd")
-		requestContext := context.WithValue(req.Context(), ctxEncodingRequestedKey, true)
-		req = req.WithContext(requestContext)
+	// Set the compression policy after explicit headers have been applied. An
+	// explicit Accept-Encoding value is never replaced. The policy still
+	// controls which response encodings are safe to decode; --compress off and
+	// --no-encode preserve the response bytes exactly.
+	mode := cfg.Compression
+	if cfg.NoEncode {
+		mode = core.CompressionOff
+	}
+	if mode == core.CompressionUnknown {
+		mode = core.CompressionAuto
+	}
+	policy := newResponseEncodingPolicy(mode)
+	requestContext := context.WithValue(req.Context(), ctxEncodingPolicyKey, policy)
+	req = req.WithContext(requestContext)
+
+	// Optionally request gzip, Brotli, or zstd encoding.
+	if !cfg.NoEncode && !acceptEncodingSet && mode != core.CompressionOff {
+		req.Header.Set("Accept-Encoding", compressionAcceptEncoding(mode))
 	}
 
 	// Optionally set the authorization header.
@@ -624,17 +640,32 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	rememberWireContentLength(resp, req)
 
-	// Automatically decode the response body if we requested it.
-	if encodingRequested(req) && resp.Body != nil {
-		decoders, ok := contentEncodingDecoders(resp.Header)
-		if !ok {
-			return resp, nil
-		}
-		for _, d := range decoders {
-			err := decodeResponseBody(resp, d.name, d.decoder)
+	// Decode only the encodings permitted by the request's compression mode.
+	// Keep this outside net/http's transport so all HTTP versions use the same
+	// streaming decoders and malformed encodings produce the same error.
+	if resp.Body != nil {
+		if policy, ok := responseEncodingPolicyFromRequest(req); ok {
+			if !policy.enabled {
+				return resp, nil
+			}
+			decoders, err := contentEncodingDecodersForPolicy(resp.Header, policy.allowed)
 			if err != nil {
+				_ = resp.Body.Close()
 				return nil, err
+			}
+			if err := decodeResponseBodyChain(resp, decoders); err != nil {
+				return nil, err
+			}
+		} else if encodingRequested(req) {
+			// Preserve the old behavior for requests constructed directly by
+			// package users that predate CompressionMode.
+			decoders, ok := contentEncodingDecoders(resp.Header)
+			if ok {
+				if err := decodeResponseBodyChain(resp, decoders); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -649,16 +680,109 @@ type namedResponseBodyDecoder struct {
 	decoder responseBodyDecoder
 }
 
-func decodeResponseBody(resp *http.Response, name string, decoder responseBodyDecoder) error {
-	body, err := decoder(resp.Body)
+func decodeResponseBodyChain(resp *http.Response, decoders []namedResponseBodyDecoder) error {
+	if len(decoders) == 0 {
+		return nil
+	}
+	counter := &wireByteCounter{}
+	resp.Body = &wireCountingReadCloser{ReadCloser: resp.Body, counter: counter}
+	for _, decoder := range decoders {
+		if err := decodeResponseBody(resp, decoder.name, decoder.decoder, counter); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func decodeResponseBody(resp *http.Response, name string, decoder responseBodyDecoder, counters ...*wireByteCounter) error {
+	decoded, err := decoder(resp.Body)
 	if err != nil {
 		resp.Body.Close()
 		return fmt.Errorf("%s: %w", name, err)
 	}
-	resp.Body = body
+	var counter *wireByteCounter
+	if len(counters) > 0 {
+		counter = counters[0]
+	} else if source, ok := resp.Body.(interface{ wireCounter() *wireByteCounter }); ok {
+		counter = source.wireCounter()
+	}
+	resp.Body = &encodingReadCloser{name: name, reader: decoded, closer: decoded, counter: counter}
 	resp.ContentLength = -1
 	return nil
 }
+
+type wireByteCounter struct{ bytes atomic.Int64 }
+
+type wireCountingReadCloser struct {
+	io.ReadCloser
+	counter *wireByteCounter
+}
+
+func (r *wireCountingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if n > 0 {
+		r.counter.bytes.Add(int64(n))
+	}
+	return n, err
+}
+
+func (r *wireCountingReadCloser) wireCounter() *wireByteCounter { return r.counter }
+
+type encodingReadCloser struct {
+	name    string
+	reader  io.Reader
+	closer  io.Closer
+	counter *wireByteCounter
+}
+
+func (r *encodingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err != nil && err != io.EOF {
+		return n, fmt.Errorf("%s: %w", r.name, err)
+	}
+	return n, err
+}
+
+func (r *encodingReadCloser) Close() error { return r.closer.Close() }
+
+func (r *encodingReadCloser) ProgressBytes() (int64, bool) {
+	if r.counter == nil {
+		return 0, false
+	}
+	return r.counter.bytes.Load(), true
+}
+
+func rememberWireContentLength(resp *http.Response, req *http.Request) {
+	if resp == nil {
+		return
+	}
+	base := resp.Request
+	if base == nil {
+		base = req
+	}
+	if base == nil {
+		return
+	}
+	ctx := context.WithValue(base.Context(), wireContentLengthKey{}, resp.ContentLength)
+	resp.Request = base.WithContext(ctx)
+}
+
+// WireContentLength returns the encoded response length when the server
+// supplied one. It remains available after a streaming decoder changes
+// http.Response.ContentLength to -1.
+func WireContentLength(resp *http.Response) int64 {
+	if resp == nil {
+		return -1
+	}
+	if resp.Request != nil {
+		if length, ok := resp.Request.Context().Value(wireContentLengthKey{}).(int64); ok {
+			return length
+		}
+	}
+	return resp.ContentLength
+}
+
+type wireContentLengthKey struct{}
 
 func contentEncodingDecoders(h http.Header) ([]namedResponseBodyDecoder, bool) {
 	encodings := contentEncodings(h)
@@ -686,12 +810,62 @@ func contentEncodingDecoders(h http.Header) ([]namedResponseBodyDecoder, bool) {
 					return newZSTDReader(rc)
 				},
 			})
-		case "aws-chunked":
+		case "identity", "aws-chunked":
 		default:
 			return nil, false
 		}
 	}
 	return decoders, true
+}
+
+// contentEncodingDecodersForPolicy validates the complete encoding chain
+// before installing any decoder. This avoids partially decoding a response
+// whose later encoding is unsupported.
+func contentEncodingDecodersForPolicy(h http.Header, allowed map[string]bool) ([]namedResponseBodyDecoder, error) {
+	values := h.Values("Content-Encoding")
+	var encodings []string
+	for _, value := range values {
+		for token := range strings.SplitSeq(value, ",") {
+			encoding := strings.TrimSpace(token)
+			if encoding == "" {
+				return nil, errors.New("malformed Content-Encoding header: empty encoding")
+			}
+			encoding = strings.ToLower(encoding)
+			if encoding != "identity" && encoding != "aws-chunked" && !allowed[encoding] {
+				return nil, fmt.Errorf("unsupported response content encoding: %s", encoding)
+			}
+			encodings = append(encodings, encoding)
+		}
+	}
+
+	decoders := make([]namedResponseBodyDecoder, 0, len(encodings))
+	for i := len(encodings) - 1; i >= 0; i-- {
+		switch encodings[i] {
+		case "br":
+			decoders = append(decoders, namedResponseBodyDecoder{
+				name: "br",
+				decoder: func(rc io.ReadCloser) (io.ReadCloser, error) {
+					return &brotliReader{ReadCloser: brotli.NewReader(rc), c: rc}, nil
+				},
+			})
+		case "gzip":
+			decoders = append(decoders, namedResponseBodyDecoder{
+				name: "gzip",
+				decoder: func(rc io.ReadCloser) (io.ReadCloser, error) {
+					return newGZIPReader(rc)
+				},
+			})
+		case "zstd":
+			decoders = append(decoders, namedResponseBodyDecoder{
+				name: "zstd",
+				decoder: func(rc io.ReadCloser) (io.ReadCloser, error) {
+					return newZSTDReader(rc)
+				},
+			})
+		case "identity", "aws-chunked":
+		}
+	}
+	return decoders, nil
 }
 
 func contentEncodings(h http.Header) []string {
@@ -708,14 +882,59 @@ func contentEncodings(h http.Header) []string {
 	return encodings
 }
 
-// ctxEncodingRequestedKeyType represents the type for storing whether response
-// encoding was requested.
-type ctxEncodingRequestedKeyType int
+type responseEncodingPolicy struct {
+	enabled bool
+	allowed map[string]bool
+}
 
-const ctxEncodingRequestedKey ctxEncodingRequestedKeyType = 0
+type ctxEncodingPolicyKeyType int
 
-// encodingRequested returns true if response encoding was requested for the
-// provided request.
+const (
+	ctxEncodingPolicyKey    ctxEncodingPolicyKeyType = 0
+	ctxEncodingRequestedKey ctxEncodingPolicyKeyType = 1 // Legacy test/client hook.
+)
+
+func newResponseEncodingPolicy(mode core.CompressionMode) responseEncodingPolicy {
+	if mode == core.CompressionOff {
+		return responseEncodingPolicy{}
+	}
+
+	allowed := make(map[string]bool, 3)
+	switch mode {
+	case core.CompressionBrotli:
+		allowed["br"] = true
+	case core.CompressionGzip:
+		allowed["gzip"] = true
+	case core.CompressionZstd:
+		allowed["zstd"] = true
+	default:
+		allowed["gzip"] = true
+		allowed["br"] = true
+		allowed["zstd"] = true
+	}
+	return responseEncodingPolicy{enabled: true, allowed: allowed}
+}
+
+func responseEncodingPolicyFromRequest(r *http.Request) (responseEncodingPolicy, bool) {
+	policy, ok := r.Context().Value(ctxEncodingPolicyKey).(responseEncodingPolicy)
+	return policy, ok
+}
+
+func compressionAcceptEncoding(mode core.CompressionMode) string {
+	switch mode {
+	case core.CompressionBrotli:
+		return "br"
+	case core.CompressionGzip:
+		return "gzip"
+	case core.CompressionZstd:
+		return "zstd"
+	default:
+		return "gzip, br, zstd"
+	}
+}
+
+// encodingRequested retains the small hook used by older direct Client tests
+// and package users. New requests carry the full responseEncodingPolicy above.
 func encodingRequested(r *http.Request) bool {
 	v, ok := r.Context().Value(ctxEncodingRequestedKey).(bool)
 	return ok && v

@@ -105,6 +105,15 @@ func TestMaterializeIsBoundedAndReplayable(t *testing.T) {
 	}
 }
 
+func TestStreamForwardsProgressCounter(t *testing.T) {
+	source := &progressReadCloser{Reader: strings.NewReader("payload"), total: 7}
+	stream := NewStream(source)
+	counter, ok := stream.ProgressBytes()
+	if !ok || counter != 7 {
+		t.Fatalf("ProgressBytes() = %d, %v; want 7, true", counter, ok)
+	}
+}
+
 func TestStreamTeeReadsOnceAndClosesSource(t *testing.T) {
 	var observed bytes.Buffer
 	source := &trackingReadCloser{Reader: strings.NewReader("payload")}
@@ -124,6 +133,15 @@ func TestStreamTeeReadsOnceAndClosesSource(t *testing.T) {
 		t.Fatal("stream did not close its source")
 	}
 }
+
+type progressReadCloser struct {
+	io.Reader
+	total int64
+}
+
+func (r *progressReadCloser) Close() error { return nil }
+
+func (r *progressReadCloser) ProgressBytes() (int64, bool) { return r.total, true }
 
 type trackingReadCloser struct {
 	io.Reader

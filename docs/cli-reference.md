@@ -251,10 +251,13 @@ fetch --article https://example.com/story
 
 ### `--compress MODE`
 
-Select content-encoding negotiation and decoding: `auto`, `br` (alias
-`brotli`), `gzip`, `zstd`, or `off`. The compatibility flag `--no-encode` is
-equivalent to `--compress off`; selecting conflicting explicit modes is an
-error.
+Select content-encoding negotiation and streaming decoding: `auto`, `br`
+(alias `brotli`), `gzip`, `zstd`, or `off`. `auto` advertises `gzip, br, zstd`;
+the other enabled modes advertise only their selected encoding. `off` sends
+no automatic encoding header and preserves encoded response bytes. An
+explicit `Accept-Encoding` header is never replaced. The compatibility flag
+`--no-encode` is equivalent to `--compress off`; selecting conflicting
+explicit modes is an error.
 
 ### `--ech MODE`
 

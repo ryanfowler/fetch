@@ -61,6 +61,12 @@ func NewBar(r io.Reader, p *core.Printer, totalBytes int64, onRender func(percen
 
 func (b *Bar) Read(p []byte) (int, error) {
 	n, err := b.r.Read(p)
+	if counter, ok := b.r.(interface{ ProgressBytes() (int64, bool) }); ok {
+		if bytesRead, valid := counter.ProgressBytes(); valid {
+			b.bytesRead.Store(bytesRead)
+			return n, err
+		}
+	}
 	if n > 0 {
 		b.bytesRead.Add(int64(n))
 	}
@@ -169,6 +175,12 @@ func NewSpinner(r io.Reader, p *core.Printer, onStart func()) *Spinner {
 
 func (s *Spinner) Read(p []byte) (int, error) {
 	n, err := s.r.Read(p)
+	if counter, ok := s.r.(interface{ ProgressBytes() (int64, bool) }); ok {
+		if bytesRead, valid := counter.ProgressBytes(); valid {
+			s.bytesRead.Store(bytesRead)
+			return n, err
+		}
+	}
 	if n > 0 {
 		s.bytesRead.Add(int64(n))
 	}

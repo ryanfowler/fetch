@@ -37,6 +37,14 @@ func (t *timedReader) Close() error {
 	return t.r.Close()
 }
 
+func (t *timedReader) ProgressBytes() (int64, bool) {
+	counter, ok := t.r.(interface{ ProgressBytes() (int64, bool) })
+	if !ok {
+		return 0, false
+	}
+	return counter.ProgressBytes()
+}
+
 func (t *timedReader) wallTime() time.Duration {
 	if t.firstRead.IsZero() {
 		return 0
