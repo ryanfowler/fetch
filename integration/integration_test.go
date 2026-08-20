@@ -72,6 +72,27 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "unexpected argument")
 	})
 
+	t.Run("CLI-003 normalized dry-run requests", func(t *testing.T) {
+		t.Parallel()
+		res := runFetch(t, fetchPath, "example.com:8080/path?debug=true", "--dry-run", "--timeout", "0", "--connect-timeout", "0")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "url: https://example.com:8080/path?debug=true")
+		assertBufContains(t, res.stderr, "accept: application/json, */*;q=0.5")
+
+		res = runFetch(t, fetchPath, "192.0.2.1", "--dry-run")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "url: http://192.0.2.1/")
+
+		res = runFetch(t, fetchPath, "--article", "example.com", "--dry-run")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "url: https://example.com/")
+		assertBufContains(t, res.stderr, "accept: text/html, application/xhtml+xml;q=0.9, text/markdown;q=0.8, */*;q=0.1")
+
+		res = runFetch(t, fetchPath, "--json", "{}", "example.com", "--dry-run")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stderr, "POST / HTTP/1.1")
+	})
+
 	t.Run("invalid flag", func(t *testing.T) {
 		t.Parallel()
 		res := runFetch(t, fetchPath, "--invalid")
@@ -1180,7 +1201,12 @@ func TestMain(t *testing.T) {
 		const data = "this is the test data"
 
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Accept-Encoding") != "gzip, zstd" {
+			if r.URL.Query().Get("no-encode") == "1" {
+				w.Write([]byte(data))
+				return
+			}
+			if encoding := r.Header.Get("Accept-Encoding"); encoding != "gzip, br, zstd" {
+				t.Errorf("Accept-Encoding = %q, want gzip, br, zstd", encoding)
 				w.Write([]byte(data))
 				return
 			}
@@ -1207,7 +1233,7 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, data)
 		assertBufContains(t, res.stderr, "aws-chunked, gzip")
 
-		res = runFetch(t, fetchPath, server.URL, "-v", "--no-encode")
+		res = runFetch(t, fetchPath, server.URL+"?no-encode=1", "-v", "--no-encode")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, data)
 		assertBufNotContains(t, res.stderr, "gzip")
@@ -1218,7 +1244,12 @@ func TestMain(t *testing.T) {
 		const data = "this is the test data"
 
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Accept-Encoding") != "gzip, zstd" {
+			if r.URL.Query().Get("no-encode") == "1" {
+				w.Write([]byte(data))
+				return
+			}
+			if encoding := r.Header.Get("Accept-Encoding"); encoding != "gzip, br, zstd" {
+				t.Errorf("Accept-Encoding = %q, want gzip, br, zstd", encoding)
 				w.Write([]byte(data))
 				return
 			}
@@ -1248,7 +1279,7 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, data)
 		assertBufContains(t, res.stderr, "aws-chunked, zstd")
 
-		res = runFetch(t, fetchPath, server.URL, "-v", "--no-encode")
+		res = runFetch(t, fetchPath, server.URL+"?no-encode=1", "-v", "--no-encode")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, data)
 		assertBufNotContains(t, res.stderr, "zstd")

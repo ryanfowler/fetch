@@ -291,7 +291,7 @@ fetch --no-encode example.com
 
 By default, `fetch`:
 
-- Sends `Accept-Encoding: gzip, zstd` header
+- Sends `Accept-Encoding: gzip, br, zstd` header
 - Automatically decompresses responses
 
 Disabling is useful when:

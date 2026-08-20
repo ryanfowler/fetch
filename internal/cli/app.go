@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -14,8 +15,9 @@ import (
 
 // App represents the full configuration for a fetch invocation.
 type App struct {
-	URL       *url.URL
-	ExtraArgs []string
+	URL           *url.URL
+	ExtraArgs     []string
+	SchemelessURL bool
 
 	Cfg config.Config
 
@@ -117,6 +119,7 @@ func (a *App) CLI() *CLI {
 			if a.URL != nil {
 				return fmt.Errorf("unexpected argument: %q", s)
 			}
+			a.SchemelessURL = !hasAuthorityScheme(s)
 			u, isWS, err := parseURL(s)
 			if err != nil {
 				return err
@@ -367,7 +370,7 @@ func (a *App) CLI() *CLI {
 
 			stringFlag(&a.Method, "method", "m", "METHOD", "HTTP method to use").
 				WithAliases("X").
-				WithDefault("GET"),
+				WithDefault("GET; body=POST"),
 
 			cfgFlag("min-tls", "", "VERSION", "Minimum TLS version",
 				func() bool { return a.Cfg.TLSMin != nil }, a.Cfg.ParseMinTLS).
@@ -386,7 +389,7 @@ func (a *App) CLI() *CLI {
 
 			{
 				Long:        "no-encode",
-				Description: "Avoid requesting gzip/zstd encoding",
+				Description: "Avoid requesting gzip, br, or zstd encoding",
 				IsSet:       func() bool { return a.noEncodeSet },
 				Fn: func(string) error {
 					if err := a.Cfg.ParseNoEncode("true"); err != nil {
@@ -660,8 +663,8 @@ func (a *App) parseDataFlag(value string) error {
 }
 
 func (a *App) parseFormFlag(value string) error {
-	key, val, _ := core.CutTrimmed(value, "=")
-	a.Form = append(a.Form, core.KeyVal[string]{Key: key, Val: val})
+	key, val, _ := strings.Cut(value, "=")
+	a.Form = append(a.Form, core.KeyVal[string]{Key: strings.TrimSpace(key), Val: val})
 	return nil
 }
 
@@ -684,7 +687,8 @@ func (a *App) parseKeyFlag(value string) error {
 }
 
 func (a *App) parseMultipartFlag(value string) error {
-	key, val, _ := core.CutTrimmed(value, "=")
+	key, val, _ := strings.Cut(value, "=")
+	key = strings.TrimSpace(key)
 	if strings.HasPrefix(val, "@") {
 		path := val[1:]
 
@@ -861,9 +865,10 @@ func parseURL(rawURL string) (*url.URL, bool, error) {
 		return nil, false, fmt.Errorf("empty URL provided")
 	}
 
-	// For URLs that have the scheme omitted, add two
-	// slashes so it can be parsed correctly.
-	if !strings.Contains(rawURL, "://") && rawURL[0] != '/' {
+	// For URLs that have the scheme omitted, add two slashes so the host is
+	// parsed as an authority rather than as a path or a scheme-like hostname
+	// such as "localhost:3000".
+	if !hasAuthorityScheme(rawURL) && rawURL[0] != '/' {
 		rawURL = "//" + rawURL
 	}
 
@@ -872,11 +877,21 @@ func parseURL(rawURL string) (*url.URL, bool, error) {
 		return nil, false, fmt.Errorf("invalid url: %w", err)
 	}
 
-	// Lowercase the scheme, and validate.
+	// Lowercase the scheme, validate it, and normalize schemeless URLs now so
+	// dry-run and request construction use the same absolute URL.
 	var isWS bool
 	u.Scheme = strings.ToLower(u.Scheme)
 	switch u.Scheme {
-	case "", "http", "https":
+	case "":
+		if u.Host == "" {
+			return nil, false, fmt.Errorf("invalid url: missing host")
+		}
+		if isIPLiteral(u.Hostname()) || strings.EqualFold(u.Hostname(), "localhost") {
+			u.Scheme = "http"
+		} else {
+			u.Scheme = "https"
+		}
+	case "http", "https":
 	case "ws":
 		u.Scheme = "http"
 		isWS = true
@@ -887,6 +902,39 @@ func parseURL(rawURL string) (*url.URL, bool, error) {
 		return nil, false, fmt.Errorf("unsupported url scheme: %s", u.Scheme)
 	}
 	return u, isWS, nil
+}
+
+func isIPLiteral(host string) bool {
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if zone := strings.LastIndexByte(host, '%'); zone > 0 {
+		return net.ParseIP(host[:zone]) != nil
+	}
+	return false
+}
+
+func hasAuthorityScheme(raw string) bool {
+	colon := strings.IndexByte(raw, ':')
+	if colon <= 0 {
+		return false
+	}
+	if delimiter := strings.IndexAny(raw, "/?#"); delimiter >= 0 && colon > delimiter {
+		return false
+	}
+	for i := 0; i < colon; i++ {
+		c := raw[i]
+		if (i == 0 && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z')) ||
+			(i > 0 && !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+				(c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.')) {
+			return false
+		}
+	}
+	return strings.HasPrefix(raw[colon+1:], "//")
+}
+
+func (a *App) hasRequestBody() bool {
+	return a.Data != nil || len(a.Form) > 0 || len(a.Multipart) > 0 || a.Edit
 }
 
 func RequestBody(value string) (io.Reader, string, error) {

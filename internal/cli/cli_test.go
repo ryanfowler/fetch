@@ -216,6 +216,59 @@ func TestOptionRegistryMetadataAndAliases(t *testing.T) {
 	}
 }
 
+func TestCLI003URLNormalizationAndMethodInference(t *testing.T) {
+	tests := []struct {
+		name   string
+		rawURL string
+		scheme string
+		host   string
+	}{
+		{name: "hostname defaults to https", rawURL: "example.com/path", scheme: "https", host: "example.com"},
+		{name: "ipv4 defaults to http", rawURL: "192.0.2.1/path", scheme: "http", host: "192.0.2.1"},
+		{name: "ipv6 defaults to http", rawURL: "[2001:db8::1]/path", scheme: "http", host: "[2001:db8::1]"},
+		{name: "scoped ipv6 defaults to http", rawURL: "[fe80::1%25lo]/path", scheme: "http", host: "[fe80::1%lo]"},
+		{name: "localhost remains http", rawURL: "localhost/path", scheme: "http", host: "localhost"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, err := Parse([]string{tt.rawURL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if app.URL.Scheme != tt.scheme || app.URL.Host != tt.host {
+				t.Fatalf("URL = %s, want %s://%s", app.URL, tt.scheme, tt.host)
+			}
+			if !app.SchemelessURL {
+				t.Fatal("schemeless URL was not recorded")
+			}
+		})
+	}
+
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "data", args: []string{"--data", "body", "example.com"}, want: "POST"},
+		{name: "json", args: []string{"--json", "{}", "example.com"}, want: "POST"},
+		{name: "xml", args: []string{"--xml", "<x/>", "example.com"}, want: "POST"},
+		{name: "form", args: []string{"--form", "key=value", "example.com"}, want: "POST"},
+		{name: "multipart", args: []string{"--multipart", "key=value", "example.com"}, want: "POST"},
+		{name: "edit", args: []string{"--edit", "example.com"}, want: "POST"},
+		{name: "explicit method wins", args: []string{"--method", "GET", "--json", "{}", "example.com"}, want: "GET"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			app, err := Parse(tt.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if app.Method != tt.want {
+				t.Fatalf("method = %q, want %q", app.Method, tt.want)
+			}
+		})
+	}
+}
+
 func TestOptionProvenance(t *testing.T) {
 	app, err := Parse([]string{"-X", "POST", "https://example.com"})
 	if err != nil {

@@ -20,6 +20,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/resolver"
 
+	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
 	"github.com/quic-go/quic-go"
@@ -406,6 +407,7 @@ func (c *Client) SetJar(jar http.CookieJar) {
 
 // RequestConfig represents the configuration for creating an HTTP request.
 type RequestConfig struct {
+	Article     bool
 	Basic       *core.KeyVal[string]
 	Bearer      string
 	ContentType string
@@ -423,13 +425,11 @@ type RequestConfig struct {
 
 // NewRequest returns an *http.Request given the provided configuration.
 func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Request, error) {
-	// Add any query params to the URL.
+	// Append query params directly to RawQuery. url.Values.Encode sorts keys,
+	// which loses the user's ordering even though duplicate parameters are
+	// valid and meaningful to many servers.
 	if len(cfg.QueryParams) > 0 {
-		q := cfg.URL.Query()
-		for _, kv := range cfg.QueryParams {
-			q.Add(kv.Key, kv.Val)
-		}
-		cfg.URL.RawQuery = q.Encode()
+		cfg.URL.RawQuery = appendQueryParams(cfg.URL.RawQuery, cfg.QueryParams)
 	}
 
 	// Build a lazy body source. The request receives the source itself so that
@@ -457,19 +457,24 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		requestBody = source
 	}
 
-	// If no scheme was provided, default to HTTPS except for loopback
-	// addresses (localhost, 127.x.x.x, ::1) which default to HTTP.
+	// If no scheme was provided, default to HTTPS except for localhost and all
+	// IP literals, which default to HTTP.
 	if cfg.URL.Scheme == "" {
-		if IsLoopback(cfg.URL.Hostname()) {
+		if isIPLiteral(cfg.URL.Hostname()) || IsLoopback(cfg.URL.Hostname()) {
 			cfg.URL.Scheme = "http"
 		} else {
 			cfg.URL.Scheme = "https"
 		}
 	}
 
-	// If no method was provided, default to GET.
+	// If no method was provided, a body implies POST. The caller can still
+	// explicitly choose any method, including GET with a body.
 	if cfg.Method == "" {
-		cfg.Method = "GET"
+		if requestBody != nil {
+			cfg.Method = http.MethodPost
+		} else {
+			cfg.Method = http.MethodGet
+		}
 	}
 
 	// Create the initial HTTP request.
@@ -484,8 +489,13 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		body.Attach(req, source)
 	}
 
-	// Set the accept and user-agent headers.
-	req.Header.Set("Accept", "application/json,application/vnd.msgpack,application/xml,image/webp,*/*")
+	// Set the default accept and user-agent headers. Explicit headers below
+	// replace the defaults without losing duplicate user-provided values.
+	if cfg.Article {
+		req.Header.Set("Accept", "text/html, application/xhtml+xml;q=0.9, text/markdown;q=0.8, */*;q=0.1")
+	} else {
+		req.Header.Set("Accept", "application/json, */*;q=0.5")
+	}
 	req.Header.Set("User-Agent", core.UserAgent)
 
 	// Optionally set the content-type header.
@@ -503,13 +513,24 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		req.Header.Set("Range", "bytes="+strings.Join(cfg.Range, ", "))
 	}
 
-	// Set any provided headers.
+	// Set any provided headers. Clear each defaulted name only before its first
+	// explicit value, then append so repeated headers remain distinct.
+	seenHeaders := make(map[string]struct{}, len(cfg.Headers))
+	acceptEncodingSet := false
 	for _, kv := range cfg.Headers {
 		if strings.EqualFold(kv.Key, "Host") {
 			req.Host = kv.Val
 			continue
 		}
-		req.Header.Set(kv.Key, kv.Val)
+		name := strings.ToLower(kv.Key)
+		if name == "accept-encoding" {
+			acceptEncodingSet = true
+		}
+		if _, seen := seenHeaders[name]; !seen {
+			req.Header.Del(kv.Key)
+			seenHeaders[name] = struct{}{}
+		}
+		req.Header.Add(kv.Key, kv.Val)
 		switch strings.ToLower(kv.Key) {
 		case "content-length":
 			length, err := strconv.ParseInt(strings.TrimSpace(kv.Val), 10, 64)
@@ -532,9 +553,9 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		}
 	}
 
-	// Optionally request gzip encoding.
-	if !cfg.NoEncode && req.Method != "HEAD" && req.Header.Get("Accept-Encoding") == "" {
-		req.Header.Set("Accept-Encoding", "gzip, zstd")
+	// Optionally request gzip, Brotli, and zstd encoding.
+	if !cfg.NoEncode && !acceptEncodingSet && req.Method != "HEAD" {
+		req.Header.Set("Accept-Encoding", "gzip, br, zstd")
 		requestContext := context.WithValue(req.Context(), ctxEncodingRequestedKey, true)
 		req = req.WithContext(requestContext)
 	}
@@ -548,6 +569,27 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 
 	return req, nil
+}
+
+func isIPLiteral(host string) bool {
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if zone := strings.LastIndexByte(host, '%'); zone > 0 {
+		return net.ParseIP(host[:zone]) != nil
+	}
+	return false
+}
+
+func appendQueryParams(raw string, params []core.KeyVal[string]) string {
+	parts := make([]string, 0, 1+len(params))
+	if raw != "" {
+		parts = append(parts, raw)
+	}
+	for _, kv := range params {
+		parts = append(parts, url.QueryEscape(kv.Key)+"="+url.QueryEscape(kv.Val))
+	}
+	return strings.Join(parts, "&")
 }
 
 func requestBodySource(r io.Reader, contentType string) (*body.Body, error) {
@@ -623,6 +665,13 @@ func contentEncodingDecoders(h http.Header) ([]namedResponseBodyDecoder, bool) {
 	decoders := make([]namedResponseBodyDecoder, 0, len(encodings))
 	for i := len(encodings) - 1; i >= 0; i-- {
 		switch strings.ToLower(encodings[i]) {
+		case "br":
+			decoders = append(decoders, namedResponseBodyDecoder{
+				name: "br",
+				decoder: func(rc io.ReadCloser) (io.ReadCloser, error) {
+					return &brotliReader{Reader: brotli.NewReader(rc), c: rc}, nil
+				},
+			})
 		case "gzip":
 			decoders = append(decoders, namedResponseBodyDecoder{
 				name: "gzip",
@@ -670,6 +719,15 @@ const ctxEncodingRequestedKey ctxEncodingRequestedKeyType = 0
 func encodingRequested(r *http.Request) bool {
 	v, ok := r.Context().Value(ctxEncodingRequestedKey).(bool)
 	return ok && v
+}
+
+type brotliReader struct {
+	*brotli.Reader
+	c io.Closer
+}
+
+func (r *brotliReader) Close() error {
+	return r.c.Close()
 }
 
 type gzipReader struct {

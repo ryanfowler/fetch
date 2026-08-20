@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -75,6 +76,7 @@ type Request struct {
 	Proxy            *url.URL
 	QueryParams      []core.KeyVal[string]
 	Range            []string
+	Article          bool
 	Redirects        *int
 	RemoteHeaderName bool
 	RemoteName       bool
@@ -90,6 +92,7 @@ type Request struct {
 	Verbosity        core.Verbosity
 	WS               bool
 	WSInteractive    core.WSInteractiveMode
+	SchemelessURL    bool
 
 	// responseDescriptor is set internally after proto setup for response formatting.
 	responseDescriptor protoreflect.MessageDescriptor
@@ -118,6 +121,9 @@ func Fetch(ctx context.Context, r *Request) int {
 
 	p := r.PrinterHandle.Stderr()
 	core.WriteErrorMsgNoFlush(p, err)
+	if plaintextHint := schemelessPlaintextHint(r, err); plaintextHint != "" {
+		core.WriteWarningMsgIf(p, "If this is a plaintext service, use "+plaintextHint+".", r.Verbosity == core.VSilent)
+	}
 
 	if isCertificateErr(err) {
 		p.WriteString("\n")
@@ -175,6 +181,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		headers = grpcHeaders(r.Headers)
 	}
 	req, err := c.NewRequest(ctx, client.RequestConfig{
+		Article:     r.Article,
 		Basic:       r.Basic,
 		Bearer:      r.Bearer,
 		ContentType: r.ContentType,
@@ -246,7 +253,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	// 7. Print request metadata / dry-run.
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
-		printRequestMetadata(errPrinter, req, r.HTTP, r.Verbosity)
+		printRequestMetadataWithURL(errPrinter, req, r.HTTP, r.Verbosity, r.DryRun)
 
 		if r.DryRun {
 			if req.Body == nil || req.Body == http.NoBody {
@@ -553,6 +560,34 @@ func addHeader(headers []core.KeyVal[string], h core.KeyVal[string]) []core.KeyV
 		return strings.Compare(a.Key, b.Key)
 	})
 	return slices.Insert(headers, i, h)
+}
+
+// schemelessPlaintextHint returns an HTTP alternative for a failed
+// schemeless HTTPS connection when the failure is not a certificate or timeout
+// error.
+func schemelessPlaintextHint(r *Request, err error) string {
+	if r == nil || !r.SchemelessURL || r.URL == nil || r.URL.Scheme != "https" || isCertificateErr(err) {
+		return ""
+	}
+	var recordErr tls.RecordHeaderError
+	if !errors.As(err, &recordErr) {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ""
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return ""
+	}
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) || urlErr == nil {
+		return ""
+	}
+
+	hintURL := *r.URL
+	hintURL.Scheme = "http"
+	return core.RedactedURL(&hintURL)
 }
 
 // isCertificateErr returns true if the error has to do with TLS cert validation.

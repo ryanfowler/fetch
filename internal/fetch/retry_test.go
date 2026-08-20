@@ -3,6 +3,7 @@ package fetch
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -141,6 +142,23 @@ func TestParseRetryAfter(t *testing.T) {
 			t.Errorf("expected ~10s, got %v", d)
 		}
 	})
+}
+
+func TestSchemelessPlaintextHint(t *testing.T) {
+	u, err := url.Parse("https://example.com:8080/path?debug=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Request{URL: u, SchemelessURL: true}
+	connectErr := &url.Error{Op: "Get", URL: u.String(), Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}}
+	if got := schemelessPlaintextHint(r, connectErr); got != "http://example.com:8080/path?debug=true" {
+		t.Fatalf("hint = %q", got)
+	}
+
+	r.SchemelessURL = false
+	if got := schemelessPlaintextHint(r, connectErr); got != "" {
+		t.Fatalf("explicit URL hint = %q, want empty", got)
+	}
 }
 
 func TestShouldRetry(t *testing.T) {

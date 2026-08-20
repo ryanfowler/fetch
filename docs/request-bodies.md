@@ -262,14 +262,14 @@ fetch -d @~/Documents/data.txt -m PUT example.com
 
 ## Method Inference
 
-When a request body is provided without specifying a method, the default is still GET. Always specify the method explicitly for clarity:
+When a request body flag is provided without an explicit method, `fetch` uses `POST`. An explicit method always wins, including `GET` with a body:
 
 ```sh
-# Explicit POST
-fetch -j '{"data": true}' -m POST example.com
+# Inferred POST
+fetch -j '{"data": true}' example.com
 
-# Don't rely on implicit behavior
-fetch -j '{"data": true}' example.com  # Still uses GET!
+# Explicit override
+fetch -m PUT -j '{"data": true}' example.com
 ```
 
 ## Large Files
