@@ -28,22 +28,26 @@ func FormatEventStream(r io.Reader, p *core.Printer) error {
 			written = true
 		}
 
-		writeEventStreamType(ev.Type, p)
-		writeEventStreamData(ev.Data, p)
+		if err := writeEventStreamType(ev.Type, p); err != nil {
+			return err
+		}
+		if err := writeEventStreamData(ev.Data, p); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func writeEventStreamType(t string, p *core.Printer) {
+func writeEventStreamType(t string, p *core.Printer) error {
 	p.WriteString("[")
 	p.Set(core.Bold)
 	p.WriteString(t)
 	p.Reset()
 	p.WriteString("]\n")
-	p.Flush()
+	return p.Flush()
 }
 
-func writeEventStreamData(d string, p *core.Printer) {
+func writeEventStreamData(d string, p *core.Printer) error {
 	dec := json.NewDecoder(strings.NewReader(d))
 	dec.UseNumber()
 	if formatNDJSONValue(dec, p) == nil {
@@ -51,15 +55,14 @@ func writeEventStreamData(d string, p *core.Printer) {
 		_, err := dec.Token()
 		if errors.Is(err, io.EOF) {
 			p.WriteString("\n")
-			p.Flush()
-			return
+			return p.Flush()
 		}
 	}
 
 	p.Discard()
 	p.WriteString(d)
 	p.WriteString("\n")
-	p.Flush()
+	return p.Flush()
 }
 
 var (

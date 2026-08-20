@@ -177,9 +177,27 @@ func printResponseHeaders(p *core.Printer, resp *http.Response, usePrefix bool) 
 	}
 }
 
-func printBinaryWarning(p *core.Printer, silent bool) {
-	msg := "the response body appears to be binary\n\nTo output to the terminal anyway, use '--output -'"
-	core.WriteWarningMsgIf(p, msg, silent)
+func printBinaryWarningContentType(p *core.Printer, silent bool, contentType string) {
+	writeBinaryWarning(p, silent, contentType, false)
+}
+
+func printBinaryWarningAfterBody(p *core.Printer, silent bool, contentType string) {
+	writeBinaryWarning(p, silent, contentType, true)
+}
+
+func writeBinaryWarning(p *core.Printer, silent bool, contentType string, afterBody bool) {
+	msg := "the response body appears to be binary"
+	if contentType == "" {
+		msg += " (content type: <none>)"
+	} else {
+		msg += " (content type: " + contentType + ")"
+	}
+	msg += "\n\nTo output to the terminal anyway, use '--output -'"
+	warning := core.NewWarningWriter(p, silent)
+	if afterBody {
+		_ = warning.AfterBody()
+	}
+	_ = warning.Write(msg)
 }
 
 // printRedirectHop prints a single redirect hop based on verbosity level.
