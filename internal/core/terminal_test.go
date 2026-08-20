@@ -20,6 +20,18 @@ func TestTerminalSafeText(t *testing.T) {
 	}
 }
 
+func TestTerminalSafeTextCommonCaseDoesNotAllocate(t *testing.T) {
+	input := "ordinary diagnostic text with UTF-8: café\n"
+	allocs := testing.AllocsPerRun(100, func() {
+		if got := TerminalSafeText(input); got != input {
+			t.Fatalf("TerminalSafeText() changed safe input to %q", got)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("TerminalSafeText() allocated %v times for safe input", allocs)
+	}
+}
+
 func TestRedactHeaderValue(t *testing.T) {
 	for _, name := range []string{"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "X-Amz-Security-Token"} {
 		if got := RedactHeaderValue(name, "secret"); got != "[REDACTED]" {

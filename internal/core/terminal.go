@@ -15,17 +15,46 @@ import (
 // they are useful diagnostic layout characters; all other C0/C1 controls and
 // invalid UTF-8 are escaped.
 func TerminalSafeText(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
+	unsafe := firstUnsafeTerminalByte(s)
+	if unsafe < 0 {
+		return s
+	}
+	return escapeTerminalText(s, unsafe)
+}
 
-	for len(s) > 0 {
-		if !utf8.FullRuneInString(s) {
-			for i := 0; i < len(s); i++ {
-				writeEscapedByte(&b, s[i])
+// firstUnsafeTerminalByte returns the byte offset of the first value that
+// needs escaping, or -1 when s is already safe for terminal diagnostics. This
+// keeps the common all-printable path allocation-free.
+func firstUnsafeTerminalByte(s string) int {
+	for i := 0; i < len(s); {
+		if s[i] < utf8.RuneSelf {
+			c := s[i]
+			if c == '\n' || c == '\t' || (c >= 0x20 && c != 0x7f) {
+				i++
+				continue
 			}
-			break
+			return i
 		}
 
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			return i
+		}
+		if (r >= 0x80 && r <= 0x9f) || unicode.IsControl(r) {
+			return i
+		}
+		i += size
+	}
+	return -1
+}
+
+func escapeTerminalText(s string, firstUnsafe int) string {
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	b.WriteString(s[:firstUnsafe])
+	s = s[firstUnsafe:]
+
+	for len(s) > 0 {
 		r, size := utf8.DecodeRuneInString(s)
 		if r == utf8.RuneError && size == 1 {
 			writeEscapedByte(&b, s[0])
