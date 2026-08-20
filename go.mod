@@ -1,6 +1,6 @@
 module github.com/ryanfowler/fetch
 
-go 1.26.3
+go 1.26.7
 
 require (
 	github.com/coder/websocket v1.8.15
