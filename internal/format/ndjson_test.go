@@ -1,10 +1,36 @@
 package format
 
 import (
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
+
+func TestFormatNDJSONHandlesChunkBoundariesAndCRLF(t *testing.T) {
+	p := core.TestPrinter(false)
+	input := &chunkReader{chunks: [][]byte{
+		[]byte(`{"id":`), []byte(`1}`), []byte("\r"), []byte("\n"),
+		[]byte(`{"id":2}`), []byte("\n"),
+	}}
+
+	if err := FormatNDJSON(input, p); err != nil {
+		t.Fatalf("FormatNDJSON() error = %v", err)
+	}
+	want := "{ \"id\": 1 }\n{ \"id\": 2 }\n"
+	if got := string(p.Bytes()); got != want {
+		t.Fatalf("FormatNDJSON() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatNDJSONRejectsAnOversizedRecord(t *testing.T) {
+	p := core.TestPrinter(false)
+	input := strings.NewReader(strings.Repeat("x", int(maxStreamingRecordBytes+1)))
+	if err := FormatNDJSON(input, p); err == nil {
+		t.Fatal("FormatNDJSON() accepted an oversized record")
+	}
+}
 
 func TestFormatJSONLine(t *testing.T) {
 	tests := []struct {
@@ -78,4 +104,20 @@ func TestFormatJSONLineTrailingData(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for trailing data")
 	}
+}
+
+type chunkReader struct {
+	chunks [][]byte
+	index  int
+}
+
+func (r *chunkReader) Read(p []byte) (int, error) {
+	if r.index == len(r.chunks) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.chunks[r.index])
+	if n == len(r.chunks[r.index]) {
+		r.index++
+	}
+	return n, nil
 }

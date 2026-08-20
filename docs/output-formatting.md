@@ -237,6 +237,14 @@ Features:
 
 - Streaming output as events arrive
 - Event type and data parsing
+- JSON in `data:` fields is formatted when each event is complete
+- LF, CRLF, and CR line endings are supported
+- Individual events are limited to 16 MiB
+
+In automatic compression mode, a compressed `text/event-stream` response to a
+GET or HEAD request is drained up to a small bounded prefix and retried once
+without `Accept-Encoding`. Unsafe methods keep the original response and show a
+warning instead of replaying the request.
 
 ```sh
 fetch example.com/events
@@ -260,6 +268,8 @@ Features:
 
 - Streaming output line by line
 - Each line formatted as JSON
+- LF and CRLF line endings are supported
+- Individual records are limited to 16 MiB
 
 ```sh
 fetch example.com/stream.ndjson

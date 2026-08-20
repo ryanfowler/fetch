@@ -1,10 +1,10 @@
 package format
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"iter"
 	"strings"
@@ -82,114 +82,84 @@ type event struct {
 }
 
 // streamEvents returns an iterator of server sent events from the provided
-// io.Reader.
+// io.Reader. Events are yielded at each blank line, so a live stream does not
+// wait for EOF before emitting completed events.
 func streamEvents(r io.Reader) iter.Seq2[event, error] {
 	return func(yield func(event, error) bool) {
-		scanner := bufio.NewScanner(r)
-		scanner.Split(splitEndOfLine)
-
+		lines := newLineReader(r)
 		var seenLine bool
 		var eventType string
-		var sb strings.Builder
+		var data bytes.Buffer
 		var lastEventID string
+		var eventBytesPending int64
+		lineNumber := 0
+
 		dispatch := func() bool {
 			ev := event{
 				LastID: lastEventID,
 				Type:   eventType,
-				Data:   sb.String(),
+				Data:   strings.TrimSuffix(data.String(), "\n"),
 			}
-			ev.Data = strings.TrimSuffix(ev.Data, "\n")
 
 			eventType = ""
-			sb.Reset()
+			data.Reset()
+			eventBytesPending = 0
 
 			if ev.Data == "" {
-				// Empty data, return.
 				return true
 			}
-
 			if ev.Type == "" {
 				ev.Type = "message"
 			}
 			return yield(ev, nil)
 		}
-		for scanner.Scan() {
-			line := scanner.Bytes()
+
+		for {
+			line, ok, err := lines.next()
+			if err != nil {
+				yield(event{}, fmt.Errorf("invalid SSE event near line %d: %w", lineNumber+1, err))
+				return
+			}
+			if !ok {
+				break
+			}
+			lineNumber++
 			if !seenLine {
 				line = bytes.TrimPrefix(line, bomBytes)
 				seenLine = true
 			}
 
 			if len(line) == 0 {
-				// Empty line, dispatch the ev.
 				if !dispatch() {
 					return
 				}
 				continue
 			}
+			eventBytesPending += int64(len(line) + lines.lineEndingBytes())
+			if eventBytesPending > maxStreamingRecordBytes {
+				yield(event{}, fmt.Errorf("SSE event exceeds %d-byte limit: %w", maxStreamingRecordBytes, ErrStreamingLimit))
+				return
+			}
 
 			name, value, _ := bytes.Cut(line, colonBytes)
 			if len(name) == 0 {
-				// This is a comment, ignore it.
 				continue
 			}
 			value = bytes.TrimPrefix(value, spaceBytes)
 
-			if bytes.Equal(name, eventBytes) {
+			switch {
+			case bytes.Equal(name, eventBytes):
 				eventType = string(value)
-			} else if bytes.Equal(name, dataBytes) {
-				sb.Grow(len(value) + 1)
-				sb.Write(value)
-				sb.WriteByte('\n')
-			} else if bytes.Equal(name, idBytes) {
+			case bytes.Equal(name, dataBytes):
+				_, _ = data.Write(value)
+				_ = data.WriteByte('\n')
+			case bytes.Equal(name, idBytes):
 				lastEventID = string(value)
 			}
 		}
-		if err := scanner.Err(); err != nil {
-			yield(event{}, err)
-			return
-		}
-		if sb.Len() > 0 {
+
+		if data.Len() > 0 {
 			dispatch()
 		}
 	}
-}
-
-// splitEndOfLine splits on \n, \r, or \r\n.
-func splitEndOfLine(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-
-	for i := range data {
-		switch data[i] {
-		case '\n':
-			// If previous char was CR, drop it from the token.
-			if i > 0 && data[i-1] == '\r' {
-				return i + 1, data[:i-1], nil
-			}
-			return i + 1, data[:i], nil
-		case '\r':
-			// If CR is followed by LF, skip both.
-			if i+1 < len(data) {
-				if data[i+1] == '\n' {
-					return i + 2, data[:i], nil
-				}
-				return i + 1, data[:i], nil
-			}
-			// CR is the last byte; if not at EOF, request more data
-			// to check if the next byte is LF (avoids splitting \r\n
-			// across buffer boundaries).
-			if !atEOF {
-				return 0, nil, nil
-			}
-			return i + 1, data[:i], nil
-		}
-	}
-
-	if atEOF {
-		return len(data), data, nil
-	}
-
-	return 0, nil, nil
 }

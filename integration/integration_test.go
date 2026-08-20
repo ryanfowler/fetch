@@ -1258,6 +1258,71 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, "[message]\n{ \"key\": \"val\" }\n\n[ev1]\nthis is my data\n")
 	})
 
+	t.Run("compressed SSE retry", func(t *testing.T) {
+		t.Parallel()
+		var requests atomic.Int64
+		firstClosed := make(chan struct{})
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if requests.Add(1) == 1 {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Content-Encoding", "gzip")
+				gw := gzip.NewWriter(w)
+				_, _ = gw.Write([]byte("data: {\"attempt\":1}\n\n"))
+				_ = gw.Flush()
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				select {
+				case <-r.Context().Done():
+				case <-time.After(2 * time.Second):
+					t.Error("compressed SSE response was not closed after the bounded drain")
+				}
+				close(firstClosed)
+				return
+			}
+			if got := r.Header.Get("Accept-Encoding"); got != "" {
+				t.Errorf("retry Accept-Encoding = %q, want empty", got)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"attempt\":2}\n\n")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "[message]\n{ \"attempt\": 2 }\n")
+		if requests.Load() != 2 {
+			t.Fatalf("requests = %d, want 2", requests.Load())
+		}
+		select {
+		case <-firstClosed:
+		case <-time.After(time.Second):
+			t.Fatal("first compressed SSE response remained open")
+		}
+	})
+
+	t.Run("unsafe compressed SSE is not replayed", func(t *testing.T) {
+		t.Parallel()
+		var requests atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Content-Encoding", "gzip")
+			gw := gzip.NewWriter(w)
+			_, _ = gw.Write([]byte("data: {\"attempt\":1}\n\n"))
+			_ = gw.Close()
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--format", "on", "--data", "payload")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "[message]\n{ \"attempt\": 1 }\n")
+		assertBufContains(t, res.stderr, "not retried")
+		if requests.Load() != 1 {
+			t.Fatalf("requests = %d, want 1", requests.Load())
+		}
+	})
+
 	t.Run("gzip compression", func(t *testing.T) {
 		t.Parallel()
 		const data = "this is the test data"

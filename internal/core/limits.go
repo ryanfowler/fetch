@@ -18,6 +18,7 @@ const (
 	MaxWebSocketMessageBytes     int64 = 16 << 20
 	MaxWebSocketPipedTextLine    int64 = 16 << 20
 	MaxWebSocketInteractiveEntry int64 = 16 << 20
+	MaxStreamingRecordBytes      int64 = 16 << 20
 	MaxCompositeMaterialization  int64 = 16 << 20
 	MaxGRPCMessageBytes          int64 = 64 << 20
 	MaxReflectionMessages              = 128
