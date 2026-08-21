@@ -560,6 +560,7 @@ func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		DNSServer: app.Cfg.DNSServer,
 		Timeout:   getValue(app.Cfg.Timeout),
 		URL:       app.URL,
+		Silent:    getValue(app.Cfg.Silent),
 	})
 }
 

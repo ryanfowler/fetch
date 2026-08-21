@@ -6,9 +6,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DNS wire limits are deliberately small enough to make malformed packets
@@ -589,18 +591,46 @@ func decodeNameWithBoundaries(packet []byte, off int, boundaries map[int]struct{
 	}
 }
 
+const (
+	// DNS retransmission is deliberately short enough to recover from a lost
+	// packet without making a normal lookup unnecessarily slow. A finite
+	// parent context can shorten it further.
+	dnsRetransmissionInterval = time.Second
+	dnsTransactionAttempts    = 2
+	maxDNSWirePacket          = 65535
+	maxDNSTCPFrames           = 8
+	maxDNSTCPBytes            = 256 * 1024
+)
+
 func lookupWireIPs(ctx context.Context, serverAddr, host string) ([]net.IPAddr, error) {
+	types := []uint16{dnsTypeA, dnsTypeAAAA}
+	results := make(chan wireLookupResult, len(types))
+	for _, typ := range types {
+		go func(typ uint16) {
+			addrs, err := lookupWireType(ctx, serverAddr, host, typ)
+			results <- wireLookupResult{typ: typ, addrs: addrs, err: err}
+		}(typ)
+	}
+
+	byType := make(map[uint16]wireLookupResult, len(types))
+	for range types {
+		result := <-results
+		byType[result.typ] = result
+	}
+
 	var out []net.IPAddr
 	var firstErr error
-	for _, typ := range []uint16{dnsTypeA, dnsTypeAAAA} {
-		addrs, err := lookupWireType(ctx, serverAddr, host, typ)
-		if err != nil {
+	// Keep the stable A-before-AAAA order used by the old resolver while the
+	// independent transactions run concurrently.
+	for _, typ := range types {
+		result := byType[typ]
+		if result.err != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = result.err
 			}
 			continue
 		}
-		out = append(out, addrs...)
+		out = append(out, result.addrs...)
 	}
 	if len(out) != 0 {
 		return out, nil
@@ -611,37 +641,213 @@ func lookupWireIPs(ctx context.Context, serverAddr, host string) ([]net.IPAddr, 
 	return nil, errors.New("no such host")
 }
 
-func lookupWireType(ctx context.Context, serverAddr, host string, typ uint16) ([]net.IPAddr, error) {
+type wireLookupResult struct {
+	typ   uint16
+	addrs []net.IPAddr
+	err   error
+}
+
+// LookupUDPMessage performs one UDP DNS transaction and, when the matching
+// response is truncated, retries the same query over TCP. The boolean reports
+// whether TCP fallback was used so diagnostic callers can explain the result.
+func LookupUDPMessage(ctx context.Context, serverAddr, host string, typ uint16) (*Message, bool, error) {
+	transactionDeadline := dnsTransactionDeadline(ctx)
 	raw, id, err := EncodeQuery(host, typ)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	name, err := ParseName(host)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	question := Question{Name: name, Type: typ, Class: 1}
+
+	// DialContext covers resolver-address lookup and socket creation. The
+	// resulting connected UDP socket also gives us the exact peer to check on
+	// every received datagram.
+	dialContext, cancelDial := context.WithDeadline(ctx, transactionDeadline)
+	defer cancelDial()
 	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "udp", serverAddr)
+	conn, err := dialer.DialContext(dialContext, "udp", serverAddr)
+	if err != nil {
+		return nil, false, err
+	}
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		conn.Close()
+		return nil, false, errors.New("DNS UDP dial did not return a UDP connection")
+	}
+	defer udpConn.Close()
+
+	message, err := transactUDP(ctx, udpConn, raw, id, question, transactionDeadline)
+	if err != nil {
+		return nil, false, err
+	}
+	if !message.Header.Truncated {
+		return message, false, nil
+	}
+
+	tcpAddress := serverAddr
+	if peer := udpConn.RemoteAddr(); peer != nil {
+		tcpAddress = peer.String()
+	}
+	message, err = transactTCP(ctx, tcpAddress, raw, id, question, transactionDeadline)
+	if err != nil {
+		return nil, false, fmt.Errorf("DNS TCP fallback: %w", err)
+	}
+	return message, true, nil
+}
+
+func lookupWireType(ctx context.Context, serverAddr, host string, typ uint16) ([]net.IPAddr, error) {
+	message, _, err := LookupUDPMessage(ctx, serverAddr, host, typ)
+	if err != nil {
+		return nil, err
+	}
+	questionName, err := ParseName(host)
+	if err != nil {
+		return nil, err
+	}
+	return addressAnswers(message, Question{Name: questionName, Type: typ, Class: 1}, typ)
+}
+
+// transactUDP sends one query, retransmitting it at most once. Invalid or
+// unrelated datagrams are not transaction failures: UDP is a datagram service
+// and stale packets can remain in a socket after a prior query or be injected
+// by an off-path sender.
+func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16, question Question, transactionDeadline time.Time) (*Message, error) {
+	stopClosing := closeOnContext(ctx, conn)
+	defer stopClosing()
+
+	var lastErr error
+	for attempt := 0; attempt < dnsTransactionAttempts; attempt++ {
+		if err := contextError(ctx); err != nil {
+			return nil, err
+		}
+		if time.Now().After(transactionDeadline) {
+			return nil, errors.New("DNS transaction budget exhausted")
+		}
+		if err := conn.SetWriteDeadline(transactionDeadline); err != nil {
+			return nil, err
+		}
+		if err := writeAll(conn, query); err != nil {
+			return nil, err
+		}
+
+		deadline, err := receiveDeadline(ctx, attempt, transactionDeadline)
+		if err != nil {
+			return nil, err
+		}
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			return nil, err
+		}
+		packet := make([]byte, maxDNSWirePacket+1)
+		for {
+			n, source, readErr := conn.ReadFromUDP(packet)
+			if readErr != nil {
+				if isTimeout(readErr) {
+					lastErr = readErr
+					break
+				}
+				if err := contextError(ctx); err != nil {
+					return nil, err
+				}
+				return nil, readErr
+			}
+			if n > maxDNSWirePacket {
+				// The packet was larger than the DNS wire limit. Do not attempt
+				// to decode a truncated prefix.
+				continue
+			}
+			if !sameUDPAddr(source, conn.RemoteAddr()) {
+				continue
+			}
+			message, matched, decodeErr := decodeTransactionPacket(packet[:n], id, question)
+			if decodeErr != nil {
+				return nil, decodeErr
+			}
+			if !matched {
+				continue
+			}
+			return message, nil
+		}
+	}
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("DNS UDP transaction timed out after %d attempts: %w", dnsTransactionAttempts, lastErr)
+	}
+	return nil, errors.New("DNS UDP transaction failed")
+}
+
+func transactTCP(ctx context.Context, serverAddr string, query []byte, id uint16, question Question, transactionDeadline time.Time) (*Message, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+	dialContext, cancelDial := context.WithDeadline(ctx, transactionDeadline)
+	defer cancelDial()
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(dialContext, "tcp", serverAddr)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
-	if _, err := conn.Write(raw); err != nil {
+	stopClosing := closeOnContext(ctx, conn)
+	defer stopClosing()
+	if err := conn.SetDeadline(transactionDeadline); err != nil {
 		return nil, err
 	}
-	packet := make([]byte, 65535)
-	n, err := conn.Read(packet)
-	if err != nil {
+	if len(query) > 65535 {
+		return nil, errors.New("DNS query exceeds the TCP frame limit")
+	}
+	var length [2]byte
+	binary.BigEndian.PutUint16(length[:], uint16(len(query)))
+	if err := writeAll(conn, length[:]); err != nil {
 		return nil, err
 	}
-	message, err := DecodeResponse(packet[:n], id, question)
-	if err != nil {
+	if err := writeAll(conn, query); err != nil {
 		return nil, err
 	}
+
+	var frameLength [2]byte
+	packet := make([]byte, maxDNSWirePacket)
+	totalBytes := 0
+	for frame := 0; ; frame++ {
+		if frame >= maxDNSTCPFrames {
+			return nil, errors.New("DNS TCP response has too many frames")
+		}
+		if _, err := io.ReadFull(conn, frameLength[:]); err != nil {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return nil, contextErr
+			}
+			return nil, err
+		}
+		n := int(binary.BigEndian.Uint16(frameLength[:]))
+		if n == 0 {
+			return nil, errors.New("DNS TCP response has an empty frame")
+		}
+		if n > len(packet) || totalBytes > maxDNSTCPBytes-n {
+			return nil, errors.New("DNS TCP response exceeds the transaction limit")
+		}
+		totalBytes += n
+		framePacket := packet[:n]
+		if _, err := io.ReadFull(conn, framePacket); err != nil {
+			if contextErr := contextError(ctx); contextErr != nil {
+				return nil, contextErr
+			}
+			return nil, err
+		}
+		message, matched, decodeErr := decodeTransactionPacket(framePacket, id, question)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		if matched {
+			return message, nil
+		}
+	}
+}
+
+func addressAnswers(message *Message, question Question, typ uint16) ([]net.IPAddr, error) {
 	if message.Header.RCode != 0 {
 		return nil, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
 	}
@@ -662,6 +868,138 @@ func lookupWireType(ctx context.Context, serverAddr, host string, typ uint16) ([
 		return nil, errors.New("no such host")
 	}
 	return out, nil
+}
+
+func decodeTransactionPacket(packet []byte, id uint16, question Question) (*Message, bool, error) {
+	// Filter the cheap correlation fields before strict decoding. A stale
+	// query packet or response for another opcode must not be able to abort
+	// this transaction merely because its remaining bytes are malformed.
+	matches, err := transactionQuestionMatches(packet, id, question)
+	if err != nil || !matches {
+		return nil, false, err
+	}
+	message, err := DecodeMessage(packet)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := message.ValidateResponse(id, question); err != nil {
+		// Correlation mismatches are expected noise on UDP. They must not abort
+		// the transaction or make a stale response look authoritative.
+		return nil, false, nil
+	}
+	return message, true, nil
+}
+
+func transactionQuestionMatches(packet []byte, id uint16, question Question) (bool, error) {
+	if len(packet) < 12 || binary.BigEndian.Uint16(packet[:2]) != id {
+		return false, nil
+	}
+	flags := binary.BigEndian.Uint16(packet[2:4])
+	if flags&0x8000 == 0 || (flags>>11)&0x0f != 0 {
+		return false, nil
+	}
+	if binary.BigEndian.Uint16(packet[4:6]) != 1 {
+		return false, nil
+	}
+	name, next, err := decodeName(packet, 12)
+	if err != nil {
+		return false, err
+	}
+	if next+4 > len(packet) {
+		return false, errors.New("truncated DNS response question")
+	}
+	got := Question{
+		Name:  name,
+		Type:  binary.BigEndian.Uint16(packet[next:]),
+		Class: binary.BigEndian.Uint16(packet[next+2:]),
+	}
+	return got.Name.Equal(question.Name) && got.Type == question.Type && got.Class == question.Class, nil
+}
+
+func sameUDPAddr(got *net.UDPAddr, expected net.Addr) bool {
+	want, ok := expected.(*net.UDPAddr)
+	if !ok || got == nil || want == nil {
+		return false
+	}
+	return got.Port == want.Port && got.IP.Equal(want.IP) && got.Zone == want.Zone
+}
+
+func dnsTransactionDeadline(ctx context.Context) time.Time {
+	if deadline, ok := ctx.Deadline(); ok {
+		return deadline
+	}
+	// An absent request deadline still needs a finite DNS retransmission
+	// window. This same absolute deadline is passed to TCP fallback, so a
+	// truncated response cannot turn a bounded UDP transaction into an
+	// unbounded stream read.
+	return time.Now().Add(dnsRetransmissionInterval * dnsTransactionAttempts)
+}
+
+func receiveDeadline(ctx context.Context, attempt int, transactionDeadline time.Time) (time.Time, error) {
+	if err := contextError(ctx); err != nil {
+		return time.Time{}, err
+	}
+	remaining := time.Until(transactionDeadline)
+	if remaining <= 0 {
+		if err := contextError(ctx); err != nil {
+			return time.Time{}, err
+		}
+		return time.Time{}, fmt.Errorf("DNS transaction budget exhausted")
+	}
+	deadline := time.Now().Add(dnsRetransmissionInterval)
+	// Divide the remaining budget between this and the final possible
+	// transmission. This keeps retransmission inside the parent deadline.
+	transmissionsLeft := dnsTransactionAttempts - attempt
+	if transmissionsLeft > 1 {
+		share := remaining / time.Duration(transmissionsLeft)
+		if share < dnsRetransmissionInterval {
+			deadline = time.Now().Add(share)
+		}
+	}
+	if transactionDeadline.Before(deadline) {
+		deadline = transactionDeadline
+	}
+	return deadline, nil
+}
+
+func closeOnContext(ctx context.Context, conn net.Conn) func() {
+	stop := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stop:
+		}
+	}()
+	return func() { close(stop) }
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) != 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n <= 0 || n > len(data) {
+			return errors.New("short DNS stream write")
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
+func contextError(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // EncodeQuery creates a recursive query with a cryptographically random ID

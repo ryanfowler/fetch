@@ -47,6 +47,7 @@ type Config struct {
 	DNSServer *url.URL
 	Timeout   time.Duration
 	URL       *url.URL
+	Silent    bool
 }
 
 type queryType struct {
@@ -63,15 +64,18 @@ type record struct {
 }
 
 type result struct {
-	host     string
-	resolver string
-	records  map[string][]record
-	duration time.Duration
+	host        string
+	resolver    string
+	records     map[string][]record
+	duration    time.Duration
+	tcpFallback bool
+	silent      bool
 }
 
 type queryResult struct {
-	records []record
-	err     error
+	records     []record
+	err         error
+	tcpFallback bool
 }
 
 type resolverTargetInfo struct {
@@ -132,6 +136,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		host:     host,
 		resolver: target.label,
 		records:  make(map[string][]record),
+		silent:   cfg.Silent,
 	}
 
 	if cfg.Endpoint != nil && cfg.Endpoint.Transport != resolver.TransportUDP && cfg.Endpoint.Transport != resolver.TransportHTTPS {
@@ -163,7 +168,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 				results[i].records, results[i].err = lookupDOHRecords(ctx, server, host, qt)
 				return
 			}
-			results[i].records, results[i].err = lookupUDPRecords(ctx, target.udpAddr, host, qt)
+			results[i].records, results[i].tcpFallback, results[i].err = lookupUDPRecordsWithFallback(ctx, target.udpAddr, host, qt)
 		}()
 	}
 	wg.Wait()
@@ -171,6 +176,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	var firstErr error
 	seen := make(map[string]int)
 	for _, result := range results {
+		out.tcpFallback = out.tcpFallback || result.tcpFallback
 		if result.err != nil && firstErr == nil {
 			firstErr = result.err
 		}
@@ -370,49 +376,27 @@ func lookupDOHRecords(ctx context.Context, serverURL *url.URL, host string, qt q
 }
 
 func lookupUDPRecords(ctx context.Context, serverAddr, host string, qt queryType) ([]record, error) {
-	raw, id, err := resolver.EncodeQuery(absoluteName(host), uint16(qt.dnsType))
-	if err != nil {
-		return nil, err
-	}
+	records, _, err := lookupUDPRecordsWithFallback(ctx, serverAddr, host, qt)
+	return records, err
+}
+
+func lookupUDPRecordsWithFallback(ctx context.Context, serverAddr, host string, qt queryType) ([]record, bool, error) {
 	name, err := resolver.ParseName(absoluteName(host))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	question := resolver.Question{Name: name, Type: uint16(qt.dnsType), Class: 1}
-
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "udp", serverAddr)
+	res, fallback, err := resolver.LookupUDPMessage(ctx, serverAddr, absoluteName(host), uint16(qt.dnsType))
 	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	}
-	if _, err := conn.Write(raw); err != nil {
-		return nil, err
-	}
-
-	buf := make([]byte, 65535)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-	res, err := resolver.DecodeResponse(buf[:n], id, question)
-	if err != nil {
-		return nil, err
+		return nil, fallback, err
 	}
 	if res.Header.RCode != 0 {
-		return nil, fmt.Errorf("no DNS records found: %s", resolver.RCodeName(res.Header.RCode))
-	}
-	if res.Header.Truncated {
-		return nil, errors.New("DNS response was truncated")
+		return nil, fallback, fmt.Errorf("no DNS records found: %s", resolver.RCodeName(res.Header.RCode))
 	}
 
 	authorized, err := resolver.AuthorizeAnswers(res, question)
 	if err != nil {
-		return nil, err
+		return nil, fallback, err
 	}
 	records := make([]record, 0, len(authorized))
 	for _, answer := range authorized {
@@ -422,7 +406,7 @@ func lookupUDPRecords(ctx context.Context, serverAddr, host string, qt queryType
 		}
 		records = append(records, record{typ: typeLabel(dnsmessage.Type(answer.Type)), value: value, ttl: answer.TTL, hasTTL: true})
 	}
-	return records, nil
+	return records, fallback, nil
 }
 
 func wireRecordValue(res resolver.Record) (string, bool) {
@@ -757,6 +741,9 @@ func render(p *core.Printer, res *result) {
 	p.WriteString(core.TerminalSafeText(res.resolver))
 	p.Reset()
 	p.WriteString("\n")
+	if res.tcpFallback {
+		core.WriteWarningMsgIf(p, "UDP response was truncated; used TCP fallback", res.silent)
+	}
 	p.WriteInfoPrefix()
 	p.WriteString("\n")
 
