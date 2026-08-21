@@ -185,7 +185,9 @@ fetch -O example.com/path/to/file.txt  # Creates ./file.txt
 
 ### `-J, --remote-header-name`
 
-Use filename from `Content-Disposition` header. Requires `-O`.
+Use filename from `Content-Disposition` header. Requires `-O`. The extended
+`filename*` parameter is preferred. Unsafe or malformed names fall back to the
+URL filename with a warning.
 
 ```sh
 fetch -O -J example.com/download

@@ -424,9 +424,12 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		return nil, nil
 	}
 
-	output, err := getOutputValue(r, resp)
+	output, outputWarning, err := getOutputValueDetails(r, resp)
 	if err != nil {
 		return nil, err
+	}
+	if outputWarning != "" {
+		core.WriteWarningMsgIf(r.PrinterHandle.Stderr(), outputWarning, r.Verbosity == core.VSilent)
 	}
 
 	if output != "" && r.Output != "-" {
