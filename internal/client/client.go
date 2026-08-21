@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -59,6 +61,7 @@ const (
 	ctxRequestObserverKey  ctxRedirectCallbackKeyType = 2
 	ctxRedirectCrossedKey  ctxRedirectCallbackKeyType = 3
 	ctxOriginCookiesKey    ctxRedirectCallbackKeyType = 4
+	ctxConnectBudgetKey    ctxRedirectCallbackKeyType = 5
 )
 
 // WithRedirectCallback returns a context with a redirect callback.
@@ -87,6 +90,24 @@ func WithRequestObserver(ctx context.Context, observer RequestObserver) context.
 func requestObserver(ctx context.Context) RequestObserver {
 	observer, _ := ctx.Value(ctxRequestObserverKey).(RequestObserver)
 	return observer
+}
+
+// WithConnectBudget associates one absolute connection-establishment budget
+// with a request. Dialers use it for DNS, proxy setup, TCP, TLS, and QUIC so
+// a retry cannot restart the connection timeout.
+func WithConnectBudget(ctx context.Context, budget core.Budget) context.Context {
+	return context.WithValue(ctx, ctxConnectBudgetKey, budget)
+}
+
+func connectContext(ctx context.Context, timeout time.Duration, phase string) (context.Context, context.CancelFunc) {
+	if budget, ok := ctx.Value(ctxConnectBudgetKey).(core.Budget); ok && budget.Limited() {
+		return budget.WithConnectionContext(ctx, phase)
+	}
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	cause := core.TimeoutError{Duration: timeout, Phase: phase, Connection: true}
+	return context.WithTimeoutCause(ctx, timeout, cause)
 }
 
 // ClientConfig represents the optional configuration parameters for a Client.
@@ -227,16 +248,72 @@ func NewClient(cfg ClientConfig) *Client {
 	return &Client{c: client, maxRedirects: maxRedirects}
 }
 
+// connectDeadlineConn keeps the connection-establishment deadline after the
+// dial function returns. This covers the HTTPS proxy CONNECT and origin TLS
+// handshake that net/http performs after DialContext returns. The deadline is
+// cleared when the first non-CONNECT request is written or when an encrypted
+// application record is written after CONNECT, so it does not limit the body.
+type connectDeadlineConn struct {
+	net.Conn
+	mu           sync.Mutex
+	cleared      bool
+	proxyConnect bool
+}
+
+func newConnectDeadlineConn(conn net.Conn, ctx context.Context) net.Conn {
+	if conn == nil {
+		return nil
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return conn
+	}
+	_ = conn.SetDeadline(deadline)
+	return &connectDeadlineConn{Conn: conn}
+}
+
+func (c *connectDeadlineConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	if !c.cleared {
+		if !c.proxyConnect && bytes.HasPrefix(p, []byte("CONNECT ")) {
+			c.proxyConnect = true
+		} else if !c.proxyConnect || isTLSApplicationRecord(p) {
+			c.clearDeadlineLocked()
+		}
+	}
+	c.mu.Unlock()
+	return c.Conn.Write(p)
+}
+
+func isTLSApplicationRecord(p []byte) bool {
+	return len(p) >= 3 && p[0] == 0x17 && p[1] == 0x03
+}
+
+func (c *connectDeadlineConn) clearDeadlineLocked() {
+	if c.cleared {
+		return
+	}
+	c.cleared = true
+	_ = c.Conn.SetDeadline(time.Time{})
+}
+
 // wrapDialWithConnectTimeout wraps a dial function with a connect timeout sub-context.
 func wrapDialWithConnectTimeout(baseDial func(context.Context, string, string) (net.Conn, error), timeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		ctx, cancel := context.WithTimeout(ctx, timeout)
+		ctx, cancel := connectContext(ctx, timeout, "DNS/TCP connect")
 		defer cancel()
+		var conn net.Conn
+		var err error
 		if baseDial != nil {
-			return baseDial(ctx, network, address)
+			conn, err = baseDial(ctx, network, address)
+		} else {
+			var d net.Dialer
+			conn, err = d.DialContext(ctx, network, address)
 		}
-		var d net.Dialer
-		return d.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return newConnectDeadlineConn(conn, ctx), nil
 	}
 }
 
@@ -246,7 +323,7 @@ func wrapDialWithConnectTimeout(baseDial func(context.Context, string, string) (
 // TLSClientConfig when DialTLSContext is set.
 func newDialTLSWithConnectTimeout(baseDial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config, timeout time.Duration, enableHTTP2 bool) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		ctx, cancel := context.WithTimeout(ctx, timeout)
+		ctx, cancel := connectContext(ctx, timeout, "DNS/TCP/TLS connect")
 		defer cancel()
 
 		dial := baseDial
@@ -280,7 +357,7 @@ func newDialTLSWithConnectTimeout(baseDial func(context.Context, string, string)
 			conn.Close()
 			return nil, err
 		}
-		return tlsConn, nil
+		return newConnectDeadlineConn(tlsConn, ctx), nil
 	}
 }
 
@@ -288,11 +365,8 @@ func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn,
 	return &http2.Transport{
 		AllowHTTP: false,
 		DialTLSContext: func(ctx context.Context, network string, addr string, cfg *tls.Config) (net.Conn, error) {
-			if connectTimeout > 0 {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, connectTimeout)
-				defer cancel()
-			}
+			ctx, cancel := connectContext(ctx, connectTimeout, "DNS/TCP/TLS connect")
+			defer cancel()
 
 			dial := baseDial
 			if dial == nil {
@@ -321,7 +395,7 @@ func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn,
 				conn.Close()
 				return nil, err
 			}
-			return tlsConn, nil
+			return newConnectDeadlineConn(tlsConn, ctx), nil
 		},
 		DisableCompression: true,
 		TLSClientConfig:    tlsConfig,
@@ -332,18 +406,19 @@ func getH2CTransport(baseDial func(context.Context, string, string) (net.Conn, e
 	return &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			if connectTimeout > 0 {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, connectTimeout)
-				defer cancel()
-			}
+			ctx, cancel := connectContext(ctx, connectTimeout, "DNS/TCP connect")
+			defer cancel()
 
 			dial := baseDial
 			if dial == nil {
 				var dialer net.Dialer
 				dial = dialer.DialContext
 			}
-			return dial(ctx, network, addr)
+			conn, err := dial(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return newConnectDeadlineConn(conn, ctx), nil
 		},
 		DisableCompression: true,
 	}
@@ -359,11 +434,8 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 
 	// Always set custom Dial to ensure trace hooks work.
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
-		if connectTimeout > 0 {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, connectTimeout)
-			defer cancel()
-		}
+		ctx, cancel := connectContext(ctx, connectTimeout, "DNS/QUIC/TLS connect")
+		defer cancel()
 
 		endpoint, err := res.ResolveAddress(ctx, "udp", addr)
 		if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"mime"
 	"net"
@@ -22,16 +23,41 @@ import (
 	"github.com/ryanfowler/fetch/internal/digest"
 )
 
-// retryableRequest executes an HTTP request with optional retry logic and
-// per-attempt timeout.
+// retryableRequest executes an HTTP request with one wall-clock budget shared
+// by all attempts, redirects, response reads, drains, and retry delays.
 func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {
-	maxAttempts := max(r.Retry+1, 1)
+	if err := contextCause(ctx); err != nil {
+		return 0, err
+	}
+	maxAttempts, err := retryAttemptCount(r.Retry)
+	if err != nil {
+		return 0, err
+	}
+	requestBudget, err := core.NewBudget(r.Timeout)
+	if err != nil {
+		return 0, err
+	}
+	connectBudget, err := core.NewBudget(r.ConnectTimeout)
+	if err != nil {
+		return 0, err
+	}
 
-	// Buffer the request body so it can be replayed on retries or digest auth.
+	// Keep request-construction context values, such as the response encoding
+	// policy and body source, while attaching one absolute request deadline.
+	parent, stopParent := combineContexts(ctx, req.Context())
+	defer stopParent()
+	requestCtx, cancelBudget := requestBudget.WithContext(parent, "")
+	defer cancelBudget()
+	if connectBudget.Limited() {
+		requestCtx = client.WithConnectBudget(requestCtx, connectBudget)
+	}
+
+	// A retry or Digest challenge needs an independent body stream. Reject a
+	// one-shot source before the first network operation instead of buffering it
+	// implicitly.
 	var replayer *replayableBody
 	if maxAttempts > 1 || r.Digest != nil {
-		var err error
-		replayer, err = newReplayableBody(req)
+		replayer, err = newReplayableBody(req.WithContext(requestCtx))
 		if err != nil {
 			return 0, err
 		}
@@ -44,36 +70,23 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 	var hadRedirects bool
 	var compressedSSERetried bool
 	for attempt := range maxAttempts {
-		// Check for cancellation before each attempt.
-		if err := ctx.Err(); err != nil {
-			return 0, context.Cause(ctx)
+		if err := contextCause(requestCtx); err != nil {
+			return 0, err
 		}
 
-		// Reset request body for this attempt.
 		if replayer != nil {
-			body, err := replayer.reset()
+			requestBody, err := replayer.reset()
 			if err != nil {
 				return 0, err
 			}
-			req.Body = body
+			req.Body = requestBody
 		}
 
-		// Apply per-attempt timeout. Derive from req.Context() (not ctx)
-		// to preserve context values set during request construction
-		// (e.g. the encoding-requested flag used for decompression).
-		reqCtx := req.Context()
-		var attemptCtx context.Context
-		var cancelAttempt context.CancelFunc
-		if r.Timeout > 0 {
-			cause := core.ErrRequestTimedOut{Timeout: r.Timeout}
-			attemptCtx, cancelAttempt = context.WithTimeoutCause(reqCtx, r.Timeout, cause)
-		} else {
-			attemptCtx, cancelAttempt = context.WithCancel(reqCtx)
-		}
-
+		// A per-attempt cancel is used only to stop a completed attempt. It does
+		// not create a second timeout or reset the shared request deadline.
+		attemptCtx, cancelAttempt := context.WithCancel(requestCtx)
 		attemptReq := req.WithContext(attemptCtx)
 
-		// Set up debug trace for this attempt if -vvv or --timing.
 		var metrics *connectionMetrics
 		if r.Verbosity >= core.VDebug || r.Timing || r.harRecorder != nil {
 			var p *core.Printer
@@ -85,7 +98,6 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 			attemptReq = attemptReq.WithContext(httptrace.WithClientTrace(attemptReq.Context(), trace))
 		}
 
-		// Set up redirect callback context for this attempt.
 		if r.Verbosity >= core.VVerbose {
 			attemptReq = attemptReq.WithContext(client.WithRedirectCallback(attemptReq.Context(), func(hop client.RedirectHop) {
 				hadRedirects = true
@@ -98,11 +110,8 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 			return 0, err
 		}
 
-		// Redirects are created inside net/http, so signing only the initial
-		// request would leave the method, URL, body hash, and Host stale on a
-		// same-origin hop. Re-sign each redirected request after the client has
-		// applied its redirect method and credential policy. Never recreate AWS
-		// credentials on a cross-origin hop.
+		// Redirects are created inside net/http. Re-sign each same-origin
+		// redirected request after its method, URL, body, and Host are final.
 		var observerErr error
 		if r.AWSSigv4 != nil {
 			attemptOrigin := attemptReq.URL
@@ -112,8 +121,6 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 					return
 				}
 				if next.Response != nil {
-					// The previous signature may have supplied a payload hash
-					// for a body that a redirect removed.
 					next.Header.Del("X-Amz-Content-Sha256")
 				}
 				if observerErr == nil {
@@ -127,20 +134,18 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 			doErr = observerErr
 		}
 
-		// Some servers and intermediaries buffer compressed event streams until
-		// the response is complete. In automatic compression mode, retry a
-		// safe SSE request once without the generated Accept-Encoding header so
-		// events can be delivered incrementally. This retry uses the current
-		// attempt context, so it cannot reset the request timeout budget.
+		// Retry one safe GET/HEAD compressed SSE response without generated
+		// encoding. The retry uses this attempt's context and therefore the same
+		// request budget.
 		if !compressedSSERetried && isCompressedSSEResponse(resp) {
 			compressedSSERetried = true
 			if isSafeStreamingMethod(attemptReq.Method) {
 				if retryReq, ok := client.UncompressedRequest(attemptReq); ok {
 					drainCompressedSSE(resp.Body, attemptReq.Context())
 					_ = resp.Body.Close()
-					if err := attemptReq.Context().Err(); err != nil {
+					if err := contextCause(attemptReq.Context()); err != nil {
 						cancelAttempt()
-						return 0, context.Cause(attemptReq.Context())
+						return 0, err
 					}
 					if err := signAWSRequest(r, retryReq); err != nil {
 						cancelAttempt()
@@ -155,49 +160,143 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 
 		retryable, retryAfter := shouldRetry(resp, doErr)
 		isLastAttempt := attempt == maxAttempts-1
-
 		if !retryable || isLastAttempt {
 			defer cancelAttempt()
 			if doErr != nil {
 				return 0, doErr
 			}
+			if resp == nil {
+				return 0, errors.New("request completed without a response")
+			}
 			defer func() { _ = resp.Body.Close() }()
-			return processResponse(ctx, r, resp, hadRedirects, attempt > 0, metrics)
+			return processResponse(requestCtx, r, resp, hadRedirects, attempt > 0, metrics)
 		}
 
-		// Drain only a bounded prefix before closing. This gives the transport
-		// a chance to reuse a connection without allowing an infinite response
-		// body to block the next attempt.
 		if resp != nil {
-			drainResponseBody(resp.Body)
-			resp.Body.Close()
+			if err := drainResponseBody(requestCtx, resp.Body); err != nil && contextCause(requestCtx) != nil {
+				_ = resp.Body.Close()
+				cancelAttempt()
+				return 0, contextCause(requestCtx)
+			}
+			_ = resp.Body.Close()
 		}
 		cancelAttempt()
 
-		// Compute delay and sleep.
 		delay := computeDelay(r.RetryDelay, attempt, retryAfter)
+		if retryAfterWasClamped(resp) {
+			warnRetryAfterClamped(r)
+		}
 		reason := retryReason(resp, doErr)
 		printRetryMsg(r, attempt+2, maxAttempts, delay, reason)
 
-		if err := sleepWithContext(ctx, delay); err != nil {
-			return 0, context.Cause(ctx)
+		if err := delayFits(requestCtx, requestBudget, delay); err != nil {
+			return 0, errors.Join(err, retryCause(resp, doErr))
 		}
-
-		// Reset redirect tracking for next attempt.
+		if err := sleepWithContext(requestCtx, delay); err != nil {
+			return 0, contextCauseOr(err, requestCtx)
+		}
 		hadRedirects = false
 	}
 
-	// Unreachable, but the compiler needs it.
 	return 0, nil
 }
 
-const maxRetryDrainBytes = 2 << 10
+const (
+	maxRetryDrainBytes = 2 << 10
+	maxRetryDrainTime  = 100 * time.Millisecond
+)
 
-func drainResponseBody(body io.Reader) {
-	if body == nil {
-		return
+// drainResponseBody reads only a bounded prefix and has a child deadline. A
+// live or malicious response cannot hold a retry indefinitely.
+func drainResponseBody(parent context.Context, source io.Reader) error {
+	if source == nil {
+		return nil
 	}
-	_, _ = io.CopyN(io.Discard, body, maxRetryDrainBytes)
+	ctx, cancel := context.WithTimeout(parent, maxRetryDrainTime)
+	defer cancel()
+	stop := closeReaderOnContext(ctx, source)
+	defer stop()
+	_, _ = io.CopyN(io.Discard, source, maxRetryDrainBytes)
+	if parent.Err() != nil {
+		return contextCause(parent)
+	}
+	// Draining is a best-effort connection-reuse optimization. A response
+	// that closes or fails while being drained must not hide the retry cause.
+	return nil
+}
+
+func retryAttemptCount(retries int) (int, error) {
+	if retries < 0 {
+		return 0, errors.New("retry count must be non-negative")
+	}
+	if retries == int(^uint(0)>>1) {
+		return 0, errors.New("retry count is too large")
+	}
+	return retries + 1, nil
+}
+
+func combineContexts(cancellation, values context.Context) (context.Context, func()) {
+	if cancellation == nil {
+		cancellation = context.Background()
+	}
+	if values == nil {
+		values = context.Background()
+	}
+	merged, cancel := context.WithCancelCause(values)
+	stop := context.AfterFunc(cancellation, func() {
+		cause := context.Cause(cancellation)
+		if cause == nil {
+			cause = cancellation.Err()
+		}
+		cancel(cause)
+	})
+	return merged, func() {
+		stop()
+		cancel(nil)
+	}
+}
+
+func contextCause(ctx context.Context) error {
+	if ctx == nil || ctx.Err() == nil {
+		return nil
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return ctx.Err()
+}
+
+func retryCause(resp *http.Response, err error) error {
+	if err != nil {
+		return err
+	}
+	if resp != nil {
+		return fmt.Errorf("last response: %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	return errors.New("last attempt failed without a response")
+}
+
+func contextCauseOr(err error, ctx context.Context) error {
+	if cause := contextCause(ctx); cause != nil {
+		return cause
+	}
+	return err
+}
+
+func delayFits(ctx context.Context, budget core.Budget, delay time.Duration) error {
+	if err := contextCause(ctx); err != nil {
+		return err
+	}
+	if delay <= 0 {
+		return nil
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
+		if budgetDeadline, limited := budget.Deadline(); limited && !deadline.Before(budgetDeadline) {
+			return budget.TimeoutError("retry delay")
+		}
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func clearAWSHeaders(req *http.Request) {
@@ -264,8 +363,13 @@ func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayabl
 		}
 	}
 
-	drainResponseBody(resp.Body)
-	resp.Body.Close()
+	if err := drainResponseBody(challengedReq.Context(), resp.Body); err != nil {
+		if cause := contextCause(challengedReq.Context()); cause != nil {
+			_ = resp.Body.Close()
+			return resp, cause
+		}
+	}
+	_ = resp.Body.Close()
 
 	req2 := challengedReq.Clone(challengedReq.Context())
 	req2.Body = body
@@ -428,13 +532,15 @@ func shouldRetry(resp *http.Response, err error) (retryable bool, retryAfter tim
 	if err != nil {
 		return isRetryableError(err), 0
 	}
+	if resp == nil {
+		return false, 0
+	}
 	switch resp.StatusCode {
-	case http.StatusTooManyRequests: // 429
-		return true, parseRetryAfter(resp.Header)
-	case http.StatusBadGateway, // 502
+	case http.StatusTooManyRequests, // 429
+		http.StatusBadGateway,         // 502
 		http.StatusServiceUnavailable, // 503
 		http.StatusGatewayTimeout:     // 504
-		return true, 0
+		return true, parseRetryAfter(resp.Header)
 	default:
 		return false, 0
 	}
@@ -479,29 +585,66 @@ func isRetryableError(err error) bool {
 // parseRetryAfter parses the Retry-After header value. It supports both
 // integer seconds and HTTP-date formats.
 func parseRetryAfter(h http.Header) time.Duration {
-	val := h.Get("Retry-After")
+	delay, _ := parseRetryAfterAt(h, time.Now())
+	return delay
+}
+
+func parseRetryAfterAt(h http.Header, now time.Time) (time.Duration, bool) {
+	val := strings.TrimSpace(h.Get("Retry-After"))
 	if val == "" {
-		return 0
+		return 0, false
 	}
 
-	// Try integer seconds first.
-	if secs, err := strconv.Atoi(val); err == nil {
-		if secs < 0 {
-			return 0
+	// Delta-seconds is an unsigned decimal value. Values that do not fit in a
+	// duration are valid server delays for our purposes, so clamp them rather
+	// than overflowing or silently treating them as zero.
+	if isDecimalValue(val) {
+		secs, err := strconv.ParseUint(val, 10, 64)
+		if err != nil || secs > uint64(core.MaxRetryAfter/time.Second) {
+			return core.MaxRetryAfter, true
 		}
-		return time.Duration(secs) * time.Second
+		return time.Duration(secs) * time.Second, false
 	}
 
-	// Try HTTP-date format.
 	if t, err := http.ParseTime(val); err == nil {
-		d := time.Until(t)
-		if d < 0 {
-			return 0
+		delay := t.Sub(now)
+		if delay <= 0 {
+			return 0, false
 		}
-		return d
+		if delay > core.MaxRetryAfter {
+			return core.MaxRetryAfter, true
+		}
+		return delay, false
 	}
 
-	return 0
+	return 0, false
+}
+
+func isDecimalValue(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func retryAfterWasClamped(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	_, clamped := parseRetryAfterAt(resp.Header, time.Now())
+	return clamped
+}
+
+func warnRetryAfterClamped(r *Request) {
+	if r == nil || r.Verbosity == core.VSilent {
+		return
+	}
+	core.WriteWarningMsgIf(r.PrinterHandle.Stderr(), "server Retry-After was clamped to 30s", false)
 }
 
 // computeDelay calculates the delay before the next retry using exponential
@@ -511,25 +654,41 @@ func computeDelay(initialDelay time.Duration, attempt int, retryAfter time.Durat
 	if initialDelay <= 0 {
 		initialDelay = time.Second
 	}
+	if initialDelay > core.MaxRetryAfter {
+		initialDelay = core.MaxRetryAfter
+	}
+	if attempt < 0 {
+		attempt = 0
+	}
 
-	// Exponential backoff: initialDelay * 2^attempt.
+	// Exponential backoff with checked/saturating arithmetic.
 	delay := initialDelay
 	for range attempt {
+		if delay >= core.MaxRetryAfter || delay > time.Duration(math.MaxInt64/2) {
+			delay = core.MaxRetryAfter
+			break
+		}
 		delay *= 2
-		if delay > 30*time.Second {
-			delay = 30 * time.Second
+		if delay > core.MaxRetryAfter {
+			delay = core.MaxRetryAfter
 			break
 		}
 	}
 
-	// Apply jitter: ±25%.
+	// Apply the existing ±25% jitter to the product backoff. Retry-After is
+	// never jittered and is capped independently below.
 	jitter := float64(delay) * 0.25
 	delay = time.Duration(float64(delay) + (rand.Float64()*2-1)*jitter)
-
-	// Respect Retry-After if it's larger.
-	delay = max(delay, retryAfter)
-
-	return delay
+	if delay > core.MaxRetryAfter {
+		delay = core.MaxRetryAfter
+	}
+	if retryAfter < 0 {
+		retryAfter = 0
+	}
+	if retryAfter > core.MaxRetryAfter {
+		retryAfter = core.MaxRetryAfter
+	}
+	return max(delay, retryAfter)
 }
 
 // sleepWithContext sleeps for the given duration, returning early if the
