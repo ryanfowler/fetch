@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -577,6 +579,183 @@ func TestSessionJarDeletionUsesRFCDefaultPath(t *testing.T) {
 	})
 	if len(sess.Cookies) != 0 {
 		t.Fatalf("expected deleted cookie to be removed from session, got %+v", sess.Cookies)
+	}
+}
+
+func TestConcurrentSessionSavesMergeUpdates(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	seed, err := Load("concurrent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedJar := seed.Jar()
+	origin, _ := url.Parse("https://example.com/")
+	seedJar.SetCookies(origin, []*http.Cookie{{Name: "seed", Value: "value"}})
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	left, err := Load("concurrent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := Load("concurrent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	left.Jar().SetCookies(origin, []*http.Cookie{{Name: "left", Value: "one"}})
+	right.Jar().SetCookies(origin, []*http.Cookie{{Name: "right", Value: "two"}})
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, sess := range []*Session{left, right} {
+		wg.Add(1)
+		go func(s *Session) {
+			defer wg.Done()
+			errs <- s.Save()
+		}(sess)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	final, err := Load("concurrent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make(map[string]string, len(final.Cookies))
+	for _, c := range final.Cookies {
+		values[c.Name] = c.Value
+	}
+	if values["left"] != "one" || values["right"] != "two" || values["seed"] != "value" {
+		t.Fatalf("merged cookies = %+v", values)
+	}
+}
+
+func TestConcurrentSessionSavePreservesDeletion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+	origin, _ := url.Parse("https://example.com/")
+
+	seed, err := Load("deletion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedJar := seed.Jar()
+	seedJar.SetCookies(origin, []*http.Cookie{
+		{Name: "remove", Value: "old"},
+		{Name: "keep", Value: "old"},
+	})
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	deleting, err := Load("deletion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updating, err := Load("deletion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleting.Jar().SetCookies(origin, []*http.Cookie{{Name: "remove", MaxAge: -1}})
+	updating.Jar().SetCookies(origin, []*http.Cookie{{Name: "keep", Value: "new"}})
+	if err := updating.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := deleting.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := Load("deletion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(final.Cookies) != 1 || final.Cookies[0].Name != "keep" || final.Cookies[0].Value != "new" {
+		t.Fatalf("cookies after concurrent deletion = %+v", final.Cookies)
+	}
+}
+
+func TestSessionDirectoryAndFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not portable to Windows")
+	}
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+	sess, err := Load("permissions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Save(); err != nil {
+		t.Fatal(err)
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0700 {
+		t.Fatalf("session directory mode = %o, want 700", got)
+	}
+	fileInfo, err := os.Stat(filepath.Join(dir, "permissions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0600 {
+		t.Fatalf("session file mode = %o, want 600", got)
+	}
+}
+
+func TestCanonicalCookieHostStripsIPv6Brackets(t *testing.T) {
+	got, ok := canonicalCookieHost("[2001:DB8::1]")
+	if !ok || got != "2001:db8::1" {
+		t.Fatalf("canonicalCookieHost = %q, %v", got, ok)
+	}
+}
+
+func TestSessionJarRoundTripForIPv6Host(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+	sess, err := Load("ipv6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin, _ := url.Parse("https://[2001:db8::1]/")
+	sess.Jar().SetCookies(origin, []*http.Cookie{{Name: "token", Value: "v"}})
+	if err := sess.Save(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load("ipv6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cookies := reloaded.Jar().Cookies(origin); len(cookies) != 1 || cookies[0].Value != "v" {
+		t.Fatalf("IPv6 cookies after reload = %+v", cookies)
+	}
+}
+
+func TestStaleSessionLockIsRecoverable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+	sess, err := Load("stale-lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(dir, "stale-lock.json.lock")
+	if err := os.WriteFile(lockPath, []byte("dead process\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-(sessionLockStaleAfter + time.Second))
+	if err := os.Chtimes(lockPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Save(); err != nil {
+		t.Fatalf("stale lock was not recovered: %v", err)
 	}
 }
 

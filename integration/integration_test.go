@@ -3186,6 +3186,39 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("websocket session cookies persist", func(t *testing.T) {
+		t.Parallel()
+		sessDir := t.TempDir()
+		sessEnv := []string{"FETCH_INTERNAL_SESSIONS_DIR=" + sessDir}
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/set" {
+				http.SetCookie(w, &http.Cookie{Name: "ws-session", Value: "ready", Path: "/"})
+			} else if r.URL.Path == "/check" {
+				cookie, err := r.Cookie("ws-session")
+				if err != nil || cookie.Value != "ready" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+			}
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			conn.Write(r.Context(), websocket.MessageText, []byte("ok"))
+			conn.Close(websocket.StatusNormalClosure, "done")
+		})
+		defer server.Close()
+
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: sessEnv}, wsURL+"/set", "--session", "ws-session", "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "ok")
+		res = runFetchOpts(t, fetchPath, fetchOpts{env: sessEnv}, wsURL+"/check", "--session", "ws-session", "--no-pager")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "ok")
+	})
+
 	t.Run("websocket exclusive with grpc", func(t *testing.T) {
 		t.Parallel()
 		res := runFetch(t, fetchPath, "--grpc", "ws://localhost:1234")
