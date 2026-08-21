@@ -34,6 +34,24 @@ fetch --color off example.com/api     # No colors
 fetch --color on example.com/api | less -R  # Colors piped to less
 ```
 
+## Article extraction
+
+Use `--article` to extract the readable part of an HTML or XHTML response as
+Markdown. The output starts with YAML frontmatter. Markdown responses pass
+through with only a `url` frontmatter field. Article extraction uses the final
+URL after redirects to resolve links.
+
+Article mode decodes the response before extraction and accepts at most 16 MiB
+of decoded content. It does not run JavaScript, so content rendered only by
+client-side scripts is not available. Output files and pipes receive raw,
+uncolored Markdown. On a terminal, `--format`, `--color`, and `--pager` affect
+presentation only.
+
+```sh
+fetch --article https://example.com/story
+fetch --article --output story.md https://example.com/story
+```
+
 ## Supported Content Types
 
 ### JSON

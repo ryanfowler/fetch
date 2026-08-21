@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanfowler/fetch/internal/article"
 	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/client"
@@ -383,7 +384,7 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 	// If --copy is requested, wrap the response body to capture raw bytes.
 	cc := newClipboardCopier(r, resp)
 
-	body, err := formatResponse(ctx, r, resp)
+	body, err := formatResponse(ctx, r, resp, cc)
 	if err != nil {
 		return 0, err
 	}
@@ -418,10 +419,14 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 	return exitCode, nil
 }
 
-func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Reader, error) {
+func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *clipboardCopier) (io.Reader, error) {
 	// Avoid trying to format the response for HEAD requests.
-	if resp.Request.Method == "HEAD" {
+	if resp.Request != nil && resp.Request.Method == "HEAD" {
 		return nil, nil
+	}
+
+	if r.Article {
+		return formatArticleResponse(r, resp, cc)
 	}
 
 	output, outputWarning, err := getOutputValueDetails(r, resp)
@@ -521,6 +526,61 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	}
 
 	return bytes.NewReader(buf), nil
+}
+
+func formatArticleResponse(r *Request, resp *http.Response, cc *clipboardCopier) (io.Reader, error) {
+	_, charset := format.GetContentType(resp.Header)
+	original := resp.Body
+	decoded, err := article.ReadLimited(transcodeReader(original, charset))
+	closeErr := original.Close()
+	if err != nil {
+		return nil, err
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+
+	pageURL := ""
+	if resp.Request != nil && resp.Request.URL != nil {
+		pageURL = resp.Request.URL.String()
+	} else if r.URL != nil {
+		pageURL = r.URL.String()
+	}
+	markdown, err := article.Render(decoded, resp.Header.Get("Content-Type"), pageURL)
+	if err != nil {
+		return nil, err
+	}
+
+	// Article extraction is a presentation transformation. Replace the
+	// consumed response with the uncolored Markdown so output files and pipes
+	// receive the exact article document, independent of terminal settings.
+	resp.Body = io.NopCloser(bytes.NewReader(markdown))
+	resp.ContentLength = int64(len(markdown))
+	cc.setBytes(markdown)
+
+	output, outputWarning, err := getOutputValueDetails(r, resp)
+	if err != nil {
+		return nil, err
+	}
+	if outputWarning != "" {
+		core.WriteWarningMsgIf(r.PrinterHandle.Stderr(), outputWarning, r.Verbosity == core.VSilent)
+	}
+	if output != "" && r.Output != "-" {
+		size := int64(len(markdown))
+		p := r.PrinterHandle.Stderr()
+		return nil, writeOutputToFile(output, resp.Body, size, p, r.Verbosity, r.Clobber)
+	}
+
+	// Pipes and explicit raw output must not receive terminal formatting.
+	if r.Output == "-" || r.Format == core.FormatOff || !core.IsStdoutTerm {
+		return resp.Body, nil
+	}
+
+	p := r.PrinterHandle.Stdout()
+	if err := format.FormatMarkdown(markdown, p); err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(p.Bytes()), nil
 }
 
 func newFormattedStream(source io.Reader, p *core.Printer, formatter format.StreamingFormatter, closers ...io.Closer) io.ReadCloser {

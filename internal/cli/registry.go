@@ -349,7 +349,13 @@ var fromCurlOptions = map[string]bool{
 }
 
 var flagDefinitions = map[string]Flag{
-	"article":   {Conflicts: []string{"discard", "remote-name", "remote-header-name"}},
+	"article": {
+		Conflicts: []string{
+			"discard", "remote-name", "remote-header-name", "grpc", "grpc-list", "grpc-describe",
+			"proto-file", "proto-desc", "inspect-dns", "inspect-tls",
+		},
+		Schemes: []string{"ws", "wss"},
+	},
 	"compress":  {},
 	"no-encode": {},
 	"ech":       {},
