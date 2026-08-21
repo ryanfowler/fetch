@@ -79,6 +79,9 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
 		printRequestMetadataWithURL(errPrinter, req, r.HTTP, r.Verbosity, r.DryRun)
+		if r.Verbosity >= core.VDebug {
+			printProxyMetadata(errPrinter, r.Proxy, req.URL)
+		}
 		errPrinter.Flush()
 		if r.DryRun {
 			if dryRunBody != nil {

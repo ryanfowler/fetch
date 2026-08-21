@@ -327,6 +327,9 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
 		printRequestMetadataWithURL(errPrinter, req, r.HTTP, r.Verbosity, r.DryRun)
+		if r.Verbosity >= core.VDebug {
+			printProxyMetadata(errPrinter, r.Proxy, req.URL)
+		}
 
 		if r.DryRun {
 			if req.Body == nil || req.Body == http.NoBody {

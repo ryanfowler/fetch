@@ -37,6 +37,8 @@ type Client struct {
 	c            *http.Client
 	maxRedirects int
 	initErr      error
+	proxy        *url.URL
+	httpVersion  core.HTTPVersion
 }
 
 // RedirectHop represents a single redirect in the chain.
@@ -133,12 +135,7 @@ type ClientConfig struct {
 
 // NewClient returns an initialized Client given the provided configuration.
 func NewClient(cfg ClientConfig) *Client {
-	proxy := http.ProxyFromEnvironment
-	if cfg.Proxy != nil {
-		proxy = func(r *http.Request) (*url.URL, error) {
-			return cfg.Proxy, nil
-		}
-	}
+	proxy := ProxyFunc(cfg.Proxy)
 
 	// Build TLS config and dial function from shared configuration.
 	tlsDialCfg := &TLSDialConfig{
@@ -213,6 +210,19 @@ func NewClient(cfg ClientConfig) *Client {
 			return fmt.Errorf("exceeded maximum number of redirects: %d", maxRedirects)
 		}
 
+		// A custom HTTP/2 or HTTP/3 transport cannot proxy. Re-evaluate the
+		// destination after every redirect so a NO_PROXY bypass on the first
+		// hop cannot silently turn into a direct request on a later hop.
+		if cfg.HTTP >= core.HTTP2 {
+			proxy, err := ProxyForURL(cfg.Proxy, req.URL)
+			if err != nil {
+				return err
+			}
+			if proxy != nil {
+				return errors.New("a proxy can only be used with HTTP/1.1")
+			}
+		}
+
 		// net/http applies its historical redirect policy before this callback:
 		// it changes every non-GET/HEAD method to GET for 301/302/303 and drops
 		// the body. Restore the fetch policy before observers inspect the next
@@ -265,7 +275,13 @@ func NewClient(cfg ClientConfig) *Client {
 	if cfg.HTTP == core.HTTP3 && cfg.Proxy != nil {
 		initErr = errors.New("HTTP/3 cannot be used with a proxy")
 	}
-	return &Client{c: client, maxRedirects: maxRedirects, initErr: initErr}
+	return &Client{
+		c:            client,
+		maxRedirects: maxRedirects,
+		initErr:      initErr,
+		proxy:        cfg.Proxy,
+		httpVersion:  cfg.HTTP,
+	}
 }
 
 // connectDeadlineConn keeps the connection-establishment deadline after the
@@ -1245,6 +1261,15 @@ func newSeekableBody(rs io.ReadSeeker, contentType string) *body.Body {
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	if c.initErr != nil {
 		return nil, c.initErr
+	}
+	if c.httpVersion >= core.HTTP2 {
+		proxy, err := ProxyForURL(c.proxy, req.URL)
+		if err != nil {
+			return nil, err
+		}
+		if proxy != nil {
+			return nil, errors.New("a proxy can only be used with HTTP/1.1")
+		}
 	}
 	if c.c.Jar != nil {
 		req = withOriginCookies(req, c.c.Jar)

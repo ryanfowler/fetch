@@ -30,7 +30,7 @@ const (
 
 func TestMain(m *testing.M) {
 	os.Setenv("HTTP_PROXY", testEnvProxyURL)
-	os.Setenv("NO_PROXY", "bypass.example")
+	os.Setenv("NO_PROXY", "bypass.example,localhost,127.0.0.1,::1")
 	os.Unsetenv("REQUEST_METHOD")
 	os.Exit(m.Run())
 }

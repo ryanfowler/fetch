@@ -19,6 +19,29 @@ func printRequestMetadata(p *core.Printer, req *http.Request, httpVersion core.H
 	printRequestMetadataWithURL(p, req, httpVersion, verbosity, false)
 }
 
+func printProxyMetadata(p *core.Printer, explicit *url.URL, target *url.URL) {
+	decision, err := client.SelectProxy(explicit, target)
+	if err != nil {
+		return
+	}
+	p.Set(core.Bold)
+	p.Set(core.Blue)
+	p.WriteString("proxy")
+	p.Reset()
+	p.WriteString(": ")
+	if decision.URL == nil {
+		p.WriteString("direct")
+		if decision.BypassReason != "" {
+			p.WriteString(" (")
+			p.WriteString(core.TerminalSafeText(decision.BypassReason))
+			p.WriteString(")")
+		}
+	} else {
+		p.WriteString(core.RedactedURL(decision.URL))
+	}
+	p.WriteString("\n")
+}
+
 func printRequestMetadataWithURL(p *core.Printer, req *http.Request, httpVersion core.HTTPVersion, verbosity core.Verbosity, showURL bool) {
 	debug := verbosity >= core.VExtraVerbose
 
