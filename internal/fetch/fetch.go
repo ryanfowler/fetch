@@ -442,14 +442,21 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	p := r.PrinterHandle.Stdout()
 	contentType, charset := format.GetContentType(resp.Header)
 
-	// gRPC streaming needs the response descriptor — handle inline.
+	// gRPC streaming needs the response descriptor — handle inline, but keep
+	// the formatted stream pageable and backpressure-aware.
 	if contentType == format.TypeGRPC {
-		return nil, format.FormatGRPCStream(resp.Body, r.responseDescriptor, p)
+		reader := newFormattedStream(resp.Body, p, func(input io.Reader, output *core.Printer) error {
+			return format.FormatGRPCStream(input, r.responseDescriptor, output)
+		}, resp.Body)
+		return reader, nil
 	}
 
-	// Dispatch registered streaming formatters (NDJSON, SSE).
+	// Dispatch registered streaming formatters (NDJSON, SSE) through a pipe.
+	// The formatter can flush each event while the downstream pager still
+	// controls backpressure and process lifetime; no complete response is
+	// buffered merely to make it pageable.
 	if fn := format.GetStreaming(contentType); fn != nil {
-		return nil, fn(transcodeReader(resp.Body, charset), p)
+		return newFormattedStream(transcodeReader(resp.Body, charset), p, fn, resp.Body), nil
 	}
 
 	// If image rendering is disabled, return the reader immediately.
@@ -468,7 +475,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 		}
 		contentType = format.SniffContentType(prefix)
 		if contentType == format.TypeUnknown || (contentType == format.TypeImage && r.Image == core.ImageOff) {
-			return io.MultiReader(bytes.NewReader(prefix), resp.Body), nil
+			return newReaderWithCloser(io.MultiReader(bytes.NewReader(prefix), resp.Body), resp.Body), nil
 		}
 	}
 
@@ -482,7 +489,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	}
 	if len(buf) > maxBodyBytes {
 		// We've read past the in-memory formatting limit, skip formatting.
-		return io.MultiReader(bytes.NewReader(buf), resp.Body), nil
+		return newReaderWithCloser(io.MultiReader(bytes.NewReader(buf), resp.Body), resp.Body), nil
 	}
 
 	// Transcode non-UTF-8 text to UTF-8, skipping binary formats.
@@ -513,14 +520,32 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response) (io.Re
 	return bytes.NewReader(buf), nil
 }
 
+func newFormattedStream(source io.Reader, p *core.Printer, formatter format.StreamingFormatter, closers ...io.Closer) io.ReadCloser {
+	reader, writer := io.Pipe()
+	streamPrinter := p.NewWriter(writer)
+	go func() {
+		err := formatter(source, streamPrinter)
+		if err != nil {
+			_ = writer.CloseWithError(err)
+			return
+		}
+		_ = writer.Close()
+	}()
+	return newReaderWithCloser(reader, append([]io.Closer{reader}, closers...)...)
+}
+
 func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary bool) error {
 	return streamToStdoutWithPagerContent(context.Background(), r, p, forceOutput, noPager, drainSuppressedBinary, false, core.PagerUnknown, "")
 }
 
 func streamToStdoutWithPagerContent(ctx context.Context, r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary, silent bool, pagerMode core.PagerMode, contentType string) error {
-	if noPager {
+	if noPager || forceOutput || isImageContentType(contentType) {
+		// Raw output must remain byte-oriented, and image protocol bytes must
+		// never be fed to a text pager. This also makes --output - an explicit
+		// pager bypass, matching its raw-output contract.
 		pagerMode = core.PagerOff
 	}
+	imageOutput := isImageContentType(contentType)
 
 	// A terminal must not receive a response chunk until that chunk has
 	// passed the binary classifier. The guard continues checking later chunks,
@@ -547,8 +572,8 @@ func streamToStdoutWithPagerContent(ctx context.Context, r io.Reader, p *core.Pr
 			return nil
 		}
 
-		r = io.MultiReader(bytes.NewReader(first[:n]), guard)
-		err = pager.StreamContext(ctx, r, pagerMode, core.IsStdoutTerm, false, os.Stdout)
+		r = newReaderWithCloser(io.MultiReader(bytes.NewReader(first[:n]), guard), guard)
+		err = pager.StreamContext(ctx, r, pagerMode, core.IsStdoutTerm, imageOutput, os.Stdout)
 		stopClosing()
 		if err != nil {
 			return err
@@ -560,9 +585,14 @@ func streamToStdoutWithPagerContent(ctx context.Context, r io.Reader, p *core.Pr
 	}
 
 	stopClosing := closeReaderOnContext(ctx, r)
-	err := pager.StreamContext(ctx, r, pagerMode, core.IsStdoutTerm, false, os.Stdout)
+	err := pager.StreamContext(ctx, r, pagerMode, core.IsStdoutTerm, imageOutput, os.Stdout)
 	stopClosing()
 	return err
+}
+
+func isImageContentType(contentType string) bool {
+	contentType, _, _ = strings.Cut(strings.ToLower(contentType), ";")
+	return strings.HasPrefix(strings.TrimSpace(contentType), "image/")
 }
 
 func getExitCodeForStatus(status int) int {

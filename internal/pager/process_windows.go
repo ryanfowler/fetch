@@ -14,3 +14,5 @@ func terminateProcessTree(cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
 	}
 }
+
+func pagerExitWasSIGPIPE(error) bool { return false }
