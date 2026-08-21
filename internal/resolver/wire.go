@@ -625,6 +625,13 @@ func lookupWireIPs(ctx context.Context, serverAddr, host string) ([]net.IPAddr, 
 // response is truncated, retries the same query over TCP. The boolean reports
 // whether TCP fallback was used so diagnostic callers can explain the result.
 func LookupUDPMessage(ctx context.Context, serverAddr, host string, typ uint16) (*Message, bool, error) {
+	return lookupUDPMessage(ctx, serverAddr, host, typ, dnsTransactionAttempts)
+}
+
+func lookupUDPMessage(ctx context.Context, serverAddr, host string, typ uint16, attempts int) (*Message, bool, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
 	transactionDeadline := dnsTransactionDeadline(ctx)
 	raw, id, err := EncodeQuery(host, typ)
 	if err != nil {
@@ -653,7 +660,7 @@ func LookupUDPMessage(ctx context.Context, serverAddr, host string, typ uint16) 
 	}
 	defer udpConn.Close()
 
-	message, err := transactUDP(ctx, udpConn, raw, id, question, transactionDeadline)
+	message, err := transactUDP(ctx, udpConn, raw, id, question, transactionDeadline, attempts)
 	if err != nil {
 		return nil, false, err
 	}
@@ -688,12 +695,12 @@ func lookupWireType(ctx context.Context, serverAddr, host string, typ uint16) ([
 // unrelated datagrams are not transaction failures: UDP is a datagram service
 // and stale packets can remain in a socket after a prior query or be injected
 // by an off-path sender.
-func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16, question Question, transactionDeadline time.Time) (*Message, error) {
+func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16, question Question, transactionDeadline time.Time, attempts int) (*Message, error) {
 	stopClosing := closeOnContext(ctx, conn)
 	defer stopClosing()
 
 	var lastErr error
-	for attempt := 0; attempt < dnsTransactionAttempts; attempt++ {
+	for attempt := 0; attempt < attempts; attempt++ {
 		if err := contextError(ctx); err != nil {
 			return nil, err
 		}
@@ -707,7 +714,7 @@ func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16
 			return nil, err
 		}
 
-		deadline, err := receiveDeadline(ctx, attempt, transactionDeadline)
+		deadline, err := receiveDeadline(ctx, attempt, transactionDeadline, attempts)
 		if err != nil {
 			return nil, err
 		}
@@ -749,7 +756,7 @@ func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16
 		return nil, err
 	}
 	if lastErr != nil {
-		return nil, fmt.Errorf("DNS UDP transaction timed out after %d attempts: %w", dnsTransactionAttempts, lastErr)
+		return nil, fmt.Errorf("DNS UDP transaction timed out after %d attempts: %w", attempts, lastErr)
 	}
 	return nil, errors.New("DNS UDP transaction failed")
 }
@@ -909,7 +916,7 @@ func dnsTransactionDeadline(ctx context.Context) time.Time {
 	return time.Now().Add(dnsRetransmissionInterval * dnsTransactionAttempts)
 }
 
-func receiveDeadline(ctx context.Context, attempt int, transactionDeadline time.Time) (time.Time, error) {
+func receiveDeadline(ctx context.Context, attempt int, transactionDeadline time.Time, attempts int) (time.Time, error) {
 	if err := contextError(ctx); err != nil {
 		return time.Time{}, err
 	}
@@ -923,7 +930,7 @@ func receiveDeadline(ctx context.Context, attempt int, transactionDeadline time.
 	deadline := time.Now().Add(dnsRetransmissionInterval)
 	// Divide the remaining budget between this and the final possible
 	// transmission. This keeps retransmission inside the parent deadline.
-	transmissionsLeft := dnsTransactionAttempts - attempt
+	transmissionsLeft := attempts - attempt
 	if transmissionsLeft > 1 {
 		share := remaining / time.Duration(transmissionsLeft)
 		if share < dnsRetransmissionInterval {

@@ -10,10 +10,13 @@ Use a custom DNS server instead of the system resolver. The endpoint is
 validated before a request starts. Supported forms include bare UDP addresses,
 `udp://`, `tcp://`, `tls://`/`dot://`, `quic://`/`doq://`, and HTTPS DoH URLs.
 Non-DoH transports reject paths and queries; userinfo and fragments are never
-accepted. TCP and DoT use pipelined, operation-scoped connections. DoQ uses
-one verified QUIC connection per operation, one bidirectional stream per
-query, and the standard `doq` ALPN. Hostname endpoints use the configured
-nonrecursive bootstrap hook.
+accepted. The same resolver policy is used by HTTP/1.1, HTTP/2, forced HTTP/3,
+gRPC, WebSocket, TLS inspection, and update downloads. Resolved candidates use
+Happy Eyeballs while preserving the preferred address family. TCP and DoT use
+pipelined, operation-scoped connections. DoQ uses one verified QUIC connection
+per operation, one bidirectional stream per query, and the standard `doq` ALPN.
+Hostname resolver endpoints use a nonrecursive platform bootstrap; target
+hostnames never fall back to system DNS when a custom resolver is configured.
 
 ### UDP DNS
 

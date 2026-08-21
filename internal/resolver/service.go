@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -442,7 +443,19 @@ func (r *Resolver) lookupServiceRecords(ctx context.Context, host string, typ ui
 	var message *Message
 	switch {
 	case r.endpoint == nil:
-		return nil, ErrHTTPSRecordsUnavailable
+		policy := r.systemPolicy
+		if policy == nil {
+			if runtime.GOOS == "windows" {
+				return nil, ErrHTTPSRecordsUnavailable
+			}
+			path := "/etc/resolv.conf"
+			loaded, readErr := LoadSystemResolverPolicy(path)
+			if readErr != nil {
+				return nil, fmt.Errorf("read system resolver policy: %w", readErr)
+			}
+			policy = &loaded
+		}
+		return QuerySystemHTTPS(ctx, *policy, host, typ)
 	case r.endpoint.Transport == TransportUDP:
 		message, _, err = LookupUDPMessage(ctx, r.endpoint.Address(), host, typ)
 	case r.endpoint.Transport == TransportTCP || r.endpoint.Transport == TransportTLS:

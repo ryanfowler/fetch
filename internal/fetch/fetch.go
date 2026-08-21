@@ -59,6 +59,7 @@ type Request struct {
 	ResolverEndpoint *resolver.Endpoint
 	DNSServer        *url.URL
 	DryRun           bool
+	ECH              core.ECHMode
 	Edit             bool
 	Form             []core.KeyVal[string]
 	Format           core.Format

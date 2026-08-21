@@ -32,6 +32,7 @@ type DOHConfig struct {
 	Endpoint     *Endpoint
 	ServerURL    *url.URL
 	RoundTripper http.RoundTripper
+	Proxy        func(*http.Request) (*url.URL, error)
 	DialContext  DialContextFunc
 	Bootstrap    BootstrapFunc
 	TLSConfig    *tls.Config
@@ -75,6 +76,7 @@ func NewDOHClient(cfg DOHConfig) (*DOHClient, error) {
 			base = base.Clone()
 		}
 		base.ForceAttemptHTTP2 = true
+		base.Proxy = cfg.Proxy
 		if serverURL.Scheme == "https" {
 			base.TLSClientConfig = dohTLSConfig(cfg, serverURL.Hostname())
 		}
@@ -154,6 +156,10 @@ func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *End
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil || !strings.EqualFold(strings.TrimSuffix(host, "."), endpointHost) {
+			// The DoH endpoint must be bootstrapped without using itself. This
+			// also covers the configured proxy address: a custom DoH resolver
+			// cannot resolve that address until its own connection exists, so
+			// the base dialer is the deliberate, narrow bootstrap exception.
 			return dial(ctx, network, address)
 		}
 		addresses := bootstrapAddrs

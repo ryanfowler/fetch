@@ -36,6 +36,7 @@ import (
 type Client struct {
 	c            *http.Client
 	maxRedirects int
+	initErr      error
 }
 
 // RedirectHop represents a single redirect in the chain.
@@ -127,11 +128,17 @@ type ClientConfig struct {
 	TLSMax           uint16
 	TLSMin           uint16
 	UnixSocket       string
+	ECH              core.ECHMode
 }
 
 // NewClient returns an initialized Client given the provided configuration.
 func NewClient(cfg ClientConfig) *Client {
 	proxy := http.ProxyFromEnvironment
+	if cfg.Proxy != nil {
+		proxy = func(r *http.Request) (*url.URL, error) {
+			return cfg.Proxy, nil
+		}
+	}
 
 	// Build TLS config and dial function from shared configuration.
 	tlsDialCfg := &TLSDialConfig{
@@ -145,6 +152,7 @@ func NewClient(cfg ClientConfig) *Client {
 	res := resolver.New(resolver.Config{
 		Endpoint: cfg.ResolverEndpoint,
 		Server:   cfg.DNSServer,
+		Proxy:    proxy,
 		CACerts:  cfg.CACerts,
 		Insecure: cfg.Insecure,
 		TLSMin:   cfg.TLSMin,
@@ -159,13 +167,6 @@ func NewClient(cfg ClientConfig) *Client {
 		}
 	}
 
-	// Set the optional proxy URL.
-	if cfg.Proxy != nil {
-		proxy = func(r *http.Request) (*url.URL, error) {
-			return cfg.Proxy, nil
-		}
-	}
-
 	// Create the http.RoundTripper based on the configured HTTP version.
 	var transport http.RoundTripper
 	switch cfg.HTTP {
@@ -176,7 +177,7 @@ func NewClient(cfg ClientConfig) *Client {
 			transport = getHTTP2Transport(baseDial, tlsConfig, cfg.ConnectTimeout)
 		}
 	case core.HTTP3:
-		transport = getHTTP3Transport(res, tlsConfig, cfg.ConnectTimeout)
+		transport = getHTTP3Transport(res, tlsConfig, cfg.ConnectTimeout, cfg.ECH)
 	default:
 		rt := &http.Transport{
 			DialContext:        baseDial,
@@ -260,7 +261,11 @@ func NewClient(cfg ClientConfig) *Client {
 		return nil
 	}
 
-	return &Client{c: client, maxRedirects: maxRedirects}
+	var initErr error
+	if cfg.HTTP == core.HTTP3 && cfg.Proxy != nil {
+		initErr = errors.New("HTTP/3 cannot be used with a proxy")
+	}
+	return &Client{c: client, maxRedirects: maxRedirects, initErr: initErr}
 }
 
 // connectDeadlineConn keeps the connection-establishment deadline after the
@@ -439,7 +444,7 @@ func getH2CTransport(baseDial func(context.Context, string, string) (net.Conn, e
 	}
 }
 
-func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTimeout time.Duration) http.RoundTripper {
+func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTimeout time.Duration, echMode core.ECHMode) http.RoundTripper {
 	rt := &http3.Transport{
 		DisableCompression: true,
 		TLSClientConfig:    tlsConfig,
@@ -457,47 +462,108 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 			return nil, err
 		}
 
+		// HTTPS/SVCB discovery is scoped to this resolver and target. It is
+		// opportunistic for ordinary forced H3, but ECH=on requires an
+		// advertised, validated configuration.
+		originHost, _, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			originHost = addr
+		}
+		originPort, portErr := strconv.ParseUint(endpoint.Port, 10, 16)
+		if portErr != nil {
+			return nil, portErr
+		}
+		discovery, discoveryErr := res.DiscoverHTTPS(ctx, originHost, uint16(originPort), nil)
+		if discoveryErr != nil {
+			if echMode == core.ECHOn || resolver.IsAuthenticatedDiscoveryFailure(discoveryErr) {
+				return nil, discoveryErr
+			}
+		} else {
+			var selected *resolver.ServiceCandidate
+			for i := range discovery.Candidates {
+				candidate := &discovery.Candidates[i]
+				for _, alpn := range candidate.ALPN {
+					if string(alpn) == "h3" {
+						selected = candidate
+						break
+					}
+				}
+				if selected != nil {
+					break
+				}
+			}
+			if selected != nil {
+				if len(selected.Addresses) > 0 {
+					endpoint.Addrs = selected.Addresses
+				}
+				endpoint.Port = strconv.Itoa(int(selected.Port))
+				if len(selected.ECH) > 0 && (echMode == core.ECHAuto || echMode == core.ECHOn) {
+					tlsCfg = tlsCfg.Clone()
+					tlsCfg.MinVersion = tls.VersionTLS13
+					tlsCfg.EncryptedClientHelloConfigList = append([]byte(nil), selected.ECH...)
+				} else if echMode == core.ECHOn {
+					return nil, errors.New("ECH is required but the selected HTTPS record has no ECH configuration")
+				}
+			} else if echMode == core.ECHOn {
+				return nil, errors.New("ECH is required but no HTTPS service configuration supports HTTP/3")
+			}
+		}
+
 		port, err := net.LookupPort("udp", endpoint.Port)
 		if err != nil {
 			return nil, err
 		}
 
-		// Establish quic connection.
+		// Race QUIC setup using the same family-preserving Happy Eyeballs
+		// policy as TCP. A black-holed preferred address must not consume the
+		// entire connection budget before another family is tried.
+		type quicResult struct {
+			conn       *quic.Conn
+			packetConn net.PacketConn
+		}
 		trace := httptrace.ContextClientTrace(ctx)
-		for _, ip := range endpoint.Addrs {
-			udpAddr := &net.UDPAddr{IP: ip.IP, Port: port}
+		result, err := resolver.RaceCandidates(ctx, endpoint.Addrs, func(attemptCtx context.Context, ip net.IPAddr) (quicResult, error) {
 			var lc net.ListenConfig
-			var packetConn net.PacketConn
-			packetConn, err = lc.ListenPacket(ctx, "udp", ":0")
-			if err != nil {
-				continue
+			packetConn, listenErr := lc.ListenPacket(attemptCtx, "udp", ":0")
+			if listenErr != nil {
+				return quicResult{}, listenErr
 			}
-
 			if trace != nil && trace.TLSHandshakeStart != nil {
 				trace.TLSHandshakeStart()
 			}
-
-			var conn *quic.Conn
-			conn, err = quic.DialEarly(ctx, packetConn, udpAddr, tlsCfg, qcfg)
+			config := qcfg
+			if config != nil {
+				config = config.Clone()
+			}
+			conn, dialErr := quic.DialEarly(attemptCtx, packetConn, &net.UDPAddr{IP: ip.IP, Port: port}, tlsCfg, config)
 			if trace != nil && trace.TLSHandshakeDone != nil {
 				var state tls.ConnectionState
 				if conn != nil {
 					state = conn.ConnectionState().TLS
 				}
-				trace.TLSHandshakeDone(state, err)
+				trace.TLSHandshakeDone(state, dialErr)
 			}
-			if err != nil {
-				packetConn.Close()
-				continue
+			if dialErr != nil {
+				_ = packetConn.Close()
+				return quicResult{}, dialErr
 			}
-			if trace != nil && trace.GotConn != nil {
-				trace.GotConn(httptrace.GotConnInfo{Conn: traceAddrConn{remote: conn.RemoteAddr()}})
+			return quicResult{conn: conn, packetConn: packetConn}, nil
+		}, func(result quicResult) {
+			if result.conn != nil {
+				_ = result.conn.CloseWithError(0, "QUIC address race lost")
 			}
-			wrapper.packetConns = append(wrapper.packetConns, packetConn)
-			return conn, nil
+			if result.packetConn != nil {
+				_ = result.packetConn.Close()
+			}
+		})
+		if err != nil {
+			return nil, err
 		}
-
-		return nil, err
+		if trace != nil && trace.GotConn != nil {
+			trace.GotConn(httptrace.GotConnInfo{Conn: traceAddrConn{remote: result.conn.RemoteAddr()}})
+		}
+		wrapper.addPacketConn(result.packetConn)
+		return result.conn, nil
 	}
 
 	return wrapper
@@ -525,7 +591,20 @@ func (c traceAddrConn) SetWriteDeadline(time.Time) error { return nil }
 // and tracks PacketConns for cleanup.
 type http3TimingTransport struct {
 	rt          *http3.Transport
+	mu          sync.Mutex
+	closed      bool
 	packetConns []net.PacketConn
+}
+
+func (t *http3TimingTransport) addPacketConn(conn net.PacketConn) {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	t.packetConns = append(t.packetConns, conn)
+	t.mu.Unlock()
 }
 
 func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -544,9 +623,14 @@ func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, err
 }
 
 func (t *http3TimingTransport) Close() error {
+	t.mu.Lock()
+	t.closed = true
+	packetConns := t.packetConns
+	t.packetConns = nil
+	t.mu.Unlock()
 	err := t.rt.Close()
-	for _, pc := range t.packetConns {
-		pc.Close()
+	for _, pc := range packetConns {
+		_ = pc.Close()
 	}
 	return err
 }
@@ -1159,6 +1243,9 @@ func newSeekableBody(rs io.ReadSeeker, contentType string) *body.Body {
 
 // Do performs the provided http Request, returning the response.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	if c.initErr != nil {
+		return nil, c.initErr
+	}
 	if c.c.Jar != nil {
 		req = withOriginCookies(req, c.c.Jar)
 	}

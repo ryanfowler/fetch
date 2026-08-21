@@ -31,8 +31,16 @@ type Config struct {
 	DialContext DialContextFunc
 	Bootstrap   BootstrapFunc
 	// RoundTripper is used only by DoH. It lets the application inject its
-	// proxy and resolver-aware HTTP transport without duplicating DoH logic.
+	// resolver-aware HTTP transport without duplicating DoH logic.
 	RoundTripper http.RoundTripper
+	// Proxy is applied to DoH endpoint requests. The endpoint bootstrap still
+	// uses the platform resolver because resolving a custom resolver through
+	// itself would recurse.
+	Proxy func(*http.Request) (*url.URL, error)
+	// SystemPolicy supplies OS resolver-file policy for HTTPS/SVCB discovery
+	// when no custom endpoint is configured. A nil value uses the platform
+	// resolv.conf path lazily.
+	SystemPolicy *SystemResolverPolicy
 	TLSConfig    *tls.Config
 	CACerts      []*x509.Certificate
 	Insecure     bool
@@ -48,6 +56,8 @@ type Resolver struct {
 	dialContext  DialContextFunc
 	bootstrap    BootstrapFunc
 	roundTripper http.RoundTripper
+	proxy        func(*http.Request) (*url.URL, error)
+	systemPolicy *SystemResolverPolicy
 	dohClient    *DOHClient
 	tlsConfig    *tls.Config
 	caCerts      []*x509.Certificate
@@ -84,6 +94,8 @@ func New(cfg Config) *Resolver {
 		dialContext:  cfg.DialContext,
 		bootstrap:    cfg.Bootstrap,
 		roundTripper: cfg.RoundTripper,
+		proxy:        cfg.Proxy,
+		systemPolicy: cfg.SystemPolicy,
 		tlsConfig:    cfg.TLSConfig,
 		caCerts:      cfg.CACerts,
 		insecure:     cfg.Insecure,
@@ -95,6 +107,7 @@ func New(cfg Config) *Resolver {
 		r.dohClient, r.err = NewDOHClient(DOHConfig{
 			Endpoint:     endpoint,
 			RoundTripper: cfg.RoundTripper,
+			Proxy:        cfg.Proxy,
 			DialContext:  cfg.DialContext,
 			Bootstrap:    cfg.Bootstrap,
 			TLSConfig:    cfg.TLSConfig,
@@ -196,30 +209,32 @@ func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) 
 	}
 
 	// Keep the resolver-preferred family first while interleaving later
-	// candidates for Happy Eyeballs. This prevents an address returned second
-	// by the platform/custom resolver from silently becoming the first dial.
-	return ResolvedEndpoint{Host: host, Port: port, Addrs: interleaveAddressFamilies(addrs)}, nil
+	// candidates for Happy Eyeballs. Cap the shared dial surface before any
+	// caller can start sockets from a large but valid RRset.
+	addrs = interleaveAddressFamilies(addrs)
+	if len(addrs) > maxDialCandidates {
+		addrs = addrs[:maxDialCandidates]
+	}
+	return ResolvedEndpoint{Host: host, Port: port, Addrs: addrs}, nil
 }
 
 // DialContext resolves address and dials each returned IP until one succeeds.
+// DialContext resolves address and races its candidates with the shared
+// Happy Eyeballs policy. The first address retains the resolver's preferred
+// family; later candidates are interleaved by ResolveAddress.
 func (r *Resolver) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	endpoint, err := r.ResolveAddress(ctx, network, address)
 	if err != nil {
 		return nil, err
 	}
-
-	var dialer net.Dialer
-	for _, addr := range endpoint.Addrs {
-		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(addr.IP.String(), endpoint.Port))
-		if dialErr == nil {
-			return conn, nil
+	return RaceCandidates(ctx, endpoint.Addrs, func(ctx context.Context, addr net.IPAddr) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, net.JoinHostPort(addr.IP.String(), endpoint.Port))
+	}, func(conn net.Conn) {
+		if conn != nil {
+			_ = conn.Close()
 		}
-		err = dialErr
-	}
-	if err == nil {
-		err = errors.New("no addresses found")
-	}
-	return nil, err
+	})
 }
 
 func endpointFromURL(u *url.URL) (*Endpoint, error) {

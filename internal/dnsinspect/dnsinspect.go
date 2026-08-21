@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
@@ -45,6 +46,7 @@ type Config struct {
 	// for direct test fixtures and older internal callers.
 	Endpoint  *resolver.Endpoint
 	DNSServer *url.URL
+	Proxy     *url.URL
 	CACerts   []*x509.Certificate
 	TLSConfig *tls.Config
 	Insecure  bool
@@ -224,9 +226,14 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		defer doqClient.Close()
 	}
 	if server != nil && server.Scheme != "" && streamClient == nil && doqClient == nil {
+		var proxy func(*http.Request) (*url.URL, error)
+		if cfg.Proxy != nil {
+			proxy = func(*http.Request) (*url.URL, error) { return cfg.Proxy, nil }
+		}
 		dohClient, err = resolver.NewDOHClient(resolver.DOHConfig{
 			Endpoint:  cfg.Endpoint,
 			ServerURL: server,
+			Proxy:     proxy,
 			TLSConfig: cfg.TLSConfig,
 			CACerts:   cfg.CACerts,
 			Insecure:  cfg.Insecure,

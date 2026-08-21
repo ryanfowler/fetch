@@ -75,71 +75,48 @@ func NewDoQClient(ctx context.Context, cfg DoQConfig) (*DoQClient, error) {
 		}
 	}
 
-	// Race a bounded set of endpoint addresses. A resolver endpoint can have
-	// both families, and a dead address must not consume the whole operation
-	// budget while another address is usable.
-	raceCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	results := make(chan doqDialResult, len(addresses))
-	for _, address := range addresses {
-		address := address
-		go func() {
-			packetConn, listenErr := listenDoQPacketConn(raceCtx)
-			if listenErr != nil {
-				results <- doqDialResult{err: listenErr}
-				return
-			}
-			quicConfig := &quic.Config{}
-			if quicTimeout, ok := doqQUICTimeout(raceCtx); ok {
-				quicConfig.HandshakeIdleTimeout = quicTimeout
-				quicConfig.MaxIdleTimeout = quicTimeout
-			}
-			conn, dialErr := dial(raceCtx, packetConn, &net.UDPAddr{IP: address.IP, Port: int(cfg.Endpoint.Port)}, tlsConfig, quicConfig)
-			if dialErr != nil {
-				_ = packetConn.Close()
-				if strings.Contains(strings.ToLower(dialErr.Error()), "application protocol") {
-					dialErr = fmt.Errorf("DNS-over-QUIC ALPN negotiation failed: %w", dialErr)
-				}
-				results <- doqDialResult{err: dialErr}
-				return
-			}
-			if negotiated := conn.ConnectionState().TLS.NegotiatedProtocol; negotiated != doqALPN {
-				_ = conn.CloseWithError(0, "DNS-over-QUIC ALPN negotiation failed")
-				_ = packetConn.Close()
-				results <- doqDialResult{err: fmt.Errorf("DNS-over-QUIC negotiated ALPN %q, want %q", negotiated, doqALPN)}
-				return
-			}
-			results <- doqDialResult{conn: conn, packetConn: packetConn}
-		}()
-	}
-
-	var lastErr error
-	for remaining := len(addresses); remaining > 0; remaining-- {
-		select {
-		case result := <-results:
-			if result.err == nil {
-				cancel()
-				go closeLosingDoQConnections(results, remaining-1)
-				return &DoQClient{conn: result.conn, packetConn: result.packetConn}, nil
-			}
-			lastErr = result.err
-		case <-ctx.Done():
-			go closeLosingDoQConnections(results, remaining)
-			// The parent budget is authoritative. A dial error from an
-			// earlier address must not hide cancellation or deadline expiry.
-			return nil, ctx.Err()
+	addresses = interleaveAddressFamilies(deduplicateAddresses(addresses))
+	result, err := RaceCandidates(ctx, addresses, func(attemptCtx context.Context, address net.IPAddr) (doqDialResult, error) {
+		packetConn, listenErr := listenDoQPacketConn(attemptCtx)
+		if listenErr != nil {
+			return doqDialResult{}, listenErr
 		}
+		quicConfig := &quic.Config{}
+		if quicTimeout, ok := doqQUICTimeout(attemptCtx); ok {
+			quicConfig.HandshakeIdleTimeout = quicTimeout
+			quicConfig.MaxIdleTimeout = quicTimeout
+		}
+		conn, dialErr := dial(attemptCtx, packetConn, &net.UDPAddr{IP: address.IP, Port: int(cfg.Endpoint.Port)}, tlsConfig, quicConfig)
+		if dialErr != nil {
+			_ = packetConn.Close()
+			if strings.Contains(strings.ToLower(dialErr.Error()), "application protocol") {
+				dialErr = fmt.Errorf("DNS-over-QUIC ALPN negotiation failed: %w", dialErr)
+			}
+			return doqDialResult{}, dialErr
+		}
+		if negotiated := conn.ConnectionState().TLS.NegotiatedProtocol; negotiated != doqALPN {
+			_ = conn.CloseWithError(0, "DNS-over-QUIC ALPN negotiation failed")
+			_ = packetConn.Close()
+			return doqDialResult{}, fmt.Errorf("DNS-over-QUIC negotiated ALPN %q, want %q", negotiated, doqALPN)
+		}
+		return doqDialResult{conn: conn, packetConn: packetConn}, nil
+	}, func(result doqDialResult) {
+		if result.conn != nil {
+			_ = result.conn.CloseWithError(0, "DNS-over-QUIC address race lost")
+		}
+		if result.packetConn != nil {
+			_ = result.packetConn.Close()
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connect to DNS-over-QUIC endpoint %s: %w", cfg.Endpoint, err)
 	}
-	if lastErr == nil {
-		lastErr = errors.New("no DNS-over-QUIC endpoint addresses succeeded")
-	}
-	return nil, fmt.Errorf("connect to DNS-over-QUIC endpoint %s: %w", cfg.Endpoint, lastErr)
+	return &DoQClient{conn: result.conn, packetConn: result.packetConn}, nil
 }
 
 type doqDialResult struct {
 	conn       *quic.Conn
 	packetConn net.PacketConn
-	err        error
 }
 
 func listenDoQPacketConn(ctx context.Context) (net.PacketConn, error) {
@@ -159,18 +136,6 @@ func doqQUICTimeout(ctx context.Context) (time.Duration, bool) {
 	// the transport's normal behavior and avoids inventing a second timeout
 	// budget in the resolver.
 	return 0, false
-}
-
-func closeLosingDoQConnections(results <-chan doqDialResult, count int) {
-	for i := 0; i < count; i++ {
-		result := <-results
-		if result.conn != nil {
-			_ = result.conn.CloseWithError(0, "DNS-over-QUIC address race lost")
-		}
-		if result.packetConn != nil {
-			_ = result.packetConn.Close()
-		}
-	}
 }
 
 func bootstrapDoQEndpoint(ctx context.Context, cfg DoQConfig) ([]net.IPAddr, error) {
