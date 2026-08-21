@@ -327,6 +327,13 @@ fetch -O -J example.com/download
 # Uses server-provided filename
 ```
 
+The extended `filename*` parameter is preferred. Server-provided names are
+restricted to one safe filename component. Path separators, control characters,
+Windows device names, and alternate-data-stream syntax are removed or rejected.
+Malformed or missing header names fall back to the URL filename with a warning.
+Downloads use an exclusive temporary file and an atomic commit. Existing
+symlink destinations are rejected, including with `--clobber`.
+
 ### `--clobber`
 
 Overwrite existing files:

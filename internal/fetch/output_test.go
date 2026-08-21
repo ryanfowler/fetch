@@ -2,9 +2,13 @@ package fetch
 
 import (
 	"bytes"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -75,6 +79,29 @@ func TestSanitizeFilename(t *testing.T) {
 			input:    "dir/",
 			expected: "dir",
 			wantErr:  false,
+		},
+		{
+			name:     "windows separator",
+			input:    `dir\\file.txt`,
+			expected: "file.txt",
+			wantErr:  false,
+		},
+		{
+			name:     "control character",
+			input:    "file\x00.txt",
+			expected: "file_.txt",
+			wantErr:  false,
+		},
+		{
+			name:     "trailing dot and space",
+			input:    "file. ",
+			expected: "file",
+			wantErr:  false,
+		},
+		{
+			name:    "windows device name",
+			input:   "CON.txt",
+			wantErr: true,
 		},
 	}
 
@@ -176,6 +203,84 @@ func TestWriteOutputToFile_OverwritesExistingFileWithClobber(t *testing.T) {
 		t.Fatalf("output file = %q, want %q", data, "new")
 	}
 }
+
+func TestContentDispositionFilenamePrefersRFC5987(t *testing.T) {
+	h := http.Header{}
+	h.Set("Content-Disposition", `attachment; filename="plain.txt"; filename*=UTF-8''%E2%82%AC.txt`)
+	name, ok := getContentDispositionFilenameDetails(h)
+	if !ok || name != "€.txt" {
+		t.Fatalf("filename = %q, valid = %v, want €.txt and true", name, ok)
+	}
+}
+
+func TestContentDispositionFilenameSkipsMalformedParameter(t *testing.T) {
+	h := http.Header{}
+	h.Set("Content-Disposition", `attachment; filename="plain.txt"; filename*=bad%zz`)
+	name, ok := getContentDispositionFilenameDetails(h)
+	if !ok || name != "plain.txt" {
+		t.Fatalf("filename = %q, valid = %v, want plain.txt and true", name, ok)
+	}
+
+	h.Set("Content-Disposition", `attachment; filename="a"bad"; filename*=UTF-8''good.txt`)
+	name, ok = getContentDispositionFilenameDetails(h)
+	if ok {
+		t.Fatalf("malformed quoted parameter produced filename %q", name)
+	}
+}
+
+func TestSanitizeFilenameBoundsUTF8(t *testing.T) {
+	name, err := sanitizeFilename(strings.Repeat("界", 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(name) > maxOutputFilenameBytes || !utf8.ValidString(name) {
+		t.Fatalf("sanitized filename has invalid size or encoding: bytes=%d", len(name))
+	}
+}
+
+func TestWriteOutputToFileRejectsSymlinkWithClobber(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	outside := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, target); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	err := writeOutputToFile(target, bytes.NewReader([]byte("new")), 3, core.TestPrinter(false), core.VSilent, true)
+	if err == nil {
+		t.Fatal("writeOutputToFile succeeded through a symlink")
+	}
+	got, readErr := os.ReadFile(outside)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != "outside" {
+		t.Fatalf("outside target changed to %q", got)
+	}
+}
+
+func TestWriteOutputToFileCleansTemporaryFileAfterReadError(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	body := &errorReader{}
+	if err := writeOutputToFile(target, body, 0, core.TestPrinter(false), core.VSilent, false); err == nil {
+		t.Fatal("writeOutputToFile succeeded for a failing reader")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary output files remain: %v", entries)
+	}
+}
+
+type errorReader struct{}
+
+func (*errorReader) Read([]byte) (int, error) { return 0, errors.New("body failed") }
 
 func TestWriteOutputToFile_DoesNotOverwriteExistingFileWithoutClobber(t *testing.T) {
 	dir := t.TempDir()
