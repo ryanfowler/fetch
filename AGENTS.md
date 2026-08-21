@@ -116,4 +116,4 @@ Multipart `-F` request bodies are produced by a replayable factory with a stable
 
 High level documentation exists in the README. All detailed documentation exists in the `docs/` directory, and should be kept up-to-date with any code changes.
 
-The `--edit` workflow accepts `VISUAL`/`EDITOR` values with flags and also preserves executable paths that contain spaces, even when those paths are not shell-quoted.
+The `--edit` workflow accepts `VISUAL`/`EDITOR` values with flags and also preserves executable paths that contain spaces, even when those paths are not shell-quoted. Request-body files are validated before opening, streamed from replayable regular-file sources, and checked for replacement, resizing, and premature EOF; multipart header parameters are sanitized and replay with a stable boundary.

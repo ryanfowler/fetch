@@ -516,7 +516,16 @@ func SourceFromContext(ctx context.Context) (*Body, bool) {
 // Attach installs b as req.Body, sets known length/GetBody, and preserves the
 // source in the request context.
 func Attach(req *http.Request, b *Body) {
-	req.ContentLength = b.ContentLength()
+	// Attach is used both while a request is being constructed and later when
+	// an editor or protocol adapter replaces its body. Preserve wire metadata
+	// explicitly supplied by the caller in the latter case. In particular,
+	// changing the body must not silently turn a user-selected
+	// Content-Length/Transfer-Encoding into the source's inferred length.
+	explicitLength := req.Header.Get("Content-Length") != ""
+	explicitTransferEncoding := len(req.TransferEncoding) > 0 || req.Header.Get("Transfer-Encoding") != ""
+	if !explicitLength && !explicitTransferEncoding {
+		req.ContentLength = b.ContentLength()
+	}
 	if b.Replayable() && req.ContentLength == 0 {
 		req.Body = http.NoBody
 		req.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
