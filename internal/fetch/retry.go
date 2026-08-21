@@ -98,7 +98,34 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 			return 0, err
 		}
 
+		// Redirects are created inside net/http, so signing only the initial
+		// request would leave the method, URL, body hash, and Host stale on a
+		// same-origin hop. Re-sign each redirected request after the client has
+		// applied its redirect method and credential policy. Never recreate AWS
+		// credentials on a cross-origin hop.
+		var observerErr error
+		if r.AWSSigv4 != nil {
+			attemptOrigin := attemptReq.URL
+			attemptReq = attemptReq.WithContext(client.WithRequestObserver(attemptReq.Context(), func(next *http.Request) {
+				if client.RedirectCrossedOrigin(next) || !client.SameOrigin(attemptOrigin, next.URL) {
+					clearAWSHeaders(next)
+					return
+				}
+				if next.Response != nil {
+					// The previous signature may have supplied a payload hash
+					// for a body that a redirect removed.
+					next.Header.Del("X-Amz-Content-Sha256")
+				}
+				if observerErr == nil {
+					observerErr = signAWSRequest(r, next)
+				}
+			}))
+		}
+
 		resp, doErr := doOnce(r, c, attemptReq, replayer)
+		if doErr == nil && observerErr != nil {
+			doErr = observerErr
+		}
 
 		// Some servers and intermediaries buffer compressed event streams until
 		// the response is complete. In automatic compression mode, retry a
@@ -138,9 +165,11 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 			return processResponse(ctx, r, resp, hadRedirects, attempt > 0, metrics)
 		}
 
-		// Drain and close the response body before retrying.
+		// Drain only a bounded prefix before closing. This gives the transport
+		// a chance to reuse a connection without allowing an infinite response
+		// body to block the next attempt.
 		if resp != nil {
-			io.Copy(io.Discard, resp.Body)
+			drainResponseBody(resp.Body)
 			resp.Body.Close()
 		}
 		cancelAttempt()
@@ -160,6 +189,24 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 
 	// Unreachable, but the compiler needs it.
 	return 0, nil
+}
+
+const maxRetryDrainBytes = 2 << 10
+
+func drainResponseBody(body io.Reader) {
+	if body == nil {
+		return
+	}
+	_, _ = io.CopyN(io.Discard, body, maxRetryDrainBytes)
+}
+
+func clearAWSHeaders(req *http.Request) {
+	if req == nil {
+		return
+	}
+	for _, name := range []string{"Authorization", "X-Amz-Date", "X-Amz-Content-Sha256", "X-Amz-Security-Token"} {
+		req.Header.Del(name)
+	}
 }
 
 // doOnce performs a single request, handling digest auth challenge-response
@@ -186,6 +233,12 @@ func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayabl
 	if challengedReq == nil {
 		challengedReq = req
 	}
+	// Digest credentials are scoped to the request origin. A challenge after
+	// a cross-origin redirect must not cause the credentials configured for the
+	// original URL to be sent to the redirected host.
+	if client.RedirectCrossedOrigin(challengedReq) || !client.SameOrigin(req.URL, challengedReq.URL) {
+		return resp, nil
+	}
 
 	auth, err := digest.Response(challengedReq, chal, r.Digest.Key, r.Digest.Val)
 	if err != nil {
@@ -211,7 +264,7 @@ func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayabl
 		}
 	}
 
-	io.Copy(io.Discard, resp.Body)
+	drainResponseBody(resp.Body)
 	resp.Body.Close()
 
 	req2 := challengedReq.Clone(challengedReq.Context())

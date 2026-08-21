@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -434,6 +435,399 @@ func TestDoLeavesUnknownStackedContentEncodingUntouched(t *testing.T) {
 	if !bytes.Equal(got, body) {
 		t.Fatalf("body = %q, want %q", got, body)
 	}
+}
+
+func TestRequestObserversComposeWithoutRecursion(t *testing.T) {
+	var first, second int
+	ctx := WithRequestObserver(context.Background(), func(*http.Request) { first++ })
+	ctx = WithRequestObserver(ctx, func(*http.Request) { second++ })
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestObserver(req.Context())(req)
+	if first != 1 || second != 1 {
+		t.Fatalf("observer calls = (%d, %d), want (1, 1)", first, second)
+	}
+}
+
+func TestRedirectMethodAndBodySemantics(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		method     string
+		body       string
+		wantMethod string
+		wantBody   string
+	}{
+		{name: "301 PUT", status: http.StatusMovedPermanently, method: http.MethodPut, body: "put", wantMethod: http.MethodPut, wantBody: "put"},
+		{name: "302 PATCH", status: http.StatusFound, method: http.MethodPatch, body: "patch", wantMethod: http.MethodPatch, wantBody: "patch"},
+		{name: "301 POST", status: http.StatusMovedPermanently, method: http.MethodPost, body: "post", wantMethod: http.MethodGet},
+		{name: "302 POST", status: http.StatusFound, method: http.MethodPost, body: "post", wantMethod: http.MethodGet},
+		{name: "303 POST", status: http.StatusSeeOther, method: http.MethodPost, body: "post", wantMethod: http.MethodGet},
+		{name: "303 HEAD", status: http.StatusSeeOther, method: http.MethodHead, wantMethod: http.MethodHead},
+		{name: "307 PUT", status: http.StatusTemporaryRedirect, method: http.MethodPut, body: "put", wantMethod: http.MethodPut, wantBody: "put"},
+		{name: "308 PATCH", status: http.StatusPermanentRedirect, method: http.MethodPatch, body: "patch", wantMethod: http.MethodPatch, wantBody: "patch"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotMethod, gotBody, gotContentType string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/start" {
+					http.Redirect(w, r, "/final", tt.status)
+					return
+				}
+				gotMethod = r.Method
+				gotContentType = r.Header.Get("Content-Type")
+				if tt.wantBody == "" {
+					for _, name := range []string{"Content-Length", "Transfer-Encoding", "Content-Encoding"} {
+						if value := r.Header.Get(name); value != "" {
+							t.Errorf("%s survived bodyless redirect: %q", name, value)
+						}
+					}
+				}
+				data, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read final body: %v", err)
+				}
+				gotBody = string(data)
+			}))
+			defer server.Close()
+
+			req, err := http.NewRequest(tt.method, server.URL+"/start", strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/test")
+			resp, err := NewClient(ClientConfig{}).Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			if gotMethod != tt.wantMethod {
+				t.Fatalf("final method = %q, want %q", gotMethod, tt.wantMethod)
+			}
+			if gotBody != tt.wantBody {
+				t.Fatalf("final body = %q, want %q", gotBody, tt.wantBody)
+			}
+			if tt.wantBody == "" && gotContentType != "" {
+				t.Fatalf("body header survived rewrite: Content-Type=%q", gotContentType)
+			}
+			if tt.wantBody != "" && gotContentType != "application/test" {
+				t.Fatalf("Content-Type = %q, want application/test", gotContentType)
+			}
+		})
+	}
+}
+
+func TestRedirectCrossOriginStripsCredentialsAndHost(t *testing.T) {
+	var got http.Header
+	var gotHost string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		gotHost = r.Host
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth("user", "secret")
+	req.Header.Set("Cookie", "session=origin")
+	req.Header.Set("Proxy-Authorization", "Basic cHJveHk6c2VjcmV0")
+	req.Host = "virtual-origin.invalid"
+
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	for _, name := range []string{"Authorization", "Cookie", "Proxy-Authorization"} {
+		if value := got.Get(name); value != "" {
+			t.Errorf("cross-origin %s = %q, want empty", name, value)
+		}
+	}
+	if gotHost == "virtual-origin.invalid" {
+		t.Fatalf("cross-origin Host was preserved: %q", gotHost)
+	}
+}
+
+func TestRedirectBodylessMethodSurvivesLaterRedirect(t *testing.T) {
+	var gotMethod string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			http.Redirect(w, r, "/middle", http.StatusMovedPermanently)
+		case "/middle":
+			http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+		default:
+			gotMethod = r.Method
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/start", strings.NewReader("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if gotMethod != http.MethodGet {
+		t.Fatalf("final method = %q, want GET", gotMethod)
+	}
+}
+
+func TestRedirectBodySurvivesEarlierMethodPreservingHop(t *testing.T) {
+	var gotMethod, gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			http.Redirect(w, r, "/middle", http.StatusFound)
+		case "/middle":
+			http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+		default:
+			gotMethod = r.Method
+			body, _ := io.ReadAll(r.Body)
+			gotBody = string(body)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/start", strings.NewReader("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if gotMethod != http.MethodPut || gotBody != "body" {
+		t.Fatalf("final request = %s %q, want PUT body", gotMethod, gotBody)
+	}
+}
+
+func TestRedirectCookieJarDoesNotLeakAcrossPorts(t *testing.T) {
+	var received string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "updated"})
+		http.Redirect(w, r, target.URL+"/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceURL, err := url.Parse(source.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(sourceURL, []*http.Cookie{{Name: "session", Value: "source"}})
+	c := NewClient(ClientConfig{})
+	c.SetJar(jar)
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if received != "" {
+		t.Fatalf("cross-port Cookie = %q, want empty", received)
+	}
+}
+
+func TestRedirectSameOriginPreservesCustomHost(t *testing.T) {
+	var gotHost string
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, server.URL+"/final", http.StatusFound)
+			return
+		}
+		gotHost = r.Host
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "virtual-origin.invalid"
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if gotHost != "virtual-origin.invalid" {
+		t.Fatalf("same-origin Host = %q, want virtual-origin.invalid", gotHost)
+	}
+}
+
+func TestRedirectHistoryDoesNotRestoreCredentials(t *testing.T) {
+	var final http.Header
+	var source *httptest.Server
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, source.URL+"/final", http.StatusFound)
+	}))
+	defer target.Close()
+	source = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, target.URL+"/middle", http.StatusFound)
+			return
+		}
+		final = r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer source.Close()
+
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.SetBasicAuth("user", "password")
+	req.Header.Set("Cookie", "origin=secret")
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if final.Get("Authorization") != "" || final.Get("Cookie") != "" {
+		t.Fatalf("credentials restored after cross-origin hop: Authorization=%q Cookie=%q", final.Get("Authorization"), final.Get("Cookie"))
+	}
+}
+
+func TestRedirectsZeroReturnsOneShotRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/final", http.StatusMovedPermanently)
+	}))
+	defer server.Close()
+	zero := 0
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/start", oneShotReader{Reader: strings.NewReader("body")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = -1
+	resp, err := NewClient(ClientConfig{Redirects: &zero}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMovedPermanently {
+		t.Fatalf("status = %d, want 301", resp.StatusCode)
+	}
+}
+
+func TestRedirectOneShotBodyReportsReplayError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/start", oneShotReader{Reader: strings.NewReader("body")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unknown-length one-shot streams must still be treated as bodies by
+	// net/http's redirect policy.
+	req.ContentLength = -1
+	_, err = NewClient(ClientConfig{}).Do(req)
+	if err == nil || !strings.Contains(err.Error(), "cannot replay request body") {
+		t.Fatalf("error = %v, want replay error", err)
+	}
+}
+
+type oneShotReader struct{ *strings.Reader }
+
+func (r oneShotReader) Read(p []byte) (int, error) { return r.Reader.Read(p) }
+
+func TestRedirectReResolvesEachDestinationWithCustomDNS(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("http_proxy", "")
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("https_proxy", "")
+	t.Setenv("ALL_PROXY", "")
+	t.Setenv("all_proxy", "")
+	t.Setenv("NO_PROXY", "*")
+	t.Setenv("no_proxy", "*")
+
+	var names []string
+	dnsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("name")
+		names = append(names, name)
+		if r.URL.Query().Get("type") == "A" {
+			_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"Status":3}`)
+	}))
+	defer dnsServer.Close()
+
+	var origin *httptest.Server
+	origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			location := "http://localhost:" + originURLPort(origin.URL) + "/final"
+			http.Redirect(w, r, location, http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer origin.Close()
+
+	originURL, err := url.Parse(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://bypass.example:"+originURL.Port()+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsURL, err := url.Parse(dnsServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(ClientConfig{DNSServer: dnsURL})
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	seen := map[string]bool{}
+	for _, name := range names {
+		seen[name] = true
+	}
+	if !seen["bypass.example"] || !seen["localhost"] {
+		t.Fatalf("custom DNS names = %v, want both redirect destinations resolved", names)
+	}
+}
+
+func originURLPort(raw string) string {
+	u, _ := url.Parse(raw)
+	return u.Port()
 }
 
 func TestNewClientUsesDefaultRedirectLimit(t *testing.T) {

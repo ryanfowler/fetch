@@ -101,6 +101,7 @@ prettier -w .
 
 Retryable requests replay bodies by calling `req.GetBody` when available, reopening file-backed bodies directly when possible, and only spooling the original body to a temp file as a final fallback for one-shot streams. This avoids holding large uploads in memory and keeps retries working for closable bodies like `*os.File`.
 Multipart `-F` request bodies are produced by a replayable factory with a stable boundary; request construction sets `req.GetBody` so 307/308 redirects can resend them without relying on retry/digest spooling.
+Redirect handling preserves non-POST methods and replayable bodies for 301/302, applies strict origin credential boundaries, preserves same-origin custom Host values, and resolves each redirected destination through the configured DNS backend.
 
 ### Content Type Detection
 

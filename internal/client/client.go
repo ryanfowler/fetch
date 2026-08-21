@@ -32,7 +32,8 @@ import (
 
 // Client represents a wrapped HTTP client.
 type Client struct {
-	c *http.Client
+	c            *http.Client
+	maxRedirects int
 }
 
 // RedirectHop represents a single redirect in the chain.
@@ -56,6 +57,8 @@ type ctxRedirectCallbackKeyType int
 const (
 	ctxRedirectCallbackKey ctxRedirectCallbackKeyType = 1
 	ctxRequestObserverKey  ctxRedirectCallbackKeyType = 2
+	ctxRedirectCrossedKey  ctxRedirectCallbackKeyType = 3
+	ctxOriginCookiesKey    ctxRedirectCallbackKeyType = 4
 )
 
 // WithRedirectCallback returns a context with a redirect callback.
@@ -64,8 +67,20 @@ func WithRedirectCallback(ctx context.Context, cb RedirectCallback) context.Cont
 }
 
 // WithRequestObserver attaches an observer to a request context. The
-// transport invokes it for the initial request and redirect requests.
+// transport invokes it for the initial request and redirect requests. When an
+// observer is already present, the new observer runs first. This lets request
+// signing happen before observers record the effective request.
 func WithRequestObserver(ctx context.Context, observer RequestObserver) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	if existing := requestObserver(ctx); existing != nil {
+		newObserver := observer
+		observer = func(req *http.Request) {
+			newObserver(req)
+			existing(req)
+		}
+	}
 	return context.WithValue(ctx, ctxRequestObserverKey, observer)
 }
 
@@ -149,15 +164,40 @@ func NewClient(cfg ClientConfig) *Client {
 		transport = rt
 	}
 
-	// Set up the redirect handler.
+	// Set up the redirect handler. Cookie filtering is installed when a jar is
+	// attached, because net/http adds jar cookies after CheckRedirect runs.
 	client := &http.Client{Transport: transport}
 	maxRedirects := 10
 	if cfg.Redirects != nil {
 		maxRedirects = *cfg.Redirects
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		// Call request observers before redirect callbacks. At this point
-		// net/http has already created the replay body for the new request.
+		// Do not inspect or replay a body when redirects are disabled or the
+		// redirect limit has already been reached.
+		if maxRedirects == 0 {
+			return http.ErrUseLastResponse
+		}
+		if maxRedirects > 0 && len(via) > maxRedirects {
+			return fmt.Errorf("exceeded maximum number of redirects: %d", maxRedirects)
+		}
+
+		// net/http applies its historical redirect policy before this callback:
+		// it changes every non-GET/HEAD method to GET for 301/302/303 and drops
+		// the body. Restore the fetch policy before observers inspect the next
+		// request.
+		if err := normalizeRedirectRequest(req, via); err != nil {
+			return err
+		}
+
+		// Apply the credential boundary after net/http has copied the initial
+		// headers. The standard library compares host suffixes, but an HTTP
+		// origin also includes scheme and port; credentials must not cross any
+		// origin boundary.
+		applyRedirectCredentialPolicy(req, via)
+
+		// Call request observers after redirect normalization and credential
+		// filtering. At this point net/http has already created the replay body
+		// for the new request.
 		if observer := requestObserver(req.Context()); observer != nil {
 			observer(req)
 		}
@@ -181,17 +221,10 @@ func NewClient(cfg ClientConfig) *Client {
 			return fmt.Errorf("cannot replay request body for redirect: %w", body.ErrNotReplayable)
 		}
 
-		// Check redirect limits.
-		if maxRedirects == 0 {
-			return http.ErrUseLastResponse
-		}
-		if maxRedirects > 0 && len(via) > maxRedirects {
-			return fmt.Errorf("exceeded maximum number of redirects: %d", maxRedirects)
-		}
 		return nil
 	}
 
-	return &Client{c: client}
+	return &Client{c: client, maxRedirects: maxRedirects}
 }
 
 // wrapDialWithConnectTimeout wraps a dial function with a connect timeout sub-context.
@@ -450,6 +483,11 @@ func (c *Client) HTTPClient() *http.Client {
 // SetJar sets the cookie jar on the HTTP client.
 func (c *Client) SetJar(jar http.CookieJar) {
 	c.c.Jar = jar
+	if jar != nil {
+		if _, wrapped := c.c.Transport.(*redirectCredentialTransport); !wrapped {
+			c.c.Transport = &redirectCredentialTransport{base: c.c.Transport}
+		}
+	}
 }
 
 // RequestConfig represents the configuration for creating an HTTP request.
@@ -672,6 +710,269 @@ func requestBodySource(r io.Reader, contentType string) (*body.Body, error) {
 	return body.NewReader(r, -1, contentType), nil
 }
 
+// SameOrigin reports whether two URLs have the same HTTP origin. URL.Host is
+// not compared directly because an omitted default port and its explicit form
+// represent the same origin.
+func SameOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil || !strings.EqualFold(a.Scheme, b.Scheme) {
+		return false
+	}
+	if !strings.EqualFold(a.Hostname(), b.Hostname()) {
+		return false
+	}
+	return originPort(a) == originPort(b)
+}
+
+func originPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+func normalizeRedirectRequest(req *http.Request, via []*http.Request) error {
+	if req == nil || len(via) == 0 || req.Response == nil {
+		return nil
+	}
+	previous := via[len(via)-1]
+	status := req.Response.StatusCode
+
+	// Go's redirect behavior is intentionally conservative for 301/302. The
+	// fetch contract preserves every method except POST, and therefore must
+	// restore the method and replay the body for PUT, PATCH, and other methods.
+	if status == http.StatusMovedPermanently || status == http.StatusFound {
+		if strings.EqualFold(previous.Method, http.MethodPost) {
+			req.Method = http.MethodGet
+			clearRedirectBody(req)
+			return nil
+		}
+		req.Method = previous.Method
+		if err := restoreRedirectBody(req, previous, via[0]); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// 303 changes every method to GET except HEAD. net/http has already made
+	// this change, but explicitly clear all entity state so a custom header or
+	// zero-length body cannot survive the rewrite.
+	if status == http.StatusSeeOther {
+		if strings.EqualFold(previous.Method, http.MethodHead) {
+			req.Method = http.MethodHead
+		} else {
+			req.Method = http.MethodGet
+		}
+		clearRedirectBody(req)
+		return nil
+	}
+
+	// 307/308 preserve the immediately previous request. Go's internal
+	// includeBody flag is based on the initial request and can therefore lose a
+	// body after an earlier 301/302. Restore from the previous hop instead.
+	if status == http.StatusTemporaryRedirect || status == http.StatusPermanentRedirect {
+		req.Method = previous.Method
+		if previous.Body == nil || previous.Body == http.NoBody {
+			clearRedirectBody(req)
+			return nil
+		}
+		return restoreRedirectBody(req, previous, via[0])
+	}
+
+	return nil
+}
+
+func restoreRedirectBody(req, previous, initial *http.Request) error {
+	if previous.Body == nil || previous.Body == http.NoBody {
+		clearRedirectBody(req)
+		return nil
+	}
+	if previous.GetBody == nil {
+		return fmt.Errorf("cannot replay request body for redirect: %w", body.ErrNotReplayable)
+	}
+	replay, err := previous.GetBody()
+	if err != nil {
+		return fmt.Errorf("cannot replay request body for redirect: %w", err)
+	}
+	req.Body = replay
+	req.GetBody = previous.GetBody
+	req.ContentLength = previous.ContentLength
+	req.TransferEncoding = append([]string(nil), previous.TransferEncoding...)
+
+	// net/http removes body-related headers when it creates the GET request.
+	// Restore the initial values for a method whose body is retained. Header
+	// values are cloned so later redirect hops cannot mutate the initial map.
+	for _, name := range redirectEntityHeaders() {
+		req.Header.Del(name)
+		for _, value := range initial.Header.Values(name) {
+			req.Header.Add(name, value)
+		}
+	}
+	return nil
+}
+
+func redirectEntityHeaders() []string {
+	return []string{"Content-Length", "Content-Type", "Content-Encoding", "Content-Language", "Content-Location", "Content-Range", "Content-MD5", "Content-Digest", "Content-Disposition", "Transfer-Encoding"}
+}
+
+func cloneOriginCookieSet(cookies originCookieSet) originCookieSet {
+	clone := make(originCookieSet, len(cookies))
+	for name := range cookies {
+		clone[name] = struct{}{}
+	}
+	return clone
+}
+
+func clearRedirectBody(req *http.Request) {
+	req.Body = http.NoBody
+	req.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
+	req.ContentLength = 0
+	req.TransferEncoding = nil
+	for _, name := range redirectEntityHeaders() {
+		req.Header.Del(name)
+	}
+}
+
+type originCookieSet map[string]struct{}
+
+func withOriginCookies(req *http.Request, jar http.CookieJar) *http.Request {
+	cookies := make(originCookieSet)
+	for _, value := range req.Header.Values("Cookie") {
+		addCookieNames(cookies, value)
+	}
+	for _, cookie := range jar.Cookies(req.URL) {
+		cookies[cookie.Name] = struct{}{}
+	}
+	return req.WithContext(context.WithValue(req.Context(), ctxOriginCookiesKey, cookies))
+}
+
+func addCookieNames(set originCookieSet, header string) {
+	for pair := range strings.SplitSeq(header, ";") {
+		name, _, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		if ok && name != "" {
+			set[name] = struct{}{}
+		}
+	}
+}
+
+// RedirectCrossedOrigin reports whether a request followed a redirect chain
+// that crossed an origin boundary. The value remains true if a later hop
+// returns to the original origin, preventing credentials from being restored.
+func RedirectCrossedOrigin(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	crossed, _ := req.Context().Value(ctxRedirectCrossedKey).(bool)
+	return crossed
+}
+
+// redirectCredentialTransport runs after net/http has added cookies from its
+// CookieJar. Remove only cookies that belonged to the original origin, while
+// allowing cookies scoped to the redirected destination to remain usable.
+type redirectCredentialTransport struct {
+	base http.RoundTripper
+}
+
+func (t *redirectCredentialTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !RedirectCrossedOrigin(req) {
+		return t.base.RoundTrip(req)
+	}
+	cookies, _ := req.Context().Value(ctxOriginCookiesKey).(originCookieSet)
+	if len(cookies) == 0 || req.Header.Get("Cookie") == "" {
+		return t.base.RoundTrip(req)
+	}
+	clone := req.Clone(req.Context())
+	var kept []string
+	for _, header := range req.Header.Values("Cookie") {
+		for pair := range strings.SplitSeq(header, ";") {
+			pair = strings.TrimSpace(pair)
+			name, _, ok := strings.Cut(pair, "=")
+			if !ok || name == "" {
+				continue
+			}
+			if _, forbidden := cookies[name]; !forbidden {
+				kept = append(kept, pair)
+			}
+		}
+	}
+	clone.Header.Del("Cookie")
+	if len(kept) > 0 {
+		clone.Header.Set("Cookie", strings.Join(kept, "; "))
+	}
+	return t.base.RoundTrip(clone)
+}
+
+func (t *redirectCredentialTransport) CloseIdleConnections() {
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+func (t *redirectCredentialTransport) Close() error {
+	if closer, ok := t.base.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request) {
+	if req == nil || len(via) == 0 || req.URL == nil {
+		return
+	}
+	initial := via[0]
+	crossed := !SameOrigin(initial.URL, req.URL)
+	if !crossed {
+		for _, previous := range via {
+			if !SameOrigin(initial.URL, previous.URL) {
+				crossed = true
+				break
+			}
+		}
+	}
+
+	if crossed {
+		cookies, _ := req.Context().Value(ctxOriginCookiesKey).(originCookieSet)
+		if cookies == nil {
+			cookies = make(originCookieSet)
+		} else {
+			cookies = cloneOriginCookieSet(cookies)
+		}
+		if req.Response != nil {
+			for _, cookie := range req.Response.Cookies() {
+				cookies[cookie.Name] = struct{}{}
+			}
+		}
+		ctx := context.WithValue(req.Context(), ctxRedirectCrossedKey, true)
+		ctx = context.WithValue(ctx, ctxOriginCookiesKey, cookies)
+		*req = *req.WithContext(ctx)
+		for _, name := range []string{"Authorization", "Cookie", "Cookie2", "Proxy-Authorization", "Www-Authenticate", "Proxy-Authenticate"} {
+			req.Header.Del(name)
+		}
+		req.Host = ""
+		// Host can also be represented in Header on requests built outside
+		// NewRequest. The transport uses Request.Host, but remove both forms.
+		req.Header.Del("Host")
+		return
+	}
+
+	// net/http only preserves a custom Host for relative redirects. Keep it
+	// for absolute same-origin redirects as well.
+	if req.Host == "" {
+		for i := len(via) - 1; i >= 0; i-- {
+			if via[i].Host != "" {
+				req.Host = via[i].Host
+				break
+			}
+		}
+	}
+}
+
 func newSeekableBody(rs io.ReadSeeker, contentType string) *body.Body {
 	if r, ok := rs.(interface {
 		io.ReadSeeker
@@ -690,6 +991,9 @@ func newSeekableBody(rs io.ReadSeeker, contentType string) *body.Body {
 
 // Do performs the provided http Request, returning the response.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	if c.c.Jar != nil {
+		req = withOriginCookies(req, c.c.Jar)
+	}
 	if observer := requestObserver(req.Context()); observer != nil {
 		observer(req)
 	}
@@ -697,6 +1001,24 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// net/http intentionally stops following a 307/308 when a body has no
+	// GetBody function. That default is too quiet for a CLI: a request that
+	// requires replay must fail clearly rather than look like a successful
+	// final redirect response. Respect --redirects 0, which explicitly asks
+	// for the redirect response instead of following it.
+	finalRequest := req
+	if resp != nil && resp.Request != nil {
+		finalRequest = resp.Request
+	}
+	if c.maxRedirects != 0 && resp != nil && finalRequest != nil &&
+		(resp.StatusCode == http.StatusTemporaryRedirect || resp.StatusCode == http.StatusPermanentRedirect) &&
+		resp.Header.Get("Location") != "" &&
+		finalRequest.Body != nil && finalRequest.Body != http.NoBody && finalRequest.GetBody == nil {
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("cannot replay request body for redirect: %w", body.ErrNotReplayable)
+	}
+
 	rememberWireContentLength(resp, req)
 
 	// Decode only the encodings permitted by the request's compression mode.
