@@ -124,7 +124,7 @@ fetch --basic username:password example.com
 
 ### `--digest USER:PASS`
 
-HTTP Digest Authentication. Uses a challenge-response handshake to avoid sending credentials in plain text.
+HTTP Digest Authentication. Uses a bounded RFC 7616 challenge-response handshake. Supports MD5, MD5-sess, SHA-256, SHA-256-sess, SHA-512-256, and SHA-512-256-sess, with no qop or qop=auth challenges.
 
 ```sh
 fetch --digest username:password example.com

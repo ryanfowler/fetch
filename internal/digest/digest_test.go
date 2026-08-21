@@ -283,3 +283,98 @@ func TestResponseUnsupportedAlgorithm(t *testing.T) {
 		t.Fatal("expected error for unsupported algorithm, got nil")
 	}
 }
+
+func TestParseChallengeRejectsMalformedQuotedStrings(t *testing.T) {
+	for _, input := range []string{
+		`Digest realm="test, nonce="abc123"`,
+		`Digest realm="test", nonce="abc123\\`,
+		`Digest realm="test", nonce="abc` + "\x01" + `"`,
+	} {
+		if _, err := ParseChallenge(input); err == nil {
+			t.Errorf("ParseChallenge(%q) succeeded, want malformed challenge", input)
+		}
+	}
+}
+
+func TestParseChallengePreservesUTF8AndBackslashes(t *testing.T) {
+	got, err := ParseChallenge(`Digest realm="café \"déjà\" C:\\", nonce="n\\once"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Realm != `café "déjà" C:\` || got.Nonce != `n\once` {
+		t.Fatalf("decoded challenge = %#v", got)
+	}
+}
+
+func TestResponseSupportsAllRFC7616AlgorithmsAndQOPLists(t *testing.T) {
+	req, err := http.NewRequest("GET", "http://example.com/path", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, algorithm := range []string{"MD5", "MD5-sess", "SHA-256", "SHA-256-sess", "SHA-512-256", "SHA-512-256-sess"} {
+		auth, err := Response(req, &Challenge{
+			Realm: "realm", Nonce: "nonce", Algorithm: algorithm, QOP: "AUTH-INT, AuTh",
+		}, " user", "pass ")
+		if err != nil {
+			t.Fatalf("algorithm %s: %v", algorithm, err)
+		}
+		if !strings.Contains(strings.ToLower(auth), "qop=auth") || !strings.Contains(auth, `username=" user"`) {
+			t.Fatalf("algorithm %s produced invalid authorization: %s", algorithm, auth)
+		}
+	}
+}
+
+func TestResponseMatchesRFC7616Vectors(t *testing.T) {
+	req, err := http.NewRequest("GET", "http://example.com/dir/index.html", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge := func(algorithm, qop string) *Challenge {
+		return &Challenge{Realm: "testrealm@host.com", Nonce: "dcd98b7102dd2f0e8b11d0f600bfb0c093", Algorithm: algorithm, QOP: qop}
+	}
+	vectors := map[string]string{
+		"MD5":              "6629fae49393a05397450978507c4ef1",
+		"MD5-sess":         "8e3825c57e897f5a0dec6c2d4e5059d0",
+		"SHA-256":          "5abdd07184ba512a22c53f41470e5eea7dcaa3a93a59b630c13dfe0a5dc6e38b",
+		"SHA-256-sess":     "b8822e12417cb7750f4e2b8515f0dcf25b7dd26993e80bee1426201446a7f59b",
+		"SHA-512-256":      "f23c08ec7334a881f8286e68450ddbd9f0cd91c41481f0e1433604da8113c6dc",
+		"SHA-512-256-sess": "0d21f0db3ec5cda5b850c0afa3bc29b4a3c5a6191959ff1baf511d4b38eb6b1e",
+	}
+	for algorithm, want := range vectors {
+		chal := challenge(algorithm, "auth")
+		hashFunc, err := hashForAlgorithm(strings.ToLower(algorithm))
+		if err != nil {
+			t.Fatal(err)
+		}
+		auth, err := responseWithCnonce(req, chal, "Mufasa", "Circle Of Life", strings.ToLower(algorithm), hashFunc, "0a4f113b")
+		if err != nil || !strings.Contains(auth, `response="`+want+`"`) {
+			t.Fatalf("%s vector: auth=%q err=%v", algorithm, auth, err)
+		}
+	}
+
+	// The no-qop form uses the same RFC credentials and must not emit qop/nc.
+	chal := challenge("MD5", "")
+	hashFunc, _ := hashForAlgorithm("md5")
+	auth, err := responseWithCnonce(req, chal, "Mufasa", "Circle Of Life", "md5", hashFunc, "")
+	if err != nil || !strings.Contains(auth, `response="670fd8c2df070c60b045671b8b24ff02"`) || strings.Contains(auth, "qop=") || strings.Contains(auth, "nc=") {
+		t.Fatalf("no-qop vector: auth=%q err=%v", auth, err)
+	}
+}
+
+func TestResponseEscapesBackslashesAndQuotes(t *testing.T) {
+	req, err := http.NewRequest("GET", "http://example.com/a\\b\"c", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := Response(req, &Challenge{
+		Realm: `ré\alm"`, Nonce: `n\once"`, Opaque: `op\aque"`, Algorithm: "MD5",
+	}, `usér\name"`, "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`username="usér\\name\""`, `realm="ré\\alm\""`, `nonce="n\\once\""`, `opaque="op\\aque\""`} {
+		if !strings.Contains(auth, want) {
+			t.Errorf("authorization %q does not contain %q", auth, want)
+		}
+	}
+}

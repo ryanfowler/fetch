@@ -853,6 +853,16 @@ func TestDigestFlag(t *testing.T) {
 		}
 	})
 
+	t.Run("digest auth preserves credential whitespace", func(t *testing.T) {
+		app, err := Parse([]string{"--digest", " user : pass ", "http://example.com"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if app.Digest.Key != " user " || app.Digest.Val != " pass " {
+			t.Fatalf("credentials = %q:%q, want whitespace preserved", app.Digest.Key, app.Digest.Val)
+		}
+	})
+
 	t.Run("digest auth invalid format", func(t *testing.T) {
 		_, err := Parse([]string{"--digest", "nocolon", "http://example.com"})
 		if err == nil {
