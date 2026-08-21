@@ -115,15 +115,18 @@ type ClientConfig struct {
 	CACerts        []*x509.Certificate
 	ClientCert     *tls.Certificate
 	ConnectTimeout time.Duration
-	DNSServer      *url.URL
-	H2C            bool
-	HTTP           core.HTTPVersion
-	Insecure       bool
-	Proxy          *url.URL
-	Redirects      *int
-	TLSMax         uint16
-	TLSMin         uint16
-	UnixSocket     string
+	// ResolverEndpoint is the validated endpoint from CLI/config parsing.
+	// DNSServer remains for compatibility with direct internal callers/tests.
+	ResolverEndpoint *resolver.Endpoint
+	DNSServer        *url.URL
+	H2C              bool
+	HTTP             core.HTTPVersion
+	Insecure         bool
+	Proxy            *url.URL
+	Redirects        *int
+	TLSMax           uint16
+	TLSMin           uint16
+	UnixSocket       string
 }
 
 // NewClient returns an initialized Client given the provided configuration.
@@ -139,7 +142,7 @@ func NewClient(cfg ClientConfig) *Client {
 		TLSMin:     cfg.TLSMin,
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
-	res := resolver.New(resolver.Config{Server: cfg.DNSServer})
+	res := resolver.New(resolver.Config{Endpoint: cfg.ResolverEndpoint, Server: cfg.DNSServer})
 	baseDial := res.DialContext
 
 	if cfg.UnixSocket != "" {

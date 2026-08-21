@@ -6,7 +6,12 @@ This guide covers advanced networking, protocol, and TLS options in `fetch`.
 
 ### `--dns-server`
 
-Use a custom DNS server instead of the system resolver.
+Use a custom DNS server instead of the system resolver. The endpoint is
+validated before a request starts. Supported forms include bare UDP addresses,
+`udp://`, `tcp://`, `tls://`/`dot://`, `quic://`/`doq://`, and HTTPS DoH URLs.
+Non-DoH transports reject paths and queries; userinfo and fragments are never
+accepted. TCP, DoT, and DoQ endpoint forms are validated now and report an
+unsupported-transport error until their query transports are implemented.
 
 ### UDP DNS
 
@@ -25,7 +30,8 @@ fetch --dns-server "[2001:4860:4860::8888]:53" example.com
 
 ### DNS-over-HTTPS (DoH)
 
-Use HTTPS URL for encrypted DNS queries:
+Use an HTTPS URL for encrypted DNS queries. Plain HTTP is not accepted for
+configured resolver endpoints:
 
 ```sh
 # Cloudflare DoH

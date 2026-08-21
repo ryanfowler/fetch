@@ -7,39 +7,53 @@ import (
 	"net"
 	"net/http/httptrace"
 	"net/url"
+	"strings"
 )
 
-// Config controls hostname resolution. A nil Server uses the system resolver,
-// a URL with an empty scheme uses UDP DNS, and http/https URLs use DoH.
+// Config controls hostname resolution. Endpoint is the validated resolver
+// configuration used by production callers. Server is retained for callers
+// that construct resolver test fixtures directly.
 type Config struct {
-	Server *url.URL
+	Endpoint *Endpoint
+	Server   *url.URL
 }
 
 // Resolver resolves names and dials addresses using the configured DNS backend.
 type Resolver struct {
-	server *url.URL
+	endpoint *Endpoint
+	err      error
 }
 
-// Endpoint contains a parsed host:port address and its resolved IP addresses.
-type Endpoint struct {
+// ResolvedEndpoint contains a parsed host:port address and its resolved IP
+// addresses.
+type ResolvedEndpoint struct {
 	Host  string
 	Port  string
 	Addrs []net.IPAddr
 }
 
-// New returns a resolver for the provided config.
+// New returns a resolver for the provided config. Endpoint validation normally
+// happens while CLI/config values are parsed. Server supports existing internal
+// test fixtures and is converted once here for compatibility.
 func New(cfg Config) *Resolver {
-	return &Resolver{server: cfg.Server}
+	if cfg.Endpoint != nil {
+		return &Resolver{endpoint: cfg.Endpoint}
+	}
+	if cfg.Server == nil {
+		return &Resolver{}
+	}
+	endpoint, err := endpointFromURL(cfg.Server)
+	return &Resolver{endpoint: endpoint, err: err}
 }
 
-// NetResolver returns a net.Resolver for system or UDP DNS resolution. DoH
-// resolution cannot be represented as a net.Resolver, so nil is returned.
+// NetResolver returns a net.Resolver for system or UDP DNS resolution. DoH,
+// DoT, and DoQ resolution cannot be represented as a net.Resolver.
 func (r *Resolver) NetResolver() *net.Resolver {
-	if r == nil || r.server == nil {
+	if r == nil || r.endpoint == nil {
 		return net.DefaultResolver
 	}
-	if r.server.Scheme == "" {
-		return udpResolver(r.server.Host)
+	if r.endpoint.Transport == TransportUDP {
+		return udpResolver(r.endpoint.Address())
 	}
 	return nil
 }
@@ -50,39 +64,45 @@ func (r *Resolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr,
 		return []net.IPAddr{{IP: ip}}, nil
 	}
 
+	if r != nil && r.err != nil {
+		return nil, r.err
+	}
+
 	switch {
-	case r == nil || r.server == nil:
+	case r == nil || r.endpoint == nil:
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
 			return net.DefaultResolver.LookupIPAddr(ctx, host)
 		})
-	case r.server.Scheme == "":
-		res := udpResolver(r.server.Host)
+	case r.endpoint.Transport == TransportUDP:
+		res := udpResolver(r.endpoint.Address())
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
 			return res.LookupIPAddr(ctx, host)
 		})
-	default:
+	case r.endpoint.Transport == TransportHTTPS:
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
-			return lookupDOH(ctx, r.server, host)
+			return lookupDOH(ctx, r.endpoint.URL(), host)
 		})
+	default:
+		return nil, fmt.Errorf("resolver transport %s is not implemented", r.endpoint.Transport)
 	}
 }
 
 // ResolveAddress resolves the host portion of network address.
-func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) (Endpoint, error) {
+func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) (ResolvedEndpoint, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
-		return Endpoint{}, err
+		return ResolvedEndpoint{}, err
 	}
 
 	addrs, err := r.LookupIPAddr(ctx, host)
 	if err != nil {
-		return Endpoint{}, fmt.Errorf("lookup %s: %w", host, err)
+		return ResolvedEndpoint{}, fmt.Errorf("lookup %s: %w", host, err)
 	}
 	if len(addrs) == 0 {
-		return Endpoint{}, fmt.Errorf("lookup %s: no addresses found", host)
+		return ResolvedEndpoint{}, fmt.Errorf("lookup %s: no addresses found", host)
 	}
 
-	return Endpoint{Host: host, Port: port, Addrs: addrs}, nil
+	return ResolvedEndpoint{Host: host, Port: port, Addrs: addrs}, nil
 }
 
 // DialContext resolves address and dials each returned IP until one succeeds.
@@ -104,6 +124,24 @@ func (r *Resolver) DialContext(ctx context.Context, network, address string) (ne
 		err = errors.New("no addresses found")
 	}
 	return nil, err
+}
+
+func endpointFromURL(u *url.URL) (*Endpoint, error) {
+	if u == nil {
+		return nil, nil
+	}
+	if u.Scheme == "" {
+		value := u.Host
+		if value == "" {
+			return nil, endpointError(u.String(), "host is empty")
+		}
+		host, port, err := parseHostPort(value, 53)
+		if err != nil {
+			return nil, endpointError(u.String(), err.Error())
+		}
+		return newEndpoint(TransportUDP, host, port, "", "", "", false), nil
+	}
+	return parseEndpoint(u.String(), strings.EqualFold(u.Scheme, "http"))
 }
 
 func lookupWithTrace(ctx context.Context, host string, lookup func(context.Context) ([]net.IPAddr, error)) ([]net.IPAddr, error) {
