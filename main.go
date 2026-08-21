@@ -188,6 +188,7 @@ func main() {
 		GRPC:             app.GRPC,
 		GRPCDescribe:     app.GRPCDescribe,
 		GRPCList:         app.GRPCList,
+		HAR:              app.HAR,
 		Headers:          app.Cfg.Headers,
 		HTTP:             app.Cfg.HTTP,
 		IgnoreStatus:     getValue(app.Cfg.IgnoreStatus),

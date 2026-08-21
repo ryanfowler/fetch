@@ -280,7 +280,15 @@ Configure Encrypted ClientHello with `auto`, `on`, or `off`.
 ### `--har PATH`
 
 Record the final HTTP exchange in a HAR 1.2 sidecar at `PATH`. Standard output
-(`-`) is not a valid HAR destination.
+(`-`) is not a valid HAR destination. The sidecar contains request headers,
+cookies, credentials, and captured bodies. Protect it as sensitive data.
+
+Request and response bodies are captured up to 16 MiB each. UTF-8 text is stored
+as text. Binary data is stored as base64. Larger bodies omit their text and add
+the comment `Body omitted by fetch because it exceeds the 16 MiB HAR capture
+limit`. HAR records the final exchange after redirects and retries. It is not
+available for WebSocket sessions, DNS/TLS inspection, gRPC discovery, or
+`--dry-run`, and it cannot use the response output path.
 
 ### `--color OPTION`
 

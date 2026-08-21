@@ -45,14 +45,33 @@ type RedirectHop struct {
 // RedirectCallback is called when a redirect occurs.
 type RedirectCallback func(hop RedirectHop)
 
+// RequestObserver is called immediately before a request is sent and for
+// every request created by a redirect. Observers may replace the request body
+// and mutate the request context.
+type RequestObserver func(req *http.Request)
+
 // ctxRedirectCallbackKeyType is the context key type for storing redirect callback.
 type ctxRedirectCallbackKeyType int
 
-const ctxRedirectCallbackKey ctxRedirectCallbackKeyType = 1
+const (
+	ctxRedirectCallbackKey ctxRedirectCallbackKeyType = 1
+	ctxRequestObserverKey  ctxRedirectCallbackKeyType = 2
+)
 
 // WithRedirectCallback returns a context with a redirect callback.
 func WithRedirectCallback(ctx context.Context, cb RedirectCallback) context.Context {
 	return context.WithValue(ctx, ctxRedirectCallbackKey, cb)
+}
+
+// WithRequestObserver attaches an observer to a request context. The
+// transport invokes it for the initial request and redirect requests.
+func WithRequestObserver(ctx context.Context, observer RequestObserver) context.Context {
+	return context.WithValue(ctx, ctxRequestObserverKey, observer)
+}
+
+func requestObserver(ctx context.Context) RequestObserver {
+	observer, _ := ctx.Value(ctxRequestObserverKey).(RequestObserver)
+	return observer
 }
 
 // ClientConfig represents the optional configuration parameters for a Client.
@@ -137,6 +156,11 @@ func NewClient(cfg ClientConfig) *Client {
 		maxRedirects = *cfg.Redirects
 	}
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// Call request observers before redirect callbacks. At this point
+		// net/http has already created the replay body for the new request.
+		if observer := requestObserver(req.Context()); observer != nil {
+			observer(req)
+		}
 		// Call redirect callback if set.
 		// req is the new request about to be made.
 		// req.Response contains the redirect response that triggered this redirect.
@@ -346,6 +370,9 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 				packetConn.Close()
 				continue
 			}
+			if trace != nil && trace.GotConn != nil {
+				trace.GotConn(httptrace.GotConnInfo{Conn: traceAddrConn{remote: conn.RemoteAddr()}})
+			}
 			wrapper.packetConns = append(wrapper.packetConns, packetConn)
 			return conn, nil
 		}
@@ -355,6 +382,24 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 
 	return wrapper
 }
+
+// traceAddrConn supplies the peer address to httptrace for QUIC. A quic.Conn
+// is not a net.Conn because its application streams are separate, but the
+// trace callback only needs the address for HAR and diagnostics.
+type traceAddrConn struct{ remote net.Addr }
+
+func (c traceAddrConn) Read([]byte) (int, error) {
+	return 0, errors.New("QUIC trace connection is not readable")
+}
+func (c traceAddrConn) Write([]byte) (int, error) {
+	return 0, errors.New("QUIC trace connection is not writable")
+}
+func (c traceAddrConn) Close() error                     { return nil }
+func (c traceAddrConn) LocalAddr() net.Addr              { return nil }
+func (c traceAddrConn) RemoteAddr() net.Addr             { return c.remote }
+func (c traceAddrConn) SetDeadline(time.Time) error      { return nil }
+func (c traceAddrConn) SetReadDeadline(time.Time) error  { return nil }
+func (c traceAddrConn) SetWriteDeadline(time.Time) error { return nil }
 
 // http3TimingTransport wraps http3.Transport to provide TTFB trace hooks
 // and tracks PacketConns for cleanup.
@@ -645,6 +690,9 @@ func newSeekableBody(rs io.ReadSeeker, contentType string) *body.Body {
 
 // Do performs the provided http Request, returning the response.
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	if observer := requestObserver(req.Context()); observer != nil {
+		observer(req)
+	}
 	resp, err := c.c.Do(req)
 	if err != nil {
 		return nil, err

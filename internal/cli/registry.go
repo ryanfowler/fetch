@@ -335,6 +335,7 @@ var websocketExcluded = map[string][]string{
 	"grpc-describe": {"ws", "wss"}, "grpc-list": {"ws", "wss"}, "multipart": {"ws", "wss"},
 	"output": {"ws", "wss"}, "remote-header-name": {"ws", "wss"}, "remote-name": {"ws", "wss"},
 	"retry": {"ws", "wss"}, "retry-delay": {"ws", "wss"}, "xml": {"ws", "wss"},
+	"har": {"ws", "wss"},
 }
 
 var fromCurlOptions = map[string]bool{
@@ -359,10 +360,13 @@ var flagDefinitions = map[string]Flag{
 	"compress":  {},
 	"no-encode": {},
 	"ech":       {},
-	"har":       {},
-	"pager":     {},
-	"no-pager":  {},
-	"skill":     {Conflicts: []string{"install-skill", "uninstall-skill"}},
+	"har": {
+		Conflicts:     []string{"dry-run", "inspect-dns", "inspect-tls", "grpc-list", "grpc-describe"},
+		UnsupportedIn: []OptionMode{ModeGRPCDiscovery},
+	},
+	"pager":    {},
+	"no-pager": {},
+	"skill":    {Conflicts: []string{"install-skill", "uninstall-skill"}},
 	"install-skill": {
 		Conflicts: []string{"skill", "uninstall-skill"},
 	},

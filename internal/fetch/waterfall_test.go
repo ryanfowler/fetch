@@ -272,17 +272,23 @@ func TestRenderWaterfall_NoColumnOverlap(t *testing.T) {
 
 func TestTimedReader_WallTime(t *testing.T) {
 	data := "hello world"
-	r := newTimedReader(io.NopCloser(strings.NewReader(data)))
+	r := newTimedReader(io.NopCloser(sleepingReader{reader: strings.NewReader(data)}))
 
 	buf := make([]byte, 5)
-	r.Read(buf)
-	time.Sleep(10 * time.Millisecond)
-	r.Read(buf)
+	_, _ = r.Read(buf)
+	_, _ = r.Read(buf)
 
 	d := r.wallTime()
 	if d < 10*time.Millisecond {
-		t.Errorf("expected wall time >= 10ms, got %v", d)
+		t.Errorf("expected source read time >= 10ms, got %v", d)
 	}
+}
+
+type sleepingReader struct{ reader io.Reader }
+
+func (r sleepingReader) Read(p []byte) (int, error) {
+	time.Sleep(5 * time.Millisecond)
+	return r.reader.Read(p)
 }
 
 func TestTimedReader_NoReads(t *testing.T) {
