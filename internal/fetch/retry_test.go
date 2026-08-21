@@ -554,6 +554,71 @@ func TestDoOnceDigestAfterRedirectUsesChallengedRequest(t *testing.T) {
 	}
 }
 
+func TestDoOnceRetriesOneStaleDigestNonce(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests++
+		switch requests {
+		case 1:
+			if req.Header.Get("Authorization") != "" {
+				t.Errorf("initial request unexpectedly had authorization")
+			}
+			w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="first", qop="auth", algorithm="SHA-256"`)
+			w.WriteHeader(http.StatusUnauthorized)
+		case 2:
+			if !strings.HasPrefix(req.Header.Get("Authorization"), "Digest ") {
+				t.Errorf("first digest retry had no authorization: %q", req.Header.Get("Authorization"))
+			}
+			w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="second", qop="auth", algorithm="SHA-256", stale="true"`)
+			w.WriteHeader(http.StatusUnauthorized)
+		case 3:
+			if !strings.Contains(req.Header.Get("Authorization"), `nonce="second"`) {
+				t.Errorf("stale retry used the wrong nonce: %q", req.Header.Get("Authorization"))
+			}
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := client.NewClient(client.ClientConfig{})
+	defer c.Close()
+	resp, err := doOnce(&Request{Digest: &core.KeyVal[string]{Key: "user", Val: "pass"}}, c, req, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || requests != 3 {
+		t.Fatalf("status = %d after %d requests, want 200 after 3", resp.StatusCode, requests)
+	}
+}
+
+func TestDoOnceSurfacesUnsupportedDigestChallenge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="nonce", qop="auth-int", algorithm="MD5"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := client.NewClient(client.ClientConfig{})
+	defer c.Close()
+	resp, err := doOnce(&Request{Digest: &core.KeyVal[string]{Key: "user", Val: "pass"}}, c, req, nil)
+	if resp != nil {
+		resp.Body.Close()
+		t.Fatal("unsupported challenge returned a response")
+	}
+	if err == nil || !strings.Contains(err.Error(), "unsupported digest authentication challenge") {
+		t.Fatalf("error = %v, want unsupported challenge diagnostic", err)
+	}
+}
+
 func TestRetryableRequestSetsGetBodyForMultipartRedirect(t *testing.T) {
 	var startHits, finalHits int
 	var finalMethod, finalBody, finalContentType string

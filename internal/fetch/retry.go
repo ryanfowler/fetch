@@ -308,74 +308,115 @@ func clearAWSHeaders(req *http.Request) {
 	}
 }
 
-// doOnce performs a single request, handling digest auth challenge-response
-// if configured. If the server responds with 401 and a Digest WWW-Authenticate
-// header, the request body is replayed and the request is retried with the
-// computed digest Authorization header.
+const maxDigestStaleRetries = 1
+
+// doOnce performs a request and the bounded Digest challenge-response
+// lifecycle. The client is deliberately supplied by the caller and remains
+// alive while the authenticated response body is consumed. This matters for
+// transports whose response stream is owned by a connection pool.
 func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayableBody) (*http.Response, error) {
 	resp, err := c.Do(req)
-	if err != nil || r.Digest == nil || resp.StatusCode != http.StatusUnauthorized {
+	if err != nil || resp == nil || r.Digest == nil || resp.StatusCode != http.StatusUnauthorized {
 		return resp, err
 	}
 
-	wwwAuth := findDigestChallenge(resp.Header)
-	if wwwAuth == "" {
-		return resp, nil
-	}
-
-	chal, err := digest.ParseChallenge(wwwAuth)
-	if err != nil {
-		return resp, nil
-	}
-
-	challengedReq := resp.Request
-	if challengedReq == nil {
-		challengedReq = req
-	}
-	// Digest credentials are scoped to the request origin. A challenge after
-	// a cross-origin redirect must not cause the credentials configured for the
-	// original URL to be sent to the redirected host.
-	if client.RedirectCrossedOrigin(challengedReq) || !client.SameOrigin(req.URL, challengedReq.URL) {
-		return resp, nil
-	}
-
-	auth, err := digest.Response(challengedReq, chal, r.Digest.Key, r.Digest.Val)
-	if err != nil {
-		return resp, nil
-	}
-
-	// Replay the request body only if the challenged request still has one.
-	var body io.ReadCloser
-	if challengedReq.Body != nil && challengedReq.Body != http.NoBody {
-		if replayer != nil {
-			body, err = replayer.reset()
-			if err != nil {
-				return resp, nil
-			}
-		} else if challengedReq.GetBody != nil {
-			body, err = challengedReq.GetBody()
-			if err != nil {
-				return resp, nil
-			}
-		} else {
-			// Cannot replay body, return the original 401.
+	staleRetries := 0
+	authenticatedRetry := false
+	currentReq := req
+	for {
+		wwwAuth := findDigestChallenge(resp.Header)
+		if wwwAuth == "" {
 			return resp, nil
 		}
-	}
 
-	if err := drainResponseBody(challengedReq.Context(), resp.Body); err != nil {
-		if cause := contextCause(challengedReq.Context()); cause != nil {
-			_ = resp.Body.Close()
-			return resp, cause
+		chal, err := digest.ParseChallenge(wwwAuth)
+		if err != nil {
+			return rejectDigestResponse(resp, fmt.Errorf("invalid digest authentication challenge: %w", err))
 		}
+
+		challengedReq := resp.Request
+		if challengedReq == nil {
+			challengedReq = currentReq
+		}
+		// Digest credentials are scoped to the request origin. A challenge after
+		// a cross-origin redirect must not cause credentials for the original
+		// origin to be sent to the redirected host.
+		if client.RedirectCrossedOrigin(challengedReq) || !client.SameOrigin(req.URL, challengedReq.URL) {
+			return resp, nil
+		}
+
+		// A second challenge is useful only when the server explicitly marks its
+		// nonce stale. Limit this path so a hostile server cannot create an
+		// authentication retry loop.
+		if authenticatedRetry {
+			if !strings.EqualFold(strings.TrimSpace(chal.Stale), "true") || staleRetries >= maxDigestStaleRetries {
+				return resp, nil
+			}
+			staleRetries++
+		}
+
+		auth, err := digest.Response(challengedReq, chal, r.Digest.Key, r.Digest.Val)
+		if err != nil {
+			return rejectDigestResponse(resp, fmt.Errorf("unsupported digest authentication challenge: %w", err))
+		}
+
+		// Replay the request body only if the challenged request still has one.
+		var requestBody io.ReadCloser
+		if challengedReq.Body != nil && challengedReq.Body != http.NoBody {
+			if replayer != nil {
+				requestBody, err = replayer.reset()
+			} else if challengedReq.GetBody != nil {
+				requestBody, err = challengedReq.GetBody()
+			} else {
+				err = body.ErrNotReplayable
+			}
+			if err != nil {
+				return rejectDigestResponse(resp, fmt.Errorf("digest authentication requires a replayable request body: %w", err))
+			}
+		}
+
+		// Drain only a bounded prefix. Closing the challenge response before the
+		// authenticated response is returned also prevents an unread challenge
+		// body from leaking a transport resource.
+		if err := drainResponseBody(challengedReq.Context(), resp.Body); err != nil {
+			if cause := contextCause(challengedReq.Context()); cause != nil {
+				_ = resp.Body.Close()
+				if requestBody != nil {
+					_ = requestBody.Close()
+				}
+				return nil, cause
+			}
+		}
+		_ = resp.Body.Close()
+
+		req2 := challengedReq.Clone(challengedReq.Context())
+		req2.Body = requestBody
+		if replayer != nil {
+			req2.GetBody = replayer.open
+		}
+		req2.Header.Set("Authorization", auth)
+
+		// Keep c alive: callers consume the returned body before their normal
+		// client cleanup runs. Do not create a short-lived client for this retry.
+		resp, err = c.Do(req2)
+		if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+			return resp, err
+		}
+		currentReq = req2
+		authenticatedRetry = true
 	}
-	_ = resp.Body.Close()
+}
 
-	req2 := challengedReq.Clone(challengedReq.Context())
-	req2.Body = body
-	req2.Header.Set("Authorization", auth)
-
-	return c.Do(req2)
+func rejectDigestResponse(resp *http.Response, err error) (*http.Response, error) {
+	if resp != nil {
+		ctx := context.Background()
+		if resp.Request != nil && resp.Request.Context() != nil {
+			ctx = resp.Request.Context()
+		}
+		_ = drainResponseBody(ctx, resp.Body)
+		_ = resp.Body.Close()
+	}
+	return nil, err
 }
 
 // findDigestChallenge searches the WWW-Authenticate headers for a Digest

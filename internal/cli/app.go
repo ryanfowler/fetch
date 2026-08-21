@@ -623,7 +623,7 @@ func (a *App) parseAWSSigv4Flag(value string) error {
 }
 
 func (a *App) parseBasicFlag(value string) error {
-	user, pass, ok := core.CutTrimmed(value, ":")
+	user, pass, ok := strings.Cut(value, ":")
 	if !ok {
 		const usage = "format must be <USERNAME:PASSWORD>"
 		return core.NewValueError("basic", value, usage, false)
@@ -633,7 +633,7 @@ func (a *App) parseBasicFlag(value string) error {
 }
 
 func (a *App) parseDigestFlag(value string) error {
-	user, pass, ok := core.CutTrimmed(value, ":")
+	user, pass, ok := strings.Cut(value, ":")
 	if !ok {
 		const usage = "format must be <USERNAME:PASSWORD>"
 		return core.NewValueError("digest", value, usage, false)
