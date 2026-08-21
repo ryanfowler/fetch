@@ -235,6 +235,7 @@ type Record struct {
 	Type       uint16
 	Class      uint16
 	TTL        uint32
+	TTLPresent bool
 	RData      []byte
 	Target     *Name
 	Target2    *Name

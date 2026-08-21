@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/http/httptrace"
 	"net/url"
 	"strings"
@@ -24,11 +25,14 @@ type Config struct {
 	// package to the application client.
 	DialContext DialContextFunc
 	Bootstrap   BootstrapFunc
-	TLSConfig   *tls.Config
-	CACerts     []*x509.Certificate
-	Insecure    bool
-	TLSMin      uint16
-	TLSMax      uint16
+	// RoundTripper is used only by DoH. It lets the application inject its
+	// proxy and resolver-aware HTTP transport without duplicating DoH logic.
+	RoundTripper http.RoundTripper
+	TLSConfig    *tls.Config
+	CACerts      []*x509.Certificate
+	Insecure     bool
+	TLSMin       uint16
+	TLSMax       uint16
 }
 
 // Resolver resolves names and dials addresses using the configured DNS backend.
@@ -36,13 +40,15 @@ type Resolver struct {
 	endpoint *Endpoint
 	err      error
 
-	dialContext DialContextFunc
-	bootstrap   BootstrapFunc
-	tlsConfig   *tls.Config
-	caCerts     []*x509.Certificate
-	insecure    bool
-	tlsMin      uint16
-	tlsMax      uint16
+	dialContext  DialContextFunc
+	bootstrap    BootstrapFunc
+	roundTripper http.RoundTripper
+	dohClient    *DOHClient
+	tlsConfig    *tls.Config
+	caCerts      []*x509.Certificate
+	insecure     bool
+	tlsMin       uint16
+	tlsMax       uint16
 }
 
 // ResolvedEndpoint contains a parsed host:port address and its resolved IP
@@ -62,17 +68,32 @@ func New(cfg Config) *Resolver {
 	if endpoint == nil && cfg.Server != nil {
 		endpoint, err = endpointFromURL(cfg.Server)
 	}
-	return &Resolver{
-		endpoint:    endpoint,
-		err:         err,
-		dialContext: cfg.DialContext,
-		bootstrap:   cfg.Bootstrap,
-		tlsConfig:   cfg.TLSConfig,
-		caCerts:     cfg.CACerts,
-		insecure:    cfg.Insecure,
-		tlsMin:      cfg.TLSMin,
-		tlsMax:      cfg.TLSMax,
+	r := &Resolver{
+		endpoint:     endpoint,
+		err:          err,
+		dialContext:  cfg.DialContext,
+		bootstrap:    cfg.Bootstrap,
+		roundTripper: cfg.RoundTripper,
+		tlsConfig:    cfg.TLSConfig,
+		caCerts:      cfg.CACerts,
+		insecure:     cfg.Insecure,
+		tlsMin:       cfg.TLSMin,
+		tlsMax:       cfg.TLSMax,
 	}
+	if r.err == nil && endpoint != nil && endpoint.Transport == TransportHTTPS {
+		r.dohClient, r.err = NewDOHClient(DOHConfig{
+			Endpoint:     endpoint,
+			RoundTripper: cfg.RoundTripper,
+			DialContext:  cfg.DialContext,
+			Bootstrap:    cfg.Bootstrap,
+			TLSConfig:    cfg.TLSConfig,
+			CACerts:      cfg.CACerts,
+			Insecure:     cfg.Insecure,
+			TLSMin:       cfg.TLSMin,
+			TLSMax:       cfg.TLSMax,
+		})
+	}
+	return r
 }
 
 // NetResolver returns a net.Resolver for system or UDP DNS resolution. DoH,
@@ -108,7 +129,10 @@ func (r *Resolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr,
 		})
 	case r.endpoint.Transport == TransportHTTPS:
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
-			return lookupDOH(ctx, r.endpoint.URL(), host)
+			if r.dohClient == nil {
+				return nil, errors.New("DoH client is not configured")
+			}
+			return lookupDOHClient(ctx, r.dohClient, host)
 		})
 	case r.endpoint.Transport == TransportTCP || r.endpoint.Transport == TransportTLS:
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {

@@ -3,6 +3,9 @@ package resolver
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +13,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -20,9 +25,170 @@ const (
 	dnsTypeAAAA = 28
 )
 
-func lookupDOH(ctx context.Context, serverURL *url.URL, host string) ([]net.IPAddr, error) {
-	a, aErr := LookupDOHType(ctx, serverURL, host, "A", dnsTypeA)
-	aaaa, aaaaErr := LookupDOHType(ctx, serverURL, host, "AAAA", dnsTypeAAAA)
+// DOHConfig controls one DNS-over-HTTPS client. RoundTripper and DialContext
+// are intentionally injectable: the application can provide its proxy and
+// resolver-aware dial policy without duplicating DoH parsing and validation.
+type DOHConfig struct {
+	Endpoint     *Endpoint
+	ServerURL    *url.URL
+	RoundTripper http.RoundTripper
+	DialContext  DialContextFunc
+	Bootstrap    BootstrapFunc
+	TLSConfig    *tls.Config
+	CACerts      []*x509.Certificate
+	Insecure     bool
+	TLSMin       uint16
+	TLSMax       uint16
+	Timeout      time.Duration
+}
+
+// DOHClient keeps one HTTP client, and therefore its connection pool, for a
+// related set of DNS queries. It is safe for concurrent Lookup calls.
+type DOHClient struct {
+	client    *http.Client
+	serverURL *url.URL
+	timeout   time.Duration
+}
+
+// NewDOHClient creates an operation-scoped DoH client. It does not follow
+// redirects: a redirect changes the resolver endpoint protocol and must not
+// silently turn a failed wire request into an unrelated request.
+func NewDOHClient(cfg DOHConfig) (*DOHClient, error) {
+	serverURL := cfg.ServerURL
+	if serverURL == nil && cfg.Endpoint != nil {
+		serverURL = cfg.Endpoint.URL()
+	}
+	if serverURL == nil || serverURL.Host == "" {
+		return nil, errors.New("DoH endpoint is missing")
+	}
+	if !strings.EqualFold(serverURL.Scheme, "https") && !strings.EqualFold(serverURL.Scheme, "http") {
+		return nil, fmt.Errorf("DoH endpoint has unsupported scheme %q", serverURL.Scheme)
+	}
+	serverURL = cloneURL(serverURL)
+
+	transport := cfg.RoundTripper
+	if transport == nil {
+		base, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			base = &http.Transport{}
+		} else {
+			base = base.Clone()
+		}
+		base.ForceAttemptHTTP2 = true
+		if serverURL.Scheme == "https" {
+			base.TLSClientConfig = dohTLSConfig(cfg, serverURL.Hostname())
+		}
+		dial := cfg.DialContext
+		if dial == nil {
+			var d net.Dialer
+			dial = d.DialContext
+		}
+		base.DialContext = dohDialContext(dial, cfg.Bootstrap, cfg.Endpoint, serverURL)
+		transport = base
+	}
+
+	return &DOHClient{
+		client: &http.Client{
+			Transport: transport,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		serverURL: serverURL,
+		timeout:   cfg.Timeout,
+	}, nil
+}
+
+func cloneURL(u *url.URL) *url.URL {
+	copyURL := *u
+	return &copyURL
+}
+
+func dohTLSConfig(cfg DOHConfig, serverName string) *tls.Config {
+	var out *tls.Config
+	if cfg.TLSConfig != nil {
+		out = cfg.TLSConfig.Clone()
+	} else {
+		out = &tls.Config{}
+	}
+	if cfg.TLSMin != 0 {
+		out.MinVersion = cfg.TLSMin
+	} else if out.MinVersion == 0 {
+		out.MinVersion = tls.VersionTLS12
+	}
+	if cfg.TLSMax != 0 {
+		out.MaxVersion = cfg.TLSMax
+	}
+	if cfg.Insecure {
+		out.InsecureSkipVerify = true
+	}
+	if len(cfg.CACerts) > 0 {
+		pool := out.RootCAs
+		if pool == nil {
+			pool, _ = x509.SystemCertPool()
+		}
+		if pool == nil {
+			pool = x509.NewCertPool()
+		} else {
+			pool = pool.Clone()
+		}
+		for _, cert := range cfg.CACerts {
+			if cert != nil {
+				pool.AddCert(cert)
+			}
+		}
+		out.RootCAs = pool
+	}
+	out.ServerName = serverName
+	return out
+}
+
+func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *Endpoint, serverURL *url.URL) DialContextFunc {
+	endpointHost := strings.TrimSuffix(serverURL.Hostname(), ".")
+	var bootstrapAddrs []net.IPAddr
+	if endpoint != nil {
+		for _, ip := range endpoint.BootstrapAddrs {
+			bootstrapAddrs = append(bootstrapAddrs, net.IPAddr{IP: append(net.IP(nil), ip...)})
+		}
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil || !strings.EqualFold(strings.TrimSuffix(host, "."), endpointHost) {
+			return dial(ctx, network, address)
+		}
+		addresses := bootstrapAddrs
+		if len(addresses) == 0 && bootstrap != nil && net.ParseIP(host) == nil {
+			addresses, err = bootstrap(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("resolve DoH endpoint %q: %w", host, err)
+			}
+		}
+		if len(addresses) == 0 {
+			return dial(ctx, network, address)
+		}
+		var lastErr error
+		for _, ip := range addresses {
+			conn, dialErr := dial(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		if lastErr == nil {
+			lastErr = errors.New("no DoH endpoint bootstrap addresses")
+		}
+		return nil, lastErr
+	}
+}
+
+func lookupDOHClient(ctx context.Context, client *DOHClient, host string) ([]net.IPAddr, error) {
+	// Keep the historical A-before-AAAA query order. DOHClient itself is safe
+	// for concurrent callers, so inspection and discovery can share its HTTP
+	// connection pool without making this compatibility path nondeterministic.
+	opCtx, cancel := client.operationContext(ctx)
+	defer cancel()
+	a, aErr := client.LookupType(opCtx, host, "A", dnsTypeA)
+	aaaa, aaaaErr := client.LookupType(opCtx, host, "AAAA", dnsTypeAAAA)
 
 	addrs := make([]net.IPAddr, 0, len(a)+len(aaaa))
 	for _, record := range a {
@@ -45,15 +211,31 @@ func lookupDOH(ctx context.Context, serverURL *url.URL, host string) ([]net.IPAd
 
 // DNSRecord is a resolved DNS answer with optional TTL metadata.
 type DNSRecord struct {
-	IP  net.IP
-	TTL int
+	IP         net.IP
+	TTL        int
+	TTLPresent bool
 }
 
 // ErrDOHProtocolIncompatible indicates that a DoH endpoint clearly does not
 // implement RFC 8484 wire messages. Only this error permits JSON fallback.
 var ErrDOHProtocolIncompatible = errors.New("DoH endpoint does not support DNS wire messages")
 
-func lookupDOHWireMessage(ctx context.Context, serverURL *url.URL, host string, answerType int) (*Message, error) {
+func (c *DOHClient) operationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := c.timeout
+	if timeout <= 0 {
+		timeout = core.DefaultDOHTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	if existing, ok := ctx.Deadline(); ok && !deadline.Before(existing) {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, deadline)
+}
+
+func (c *DOHClient) wireMessage(ctx context.Context, host string, answerType int) (*Message, error) {
+	if answerType <= 0 || answerType > 0xffff {
+		return nil, fmt.Errorf("invalid DoH query type %d", answerType)
+	}
 	qname, err := ParseName(host)
 	if err != nil {
 		return nil, err
@@ -63,34 +245,40 @@ func lookupDOHWireMessage(ctx context.Context, serverURL *url.URL, host string, 
 		return nil, err
 	}
 	question := Question{Name: qname, Type: uint16(answerType), Class: 1}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverURL.String(), bytes.NewReader(query))
+	requestCtx, cancel := c.operationContext(ctx)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.serverURL.String(), bytes.NewReader(query))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/dns-message")
 	req.Header.Set("Content-Type", "application/dns-message")
 	req.Header.Set("User-Agent", core.UserAgent)
-	resp, err := (&http.Client{}).Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	contentType := strings.ToLower(strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0]))
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotAcceptable || resp.StatusCode == http.StatusUnsupportedMediaType {
+		if dohProtocolIncompatibleStatus(resp.StatusCode) {
 			return nil, ErrDOHProtocolIncompatible
+		}
+		excerpt, excerptErr := readDOHExcerpt(resp.Body)
+		if excerptErr == nil && excerpt != "" {
+			return nil, fmt.Errorf("DoH response code: %d: %s", resp.StatusCode, core.TerminalSafeText(excerpt))
 		}
 		return nil, fmt.Errorf("DoH response code: %d", resp.StatusCode)
 	}
 	if contentType != "application/dns-message" {
 		return nil, ErrDOHProtocolIncompatible
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	if resp.ContentLength > core.MaxDOHWireResponseBytes {
+		return nil, core.LimitError{Subsystem: "DoH wire response", Limit: core.MaxDOHWireResponseBytes}
+	}
+	raw, err := core.ReadAllLimited(resp.Body, core.MaxDOHWireResponseBytes, "DoH wire response")
 	if err != nil {
 		return nil, err
-	}
-	if len(raw) > 65535 {
-		return nil, errors.New("DoH wire response exceeds the 65535-byte limit")
 	}
 	message, err := DecodeResponse(raw, id, question)
 	if err != nil {
@@ -102,7 +290,26 @@ func lookupDOHWireMessage(ctx context.Context, serverURL *url.URL, host string, 
 	if _, err := AuthorizeAnswers(message, question); err != nil {
 		return nil, err
 	}
+	adjustMessageTTLs(message, parseAge(resp.Header.Get("Age")))
 	return message, nil
+}
+
+func dohProtocolIncompatibleStatus(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusNotImplemented,
+		http.StatusMethodNotAllowed, http.StatusNotAcceptable, http.StatusUnsupportedMediaType:
+		return true
+	default:
+		return false
+	}
+}
+
+func lookupDOHWireMessage(ctx context.Context, serverURL *url.URL, host string, answerType int) (*Message, error) {
+	client, err := NewDOHClient(DOHConfig{ServerURL: serverURL})
+	if err != nil {
+		return nil, err
+	}
+	return client.wireMessage(ctx, host, answerType)
 }
 
 // LookupDOHWireMessage performs one strict RFC 8484 query. It is used by DNS
@@ -111,8 +318,8 @@ func LookupDOHWireMessage(ctx context.Context, serverURL *url.URL, host string, 
 	return lookupDOHWireMessage(ctx, serverURL, host, answerType)
 }
 
-func lookupDOHWireType(ctx context.Context, serverURL *url.URL, host string, answerType int) ([]DNSRecord, error) {
-	message, err := lookupDOHWireMessage(ctx, serverURL, host, answerType)
+func (c *DOHClient) lookupWireType(ctx context.Context, host string, answerType int) ([]DNSRecord, error) {
+	message, err := c.wireMessage(ctx, host, answerType)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +337,7 @@ func lookupDOHWireType(ctx context.Context, serverURL *url.URL, host string, ans
 			continue
 		}
 		if ip := RecordAddress(answer); ip != nil {
-			out = append(out, DNSRecord{IP: ip, TTL: int(answer.TTL)})
+			out = append(out, DNSRecord{IP: ip, TTL: int(answer.TTL), TTLPresent: true})
 		}
 	}
 	if len(out) == 0 {
@@ -143,73 +350,146 @@ func lookupDOHWireType(ctx context.Context, serverURL *url.URL, host string, ans
 // endpoint. RFC 8484 wire format is authoritative; JSON is retained only for
 // endpoints that clearly do not implement the wire protocol.
 func LookupDOHType(ctx context.Context, serverURL *url.URL, host, dnsType string, answerType int) ([]DNSRecord, error) {
-	if records, err := lookupDOHWireType(ctx, serverURL, host, answerType); err == nil {
+	client, err := NewDOHClient(DOHConfig{ServerURL: serverURL})
+	if err != nil {
+		return nil, err
+	}
+	return client.LookupType(ctx, host, dnsType, answerType)
+}
+
+// LookupType performs a wire-first query and permits JSON fallback only after
+// the wire endpoint has made a clear protocol incompatibility response.
+func (c *DOHClient) LookupType(ctx context.Context, host, dnsType string, answerType int) ([]DNSRecord, error) {
+	opCtx, cancel := c.operationContext(ctx)
+	defer cancel()
+	if records, err := c.lookupWireType(opCtx, host, answerType); err == nil {
 		return records, nil
 	} else if !errors.Is(err, ErrDOHProtocolIncompatible) {
 		return nil, err
 	}
-	type answer struct {
-		Name string `json:"name"`
-		Type int    `json:"type"`
-		Data string `json:"data"`
-		TTL  uint32 `json:"TTL"`
-	}
-	type response struct {
-		Status int      `json:"Status"`
-		Answer []answer `json:"Answer"`
-	}
+	return c.lookupJSONType(opCtx, host, dnsType, answerType)
+}
 
-	u := *serverURL
+type dohJSONAnswer struct {
+	Name string          `json:"name"`
+	Type json.RawMessage `json:"type"`
+	Data string          `json:"data"`
+	TTL  json.RawMessage `json:"TTL"`
+}
+
+type dohJSONResponse struct {
+	Status json.RawMessage `json:"Status"`
+	Answer []dohJSONAnswer `json:"Answer"`
+}
+
+// DOHRecord retains the validated DNS record and the original JSON data when
+// the endpoint uses the compatibility JSON representation. Data is empty for
+// wire responses; callers should use Record in that case.
+type DOHRecord struct {
+	Record     Record
+	Data       string
+	TTLPresent bool
+}
+
+// LookupInspectionType performs the same wire-first query as LookupType but
+// retains all validated record types for DNS inspection.
+func (c *DOHClient) LookupInspectionType(ctx context.Context, host, dnsType string, answerType int) ([]DOHRecord, error) {
+	opCtx, cancel := c.operationContext(ctx)
+	defer cancel()
+	message, err := c.wireMessage(opCtx, host, answerType)
+	if err == nil {
+		name, parseErr := ParseName(host)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		authorized, authErr := AuthorizeAnswers(message, Question{Name: name, Type: uint16(answerType), Class: 1})
+		if authErr != nil {
+			return nil, authErr
+		}
+		out := make([]DOHRecord, 0, len(authorized))
+		for _, record := range authorized {
+			record.TTLPresent = true
+			out = append(out, DOHRecord{Record: record, TTLPresent: true})
+		}
+		return out, nil
+	}
+	if !errors.Is(err, ErrDOHProtocolIncompatible) {
+		return nil, err
+	}
+	return c.lookupJSONRecords(opCtx, host, dnsType, answerType)
+}
+
+func (c *DOHClient) lookupJSONType(ctx context.Context, host, dnsType string, answerType int) ([]DNSRecord, error) {
+	records, err := c.lookupJSONRecords(ctx, host, dnsType, answerType)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DNSRecord, 0, len(records))
+	for _, item := range records {
+		if int(item.Record.Type) != answerType {
+			continue
+		}
+		if ip := RecordAddress(item.Record); ip != nil {
+			out = append(out, DNSRecord{IP: ip, TTL: int(item.Record.TTL), TTLPresent: item.TTLPresent})
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no such host")
+	}
+	return out, nil
+}
+
+func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string, answerType int) ([]DOHRecord, error) {
+	u := *c.serverURL
 	q := u.Query()
 	q.Set("name", host)
 	q.Set("type", dnsType)
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	requestCtx, cancel := c.operationContext(ctx)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/dns-json")
 	req.Header.Set("User-Agent", core.UserAgent)
-
-	var client http.Client
-	resp, err := client.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
-		if err != nil {
-			return nil, fmt.Errorf("http response code: %d", resp.StatusCode)
+		raw, readErr := readDOHExcerpt(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("DoH JSON response code: %d", resp.StatusCode)
 		}
-		type errorResponse struct {
-			Error string `json:"error"`
+		excerpt := core.TerminalSafeText(raw)
+		if excerpt == "" {
+			return nil, fmt.Errorf("DoH JSON response code: %d", resp.StatusCode)
 		}
-		var errRes errorResponse
-		err = json.Unmarshal(raw, &errRes)
-		if err == nil && errRes.Error != "" {
-			return nil, fmt.Errorf("%d: %s", resp.StatusCode, errRes.Error)
-		}
-		return nil, fmt.Errorf("%d: %s", resp.StatusCode, raw)
+		return nil, fmt.Errorf("DoH JSON response code: %d: %s", resp.StatusCode, excerpt)
 	}
 
-	rawJSON, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	rawJSON, err := core.ReadAllLimited(resp.Body, core.MaxDOHJSONResponseBytes, "DoH JSON response")
 	if err != nil {
 		return nil, err
 	}
-	if len(rawJSON) > 1<<20 {
-		return nil, errors.New("DoH JSON response exceeds the 1 MiB limit")
-	}
-	var res response
+	var res dohJSONResponse
 	if err := json.Unmarshal(rawJSON, &res); err != nil {
+		return nil, fmt.Errorf("invalid DoH JSON response: %w", err)
+	}
+	status, err := parseJSONUint(res.Status, 16, "Status")
+	if err != nil {
 		return nil, err
 	}
-
-	if res.Status != 0 || len(res.Answer) == 0 {
-		name := rcodeName(res.Status)
+	if status != 0 || len(res.Answer) == 0 {
+		name := rcodeName(int(status))
 		if name == "" {
+			name = RCodeName(uint16(status))
+		}
+		if status == 0 {
 			return nil, errors.New("no such host")
 		}
 		return nil, fmt.Errorf("no such host: %s", name)
@@ -221,52 +501,177 @@ func LookupDOHType(ctx context.Context, serverURL *url.URL, host, dnsType string
 	}
 	question := Question{Name: qname, Type: uint16(answerType), Class: 1}
 	message := &Message{Answers: make([]Record, 0, len(res.Answer))}
-	for _, answer := range res.Answer {
+	parsed := make([]DOHRecord, 0, len(res.Answer))
+	age := parseAge(resp.Header.Get("Age"))
+	for index, answer := range res.Answer {
 		owner := qname
 		if answer.Name != "" {
 			owner, err = ParseName(answer.Name)
 			if err != nil {
-				return nil, fmt.Errorf("invalid DoH JSON answer owner: %w", err)
+				return nil, fmt.Errorf("invalid DoH JSON answer %d owner: %w", index, err)
 			}
 		}
-		record := Record{Owner: owner, Type: uint16(answer.Type), Class: 1, TTL: answer.TTL}
-		switch answer.Type {
+		typ, err := parseJSONUint(answer.Type, 16, fmt.Sprintf("Answer[%d].type", index))
+		if err != nil {
+			return nil, err
+		}
+		ttl, ttlPresent, err := parseJSONTTL(answer.TTL, index)
+		if err != nil {
+			return nil, err
+		}
+		if ttlPresent {
+			ttl = subtractAge(ttl, age)
+		}
+		record := Record{Owner: owner, Type: uint16(typ), Class: 1, TTL: ttl, TTLPresent: ttlPresent}
+		data := answer.Data
+		raw, generic, genericErr := parseJSONGenericRDATA(answer.Data, uint16(typ))
+		if genericErr != nil {
+			return nil, fmt.Errorf("invalid DoH JSON RDATA in answer %d: %w", index, genericErr)
+		}
+		if strings.HasPrefix(strings.TrimSpace(answer.Data), `\#`) && !generic {
+			return nil, fmt.Errorf("invalid DoH JSON generic RDATA in answer %d", index)
+		}
+		if generic {
+			record.RData = raw
+		}
+		switch uint16(typ) {
 		case dnsTypeA, dnsTypeAAAA:
-			ip := net.ParseIP(answer.Data)
-			if ip == nil || (answer.Type == dnsTypeA && ip.To4() == nil) || (answer.Type == dnsTypeAAAA && (ip.To16() == nil || ip.To4() != nil)) {
-				return nil, errors.New("invalid DoH JSON address")
+			if generic {
+				break
 			}
-			if answer.Type == dnsTypeA {
+			ip := net.ParseIP(answer.Data)
+			if ip == nil || (typ == dnsTypeA && ip.To4() == nil) || (typ == dnsTypeAAAA && (ip.To16() == nil || ip.To4() != nil)) {
+				return nil, fmt.Errorf("invalid DoH JSON address in answer %d", index)
+			}
+			if typ == dnsTypeA {
 				record.RData = append([]byte(nil), ip.To4()...)
 			} else {
 				record.RData = append([]byte(nil), ip.To16()...)
 			}
-		case 5:
+		case dnsTypeCNAME:
 			target, parseErr := ParseName(answer.Data)
 			if parseErr != nil {
-				return nil, fmt.Errorf("invalid DoH JSON CNAME: %w", parseErr)
+				return nil, fmt.Errorf("invalid DoH JSON CNAME in answer %d: %w", index, parseErr)
 			}
 			record.Target = &target
 			record.RData, _ = target.Wire()
 		default:
-			continue
+			// The JSON data is retained for inspection. Its numeric type and
+			// owner were validated above even when this resolver is not using it
+			// to return an address.
 		}
 		message.Answers = append(message.Answers, record)
+		parsed = append(parsed, DOHRecord{Record: record, Data: data, TTLPresent: ttlPresent})
 	}
-	answers, err := AuthorizeAddressAnswers(message, question)
+	answers, err := AuthorizeAnswers(message, question)
 	if err != nil {
 		return nil, err
 	}
-	records := make([]DNSRecord, 0, len(answers))
+	allowed := make(map[string]struct{}, len(answers))
 	for _, answer := range answers {
-		if int(answer.Type) == answerType {
-			if ip := RecordAddress(answer); ip != nil {
-				records = append(records, DNSRecord{IP: ip, TTL: int(answer.TTL)})
+		allowed[nameKey(answer.Owner)] = struct{}{}
+	}
+	out := make([]DOHRecord, 0, len(parsed))
+	for _, item := range parsed {
+		if _, ok := allowed[nameKey(item.Record.Owner)]; ok {
+			out = append(out, item)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no such host")
+	}
+	return out, nil
+}
+
+func parseJSONGenericRDATA(value string, typ uint16) ([]byte, bool, error) {
+	fields := strings.Fields(value)
+	if len(fields) < 3 || fields[0] != `\#` {
+		return nil, false, nil
+	}
+	length, err := strconv.ParseUint(fields[1], 10, 32)
+	if err != nil {
+		return nil, true, fmt.Errorf("invalid generic RDATA length")
+	}
+	raw, err := hex.DecodeString(strings.Join(fields[2:], ""))
+	if err != nil || uint64(len(raw)) != length {
+		return nil, true, errors.New("generic RDATA length does not match data")
+	}
+	if err := ValidateRData(typ, raw); err != nil {
+		return nil, true, err
+	}
+	return raw, true, nil
+}
+
+func parseJSONUint(raw json.RawMessage, bits int, field string) (uint64, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, fmt.Errorf("DoH JSON %s is missing", field)
+	}
+	value, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, bits)
+	if err != nil {
+		return 0, fmt.Errorf("invalid DoH JSON %s: %w", field, err)
+	}
+	return value, nil
+}
+
+func parseJSONTTL(raw json.RawMessage, index int) (uint32, bool, error) {
+	if len(raw) == 0 {
+		return 0, false, nil
+	}
+	if string(raw) == "null" {
+		return 0, false, fmt.Errorf("invalid DoH JSON TTL in answer %d", index)
+	}
+	value, err := parseJSONUint(raw, 32, fmt.Sprintf("Answer[%d].TTL", index))
+	if err != nil {
+		return 0, false, err
+	}
+	return uint32(value), true, nil
+}
+
+func parseAge(value string) uint64 {
+	if value == "" {
+		return 0
+	}
+	// Age is a single non-negative delta-seconds value. Treat an invalid
+	// value as absent, but saturate overflow so it cannot preserve stale TTLs.
+	value = strings.TrimSpace(strings.Split(value, ",")[0])
+	age, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		if strings.Trim(value, "0123456789") == "" {
+			return ^uint64(0)
+		}
+		return 0
+	}
+	return age
+}
+
+func subtractAge(ttl uint32, age uint64) uint32 {
+	if age >= uint64(ttl) {
+		return 0
+	}
+	return ttl - uint32(age)
+}
+
+func adjustMessageTTLs(message *Message, age uint64) {
+	if age == 0 {
+		return
+	}
+	for _, sections := range []*[]Record{&message.Answers, &message.Authorities, &message.Additionals} {
+		for i := range *sections {
+			if (*sections)[i].Type != dnsTypeOPT {
+				(*sections)[i].TTL = subtractAge((*sections)[i].TTL, age)
 			}
 		}
 	}
-	if len(records) == 0 {
-		return nil, errors.New("no such host")
+}
+
+func readDOHExcerpt(body io.Reader) (string, error) {
+	const maxExcerpt = 16 << 10
+	raw, err := io.ReadAll(io.LimitReader(body, maxExcerpt+1))
+	if len(raw) > maxExcerpt {
+		raw = raw[:maxExcerpt]
 	}
-	return records, nil
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(raw)), nil
 }
