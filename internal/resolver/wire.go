@@ -486,6 +486,9 @@ func decodeKnownRData(record *Record, packet []byte, start, end int, boundaries 
 			return errors.New("SVCB record is truncated")
 		}
 		record.Priority = binary.BigEndian.Uint16(packet[start:])
+		if err := validateSVCBTargetEncoding(packet, start+2, end); err != nil {
+			return err
+		}
 		target, next, err := name(start + 2)
 		if err != nil {
 			return fmt.Errorf("SVCB target: %w", err)
@@ -498,6 +501,9 @@ func decodeKnownRData(record *Record, packet []byte, start, end int, boundaries 
 				return errors.New("SVCB parameter is truncated")
 			}
 			key := binary.BigEndian.Uint16(packet[at:])
+			if key == ^uint16(0) {
+				return errors.New("SVCB parameter key 65535 is reserved")
+			}
 			ln := int(binary.BigEndian.Uint16(packet[at+2:]))
 			at += 4
 			if ln > end-at {
@@ -509,6 +515,9 @@ func decodeKnownRData(record *Record, packet []byte, start, end int, boundaries 
 			lastKey, haveKey = key, true
 			record.Params = append(record.Params, SVCParam{Key: key, Value: append([]byte(nil), packet[at:at+ln]...)})
 			at += ln
+		}
+		if _, err := buildSVCBRecord(record.Priority, *record.Target, record.Params); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1055,6 +1064,27 @@ func AuthorizeAnswers(m *Message, question Question) ([]Record, error) {
 	}
 	if len(m.Answers) > maxDNSRecords {
 		return nil, errors.New("DNS response has too many answer records")
+	}
+
+	// Validate every service-binding RRset before selecting authorized answers.
+	// This keeps a malformed record from being hidden by a valid record in the
+	// same authenticated response.
+	type serviceSetKey struct {
+		owner string
+		typ   uint16
+	}
+	serviceSets := make(map[serviceSetKey][]Record)
+	for _, record := range m.Answers {
+		if record.Class != question.Class || (record.Type != dnsTypeSVCB && record.Type != dnsTypeHTTPS) {
+			continue
+		}
+		key := serviceSetKey{owner: nameKey(record.Owner), typ: record.Type}
+		serviceSets[key] = append(serviceSets[key], record)
+	}
+	for _, records := range serviceSets {
+		if err := ValidateSVCBRRSet(records); err != nil {
+			return nil, err
+		}
 	}
 
 	// DNS CNAMEs form a chain, not a general graph. Index the complete answer
