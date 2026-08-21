@@ -343,6 +343,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			if err := printDryRunBodyPreview(errPrinter, source, r.Verbosity == core.VSilent); err != nil {
 				return 0, err
 			}
+			return 0, nil
 		}
 
 		// Trailing "> \n" already written by printRequestMetadata.
