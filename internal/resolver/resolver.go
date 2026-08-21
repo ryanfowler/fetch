@@ -120,6 +120,18 @@ func New(cfg Config) *Resolver {
 	return r
 }
 
+// Provenance identifies the resolver policy that supplied addresses. It is
+// intentionally display-oriented and contains no credentials.
+func (r *Resolver) Provenance() string {
+	if r == nil || r.endpoint == nil {
+		return "system"
+	}
+	if r.endpoint.Display != "" {
+		return r.endpoint.Display
+	}
+	return string(r.endpoint.Transport) + "://" + r.endpoint.ConnectHost
+}
+
 // NetResolver returns a net.Resolver for system or UDP DNS resolution. DoH,
 // DoT, and DoQ resolution cannot be represented as a net.Resolver.
 func (r *Resolver) NetResolver() *net.Resolver {
@@ -206,6 +218,31 @@ func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) 
 	}
 	if len(addrs) == 0 {
 		return ResolvedEndpoint{}, fmt.Errorf("lookup %s: no addresses found", host)
+	}
+
+	// A family-specific network must not waste attempts on addresses that the
+	// platform dialer will reject. For dual-stack networks, retain the
+	// resolver-preferred family and interleave the other family below.
+	switch strings.ToLower(network) {
+	case "tcp4", "udp4":
+		filtered := addrs[:0]
+		for _, addr := range addrs {
+			if addr.IP.To4() != nil {
+				filtered = append(filtered, addr)
+			}
+		}
+		addrs = filtered
+	case "tcp6", "udp6":
+		filtered := addrs[:0]
+		for _, addr := range addrs {
+			if addr.IP.To4() == nil && addr.IP.To16() != nil {
+				filtered = append(filtered, addr)
+			}
+		}
+		addrs = filtered
+	}
+	if len(addrs) == 0 {
+		return ResolvedEndpoint{}, fmt.Errorf("lookup %s: no addresses for network %s", host, network)
 	}
 
 	// Keep the resolver-preferred family first while interleaving later
