@@ -46,7 +46,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 	// policy and body source, while attaching one absolute request deadline.
 	parent, stopParent := combineContexts(ctx, req.Context())
 	defer stopParent()
-	requestCtx, cancelBudget := requestBudget.WithContext(parent, "request")
+	requestCtx, cancelBudget := requestBudget.WithContext(parent, "")
 	defer cancelBudget()
 	if connectBudget.Limited() {
 		requestCtx = client.WithConnectBudget(requestCtx, connectBudget)

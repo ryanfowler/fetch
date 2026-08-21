@@ -3293,15 +3293,13 @@ func TestMain(t *testing.T) {
 		}
 	})
 
-	t.Run("retry on per-attempt timeout", func(t *testing.T) {
+	t.Run("retry within shared timeout", func(t *testing.T) {
 		t.Parallel()
 		var count atomic.Int64
-		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+		server := startServer(func(w http.ResponseWriter, _ *http.Request) {
 			n := count.Add(1)
 			if n <= 1 {
-				// First attempt: block until the client-side per-attempt
-				// timeout cancels the request.
-				<-r.Context().Done()
+				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
 			io.WriteString(w, "ok")
