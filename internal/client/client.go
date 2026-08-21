@@ -257,6 +257,20 @@ func NewClient(cfg ClientConfig) *Client {
 		rt.Protocols.SetHTTP1(true)
 		rt.Protocols.SetHTTP2(cfg.HTTP != core.HTTP1)
 		transport = rt
+		// Automatic HTTP/3 is only safe for direct HTTPS requests. The
+		// wrapper delegates HTTP, proxy, and Unix-socket requests to this
+		// ordinary transport, and prepares exactly one complete TCP/TLS or
+		// QUIC connection before sending an eligible request.
+		if cfg.HTTP == core.HTTPDefault && cfg.Proxy == nil && cfg.UnixSocket == "" {
+			// Environment-selected proxies are not eligible for automatic H3.
+			// Keep the ordinary transport visible in that case so proxy setup
+			// remains the single source of truth.
+			autoHTTPSProxy, httpsProxyErr := ProxyForURL(nil, &url.URL{Scheme: "https", Host: "example.com"})
+			autoHTTPProxy, httpProxyErr := ProxyForURL(nil, &url.URL{Scheme: "http", Host: "example.com"})
+			if httpsProxyErr == nil && httpProxyErr == nil && autoHTTPSProxy == nil && autoHTTPProxy == nil {
+				transport = newAutomaticHTTP3Transport(rt, res, cfg.ConnectTimeout, tlsConfig)
+			}
+		}
 	}
 
 	// Set up the redirect handler. Cookie filtering is installed when a jar is
