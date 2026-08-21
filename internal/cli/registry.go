@@ -400,7 +400,7 @@ var flagDefinitions = map[string]Flag{
 	"key":                {IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
 	"proto-import":       {Requires: []string{"proto-file"}},
 	"remote-header-name": {Requires: []string{"remote-name"}, IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}, FromCurl: true, UnsupportedIn: []OptionMode{ModeGRPCDiscovery}},
-	"ca-cert":            {ConfigKey: "ca-cert", IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
+	"ca-cert":            {ConfigKey: "ca-cert", FromCurl: true},
 	"cert":               {IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
 
 	"header":        {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
@@ -417,9 +417,9 @@ var flagDefinitions = map[string]Flag{
 	"proxy":         {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
 	"unix":          {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
 
-	"min-tls":     {ConfigKey: "min-tls", IgnoredIn: []OptionMode{ModeDNSInspection}, IgnoreLabel: "--tls", FromCurl: true},
-	"max-tls":     {IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
-	"insecure":    {IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
+	"min-tls":     {ConfigKey: "min-tls", IgnoreLabel: "--tls", FromCurl: true},
+	"max-tls":     {FromCurl: true},
+	"insecure":    {FromCurl: true},
 	"format":      {IgnoredIn: []OptionMode{ModeDNSInspection}},
 	"dry-run":     {IgnoredIn: []OptionMode{ModeDNSInspection}},
 	"inspect-tls": {IgnoredIn: []OptionMode{ModeDNSInspection}},

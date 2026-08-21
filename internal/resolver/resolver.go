@@ -2,6 +2,8 @@ package resolver
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -16,12 +18,31 @@ import (
 type Config struct {
 	Endpoint *Endpoint
 	Server   *url.URL
+
+	// The stream hooks are used by DNS-over-TCP and DNS-over-TLS. They keep
+	// resolver endpoint bootstrap and dialing injectable without coupling this
+	// package to the application client.
+	DialContext DialContextFunc
+	Bootstrap   BootstrapFunc
+	TLSConfig   *tls.Config
+	CACerts     []*x509.Certificate
+	Insecure    bool
+	TLSMin      uint16
+	TLSMax      uint16
 }
 
 // Resolver resolves names and dials addresses using the configured DNS backend.
 type Resolver struct {
 	endpoint *Endpoint
 	err      error
+
+	dialContext DialContextFunc
+	bootstrap   BootstrapFunc
+	tlsConfig   *tls.Config
+	caCerts     []*x509.Certificate
+	insecure    bool
+	tlsMin      uint16
+	tlsMax      uint16
 }
 
 // ResolvedEndpoint contains a parsed host:port address and its resolved IP
@@ -36,14 +57,22 @@ type ResolvedEndpoint struct {
 // happens while CLI/config values are parsed. Server supports existing internal
 // test fixtures and is converted once here for compatibility.
 func New(cfg Config) *Resolver {
-	if cfg.Endpoint != nil {
-		return &Resolver{endpoint: cfg.Endpoint}
+	endpoint := cfg.Endpoint
+	var err error
+	if endpoint == nil && cfg.Server != nil {
+		endpoint, err = endpointFromURL(cfg.Server)
 	}
-	if cfg.Server == nil {
-		return &Resolver{}
+	return &Resolver{
+		endpoint:    endpoint,
+		err:         err,
+		dialContext: cfg.DialContext,
+		bootstrap:   cfg.Bootstrap,
+		tlsConfig:   cfg.TLSConfig,
+		caCerts:     cfg.CACerts,
+		insecure:    cfg.Insecure,
+		tlsMin:      cfg.TLSMin,
+		tlsMax:      cfg.TLSMax,
 	}
-	endpoint, err := endpointFromURL(cfg.Server)
-	return &Resolver{endpoint: endpoint, err: err}
 }
 
 // NetResolver returns a net.Resolver for system or UDP DNS resolution. DoH,
@@ -80,6 +109,19 @@ func (r *Resolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr,
 	case r.endpoint.Transport == TransportHTTPS:
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
 			return lookupDOH(ctx, r.endpoint.URL(), host)
+		})
+	case r.endpoint.Transport == TransportTCP || r.endpoint.Transport == TransportTLS:
+		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
+			return lookupStreamIPs(ctx, StreamConfig{
+				Endpoint:    r.endpoint,
+				DialContext: r.dialContext,
+				Bootstrap:   r.bootstrap,
+				TLSConfig:   r.tlsConfig,
+				CACerts:     r.caCerts,
+				Insecure:    r.insecure,
+				TLSMin:      r.tlsMin,
+				TLSMax:      r.tlsMax,
+			}, host)
 		})
 	default:
 		return nil, fmt.Errorf("resolver transport %s is not implemented", r.endpoint.Transport)

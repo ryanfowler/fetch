@@ -142,7 +142,14 @@ func NewClient(cfg ClientConfig) *Client {
 		TLSMin:     cfg.TLSMin,
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
-	res := resolver.New(resolver.Config{Endpoint: cfg.ResolverEndpoint, Server: cfg.DNSServer})
+	res := resolver.New(resolver.Config{
+		Endpoint: cfg.ResolverEndpoint,
+		Server:   cfg.DNSServer,
+		CACerts:  cfg.CACerts,
+		Insecure: cfg.Insecure,
+		TLSMin:   cfg.TLSMin,
+		TLSMax:   cfg.TLSMax,
+	})
 	baseDial := res.DialContext
 
 	if cfg.UnixSocket != "" {

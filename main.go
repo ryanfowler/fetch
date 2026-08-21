@@ -558,6 +558,10 @@ func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 	return dnsinspect.Inspect(ctx, p, &dnsinspect.Config{
 		Endpoint:  app.Cfg.DNSEndpoint,
 		DNSServer: app.Cfg.DNSServer,
+		CACerts:   app.Cfg.CACerts,
+		Insecure:  getValue(app.Cfg.Insecure),
+		TLSMin:    getValue(app.Cfg.TLSMin),
+		TLSMax:    getValue(app.Cfg.TLSMax),
 		Timeout:   getValue(app.Cfg.Timeout),
 		URL:       app.URL,
 		Silent:    getValue(app.Cfg.Silent),
