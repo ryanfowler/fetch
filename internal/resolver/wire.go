@@ -364,7 +364,7 @@ func decodeRecord(packet []byte, off int, boundaries map[int]struct{}) (Record, 
 	if off+10 > len(packet) {
 		return Record{}, 0, errors.New("truncated DNS record header")
 	}
-	record := Record{Owner: name, Type: binary.BigEndian.Uint16(packet[off:]), Class: binary.BigEndian.Uint16(packet[off+2:]), TTL: binary.BigEndian.Uint32(packet[off+4:])}
+	record := Record{Owner: name, Type: binary.BigEndian.Uint16(packet[off:]), Class: binary.BigEndian.Uint16(packet[off+2:]), TTL: binary.BigEndian.Uint32(packet[off+4:]), TTLPresent: true}
 	rdlen := int(binary.BigEndian.Uint16(packet[off+8:]))
 	off += 10
 	if rdlen > maxDNSRDataBytes || rdlen > len(packet)-off {
