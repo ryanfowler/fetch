@@ -96,6 +96,7 @@ prettier -w .
 - HAR recording captures one final exchange, preserves duplicate headers, captures decoded response bodies up to 16 MiB, and never changes the normal streaming pipeline. HAR files can contain credentials and sensitive bodies.
 - Brotli response decoding uses the decoder-only `github.com/google/brotli/go/brotli` module; tests use fixed Brotli fixtures.
 - DNS-over-HTTPS sends bounded RFC 8484 wire queries first, falls back to bounded JSON only for clear protocol incompatibility, adjusts TTLs for `Age`, and never falls back after transport, TLS, timeout, or malformed-wire failures. DNS answers authorize owners through bounded CNAME chains, and DoH JSON records use the same owner validation.
+- A and AAAA lookups run concurrently across custom DNS transports, keep the first usable family preference with a bounded sibling grace period, deduplicate stable address order, and interleave later dial candidates without changing the preferred family.
 - SSE and NDJSON use bounded, chunk-safe streaming parsers; automatic compression retries compressed SSE once for safe GET/HEAD requests.
 - `-v --help` renders the embedded Markdown CLI reference and uses the configured pager. Pager commands are parsed without a shell, and `NO_PAGER` disables automatic paging.
 - Build information includes target OS/architecture and Go settings; dependency versions appear with `--buildinfo -v`. Ctrl-C exits with status 130, and broken-pipe output exits cleanly.

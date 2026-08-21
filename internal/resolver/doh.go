@@ -182,31 +182,24 @@ func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *End
 }
 
 func lookupDOHClient(ctx context.Context, client *DOHClient, host string) ([]net.IPAddr, error) {
-	// Keep the historical A-before-AAAA query order. DOHClient itself is safe
-	// for concurrent callers, so inspection and discovery can share its HTTP
-	// connection pool without making this compatibility path nondeterministic.
-	opCtx, cancel := client.operationContext(ctx)
-	defer cancel()
-	a, aErr := client.LookupType(opCtx, host, "A", dnsTypeA)
-	aaaa, aaaaErr := client.LookupType(opCtx, host, "AAAA", dnsTypeAAAA)
-
-	addrs := make([]net.IPAddr, 0, len(a)+len(aaaa))
-	for _, record := range a {
-		addrs = append(addrs, net.IPAddr{IP: record.IP})
-	}
-	for _, record := range aaaa {
-		addrs = append(addrs, net.IPAddr{IP: record.IP})
-	}
-	if len(addrs) > 0 {
+	return resolveAddressFamilies(ctx, func(ctx context.Context, typ uint16) ([]net.IPAddr, error) {
+		dnsType := "A"
+		if typ == dnsTypeAAAA {
+			dnsType = "AAAA"
+		}
+		records, err := client.LookupType(ctx, host, dnsType, int(typ))
+		if err != nil {
+			return nil, err
+		}
+		addrs := make([]net.IPAddr, 0, len(records))
+		for _, record := range records {
+			addrs = append(addrs, net.IPAddr{IP: record.IP})
+		}
+		if len(addrs) == 0 {
+			return nil, errDNSNoData
+		}
 		return addrs, nil
-	}
-	if aErr != nil {
-		return nil, aErr
-	}
-	if aaaaErr != nil {
-		return nil, aaaaErr
-	}
-	return nil, errors.New("no such host")
+	})
 }
 
 // DNSRecord is a resolved DNS answer with optional TTL metadata.

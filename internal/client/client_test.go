@@ -12,6 +12,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -894,9 +895,12 @@ func TestRedirectReResolvesEachDestinationWithCustomDNS(t *testing.T) {
 	t.Setenv("no_proxy", "*")
 
 	var names []string
+	var namesMu sync.Mutex
 	dnsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
+		namesMu.Lock()
 		names = append(names, name)
+		namesMu.Unlock()
 		if r.URL.Query().Get("type") == "A" {
 			_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"name":"`+name+`","type":1,"data":"127.0.0.1"}]}`)
 			return
@@ -936,6 +940,8 @@ func TestRedirectReResolvesEachDestinationWithCustomDNS(t *testing.T) {
 	resp.Body.Close()
 
 	seen := map[string]bool{}
+	namesMu.Lock()
+	defer namesMu.Unlock()
 	for _, name := range names {
 		seen[name] = true
 	}

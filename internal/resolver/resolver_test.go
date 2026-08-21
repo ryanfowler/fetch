@@ -11,15 +11,19 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 func TestLookupIPAddrDOHReturnsAAndAAAA(t *testing.T) {
 	var queries []string
+	var queriesMu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
+			queriesMu.Lock()
 			queries = append(queries, r.URL.Query().Get("type"))
+			queriesMu.Unlock()
 			if r.Header.Get("Accept") != "application/dns-json" {
 				t.Errorf("Accept = %q, want application/dns-json", r.Header.Get("Accept"))
 			}
@@ -42,11 +46,13 @@ func TestLookupIPAddrDOHReturnsAAndAAAA(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got, want := ipStrings(addrs), []string{"127.0.0.1", "::1"}; strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("addrs = %v, want %v", got, want)
+	got := ipStrings(addrs)
+	if len(got) != 2 || (got[0] != "127.0.0.1" && got[0] != "::1") ||
+		(got[1] != "127.0.0.1" && got[1] != "::1") || got[0] == got[1] {
+		t.Fatalf("addrs = %v, want one IPv4 and one IPv6 address in first-seen family order", got)
 	}
-	if got, want := strings.Join(queries, ","), "A,AAAA"; got != want {
-		t.Fatalf("queries = %q, want %q", got, want)
+	if got := strings.Join(queries, ","); got != "A,AAAA" && got != "AAAA,A" {
+		t.Fatalf("queries = %q, want both A and AAAA queries", got)
 	}
 }
 

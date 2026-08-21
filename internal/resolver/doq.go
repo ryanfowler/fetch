@@ -410,95 +410,33 @@ func lookupDoQIPs(ctx context.Context, cfg DoQConfig, host string) ([]net.IPAddr
 	}
 	defer client.Close()
 
-	types := []uint16{dnsTypeA, dnsTypeAAAA}
-	type result struct {
-		typ   uint16
-		addrs []net.IPAddr
-		err   error
-	}
-	results := make(chan result, len(types))
-	for _, typ := range types {
-		go func(typ uint16) {
-			message, queryErr := client.Query(ctx, host, typ)
-			if queryErr != nil {
-				results <- result{typ: typ, err: queryErr}
-				return
-			}
-			name, nameErr := ParseName(host)
-			if nameErr != nil {
-				results <- result{typ: typ, err: nameErr}
-				return
-			}
-			if message.Header.RCode != 0 {
-				results <- result{typ: typ, err: fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))}
-				return
-			}
-			authorized, authErr := AuthorizeAddressAnswers(message, Question{Name: name, Type: typ, Class: 1})
-			if authErr != nil {
-				results <- result{typ: typ, err: authErr}
-				return
-			}
-			out := make([]net.IPAddr, 0, len(authorized))
-			for _, answer := range authorized {
-				if answer.Type == typ {
-					if ip := RecordAddress(answer); ip != nil {
-						out = append(out, net.IPAddr{IP: ip})
-					}
+	return resolveAddressFamilies(ctx, func(ctx context.Context, typ uint16) ([]net.IPAddr, error) {
+		message, err := client.Query(ctx, host, typ)
+		if err != nil {
+			return nil, err
+		}
+		name, err := ParseName(host)
+		if err != nil {
+			return nil, err
+		}
+		if message.Header.RCode != 0 {
+			return nil, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+		}
+		authorized, err := AuthorizeAddressAnswers(message, Question{Name: name, Type: typ, Class: 1})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]net.IPAddr, 0, len(authorized))
+		for _, answer := range authorized {
+			if answer.Type == typ {
+				if ip := RecordAddress(answer); ip != nil {
+					out = append(out, net.IPAddr{IP: ip})
 				}
 			}
-			if len(out) == 0 {
-				queryErr = errDNSNoData
-			}
-			results <- result{typ: typ, addrs: out, err: queryErr}
-		}(typ)
-	}
-
-	byType := make(map[uint16]result, len(types))
-	remaining := len(types)
-	var grace <-chan time.Time
-	var timer *time.Timer
-	for remaining > 0 {
-		select {
-		case value := <-results:
-			byType[value.typ] = value
-			remaining--
-			if value.err == nil && len(value.addrs) > 0 && grace == nil {
-				timer = time.NewTimer(streamFamilyGrace)
-				grace = timer.C
-			}
-		case <-grace:
-			remaining = 0
-		case <-ctx.Done():
-			remaining = 0
 		}
-	}
-	if timer != nil {
-		timer.Stop()
-	}
-
-	var out []net.IPAddr
-	var firstErr error
-	for _, typ := range types {
-		value, ok := byType[typ]
-		if !ok {
-			continue
+		if len(out) == 0 {
+			return nil, errDNSNoData
 		}
-		if value.err != nil {
-			if firstErr == nil {
-				firstErr = value.err
-			}
-			continue
-		}
-		out = append(out, value.addrs...)
-	}
-	if len(out) > 0 {
 		return out, nil
-	}
-	if err := contextError(ctx); err != nil {
-		return nil, err
-	}
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	return nil, errors.New("no such host")
+	})
 }
