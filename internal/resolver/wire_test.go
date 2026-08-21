@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"encoding/binary"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -121,6 +122,25 @@ func TestDecodeExtendedRCode(t *testing.T) {
 	}
 }
 
+func TestAddressAnswersReportsNODATA(t *testing.T) {
+	query, id, err := EncodeQueryWithID(0x54, "example.com", dnsTypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := ParseName("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	question := Question{Name: name, Type: dnsTypeA, Class: 1}
+	message, err := DecodeResponse(responsePacket(query, id, question, nil), id, question)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := addressAnswers(message, question, dnsTypeA); err == nil || !strings.Contains(err.Error(), "NODATA") {
+		t.Fatalf("err = %v, want NODATA", err)
+	}
+}
+
 func TestAuthorizeAnswersFollowsOnlyValidatedCNAMEChain(t *testing.T) {
 	query, id, err := EncodeQueryWithID(0x55, "example.com", dnsTypeA)
 	if err != nil {
@@ -162,6 +182,72 @@ func TestAuthorizeAnswersRejectsReachableCNAMECycle(t *testing.T) {
 	}
 	if _, err := AuthorizeAnswers(message, question); err == nil || !strings.Contains(err.Error(), "loop") {
 		t.Fatalf("cycle error = %v", err)
+	}
+}
+
+func TestAuthorizeAnswersRejectsConflictingCNAMEData(t *testing.T) {
+	query, id, _ := EncodeQueryWithID(0x78, "example.com", dnsTypeA)
+	name, _ := ParseName("example.com")
+	alias, _ := ParseName("alias.example")
+	question := Question{Name: name, Type: dnsTypeA, Class: 1}
+	response := responsePacket(query, id, question, []Record{
+		makeRecord(name, dnsTypeCNAME, mustWireName(t, alias)),
+		makeRecord(name, dnsTypeA, []byte{192, 0, 2, 1}),
+	})
+	message, err := DecodeResponse(response, id, question)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AuthorizeAnswers(message, question); err == nil || !strings.Contains(err.Error(), "conflicting answer data") {
+		t.Fatalf("conflicting data error = %v", err)
+	}
+}
+
+func TestAuthorizeAnswersRejectsConflictingCNAMETargets(t *testing.T) {
+	query, id, _ := EncodeQueryWithID(0x79, "example.com", dnsTypeA)
+	name, _ := ParseName("example.com")
+	one, _ := ParseName("one.example")
+	two, _ := ParseName("two.example")
+	question := Question{Name: name, Type: dnsTypeA, Class: 1}
+	response := responsePacket(query, id, question, []Record{
+		makeRecord(name, dnsTypeCNAME, mustWireName(t, one)),
+		makeRecord(name, dnsTypeCNAME, mustWireName(t, two)),
+	})
+	message, err := DecodeResponse(response, id, question)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AuthorizeAnswers(message, question); err == nil || !strings.Contains(err.Error(), "conflicting targets") {
+		t.Fatalf("conflicting target error = %v", err)
+	}
+}
+
+func TestAuthorizeAnswersBoundsReverseOrderedCNAMEChain(t *testing.T) {
+	query, id, _ := EncodeQueryWithID(0x7a, "example.com", dnsTypeA)
+	questionName, _ := ParseName("example.com")
+	question := Question{Name: questionName, Type: dnsTypeA, Class: 1}
+	answers := make([]Record, 0, 17)
+	previous := questionName
+	for i := 0; i < 16; i++ {
+		next, err := ParseName("n" + strconv.Itoa(i) + ".example")
+		if err != nil {
+			t.Fatal(err)
+		}
+		answers = append(answers, makeRecord(previous, dnsTypeCNAME, mustWireName(t, next)))
+		previous = next
+	}
+	answers = append(answers, makeRecord(previous, dnsTypeA, []byte{192, 0, 2, 1}))
+	for i, j := 0, len(answers)-1; i < j; i, j = i+1, j-1 {
+		answers[i], answers[j] = answers[j], answers[i]
+	}
+	response := responsePacket(query, id, question, answers)
+	message, err := DecodeResponse(response, id, question)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authorized, err := AuthorizeAddressAnswers(message, question)
+	if err != nil || len(authorized) != 1 {
+		t.Fatalf("authorized reverse chain = %#v, err = %v", authorized, err)
 	}
 }
 

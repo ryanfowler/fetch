@@ -22,11 +22,11 @@ func TestInspectDOHShowsAAndAAAATTLs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("type") {
 		case "A":
-			io.WriteString(w, `{"Status":0,"Answer":[{"type":5,"data":"alias.example.com.","TTL":120},{"type":1,"data":"192.0.2.1","TTL":60}]}`)
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com.","type":5,"data":"alias.example.com.","TTL":120},{"name":"alias.example.com.","type":1,"data":"192.0.2.1","TTL":60}]}`)
 		case "AAAA":
-			io.WriteString(w, `{"Status":0,"Answer":[{"type":28,"data":"2001:db8::1","TTL":300}]}`)
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com.","type":28,"data":"2001:db8::1","TTL":300}]}`)
 		case "TXT":
-			io.WriteString(w, `{"Status":0,"Answer":[{"type":16,"data":"v=spf1 -all","TTL":180}]}`)
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com.","type":16,"data":"v=spf1 -all","TTL":180}]}`)
 		default:
 			io.WriteString(w, `{"Status":0}`)
 		}
@@ -95,7 +95,7 @@ func TestLookupQueriesRecordTypesConcurrently(t *testing.T) {
 
 		switch r.URL.Query().Get("type") {
 		case "A":
-			io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"192.0.2.1","TTL":60}]}`)
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"192.0.2.1","TTL":60}]}`)
 		default:
 			io.WriteString(w, `{"Status":0}`)
 		}
@@ -121,9 +121,9 @@ func TestLookupCollapsesDuplicateCNAMEsWithLowestTTL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("type") {
 		case "A":
-			io.WriteString(w, `{"Status":0,"Answer":[{"type":5,"data":"alias.example.com.","TTL":120},{"type":1,"data":"192.0.2.1","TTL":60}]}`)
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com.","type":5,"data":"alias.example.com.","TTL":120},{"name":"alias.example.com.","type":1,"data":"192.0.2.1","TTL":60}]}`)
 		case "AAAA":
-			io.WriteString(w, `{"Status":0,"Answer":[{"type":5,"data":"alias.example.com.","TTL":119}]}`)
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com.","type":5,"data":"alias.example.com.","TTL":119}]}`)
 		default:
 			io.WriteString(w, `{"Status":0}`)
 		}

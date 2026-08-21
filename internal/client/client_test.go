@@ -898,7 +898,7 @@ func TestRedirectReResolvesEachDestinationWithCustomDNS(t *testing.T) {
 		name := r.URL.Query().Get("name")
 		names = append(names, name)
 		if r.URL.Query().Get("type") == "A" {
-			_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}`)
+			_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"name":"`+name+`","type":1,"data":"127.0.0.1"}]}`)
 			return
 		}
 		_, _ = io.WriteString(w, `{"Status":3}`)

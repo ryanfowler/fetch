@@ -556,7 +556,7 @@ func TestMain(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/dns-query" {
-				io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}`)
+				io.WriteString(w, `{"Status":0,"Answer":[{"name":"localhost","type":1,"data":"127.0.0.1"}]}`)
 				return
 			}
 			if r.URL.Path == "/dns-query-nxdomain" {

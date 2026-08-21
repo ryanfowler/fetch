@@ -27,9 +27,9 @@ func TestLookupIPAddrDOHReturnsAAndAAAA(t *testing.T) {
 
 		switch r.URL.Query().Get("type") {
 		case "A":
-			io.WriteString(w, `{"Status":0,"Answer":[{"type":5,"data":"alias.example"},{"type":1,"data":"127.0.0.1"}]}`)
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":5,"data":"alias.example"},{"name":"alias.example","type":1,"data":"127.0.0.1"}]}`)
 		case "AAAA":
-			io.WriteString(w, `{"Status":0,"Answer":[{"type":28,"data":"::1"}]}`)
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":28,"data":"::1"}]}`)
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
@@ -64,7 +64,7 @@ func TestLookupIPAddrDOHNXDomain(t *testing.T) {
 
 func TestLookupDOHTypeReturnsTTL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1","TTL":123}]}`)
+		io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"data":"127.0.0.1","TTL":123}]}`)
 	}))
 	defer server.Close()
 
@@ -157,6 +157,177 @@ func TestDOHJSONFallbackIsBoundedAndAdjustsAge(t *testing.T) {
 	}
 }
 
+func TestDOHJSONRequiresAnswerOwners(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"192.0.2.1"}]}`)
+	}))
+	defer server.Close()
+
+	_, err := LookupDOHType(context.Background(), mustURL(t, server.URL), "example.com", "A", dnsTypeA)
+	if err == nil || !strings.Contains(err.Error(), "owner") || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("err = %v, want missing-owner error", err)
+	}
+}
+
+func TestDOHJSONAuthorizesOnlyTheValidatedCNAMEChain(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		io.WriteString(w, `{"Status":0,"Answer":[
+			{"name":"EXAMPLE.com.","type":5,"data":"Alias.Example."},
+			{"name":"unrelated.example.","type":1,"data":"192.0.2.99"},
+			{"name":"alias.example.","type":1,"data":"192.0.2.1"}
+		]}`)
+	}))
+	defer server.Close()
+
+	records, err := LookupDOHType(context.Background(), mustURL(t, server.URL), "example.com", "A", dnsTypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].IP.String() != "192.0.2.1" {
+		t.Fatalf("records = %#v, want only the CNAME successor", records)
+	}
+}
+
+func TestDOHJSONAcceptsGenericCNAMEChain(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		io.WriteString(w, `{"Status":0,"Answer":[
+			{"name":"example.com","type":5,"data":"\\# 15 05616c696173076578616d706c6500"},
+			{"name":"alias.example","type":1,"data":"192.0.2.1"}
+		]}`)
+	}))
+	defer server.Close()
+
+	records, err := LookupDOHType(context.Background(), mustURL(t, server.URL), "example.com", "A", dnsTypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].IP.String() != "192.0.2.1" {
+		t.Fatalf("records = %#v, want generic CNAME successor", records)
+	}
+}
+
+func TestDOHJSONRejectsConflictingCNAMEChain(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		io.WriteString(w, `{"Status":0,"Answer":[
+			{"name":"example.com.","type":5,"data":"one.example."},
+			{"name":"example.com.","type":5,"data":"two.example."}
+		]}`)
+	}))
+	defer server.Close()
+
+	_, err := LookupDOHType(context.Background(), mustURL(t, server.URL), "example.com", "A", dnsTypeA)
+	if err == nil || !strings.Contains(err.Error(), "conflicting targets") {
+		t.Fatalf("err = %v, want conflicting-target error", err)
+	}
+}
+
+func TestDOHJSONRejectsMalformedServiceBinding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":65,"data":"not-a-service-binding"}]}`)
+	}))
+	defer server.Close()
+
+	client, clientErr := NewDOHClient(DOHConfig{ServerURL: mustURL(t, server.URL)})
+	if clientErr != nil {
+		t.Fatal(clientErr)
+	}
+	_, err := client.LookupInspectionType(context.Background(), "example.com", "HTTPS", int(dnsTypeHTTPS))
+	if err == nil || !strings.Contains(err.Error(), "invalid DoH JSON SVCB/HTTPS") {
+		t.Fatalf("err = %v, want malformed service-binding error", err)
+	}
+}
+
+func TestDOHJSONUnauthorizedAnswersReportNODATA(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		io.WriteString(w, `{"Status":0,"Answer":[{"name":"unrelated.example","type":1,"data":"192.0.2.1"}]}`)
+	}))
+	defer server.Close()
+
+	_, err := LookupDOHType(context.Background(), mustURL(t, server.URL), "example.com", "A", dnsTypeA)
+	if err == nil || !strings.Contains(err.Error(), "NODATA") {
+		t.Fatalf("err = %v, want NODATA", err)
+	}
+}
+
+func TestDOHJSONRejectsValuedNoDefaultALPN(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":65,"data":"1 . no-default-alpn=foo"}]}`)
+	}))
+	defer server.Close()
+
+	client, err := NewDOHClient(DOHConfig{ServerURL: mustURL(t, server.URL)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.LookupInspectionType(context.Background(), "example.com", "HTTPS", int(dnsTypeHTTPS))
+	if err == nil || !strings.Contains(err.Error(), "invalid DoH JSON SVCB/HTTPS") {
+		t.Fatalf("err = %v, want invalid no-default-alpn error", err)
+	}
+}
+
+func TestDOHJSONNumericErrorsDoNotEchoLargeValues(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":`+strings.Repeat("9", 1<<20)+`,"data":"192.0.2.1"}]}`)
+	}))
+	defer server.Close()
+
+	_, err := LookupDOHType(context.Background(), mustURL(t, server.URL), "example.com", "A", dnsTypeA)
+	if err == nil {
+		t.Fatal("large numeric value was accepted")
+	}
+	if len(err.Error()) > 1024 {
+		t.Fatalf("err length = %d, want a bounded numeric error", len(err.Error()))
+	}
+}
+
+func TestDOHJSONReportsEmptyNODATA(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		io.WriteString(w, `{"Status":0}`)
+	}))
+	defer server.Close()
+
+	_, err := LookupDOHType(context.Background(), mustURL(t, server.URL), "example.com", "A", dnsTypeA)
+	if err == nil || !strings.Contains(err.Error(), "NODATA") {
+		t.Fatalf("err = %v, want NODATA", err)
+	}
+}
+
 func TestDOHDoesNotFallbackAfterMalformedWireResponse(t *testing.T) {
 	var gets int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -203,7 +374,7 @@ func TestDOHProtocolFallbackIncludesNotImplemented(t *testing.T) {
 			w.WriteHeader(http.StatusNotImplemented)
 			return
 		}
-		io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"192.0.2.10","TTL":4}]}`)
+		io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"data":"192.0.2.10","TTL":4}]}`)
 	}))
 	defer server.Close()
 
@@ -297,7 +468,7 @@ func TestLookupIPAddrDoesNotTraceIPLiteral(t *testing.T) {
 
 func TestLookupIPAddrDOHTraceHooks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}`)
+		io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"data":"127.0.0.1"}]}`)
 	}))
 	defer server.Close()
 
@@ -348,7 +519,7 @@ func TestDialContextUsesResolvedAddress(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("type") {
 		case "A":
-			fmt.Fprintf(w, `{"Status":0,"Answer":[{"type":1,"data":"127.0.0.1"}]}`)
+			fmt.Fprintf(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"data":"127.0.0.1"}]}`)
 		case "AAAA":
 			io.WriteString(w, `{"Status":3}`)
 		}

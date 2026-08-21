@@ -429,13 +429,13 @@ func lookupDoQIPs(ctx context.Context, cfg DoQConfig, host string) ([]net.IPAddr
 				results <- result{typ: typ, err: nameErr}
 				return
 			}
+			if message.Header.RCode != 0 {
+				results <- result{typ: typ, err: fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))}
+				return
+			}
 			authorized, authErr := AuthorizeAddressAnswers(message, Question{Name: name, Type: typ, Class: 1})
 			if authErr != nil {
 				results <- result{typ: typ, err: authErr}
-				return
-			}
-			if message.Header.RCode != 0 {
-				results <- result{typ: typ, err: fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))}
 				return
 			}
 			out := make([]net.IPAddr, 0, len(authorized))
@@ -447,7 +447,7 @@ func lookupDoQIPs(ctx context.Context, cfg DoQConfig, host string) ([]net.IPAddr
 				}
 			}
 			if len(out) == 0 {
-				queryErr = errors.New("no such host")
+				queryErr = errDNSNoData
 			}
 			results <- result{typ: typ, addrs: out, err: queryErr}
 		}(typ)

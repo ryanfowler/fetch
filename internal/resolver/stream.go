@@ -526,11 +526,11 @@ func lookupStreamIPs(ctx context.Context, cfg StreamConfig, host string) ([]net.
 					err = nameErr
 				} else {
 					var answers []Record
-					answers, err = AuthorizeAddressAnswers(message, Question{Name: name, Type: typ, Class: 1})
-					if err == nil {
-						if message.Header.RCode != 0 {
-							err = fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
-						} else {
+					if message.Header.RCode != 0 {
+						err = fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+					} else {
+						answers, err = AuthorizeAddressAnswers(message, Question{Name: name, Type: typ, Class: 1})
+						if err == nil {
 							for _, answer := range answers {
 								if answer.Type == typ {
 									if ip := RecordAddress(answer); ip != nil {
@@ -539,7 +539,7 @@ func lookupStreamIPs(ctx context.Context, cfg StreamConfig, host string) ([]net.
 								}
 							}
 							if len(addrs) == 0 {
-								err = errors.New("no such host")
+								err = errDNSNoData
 							}
 						}
 					}
