@@ -576,14 +576,20 @@ func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string,
 		parsed = append(parsed, DOHRecord{Record: record, Data: data, TTLPresent: ttlPresent})
 	}
 	if status != 0 || len(res.Answer) == 0 {
+		if status == 0 {
+			return nil, errDNSNoData
+		}
+		// Preserve the actual DNS response code. Only NXDOMAIN is a
+		// negative name answer; SERVFAIL, REFUSED, and other server errors
+		// must not be mistaken for a safe downgrade.
 		name := rcodeName(int(status))
 		if name == "" {
 			name = RCodeName(uint16(status))
 		}
-		if status == 0 {
-			return nil, errDNSNoData
+		if status == 3 {
+			return nil, fmt.Errorf("no such host: %s", name)
 		}
-		return nil, fmt.Errorf("no such host: %s", name)
+		return nil, fmt.Errorf("DoH JSON response: %s", name)
 	}
 	answers, err := AuthorizeAnswers(message, question)
 	if err != nil {

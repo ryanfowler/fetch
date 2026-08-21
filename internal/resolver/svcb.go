@@ -27,6 +27,9 @@ const (
 // record. Params retains unknown optional parameters so callers can preserve
 // them without guessing their meaning.
 type SVCBRecord struct {
+	Owner                Name
+	TTL                  uint32
+	TTLPresent           bool
 	Priority             uint16
 	Target               Name
 	Params               []SVCParam
@@ -461,10 +464,20 @@ func parseSVCBRecord(record Record) (SVCBRecord, error) {
 	if record.Type != dnsTypeSVCB && record.Type != dnsTypeHTTPS {
 		return SVCBRecord{}, fmt.Errorf("record type %d is not SVCB or HTTPS", record.Type)
 	}
+	var parsed SVCBRecord
+	var err error
 	if record.Target == nil {
-		return ParseSVCBRData(record.RData)
+		parsed, err = ParseSVCBRData(record.RData)
+	} else {
+		parsed, err = buildSVCBRecord(record.Priority, *record.Target, record.Params)
 	}
-	return buildSVCBRecord(record.Priority, *record.Target, record.Params)
+	if err != nil {
+		return SVCBRecord{}, err
+	}
+	parsed.Owner = record.Owner
+	parsed.TTL = record.TTL
+	parsed.TTLPresent = record.TTLPresent
+	return parsed, nil
 }
 
 func parseSVCBParams(raw []byte) ([]SVCParam, error) {
