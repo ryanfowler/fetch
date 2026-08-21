@@ -167,6 +167,28 @@ func TestMultipart(t *testing.T) {
 	}
 }
 
+func TestMultipartSanitizesHeaderParameters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "report\".txt")
+	if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	data := readMultipartBody(t, NewMultipart([]core.KeyVal[string]{
+		{Key: "field\"\r\nInjected", Val: "value"},
+		{Key: "upload", Val: "@" + path},
+	}))
+	if bytes.Contains(data, []byte("name=\"field\"\r\nInjected\"")) ||
+		bytes.Contains(data, []byte(`filename="report".txt"`)) {
+		t.Fatalf("multipart header parameter was not sanitized: %q", data)
+	}
+	if !bytes.Contains(data, []byte(`name="field___Injected"`)) {
+		t.Fatalf("sanitized field name missing from multipart body: %q", data)
+	}
+	if !bytes.Contains(data, []byte(`filename="report_.txt"`)) {
+		t.Fatalf("sanitized filename missing from multipart body: %q", data)
+	}
+}
+
 func TestMultipartOpenReplaysWithStableBoundary(t *testing.T) {
 	mp := NewMultipart([]core.KeyVal[string]{
 		{Key: "field", Val: "value"},

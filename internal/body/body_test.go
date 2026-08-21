@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -87,6 +88,44 @@ func TestFileBodyRejectsTruncationAndReplacement(t *testing.T) {
 	if _, err := b.Replay(); err == nil {
 		t.Fatal("Replay succeeded after file replacement/truncation")
 	}
+}
+
+func TestAttachPreservesExplicitWireMetadata(t *testing.T) {
+	t.Run("content length", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodPost, "https://example.com", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Length", "3")
+		req.ContentLength = 3
+
+		Attach(req, NewBytes([]byte("longer body"), "text/plain"))
+
+		if req.ContentLength != 3 {
+			t.Fatalf("ContentLength = %d, want explicit value 3", req.ContentLength)
+		}
+		if req.GetBody == nil {
+			t.Fatal("GetBody is nil for replayable replacement body")
+		}
+	})
+
+	t.Run("transfer encoding", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodPost, "https://example.com", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.TransferEncoding = []string{"chunked"}
+		req.ContentLength = -1
+
+		Attach(req, NewBytes([]byte("longer body"), "text/plain"))
+
+		if req.ContentLength != -1 {
+			t.Fatalf("ContentLength = %d, want explicit transfer-encoding value -1", req.ContentLength)
+		}
+		if got := req.TransferEncoding; len(got) != 1 || got[0] != "chunked" {
+			t.Fatalf("TransferEncoding = %v, want [chunked]", got)
+		}
+	})
 }
 
 func TestMaterializeIsBoundedAndReplayable(t *testing.T) {

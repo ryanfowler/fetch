@@ -178,6 +178,13 @@ fetch -F avatar=@photo.jpg -F name=John -m POST example.com/profile
 
 When uploading a file by path, only the file's base name is sent in the multipart `filename` parameter.
 
+Request files are validated as ordinary regular files before they are opened;
+directories, named pipes, devices, sockets, and other special files are
+rejected. File uploads are streamed with bounded memory, and multipart bodies
+use a stable boundary so redirects and retries reproduce the same bytes. If a
+file is replaced, resized, or truncated after parsing, the request fails rather
+than sending a partial upload.
+
 ### Multiple Files
 
 ```sh

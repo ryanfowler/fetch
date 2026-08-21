@@ -702,7 +702,8 @@ func (a *App) parseMultipartFlag(value string) error {
 			val = "@" + path
 		}
 
-		// Ensure the file exists.
+		// Validate before opening. Opening a FIFO or another special file can
+		// block indefinitely, while request bodies require ordinary files.
 		stats, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -712,6 +713,9 @@ func (a *App) parseMultipartFlag(value string) error {
 		}
 		if stats.IsDir() {
 			return fmt.Errorf("file is a directory: '%s'", path)
+		}
+		if !stats.Mode().IsRegular() {
+			return fmt.Errorf("file is not a regular file: '%s'", path)
 		}
 	}
 	a.Multipart = append(a.Multipart, core.KeyVal[string]{Key: key, Val: val})
@@ -953,21 +957,24 @@ func RequestBody(value string) (io.Reader, string, error) {
 			}
 			path = home + path[1:]
 		}
-		f, err := os.Open(path)
+		// Stat before opening so a FIFO, socket, device, or other special
+		// file cannot make CLI parsing block while it is opened as a body.
+		info, err := os.Stat(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil, "", core.FileNotExistsError(value[1:])
 			}
 			return nil, "", err
 		}
-		info, err := f.Stat()
-		if err != nil {
-			f.Close()
-			return nil, "", err
-		}
 		if info.IsDir() {
-			f.Close()
 			return nil, "", fileIsDirError(value[1:])
+		}
+		if !info.Mode().IsRegular() {
+			return nil, "", fmt.Errorf("file is not a regular file: '%s'", value[1:])
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, "", err
 		}
 		return f, path, nil
 	}
