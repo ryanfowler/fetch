@@ -205,10 +205,16 @@ fetch --http 3 example.com
 
 ### Version Detection
 
-By default, `fetch` negotiates the best available version:
+For direct HTTPS requests, the default mode starts normal address resolution and
+HTTPS/SVCB discovery together. A valid `h3` service candidate and cached
+`Alt-Svc` candidate can race TCP/TLS setup. The request is sent only once on
+the transport that wins. Fresh HTTPS/SVCB candidates take precedence over
+cached DNS candidates. Proxies and Unix-socket requests use TCP only.
 
-1. Attempts HTTP/2 via ALPN
-2. Falls back to HTTP/1.1 if needed
+If HTTP/3 does not win, `fetch` negotiates HTTP/2 through ALPN and falls back
+to HTTP/1.1 when needed. Authenticated DNS discovery errors are not silently
+downgraded. Use `--http 1` or `--http 2` to disable HTTP/3 discovery and
+racing. Use `--http 3` to require HTTP/3; it never falls back to TCP.
 
 ## TLS Configuration
 
