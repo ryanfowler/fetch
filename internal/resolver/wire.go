@@ -607,48 +607,9 @@ const (
 )
 
 func lookupWireIPs(ctx context.Context, serverAddr, host string) ([]net.IPAddr, error) {
-	types := []uint16{dnsTypeA, dnsTypeAAAA}
-	results := make(chan wireLookupResult, len(types))
-	for _, typ := range types {
-		go func(typ uint16) {
-			addrs, err := lookupWireType(ctx, serverAddr, host, typ)
-			results <- wireLookupResult{typ: typ, addrs: addrs, err: err}
-		}(typ)
-	}
-
-	byType := make(map[uint16]wireLookupResult, len(types))
-	for range types {
-		result := <-results
-		byType[result.typ] = result
-	}
-
-	var out []net.IPAddr
-	var firstErr error
-	// Keep the stable A-before-AAAA order used by the old resolver while the
-	// independent transactions run concurrently.
-	for _, typ := range types {
-		result := byType[typ]
-		if result.err != nil {
-			if firstErr == nil {
-				firstErr = result.err
-			}
-			continue
-		}
-		out = append(out, result.addrs...)
-	}
-	if len(out) != 0 {
-		return out, nil
-	}
-	if firstErr != nil {
-		return nil, firstErr
-	}
-	return nil, errors.New("no such host")
-}
-
-type wireLookupResult struct {
-	typ   uint16
-	addrs []net.IPAddr
-	err   error
+	return resolveAddressFamilies(ctx, func(ctx context.Context, typ uint16) ([]net.IPAddr, error) {
+		return lookupWireType(ctx, serverAddr, host, typ)
+	})
 }
 
 // LookupUDPMessage performs one UDP DNS transaction and, when the matching

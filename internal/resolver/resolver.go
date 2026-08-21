@@ -20,6 +20,11 @@ type Config struct {
 	Endpoint *Endpoint
 	Server   *url.URL
 
+	// SystemLookupIPAddr replaces the platform resolver in deterministic tests.
+	// Production callers leave it nil so net.Resolver remains authoritative for
+	// ordinary system A/AAAA lookups.
+	SystemLookupIPAddr func(context.Context, string) ([]net.IPAddr, error)
+
 	// The stream hooks are used by DNS-over-TCP and DNS-over-TLS. They keep
 	// resolver endpoint bootstrap and dialing injectable without coupling this
 	// package to the application client.
@@ -49,6 +54,7 @@ type Resolver struct {
 	insecure     bool
 	tlsMin       uint16
 	tlsMax       uint16
+	systemLookup func(context.Context, string) ([]net.IPAddr, error)
 }
 
 // ResolvedEndpoint contains a parsed host:port address and its resolved IP
@@ -68,6 +74,10 @@ func New(cfg Config) *Resolver {
 	if endpoint == nil && cfg.Server != nil {
 		endpoint, err = endpointFromURL(cfg.Server)
 	}
+	systemLookup := cfg.SystemLookupIPAddr
+	if systemLookup == nil {
+		systemLookup = net.DefaultResolver.LookupIPAddr
+	}
 	r := &Resolver{
 		endpoint:     endpoint,
 		err:          err,
@@ -79,6 +89,7 @@ func New(cfg Config) *Resolver {
 		insecure:     cfg.Insecure,
 		tlsMin:       cfg.TLSMin,
 		tlsMax:       cfg.TLSMax,
+		systemLookup: systemLookup,
 	}
 	if r.err == nil && endpoint != nil && endpoint.Transport == TransportHTTPS {
 		r.dohClient, r.err = NewDOHClient(DOHConfig{
@@ -120,8 +131,13 @@ func (r *Resolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr,
 
 	switch {
 	case r == nil || r.endpoint == nil:
+		lookup := net.DefaultResolver.LookupIPAddr
+		if r != nil && r.systemLookup != nil {
+			lookup = r.systemLookup
+		}
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
-			return net.DefaultResolver.LookupIPAddr(ctx, host)
+			addrs, err := lookup(ctx, host)
+			return deduplicateAddresses(addrs), err
 		})
 	case r.endpoint.Transport == TransportUDP:
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
@@ -179,7 +195,10 @@ func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) 
 		return ResolvedEndpoint{}, fmt.Errorf("lookup %s: no addresses found", host)
 	}
 
-	return ResolvedEndpoint{Host: host, Port: port, Addrs: addrs}, nil
+	// Keep the resolver-preferred family first while interleaving later
+	// candidates for Happy Eyeballs. This prevents an address returned second
+	// by the platform/custom resolver from silently becoming the first dial.
+	return ResolvedEndpoint{Host: host, Port: port, Addrs: interleaveAddressFamilies(addrs)}, nil
 }
 
 // DialContext resolves address and dials each returned IP until one succeeds.

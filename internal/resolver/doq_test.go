@@ -158,8 +158,10 @@ func TestResolverLookupIPAddrUsesDoQ(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := ipStrings(addrs); strings.Join(got, ",") != "192.0.2.1,2001:db8::1" {
-		t.Fatalf("addresses = %v", got)
+	got := ipStrings(addrs)
+	if len(got) != 2 || (got[0] != "192.0.2.1" && got[0] != "2001:db8::1") ||
+		(got[1] != "192.0.2.1" && got[1] != "2001:db8::1") || got[0] == got[1] {
+		t.Fatalf("addresses = %v, want one IPv4 and one IPv6 address", got)
 	}
 }
 
