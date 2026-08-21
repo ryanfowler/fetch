@@ -140,7 +140,7 @@ fetch --bearer mysecrettoken example.com
 
 ### `--aws-sigv4 REGION/SERVICE`
 
-Sign requests with AWS Signature V4. Requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables.
+Sign requests with AWS Signature V4. Requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables. If `AWS_SESSION_TOKEN` is set, it is sent and signed as `x-amz-security-token`.
 
 ```sh
 fetch --aws-sigv4 us-east-1/s3 s3.amazonaws.com/bucket/key
@@ -779,6 +779,7 @@ fetch --update --dry-run
 | ----------------------- | -------------------------------- |
 | `AWS_ACCESS_KEY_ID`     | AWS access key for `--aws-sigv4` |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for `--aws-sigv4` |
+| `AWS_SESSION_TOKEN` | Optional temporary AWS session token for `--aws-sigv4` |
 | `VISUAL` / `EDITOR`     | Editor for `--edit` option       |
 | `HTTPS_PROXY`           | HTTPS proxy URL                  |
 | `HTTP_PROXY`            | HTTP proxy URL                   |

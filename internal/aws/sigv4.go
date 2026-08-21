@@ -26,10 +26,11 @@ const (
 )
 
 type Config struct {
-	AccessKey string
-	SecretKey string
-	Region    string
-	Service   string
+	AccessKey    string
+	SecretKey    string
+	SessionToken string
+	Region       string
+	Service      string
 }
 
 // MissingEnvVarError is returned when credentials are required for signing but
@@ -62,14 +63,18 @@ func Sign(req *http.Request, cfg Config, now time.Time) error {
 		return err
 	}
 
+	if cfg.SessionToken != "" {
+		setHeaderInsensitive(req, "X-Amz-Security-Token", cfg.SessionToken)
+	}
+
 	datetime := now.Format(datetimeFormat)
-	req.Header.Set("X-Amz-Date", datetime)
+	setHeaderInsensitive(req, "X-Amz-Date", datetime)
 
 	payload, err := getPayloadHash(req, cfg.Service)
 	if err != nil {
 		return err
 	}
-	req.Header.Set(headerContentSha256, payload)
+	setHeaderInsensitive(req, headerContentSha256, payload)
 
 	// Build the signature.
 	signedHeaders := getSignedHeaders(req)
@@ -100,8 +105,29 @@ func Sign(req *http.Request, cfg Config, now time.Time) error {
 	sb.WriteString(",Signature=")
 	sb.WriteString(signature)
 
-	req.Header.Set("Authorization", sb.String())
+	setHeaderInsensitive(req, "Authorization", sb.String())
 	return nil
+}
+
+func setHeaderInsensitive(req *http.Request, name, value string) {
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+	for key := range req.Header {
+		if strings.EqualFold(key, name) {
+			delete(req.Header, key)
+		}
+	}
+	req.Header.Set(name, value)
+}
+
+func headerValueInsensitive(header http.Header, name string) string {
+	for key, values := range header {
+		if strings.EqualFold(key, name) && len(values) > 0 {
+			return values[0]
+		}
+	}
+	return ""
 }
 
 func fillEnvCredentials(cfg *Config) error {
@@ -117,13 +143,16 @@ func fillEnvCredentials(cfg *Config) error {
 			return &MissingEnvVarError{EnvVar: "AWS_SECRET_ACCESS_KEY"}
 		}
 	}
+	if cfg.SessionToken == "" {
+		cfg.SessionToken = os.Getenv("AWS_SESSION_TOKEN")
+	}
 	return nil
 }
 
 // getPayloadHash returns the appropriate payload has for HTTP request and service.
 func getPayloadHash(req *http.Request, service string) (string, error) {
 	// If a payload header already exists, use that.
-	if payload := req.Header.Get(headerContentSha256); payload != "" {
+	if payload := headerValueInsensitive(req.Header, headerContentSha256); payload != "" {
 		return payload, nil
 	}
 
@@ -212,18 +241,39 @@ func getSignedHeaders(req *http.Request) []core.KeyVal[string] {
 		out = append(out, core.KeyVal[string]{Key: "host", Val: host})
 	}
 
-	for key, vals := range req.Header {
+	// Header maps normally contain canonicalized keys, but requests assembled
+	// by integrations can contain differently cased keys. Merge those values
+	// before canonicalization so each signed header appears exactly once.
+	values := make(map[string][]string, len(req.Header))
+	headerKeys := make([]string, 0, len(req.Header))
+	for key := range req.Header {
+		headerKeys = append(headerKeys, key)
+	}
+	slices.Sort(headerKeys)
+	for _, key := range headerKeys {
+		vals := req.Header[key]
 		switch {
 		case strings.EqualFold(key, "Host"):
 			continue
-		case key == "Accept-Encoding", key == "Authorization", key == "Content-Length", key == "User-Agent":
+		case strings.EqualFold(key, "Accept-Encoding"),
+			strings.EqualFold(key, "Authorization"),
+			strings.EqualFold(key, "Content-Length"),
+			strings.EqualFold(key, "User-Agent"):
 			// Avoid signing these headers.
 			continue
 		}
 		key = strings.ToLower(strings.TrimSpace(key))
-		val := canonicalHeaderValue(vals)
-		out = append(out, core.KeyVal[string]{Key: key, Val: val})
+		values[key] = append(values[key], vals...)
 	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		out = append(out, core.KeyVal[string]{Key: key, Val: canonicalHeaderValue(values[key])})
+	}
+
 	// Headers should be ordered by key.
 	slices.SortFunc(out, func(a, b core.KeyVal[string]) int {
 		return strings.Compare(a.Key, b.Key)
@@ -297,7 +347,7 @@ func buildCanonicalRequest(req *http.Request, headers []core.KeyVal[string], pay
 	writeCanonicalURIPath(&buf, req.URL)
 	buf.WriteByte('\n')
 
-	buf.WriteString(strings.ReplaceAll(req.URL.Query().Encode(), "+", "%20"))
+	buf.WriteString(canonicalQuery(req.URL))
 	buf.WriteByte('\n')
 
 	for _, kv := range headers {
@@ -319,6 +369,86 @@ func buildCanonicalRequest(req *http.Request, headers []core.KeyVal[string], pay
 	buf.WriteString(payload)
 
 	return buf.Bytes()
+}
+
+type canonicalQueryPair struct {
+	key   string
+	value string
+}
+
+func canonicalQuery(u *url.URL) string {
+	if u == nil || u.RawQuery == "" {
+		return ""
+	}
+
+	parts := strings.Split(u.RawQuery, "&")
+	pairs := make([]canonicalQueryPair, 0, len(parts))
+	for _, part := range parts {
+		key, value, _ := strings.Cut(part, "=")
+		pairs = append(pairs, canonicalQueryPair{
+			key:   awsPercentEncode(percentDecodeQuery(key)),
+			value: awsPercentEncode(percentDecodeQuery(value)),
+		})
+	}
+
+	slices.SortFunc(pairs, func(a, b canonicalQueryPair) int {
+		if cmp := strings.Compare(a.key, b.key); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.value, b.value)
+	})
+
+	var out strings.Builder
+	for i, pair := range pairs {
+		if i > 0 {
+			out.WriteByte('&')
+		}
+		out.WriteString(pair.key)
+		out.WriteByte('=')
+		out.WriteString(pair.value)
+	}
+	return out.String()
+}
+
+// percentDecodeQuery decodes valid percent escapes without applying HTML form
+// semantics. In particular, '+' is a literal plus in a SigV4 query string.
+func percentDecodeQuery(value string) []byte {
+	decoded := make([]byte, 0, len(value))
+	for i := 0; i < len(value); i++ {
+		if value[i] == '%' && i+2 < len(value) && isHex(value[i+1]) && isHex(value[i+2]) {
+			decoded = append(decoded, fromHex(value[i+1])<<4|fromHex(value[i+2]))
+			i += 2
+			continue
+		}
+		decoded = append(decoded, value[i])
+	}
+	return decoded
+}
+
+func fromHex(b byte) byte {
+	switch {
+	case b >= '0' && b <= '9':
+		return b - '0'
+	case b >= 'a' && b <= 'f':
+		return b - 'a' + 10
+	default:
+		return b - 'A' + 10
+	}
+}
+
+func awsPercentEncode(value []byte) string {
+	const hexUpper = "0123456789ABCDEF"
+	var out strings.Builder
+	for _, b := range value {
+		if validURIBytes[b] && b != '/' {
+			out.WriteByte(b)
+			continue
+		}
+		out.WriteByte('%')
+		out.WriteByte(hexUpper[b>>4])
+		out.WriteByte(hexUpper[b&0x0F])
+	}
+	return out.String()
 }
 
 func writeCanonicalURIPath(buf *bytes.Buffer, u *url.URL) {

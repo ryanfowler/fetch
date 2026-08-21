@@ -207,7 +207,7 @@ func TestCLI003RequestDefaultsAndOrdering(t *testing.T) {
 	if got := withoutEncoding.Header.Values("Accept-Encoding"); !slices.Equal(got, []string{""}) {
 		t.Fatalf("explicit empty Accept-Encoding = %q, want empty value", got)
 	}
-	if got := req.URL.RawQuery; got != "z=old&space=hello+world&a=one&z=two&space=+hello+" {
+	if got := req.URL.RawQuery; got != "z=old&space=hello+world&a=one&z=two&space=%20hello%20" {
 		t.Fatalf("RawQuery = %q, want appended order and preserved spaces", got)
 	}
 
@@ -230,6 +230,37 @@ func TestCLI003RequestDefaultsAndOrdering(t *testing.T) {
 	defer explicitGet.Body.Close()
 	if explicitGet.Method != http.MethodGet {
 		t.Fatalf("explicit method = %q, want GET", explicitGet.Method)
+	}
+}
+
+func TestNewRequestConvertsURLUserinfoToBasicAuth(t *testing.T) {
+	u := mustURL(t, "https://url%20user:open%20sesame@example.com/path")
+	req, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{URL: u})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.User != nil || req.URL.User != nil {
+		t.Fatal("URL userinfo was not removed")
+	}
+	username, password, ok := req.BasicAuth()
+	if !ok || username != "url user" || password != "open sesame" {
+		t.Fatalf("Basic auth = %q:%q, %v", username, password, ok)
+	}
+	if got := req.URL.String(); got != "https://example.com/path" {
+		t.Fatalf("request URL = %q, want userinfo-free URL", got)
+	}
+}
+
+func TestNewRequestExplicitAuthorizationOverridesURLUserinfo(t *testing.T) {
+	req, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+		Headers: []core.KeyVal[string]{{Key: "Authorization", Val: "Bearer explicit"}},
+		URL:     mustURL(t, "https://user:password@example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer explicit" {
+		t.Fatalf("Authorization = %q, want explicit header", got)
 	}
 }
 
@@ -520,6 +551,35 @@ func TestRedirectMethodAndBodySemantics(t *testing.T) {
 				t.Fatalf("Content-Type = %q, want application/test", gotContentType)
 			}
 		})
+	}
+}
+
+func TestRedirectLocationUserinfoIsStripped(t *testing.T) {
+	var gotURL *url.URL
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "http://user:password@"+r.Host+"/final", http.StatusFound)
+			return
+		}
+		gotURL = r.URL
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if gotURL == nil {
+		t.Fatal("redirect target was not reached")
+	}
+	if gotURL.User != nil {
+		t.Fatalf("redirect request URL userinfo = %v, want nil", gotURL.User)
 	}
 }
 

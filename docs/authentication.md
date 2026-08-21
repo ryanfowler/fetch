@@ -20,6 +20,11 @@ The `--basic` flag sets the `Authorization` header:
 Authorization: Basic base64(username:password)
 ```
 
+Credentials in URL userinfo, such as `https://user:password@example.com`, are
+also converted to Basic authentication and removed from the request URL.
+Explicit `Authorization` headers override URL userinfo. The `--basic` and
+`--bearer` options take precedence over an explicit header.
+
 ## HTTP Digest Authentication
 
 Digest Authentication uses a challenge-response mechanism that is more secure than Basic Authentication because credentials are never sent in plain text.
@@ -123,6 +128,14 @@ AWS SigV4 signs the request by:
 2. Generating a signing key from your secret key, date, region, and service
 3. Computing an HMAC-SHA256 signature
 4. Adding the signature to the `Authorization` header
+
+For temporary credentials, also set `AWS_SESSION_TOKEN`. `fetch` sends it as
+`x-amz-security-token` and includes that header in the signature. SigV4 keeps
+duplicate query parameters, sorts their AWS-encoded keys and values, and treats
+`+` as a literal plus sign.
+
+When AWS signing is enabled, it generates the `Authorization` header. AWS
+credentials and signing headers are removed before a cross-origin redirect.
 
 ## Mutual TLS (mTLS)
 
