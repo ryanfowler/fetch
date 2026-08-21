@@ -16,9 +16,11 @@ import (
 func TestLookupIPAddrDOHReturnsAAndAAAA(t *testing.T) {
 	var queries []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		queries = append(queries, r.URL.Query().Get("type"))
-		if r.Header.Get("Accept") != "application/dns-json" {
-			t.Errorf("Accept = %q, want application/dns-json", r.Header.Get("Accept"))
+		if r.Method == http.MethodGet {
+			queries = append(queries, r.URL.Query().Get("type"))
+			if r.Header.Get("Accept") != "application/dns-json" {
+				t.Errorf("Accept = %q, want application/dns-json", r.Header.Get("Accept"))
+			}
 		}
 
 		switch r.URL.Query().Get("type") {
