@@ -103,14 +103,20 @@ fetch --proxy http://user:password@proxy.example.com:8080 example.com
 
 ### Environment Variables
 
-`fetch` respects standard proxy environment variables:
+`fetch` respects standard proxy environment variables. Uppercase names take
+precedence over lowercase names. `HTTP_PROXY` is ignored when `REQUEST_METHOD`
+is set. Explicit `--proxy` and configuration values take precedence over the
+environment. `NO_PROXY` entries may be `*`, exact hosts, domain suffixes,
+IP literals, CIDR ranges, or entries with a port. Invalid entries are ignored.
+
 
 ```sh
 export HTTP_PROXY="http://proxy.example.com:8080"
 export HTTPS_PROXY="http://proxy.example.com:8080"
-export NO_PROXY="localhost,127.0.0.1,.internal.com"
+export ALL_PROXY="socks5://proxy.example.com:1080"
+export NO_PROXY="localhost,127.0.0.1,192.168.0.0/16,.internal.com"
 
-fetch example.com  # Uses proxy from environment
+fetch example.com  # Uses the HTTPS proxy from the environment
 ```
 
 ### Configuration File

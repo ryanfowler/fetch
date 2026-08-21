@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/resolver"
 
@@ -226,10 +226,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		defer doqClient.Close()
 	}
 	if server != nil && server.Scheme != "" && streamClient == nil && doqClient == nil {
-		var proxy func(*http.Request) (*url.URL, error)
-		if cfg.Proxy != nil {
-			proxy = func(*http.Request) (*url.URL, error) { return cfg.Proxy, nil }
-		}
+		proxy := client.ProxyFunc(cfg.Proxy)
 		dohClient, err = resolver.NewDOHClient(resolver.DOHConfig{
 			Endpoint:  cfg.Endpoint,
 			ServerURL: server,

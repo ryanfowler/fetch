@@ -795,9 +795,10 @@ fetch --update --dry-run
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for `--aws-sigv4` |
 | `AWS_SESSION_TOKEN` | Optional temporary AWS session token for `--aws-sigv4` |
 | `VISUAL` / `EDITOR`     | Editor for `--edit` option       |
-| `HTTPS_PROXY`           | HTTPS proxy URL                  |
-| `HTTP_PROXY`            | HTTP proxy URL                   |
-| `NO_PROXY`              | Hosts to bypass proxy            |
+| `HTTPS_PROXY` / `https_proxy` | HTTPS/WSS proxy URL                         |
+| `HTTP_PROXY` / `http_proxy`   | HTTP/WS proxy URL                           |
+| `ALL_PROXY` / `all_proxy`     | Fallback proxy URL                          |
+| `NO_PROXY` / `no_proxy`       | Hosts, domains, IPs, CIDR ranges, or ports |
 
 ## File References
 
