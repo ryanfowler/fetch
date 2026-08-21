@@ -159,7 +159,8 @@ func NewClient(cfg ClientConfig) *Client {
 		TLSMin:             cfg.TLSMin,
 		TLSMax:             cfg.TLSMax,
 	})
-	baseDial := res.DialContext
+	dialer := NewResolverDialer(res, cfg.ConnectTimeout)
+	baseDial := dialer.DialContext
 	proxyState := &proxyTransportState{}
 
 	if cfg.UnixSocket != "" {

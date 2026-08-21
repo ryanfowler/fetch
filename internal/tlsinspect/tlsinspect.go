@@ -85,21 +85,27 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		return 0
 	}
 
-	// Dial and handshake using context for cancellation support.
-	rawConn, err := res.DialContext(ctx, "tcp", addr)
+	// Use the same resolver-aware dialer as HTTP, WebSocket, and gRPC. TLS
+	// belongs to the connection setup budget so DNS, TCP, and the handshake
+	// cannot each consume the full timeout.
+	dialer := client.NewResolverDialer(res, cfg.Timeout)
+	result, err := dialer.Dial(ctx, client.DialRequest{
+		Network:    "tcp",
+		Address:    addr,
+		OriginHost: host,
+		TLSConfig:  tlsConfig,
+		ALPN:       tlsConfig.NextProtos,
+	})
 	if err != nil {
 		writeTLSError(p, err)
 		return 1
 	}
-	defer rawConn.Close()
-
-	tlsConn := tls.Client(rawConn, tlsConfig)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		writeTLSError(p, err)
+	defer result.Conn.Close()
+	if result.TLSState == nil {
+		writeTLSError(p, errors.New("TLS dial completed without connection state"))
 		return 1
 	}
-	cs := tlsConn.ConnectionState()
-	render(p, &cs)
+	render(p, result.TLSState)
 	p.Flush()
 	return 0
 }

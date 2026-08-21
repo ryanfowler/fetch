@@ -972,6 +972,9 @@ func writeAll(w io.Writer, data []byte) error {
 func contextError(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
 		return ctx.Err()
 	default:
 		return nil

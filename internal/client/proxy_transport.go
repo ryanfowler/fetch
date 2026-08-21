@@ -107,17 +107,24 @@ func newSOCKS5Dialer(base func(context.Context, string, string) (net.Conn, error
 			if res == nil {
 				return nil, errors.New("SOCKS5 local resolution is unavailable")
 			}
-			endpoint, err := res.ResolveAddress(connectCtx, network, address)
-			if err != nil {
-				return nil, fmt.Errorf("SOCKS5 local lookup %s: %w", host, err)
-			}
-			return resolver.RaceCandidates(connectCtx, endpoint.Addrs, func(attemptCtx context.Context, ip net.IPAddr) (net.Conn, error) {
-				return dialSOCKSConnection(attemptCtx, base, proxy, ipSOCKSDestination(ip.IP, uint16(port)), 0)
-			}, func(conn net.Conn) {
-				if conn != nil {
-					_ = conn.Close()
-				}
+			// Use the same resolver-aware race coordinator as direct HTTP
+			// connections. The attempt callback owns the SOCKS protocol, while
+			// DNS, family preference, cancellation, and loser cleanup remain in
+			// one place.
+			dialer := NewResolverDialer(res, timeout)
+			result, dialErr := dialer.Dial(connectCtx, DialRequest{
+				Network: network,
+				Host:    host,
+				Port:    portText,
+				Mode:    DialSOCKS5,
+				Attempt: func(attemptCtx context.Context, _ string, ip net.IPAddr) (net.Conn, error) {
+					return dialSOCKSConnection(attemptCtx, base, proxy, ipSOCKSDestination(ip.IP, uint16(port)), 0)
+				},
 			})
+			if dialErr != nil {
+				return nil, fmt.Errorf("SOCKS5 local lookup %s: %w", host, dialErr)
+			}
+			return result.Conn, nil
 		}
 
 		var destination socksDestination
