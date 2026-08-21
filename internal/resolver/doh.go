@@ -553,9 +553,20 @@ func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string,
 			record.Target = &target
 			record.RData, _ = target.Wire()
 		case dnsTypeSVCB, dnsTypeHTTPS:
-			if !generic && !validJSONServiceBinding(answer.Data) {
-				return nil, fmt.Errorf("invalid DoH JSON SVCB/HTTPS in answer %d", index)
+			var parsed SVCBRecord
+			if generic {
+				parsed, err = ParseSVCBRData(raw)
+			} else {
+				parsed, raw, err = parseJSONSVCBPresentation(answer.Data)
 			}
+			if err != nil {
+				return nil, fmt.Errorf("invalid DoH JSON SVCB/HTTPS in answer %d: %w", index, err)
+			}
+			record.RData = raw
+			record.Priority = parsed.Priority
+			target := parsed.Target
+			record.Target = &target
+			record.Params = cloneSVCBParams(parsed.Params)
 		default:
 			// The JSON data is retained for inspection. Its numeric type and
 			// owner were validated above even when this resolver is not using it
@@ -592,118 +603,6 @@ func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string,
 		return nil, errDNSNoData
 	}
 	return out, nil
-}
-
-func validJSONServiceBinding(value string) bool {
-	fields := strings.Fields(value)
-	if len(fields) < 2 {
-		return false
-	}
-	if _, err := strconv.ParseUint(fields[0], 10, 16); err != nil {
-		return false
-	}
-	if _, err := ParseName(fields[1]); err != nil {
-		return false
-	}
-
-	keys := make(map[uint16]struct{}, len(fields)-2)
-	for _, field := range fields[2:] {
-		keyText, valueText, hasValue := strings.Cut(field, "=")
-		key, known := jsonServiceBindingKey(keyText)
-		if !known {
-			return false
-		}
-		if _, duplicate := keys[key]; duplicate {
-			return false
-		}
-		keys[key] = struct{}{}
-		if key == 2 {
-			if hasValue {
-				return false
-			}
-			continue // no-default-alpn is represented without an equals sign.
-		}
-		if !hasValue {
-			return false
-		}
-		if strings.HasPrefix(valueText, "\"") {
-			decoded, err := strconv.Unquote(valueText)
-			if err != nil {
-				return false
-			}
-			valueText = decoded
-		}
-		if !validJSONServiceBindingParam(key, valueText) {
-			return false
-		}
-	}
-	return true
-}
-
-func jsonServiceBindingKey(value string) (uint16, bool) {
-	switch strings.ToLower(value) {
-	case "mandatory":
-		return 0, true
-	case "alpn":
-		return 1, true
-	case "no-default-alpn":
-		return 2, true
-	case "port":
-		return 3, true
-	case "ipv4hint":
-		return 4, true
-	case "ech":
-		return 5, true
-	case "ipv6hint":
-		return 6, true
-	case "dohpath":
-		return 7, true
-	}
-	if strings.HasPrefix(strings.ToLower(value), "key") {
-		key, err := strconv.ParseUint(value[3:], 10, 16)
-		return uint16(key), err == nil
-	}
-	return 0, false
-}
-
-func validJSONServiceBindingParam(key uint16, value string) bool {
-	if value == "" {
-		return false
-	}
-	switch key {
-	case 0:
-		for _, item := range strings.Split(value, ",") {
-			if item == "" {
-				return false
-			}
-			key, known := jsonServiceBindingKey(item)
-			if !known || key == 0 || key == 2 || key == 5 || key == 6 || key == 7 {
-				return false
-			}
-		}
-		return true
-	case 3:
-		_, err := strconv.ParseUint(value, 10, 16)
-		return err == nil
-	case 4:
-		for _, item := range strings.Split(value, ",") {
-			ip := net.ParseIP(item)
-			if ip == nil || ip.To4() == nil {
-				return false
-			}
-		}
-		return true
-	case 6:
-		for _, item := range strings.Split(value, ",") {
-			ip := net.ParseIP(item)
-			if ip == nil || ip.To16() == nil || ip.To4() != nil {
-				return false
-			}
-		}
-		return true
-	default:
-		return true
-	}
 }
 
 func parseJSONGenericRDATA(value string, typ uint16) ([]byte, bool, error) {
