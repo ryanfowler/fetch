@@ -55,7 +55,7 @@ fetch --inspect-dns example.com
 fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 ```
 
-The output shows the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, address count, record count, lookup duration, and per-record TTLs.
+Without `--dns-server`, inspection uses the platform resolver and shows only A and AAAA records. Per-record TTLs are unavailable through that resolver. With an explicit resolver, inspection queries A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS concurrently. The output shows the resolver security classification, address and record counts, and duration. If a query fails, successful records are retained, the incomplete record types are reported, and the command exits with status 1.
 
 ### Configuration File
 

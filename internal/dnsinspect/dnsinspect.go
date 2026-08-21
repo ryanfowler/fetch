@@ -4,17 +4,18 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/resolver"
@@ -68,18 +69,27 @@ type record struct {
 }
 
 type result struct {
-	host        string
-	resolver    string
-	records     map[string][]record
-	duration    time.Duration
-	tcpFallback bool
-	silent      bool
+	host           string
+	resolver       string
+	security       string
+	records        map[string][]record
+	failures       []queryFailure
+	duration       time.Duration
+	tcpFallback    bool
+	ttlUnavailable bool
+	silent         bool
 }
 
 type queryResult struct {
+	label       string
 	records     []record
 	err         error
 	tcpFallback bool
+}
+
+type queryFailure struct {
+	label string
+	err   error
 }
 
 type resolverTargetInfo struct {
@@ -88,10 +98,7 @@ type resolverTargetInfo struct {
 	useDefault bool
 }
 
-var (
-	readResolvConf      = func() ([]byte, error) { return os.ReadFile("/etc/resolv.conf") }
-	defaultLookupIPAddr = net.DefaultResolver.LookupIPAddr
-)
+var defaultLookupIPAddr = net.DefaultResolver.LookupIPAddr
 
 // Inspect resolves the configured URL hostname and renders DNS information to
 // the printer. It returns a non-zero exit code on failure.
@@ -106,11 +113,16 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		return 1
 	}
 
-	if cfg.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
-		defer cancel()
+	// DNS inspection is a diagnostic operation, so it must not leave one
+	// stalled resolver query hanging forever. All record-type queries share
+	// this single deadline, including resolver endpoint bootstrap.
+	inspectionTimeout := cfg.Timeout
+	if inspectionTimeout <= 0 {
+		inspectionTimeout = core.DefaultDOHTimeout
 	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, inspectionTimeout)
+	defer cancel()
 
 	start := time.Now()
 	if ip := net.ParseIP(host); ip != nil {
@@ -126,7 +138,14 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		return 1
 	}
 	render(p, res)
+	partial := len(res.failures) > 0
+	if partial {
+		core.WriteWarningMsgIf(p, formatPartialWarning(res.failures), res.silent)
+	}
 	p.Flush()
+	if partial {
+		return 1
+	}
 	return 0
 }
 
@@ -139,8 +158,18 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	out := &result{
 		host:     host,
 		resolver: target.label,
+		security: resolverSecurity(cfg, server),
 		records:  make(map[string][]record),
 		silent:   cfg.Silent,
+	}
+
+	// A missing --dns-server means the platform resolver, not the first
+	// nameserver listed in resolv.conf. The platform API exposes addresses but
+	// not per-record TTLs, and it cannot provide the additional record types.
+	if server == nil {
+		target = resolverTargetInfo{label: "system resolver", useDefault: true}
+		out.resolver = target.label
+		out.ttlUnavailable = true
 	}
 
 	if cfg.Endpoint != nil && cfg.Endpoint.Transport != resolver.TransportUDP && cfg.Endpoint.Transport != resolver.TransportTCP && cfg.Endpoint.Transport != resolver.TransportTLS && cfg.Endpoint.Transport != resolver.TransportQUIC && cfg.Endpoint.Transport != resolver.TransportHTTPS {
@@ -214,8 +243,9 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	var wg sync.WaitGroup
 	for i, qt := range inspectTypes {
 		wg.Add(1)
-		go func() {
+		go func(i int, qt queryType) {
 			defer wg.Done()
+			results[i].label = qt.label
 			if streamClient != nil {
 				results[i].records, results[i].err = lookupStreamRecords(ctx, streamClient, host, qt)
 				return
@@ -229,23 +259,31 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 				return
 			}
 			results[i].records, results[i].tcpFallback, results[i].err = lookupUDPRecordsWithFallback(ctx, target.udpAddr, host, qt)
-		}()
+		}(i, qt)
 	}
 	wg.Wait()
 
 	var firstErr error
 	seen := make(map[string]int)
-	for _, result := range results {
-		out.tcpFallback = out.tcpFallback || result.tcpFallback
-		if result.err != nil && firstErr == nil {
-			firstErr = result.err
+	for _, query := range results {
+		out.tcpFallback = out.tcpFallback || query.tcpFallback
+		if query.err != nil && !errors.Is(query.err, resolver.ErrDNSNoData) {
+			out.failures = append(out.failures, queryFailure{label: query.label, err: query.err})
+			if firstErr == nil {
+				firstErr = query.err
+			}
 		}
-		for _, rec := range result.records {
+		for _, rec := range query.records {
 			key := rec.typ + "\x00" + rec.value
 			if idx, ok := seen[key]; ok {
 				records := out.records[rec.typ]
-				if rec.ttl < records[idx].ttl {
-					records[idx].ttl = rec.ttl
+				existing := &records[idx]
+				switch {
+				case rec.hasTTL && !existing.hasTTL:
+					existing.ttl = rec.ttl
+					existing.hasTTL = true
+				case rec.hasTTL && existing.hasTTL && rec.ttl < existing.ttl:
+					existing.ttl = rec.ttl
 				}
 				continue
 			}
@@ -255,7 +293,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	}
 	out.duration = time.Since(start)
 
-	if recordCount(out) > 0 {
+	if recordCount(out) > 0 || len(out.failures) > 0 {
 		return out, nil
 	}
 	if firstErr != nil {
@@ -474,6 +512,8 @@ func formatSVCParam(param dnsmessage.SVCParam) string {
 		return param.Key.String() + "=" + strings.Join(alpns, ",")
 	case dnsmessage.SVCParamNoDefaultALPN:
 		return param.Key.String()
+	case dnsmessage.SVCParamECH:
+		return param.Key.String() + "=" + base64.StdEncoding.EncodeToString(param.Value)
 	case dnsmessage.SVCParamPort:
 		if len(param.Value) != 2 {
 			return fmt.Sprintf("%s=0x%s", param.Key.String(), hex.EncodeToString(param.Value))
@@ -588,36 +628,35 @@ func unpackDNSName(raw []byte, off int) (string, int, bool) {
 	}
 }
 
+func resolverSecurity(cfg *Config, server *url.URL) string {
+	if server == nil {
+		return "platform resolver (OS-managed security)"
+	}
+	if cfg.Endpoint != nil {
+		security := cfg.Endpoint.Security
+		if cfg.Insecure && security == resolver.SecurityVerifiedEncrypted {
+			security = resolver.SecurityUnverifiedEncrypt
+		}
+		return string(security)
+	}
+	if cfg.Insecure && (strings.EqualFold(server.Scheme, "https") || strings.EqualFold(server.Scheme, "http")) {
+		return string(resolver.SecurityUnverifiedEncrypt)
+	}
+	if strings.EqualFold(server.Scheme, "https") {
+		return string(resolver.SecurityVerifiedEncrypted)
+	}
+	return string(resolver.SecurityPlaintext)
+}
+
 func resolverTarget(server *url.URL) resolverTargetInfo {
 	switch {
 	case server == nil:
-		addr, ok := systemDNSServer()
-		if !ok {
-			return resolverTargetInfo{label: "system resolver", useDefault: true}
-		}
-		return resolverTargetInfo{label: "system (" + addr + ")", udpAddr: addr}
+		return resolverTargetInfo{label: "system resolver", useDefault: true}
 	case server.Scheme == "":
 		return resolverTargetInfo{label: "udp " + server.Host, udpAddr: server.Host}
 	default:
 		return resolverTargetInfo{label: server.String()}
 	}
-}
-
-func systemDNSServer() (string, bool) {
-	raw, err := readResolvConf()
-	if err == nil {
-		for _, line := range strings.Split(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) >= 2 && fields[0] == "nameserver" {
-				return net.JoinHostPort(fields[1], "53"), true
-			}
-		}
-	}
-	return "", false
 }
 
 func absoluteName(host string) string {
@@ -690,6 +729,31 @@ func renderIPLiteral(p *core.Printer, host string, ip net.IP, resolver string, d
 	p.WriteString("\n")
 }
 
+const maxPartialErrorBytes = 256
+
+func conciseDiagnostic(text string) string {
+	if len(text) <= maxPartialErrorBytes {
+		return text
+	}
+	cut := maxPartialErrorBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "..."
+}
+
+func formatPartialWarning(failures []queryFailure) string {
+	parts := make([]string, 0, len(failures))
+	for _, failure := range failures {
+		if failure.err == nil {
+			parts = append(parts, failure.label)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s (%s)", failure.label, conciseDiagnostic(failure.err.Error())))
+	}
+	return "DNS inspection incomplete; failed record types: " + strings.Join(parts, ", ")
+}
+
 func render(p *core.Printer, res *result) {
 	p.WriteInfoPrefix()
 	p.Set(core.Bold)
@@ -708,6 +772,14 @@ func render(p *core.Printer, res *result) {
 	p.WriteString(core.TerminalSafeText(res.resolver))
 	p.Reset()
 	p.WriteString("\n")
+	p.WriteInfoPrefix()
+	p.WriteString("Security: ")
+	p.WriteString(core.TerminalSafeText(res.security))
+	p.WriteString("\n")
+	if res.ttlUnavailable {
+		p.WriteInfoPrefix()
+		p.WriteString("TTL: unavailable (platform resolver does not provide per-record TTLs)\n")
+	}
 	if res.tcpFallback {
 		core.WriteWarningMsgIf(p, "UDP response was truncated; used TCP fallback", res.silent)
 	}

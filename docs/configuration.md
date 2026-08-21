@@ -253,13 +253,17 @@ ca-cert = ca-cert.pem
 **Type**: Resolver endpoint
 **Default**: System default
 
-Use a custom DNS server for hostname resolution. Supported forms are bare
-IPv4 or bracketed IPv6 UDP addresses, `host:port`, `udp://`, `tcp://`,
+Use a custom DNS server for hostname resolution. Without this option, DNS
+inspection uses the platform resolver and shows only A and AAAA records; its
+per-record TTLs are unavailable. Supported custom forms are bare IPv4 or
+bracketed IPv6 UDP addresses, `host:port`, `udp://`, `tcp://`,
 `tls://`/`dot://`, `quic://`/`doq://`, and HTTPS DoH URLs. UDP/TCP default to
 port 53, while DoT/DoQ default to 853. Non-DoH paths and queries, userinfo,
 and fragments are rejected during configuration validation. TCP and DoT use
 pipelined operation-scoped connections. DoQ uses a verified QUIC connection
-per resolver operation and one bidirectional stream per DNS query.
+per resolver operation and one bidirectional stream per DNS query. Explicit
+DNS inspection queries all supported record types concurrently and reports
+partial results with a nonzero status when a query fails.
 
 ```ini
 # Use Google DNS
