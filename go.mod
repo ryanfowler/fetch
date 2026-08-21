@@ -7,7 +7,7 @@ require (
 	github.com/goccy/go-yaml v1.19.2
 	github.com/google/brotli/go/brotli v1.1.1-rc0.0.20260804194026-8e10eeb3378f
 	github.com/klauspost/compress v1.19.2
-	github.com/mattn/go-runewidth v0.0.27
+	github.com/mattn/go-runewidth v0.0.28
 	github.com/quic-go/quic-go v0.61.0
 	github.com/ryanfowler/readability v0.1.1-0.20260728104115-94024d364e88
 	github.com/tinylib/msgp v1.6.4
