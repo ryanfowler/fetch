@@ -258,8 +258,8 @@ IPv4 or bracketed IPv6 UDP addresses, `host:port`, `udp://`, `tcp://`,
 `tls://`/`dot://`, `quic://`/`doq://`, and HTTPS DoH URLs. UDP/TCP default to
 port 53, while DoT/DoQ default to 853. Non-DoH paths and queries, userinfo,
 and fragments are rejected during configuration validation. TCP and DoT use
-pipelined operation-scoped connections. DoQ is parsed but reports an
-unsupported-transport error until its transport implementation lands.
+pipelined operation-scoped connections. DoQ uses a verified QUIC connection
+per resolver operation and one bidirectional stream per DNS query.
 
 ```ini
 # Use Google DNS

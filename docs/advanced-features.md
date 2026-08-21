@@ -10,9 +10,10 @@ Use a custom DNS server instead of the system resolver. The endpoint is
 validated before a request starts. Supported forms include bare UDP addresses,
 `udp://`, `tcp://`, `tls://`/`dot://`, `quic://`/`doq://`, and HTTPS DoH URLs.
 Non-DoH transports reject paths and queries; userinfo and fragments are never
-accepted. TCP and DoT use pipelined, operation-scoped connections. DoQ endpoint
-forms are validated now and report an unsupported-transport error until their
-query transport is implemented.
+accepted. TCP and DoT use pipelined, operation-scoped connections. DoQ uses
+one verified QUIC connection per operation, one bidirectional stream per
+query, and the standard `doq` ALPN. Hostname endpoints use the configured
+nonrecursive bootstrap hook.
 
 ### UDP DNS
 

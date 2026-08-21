@@ -64,7 +64,7 @@ prettier -w .
 - **internal/har** - Bounded HAR 1.2 final-exchange recording with streaming body capture and atomic output.
 - **internal/proto** - Protocol buffer compilation and message handling for gRPC support.
 - **internal/pager** - Shell-free `$PAGER` parsing and bounded pager process lifecycle for help and response output.
-- **internal/resolver** - Shared DNS resolution and dialing for system DNS, UDP, pipelined TCP, DNS-over-TLS, and DNS-over-HTTPS across HTTP, HTTP/3, gRPC, and TLS inspection.
+- **internal/resolver** - Shared DNS resolution and dialing for system DNS, UDP, pipelined TCP, DNS-over-TLS, DNS-over-QUIC, and DNS-over-HTTPS across HTTP, HTTP/3, gRPC, and TLS inspection.
 - **internal/session** - Named cookie sessions with persistent storage across invocations.
 - **internal/update** - Check for updates, download from Github, and self-update.
 - **internal/ws** - WebSocket message loop (read, write, bidirectional coordination).
@@ -81,7 +81,7 @@ prettier -w .
 - `--grpc-list` and `--grpc-describe` provide grpcurl-style discovery using reflection or local descriptor files.
 - `--grpc` now automatically tries gRPC reflection when no local schema is supplied.
 - Plaintext loopback gRPC servers are supported via `h2c` for both calls and discovery.
-- `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP, pipelined TCP/DoT, or DoH responses. TCP and DoT inspection queries share one bounded operation-scoped connection.
+- `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP, pipelined TCP/DoT, DoQ, or DoH responses. TCP, DoT, and DoQ inspection queries share one bounded operation-scoped connection.
 - `--inspect-tls --http 3` performs QUIC/TLS inspection with `h3` ALPN instead of the TCP TLS path.
 - `--tls` remains a compatibility alias for setting the minimum TLS version; prefer `--min-tls` in new docs/examples, and use `--max-tls` to cap negotiation or combine min/max for an exact TLS version.
 - WebSocket terminal sessions use the interactive prompt by default and can be controlled with `--ws-interactive auto|on|off`; output-file/clipboard/retry flags are rejected because the WebSocket path streams through the message loop instead of the normal response pipeline.

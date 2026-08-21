@@ -44,6 +44,11 @@ type StreamConfig struct {
 	Insecure    bool
 	TLSMin      uint16
 	TLSMax      uint16
+
+	// QUICDial optionally replaces the default quic-go dial operation. It is
+	// useful for deterministic tests and for callers that provide a shared
+	// packet-dial policy. It is ignored by TCP and TLS transports.
+	QUICDial QUICDialFunc
 }
 
 // StreamClient pipelines DNS queries over one stream and correlates responses
