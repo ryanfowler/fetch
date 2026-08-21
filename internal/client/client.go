@@ -122,15 +122,18 @@ type ClientConfig struct {
 	// DNSServer remains for compatibility with direct internal callers/tests.
 	ResolverEndpoint *resolver.Endpoint
 	DNSServer        *url.URL
-	H2C              bool
-	HTTP             core.HTTPVersion
-	Insecure         bool
-	Proxy            *url.URL
-	Redirects        *int
-	TLSMax           uint16
-	TLSMin           uint16
-	UnixSocket       string
-	ECH              core.ECHMode
+	// SystemLookupIPAddr is a test hook for deterministic proxy destination
+	// resolution. Production callers leave it nil.
+	SystemLookupIPAddr func(context.Context, string) ([]net.IPAddr, error)
+	H2C                bool
+	HTTP               core.HTTPVersion
+	Insecure           bool
+	Proxy              *url.URL
+	Redirects          *int
+	TLSMax             uint16
+	TLSMin             uint16
+	UnixSocket         string
+	ECH                core.ECHMode
 }
 
 // NewClient returns an initialized Client given the provided configuration.
@@ -147,15 +150,17 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
 	res := resolver.New(resolver.Config{
-		Endpoint: cfg.ResolverEndpoint,
-		Server:   cfg.DNSServer,
-		Proxy:    proxy,
-		CACerts:  cfg.CACerts,
-		Insecure: cfg.Insecure,
-		TLSMin:   cfg.TLSMin,
-		TLSMax:   cfg.TLSMax,
+		Endpoint:           cfg.ResolverEndpoint,
+		Server:             cfg.DNSServer,
+		SystemLookupIPAddr: cfg.SystemLookupIPAddr,
+		Proxy:              proxy,
+		CACerts:            cfg.CACerts,
+		Insecure:           cfg.Insecure,
+		TLSMin:             cfg.TLSMin,
+		TLSMax:             cfg.TLSMax,
 	})
 	baseDial := res.DialContext
+	proxyState := &proxyTransportState{}
 
 	if cfg.UnixSocket != "" {
 		baseDial = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -169,25 +174,85 @@ func NewClient(cfg ClientConfig) *Client {
 	switch cfg.HTTP {
 	case core.HTTP2:
 		if cfg.H2C {
-			transport = getH2CTransport(baseDial, cfg.ConnectTimeout)
+			transport = getH2CTransport(baseDial, res, cfg.Proxy, cfg.ConnectTimeout)
 		} else {
-			transport = getHTTP2Transport(baseDial, tlsConfig, cfg.ConnectTimeout)
+			transport = getHTTP2Transport(baseDial, res, cfg.Proxy, tlsConfig, cfg.ConnectTimeout)
 		}
 	case core.HTTP3:
 		transport = getHTTP3Transport(res, tlsConfig, cfg.ConnectTimeout, cfg.ECH)
 	default:
+		if useUnifiedProxyTransport(cfg.Proxy) {
+			transport = newUnifiedProxyTransport(cfg, baseDial, res, tlsConfig)
+			break
+		}
 		rt := &http.Transport{
-			DialContext:        baseDial,
 			DisableCompression: true,
 			ForceAttemptHTTP2:  cfg.HTTP != core.HTTP1,
 			Protocols:          &http.Protocols{},
-			Proxy:              proxy,
 			TLSClientConfig:    tlsConfig,
 		}
-		if cfg.ConnectTimeout > 0 {
-			rt.DialContext = wrapDialWithConnectTimeout(baseDial, cfg.ConnectTimeout)
-			rt.DialTLSContext = newDialTLSWithConnectTimeout(baseDial, tlsConfig, cfg.ConnectTimeout, cfg.HTTP != core.HTTP1)
+
+		// net/http provides the HTTP proxy CONNECT machinery, but its SOCKS
+		// implementation treats socks5 and socks5h identically. It also uses
+		// the origin TLS configuration for an HTTPS proxy. Keep the transport
+		// as the single HTTP implementation, and replace only the first-hop
+		// dial for the schemes whose semantics need to be explicit.
+		transportProxy := func(req *http.Request) (*url.URL, error) {
+			proxyState.forgetTarget(req.URL)
+			proxyState.clearHTTPS()
+			selected, err := proxy(req)
+			if err != nil || selected == nil {
+				return selected, err
+			}
+			switch strings.ToLower(selected.Scheme) {
+			case "https":
+				proxyState.remember(selected)
+				return httpsProxyAsHTTP(selected), nil
+			case "socks5", "socks5h":
+				// SOCKS destinations are carried by DialContext rather than
+				// net/http's SOCKS implementation so socks5 can resolve
+				// locally and socks5h can preserve the hostname.
+				proxyState.rememberSocks(req.URL, selected)
+				return nil, nil
+			default:
+				return selected, nil
+			}
 		}
+		dial := wrapDialWithConnectTimeout(baseDial, cfg.ConnectTimeout)
+		if cfg.ConnectTimeout <= 0 {
+			dial = baseDial
+		}
+		if cfg.Proxy != nil {
+			switch strings.ToLower(cfg.Proxy.Scheme) {
+			case "socks5", "socks5h":
+				transportProxy = func(*http.Request) (*url.URL, error) { return nil, nil }
+				dial = newSOCKS5Dialer(baseDial, res, cfg.Proxy, strings.EqualFold(cfg.Proxy.Scheme, "socks5"), cfg.ConnectTimeout)
+			case "https":
+				transportProxy = func(*http.Request) (*url.URL, error) {
+					return httpsProxyAsHTTP(cfg.Proxy), nil
+				}
+				dial = newHTTPSProxyDialer(baseDial, cfg.Proxy, cfg.ConnectTimeout)
+			default:
+				transportProxy = proxy
+			}
+		}
+		if cfg.Proxy == nil {
+			// Environment HTTPS proxies are recorded by transportProxy and
+			// upgraded in the dial path without changing the public
+			// *http.Transport type used by existing callers.
+			wrappedDial := dial
+			dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+				if selected, socks := proxyState.lookup(address); selected != nil {
+					if socks {
+						return newSOCKS5Dialer(baseDial, res, selected, strings.EqualFold(selected.Scheme, "socks5"), cfg.ConnectTimeout)(ctx, network, address)
+					}
+					return newHTTPSProxyDialer(baseDial, selected, cfg.ConnectTimeout)(ctx, network, address)
+				}
+				return wrappedDial(ctx, network, address)
+			}
+		}
+		rt.Proxy = transportProxy
+		rt.DialContext = dial
 		rt.Protocols.SetHTTP1(true)
 		rt.Protocols.SetHTTP2(cfg.HTTP != core.HTTP1)
 		transport = rt
@@ -210,16 +275,15 @@ func NewClient(cfg ClientConfig) *Client {
 			return fmt.Errorf("exceeded maximum number of redirects: %d", maxRedirects)
 		}
 
-		// A custom HTTP/2 or HTTP/3 transport cannot proxy. Re-evaluate the
-		// destination after every redirect so a NO_PROXY bypass on the first
-		// hop cannot silently turn into a direct request on a later hop.
-		if cfg.HTTP >= core.HTTP2 {
+		// HTTP/2 has its own proxy-aware dialer. HTTP/3 still has no
+		// supported proxy path; reject it before any connection attempt.
+		if cfg.HTTP == core.HTTP3 {
 			proxy, err := ProxyForURL(cfg.Proxy, req.URL)
 			if err != nil {
 				return err
 			}
 			if proxy != nil {
-				return errors.New("a proxy can only be used with HTTP/1.1")
+				return errors.New("HTTP/3 cannot be used with a proxy")
 			}
 		}
 
@@ -272,6 +336,19 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 
 	var initErr error
+	if useUnifiedProxyTransport(cfg.Proxy) {
+		// DoH is constructed by the resolver before the application transport
+		// exists. Replace it now so HTTPS proxy verification and SOCKS
+		// hostname semantics are shared with ordinary requests. Proxy
+		// endpoints themselves use platform bootstrap to avoid resolving a
+		// DoH proxy through that same DoH endpoint.
+		dohTransport := newUnifiedProxyTransport(cfg, baseDial, res, tlsConfig)
+		dohTransport.proxyBase = func(ctx context.Context, network, address string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, network, address)
+		}
+		initErr = res.SetRoundTripper(dohTransport)
+	}
 	if cfg.HTTP == core.HTTP3 && cfg.Proxy != nil {
 		initErr = errors.New("HTTP/3 cannot be used with a proxy")
 	}
@@ -311,14 +388,24 @@ func newConnectDeadlineConn(conn net.Conn, ctx context.Context) net.Conn {
 func (c *connectDeadlineConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	if !c.cleared {
-		if !c.proxyConnect && bytes.HasPrefix(p, []byte("CONNECT ")) {
+		switch {
+		case !c.proxyConnect && bytes.HasPrefix(p, []byte("CONNECT ")):
 			c.proxyConnect = true
-		} else if !c.proxyConnect || isTLSApplicationRecord(p) {
+		case isTLSHandshakeRecord(p):
+			// Keep the connection deadline through proxy and origin TLS
+			// handshakes. The first application record clears it.
+		case isTLSApplicationRecord(p):
+			c.clearDeadlineLocked()
+		default:
 			c.clearDeadlineLocked()
 		}
 	}
 	c.mu.Unlock()
 	return c.Conn.Write(p)
+}
+
+func isTLSHandshakeRecord(p []byte) bool {
+	return len(p) >= 3 && p[0] == 0x16 && p[1] == 0x03
 }
 
 func isTLSApplicationRecord(p []byte) bool {
@@ -353,109 +440,19 @@ func wrapDialWithConnectTimeout(baseDial func(context.Context, string, string) (
 	}
 }
 
-// newDialTLSWithConnectTimeout returns a DialTLSContext function that performs
-// DNS + TCP + TLS under a single connect timeout context. It clones the provided
-// tlsConfig and sets NextProtos explicitly because http.Transport ignores
-// TLSClientConfig when DialTLSContext is set.
-func newDialTLSWithConnectTimeout(baseDial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config, timeout time.Duration, enableHTTP2 bool) func(context.Context, string, string) (net.Conn, error) {
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		ctx, cancel := connectContext(ctx, timeout, "DNS/TCP/TLS connect")
-		defer cancel()
-
-		dial := baseDial
-		if dial == nil {
-			var d net.Dialer
-			dial = d.DialContext
-		}
-
-		conn, err := dial(ctx, network, address)
-		if err != nil {
-			return nil, err
-		}
-
-		cfg := tlsConfig.Clone()
-		if enableHTTP2 {
-			cfg.NextProtos = []string{"h2", "http/1.1"}
-		} else {
-			cfg.NextProtos = []string{"http/1.1"}
-		}
-
-		host, _, err := net.SplitHostPort(address)
-		if err != nil {
-			host = address
-		}
-		if cfg.ServerName == "" {
-			cfg.ServerName = host
-		}
-
-		tlsConn := tls.Client(conn, cfg)
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		return newConnectDeadlineConn(tlsConn, ctx), nil
-	}
-}
-
-func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn, error), tlsConfig *tls.Config, connectTimeout time.Duration) http.RoundTripper {
+func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, explicitProxy *url.URL, tlsConfig *tls.Config, connectTimeout time.Duration) http.RoundTripper {
 	return &http2.Transport{
-		AllowHTTP: false,
-		DialTLSContext: func(ctx context.Context, network string, addr string, cfg *tls.Config) (net.Conn, error) {
-			ctx, cancel := connectContext(ctx, connectTimeout, "DNS/TCP/TLS connect")
-			defer cancel()
-
-			dial := baseDial
-			if dial == nil {
-				var dialer net.Dialer
-				dial = dialer.DialContext
-			}
-
-			// Dial a connection and perform the TLS handshake.
-			conn, err := dial(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-
-			if cfg.ServerName == "" {
-				c := cfg.Clone()
-				host, _, err := net.SplitHostPort(addr)
-				if err != nil {
-					host = addr
-				}
-				c.ServerName = host
-				cfg = c
-			}
-
-			tlsConn := tls.Client(conn, cfg)
-			if err := tlsConn.HandshakeContext(ctx); err != nil {
-				conn.Close()
-				return nil, err
-			}
-			return newConnectDeadlineConn(tlsConn, ctx), nil
-		},
+		AllowHTTP:          false,
+		DialTLSContext:     newHTTP2DialTLS(baseDial, res, explicitProxy, "https", tlsConfig, connectTimeout),
 		DisableCompression: true,
 		TLSClientConfig:    tlsConfig,
 	}
 }
 
-func getH2CTransport(baseDial func(context.Context, string, string) (net.Conn, error), connectTimeout time.Duration) http.RoundTripper {
+func getH2CTransport(baseDial func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, explicitProxy *url.URL, connectTimeout time.Duration) http.RoundTripper {
 	return &http2.Transport{
-		AllowHTTP: true,
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			ctx, cancel := connectContext(ctx, connectTimeout, "DNS/TCP connect")
-			defer cancel()
-
-			dial := baseDial
-			if dial == nil {
-				var dialer net.Dialer
-				dial = dialer.DialContext
-			}
-			conn, err := dial(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			return newConnectDeadlineConn(conn, ctx), nil
-		},
+		AllowHTTP:          true,
+		DialTLSContext:     newHTTP2DialTLS(baseDial, res, explicitProxy, "http", nil, connectTimeout),
 		DisableCompression: true,
 	}
 }
@@ -1258,18 +1255,33 @@ func newSeekableBody(rs io.ReadSeeker, contentType string) *body.Body {
 }
 
 // Do performs the provided http Request, returning the response.
-func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	if c.initErr != nil {
-		return nil, c.initErr
+// ValidateTransport checks configuration that must fail before a handshake.
+// WebSocket uses HTTPClient directly, so it calls this method before dialing.
+func (c *Client) ValidateTransport(req *http.Request) error {
+	if c == nil {
+		return errors.New("nil HTTP client")
 	}
-	if c.httpVersion >= core.HTTP2 {
+	if c.initErr != nil {
+		return c.initErr
+	}
+	if req == nil || req.URL == nil {
+		return errors.New("request URL is required")
+	}
+	if c.httpVersion == core.HTTP3 {
 		proxy, err := ProxyForURL(c.proxy, req.URL)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if proxy != nil {
-			return nil, errors.New("a proxy can only be used with HTTP/1.1")
+			return errors.New("HTTP/3 cannot be used with a proxy")
 		}
+	}
+	return nil
+}
+
+func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	if err := c.ValidateTransport(req); err != nil {
+		return nil, err
 	}
 	if c.c.Jar != nil {
 		req = withOriginCookies(req, c.c.Jar)

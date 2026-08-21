@@ -105,6 +105,10 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		defer cancelDial()
 	}
 
+	if err := c.ValidateTransport(req); err != nil {
+		return 1, err
+	}
+
 	// Attach debug trace for -vvv.
 	if r.Verbosity >= core.VDebug {
 		trace, _ := newDebugTrace(r.PrinterHandle.Stderr())

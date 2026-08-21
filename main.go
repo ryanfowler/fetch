@@ -148,22 +148,6 @@ func main() {
 		os.Exit(statusForContext(ctx, inspectTLS(ctx, app, handle)))
 	}
 
-	// Respond with an error if the selected proxy is used with HTTP/2 or
-	// higher. This includes environment proxies, but respects NO_PROXY.
-	if app.Cfg.HTTP >= core.HTTP2 {
-		proxy, proxyErr := client.ProxyForURL(app.Cfg.Proxy, app.URL)
-		if proxyErr != nil {
-			p := handle.Stderr()
-			writeCLIErr(p, proxyErr)
-			os.Exit(1)
-		}
-		if proxy != nil {
-			p := handle.Stderr()
-			writeCLIErr(p, errors.New("a proxy can only be used with HTTP/1.1"))
-			os.Exit(1)
-		}
-	}
-
 	// Respond with an error if a unix socket is specified with HTTP/3.
 	if app.UnixSocket != "" && app.Cfg.HTTP == core.HTTP3 {
 		p := handle.Stderr()

@@ -223,6 +223,33 @@ func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) 
 // Happy Eyeballs policy. The first address retains the resolver's preferred
 // family; later candidates are interleaved by ResolveAddress.
 func (r *Resolver) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	// A DoH endpoint cannot resolve its own hostname through the DoH client.
+	// Bootstrap this one first hop with its explicit addresses or the platform
+	// resolver, while all application destinations continue to use the selected
+	// resolver normally.
+	if r != nil && r.endpoint != nil && r.endpoint.Transport == TransportHTTPS {
+		if host, port, splitErr := net.SplitHostPort(address); splitErr == nil && strings.EqualFold(strings.TrimSuffix(host, "."), strings.TrimSuffix(r.endpoint.ConnectHost, ".")) {
+			addrs := make([]net.IPAddr, 0, len(r.endpoint.BootstrapAddrs))
+			for _, ip := range r.endpoint.BootstrapAddrs {
+				addrs = append(addrs, net.IPAddr{IP: append(net.IP(nil), ip...)})
+			}
+			if len(addrs) == 0 {
+				var lookupErr error
+				addrs, lookupErr = net.DefaultResolver.LookupIPAddr(ctx, host)
+				if lookupErr != nil {
+					return nil, lookupErr
+				}
+			}
+			return RaceCandidates(ctx, addrs, func(ctx context.Context, addr net.IPAddr) (net.Conn, error) {
+				var dialer net.Dialer
+				return dialer.DialContext(ctx, network, net.JoinHostPort(addr.IP.String(), port))
+			}, func(conn net.Conn) {
+				if conn != nil {
+					_ = conn.Close()
+				}
+			})
+		}
+	}
 	endpoint, err := r.ResolveAddress(ctx, network, address)
 	if err != nil {
 		return nil, err

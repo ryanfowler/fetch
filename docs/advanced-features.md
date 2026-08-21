@@ -93,7 +93,18 @@ fetch --proxy https://secure-proxy.example.com:8443 example.com
 
 ```sh
 fetch --proxy socks5://localhost:1080 example.com
+fetch --proxy socks5h://localhost:1080 example.com
 ```
+
+`socks5` resolves the destination with `fetch`'s configured resolver and sends
+an IP address to the proxy. `socks5h` sends the hostname and leaves resolution
+to the proxy. Both forms support username-only and username/password
+credentials.
+
+An `https` proxy is TLS-protected and verified using system roots. Its TLS
+verification is separate from the origin: `--insecure` and origin CA files do
+not disable proxy verification. HTTP, HTTPS, SOCKS5, and SOCKS5H use the same
+proxy selection and transport policy.
 
 ### Authenticated Proxy
 
