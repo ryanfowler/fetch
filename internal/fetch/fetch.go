@@ -825,7 +825,14 @@ func getHeaders(headers http.Header) []core.KeyVal[string] {
 	out := make([]core.KeyVal[string], 0, len(headers))
 	for k, v := range headers {
 		k = strings.ToLower(k)
-		value := core.RedactHeaderValue(k, strings.Join(v, ","))
+		values := make([]string, 0, len(v))
+		for _, item := range v {
+			if k == "location" {
+				item = redactedRedirectLocation(item)
+			}
+			values = append(values, item)
+		}
+		value := core.RedactHeaderValue(k, strings.Join(values, ","))
 		out = append(out, core.KeyVal[string]{Key: k, Val: value})
 	}
 	slices.SortFunc(out, func(a, b core.KeyVal[string]) int {

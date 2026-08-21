@@ -121,7 +121,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 					return
 				}
 				if next.Response != nil {
-					next.Header.Del("X-Amz-Content-Sha256")
+					clearAWSGeneratedHeaders(next)
 				}
 				if observerErr == nil {
 					observerErr = signAWSRequest(r, next)
@@ -299,12 +299,29 @@ func delayFits(ctx context.Context, budget core.Budget, delay time.Duration) err
 	return nil
 }
 
+func clearAWSGeneratedHeaders(req *http.Request) {
+	if req == nil {
+		return
+	}
+	for _, name := range []string{"Authorization", "X-Amz-Date", "X-Amz-Content-Sha256"} {
+		for key := range req.Header {
+			if strings.EqualFold(key, name) {
+				delete(req.Header, key)
+			}
+		}
+	}
+}
+
 func clearAWSHeaders(req *http.Request) {
 	if req == nil {
 		return
 	}
-	for _, name := range []string{"Authorization", "X-Amz-Date", "X-Amz-Content-Sha256", "X-Amz-Security-Token"} {
-		req.Header.Del(name)
+	for _, name := range []string{"Authorization", "X-Amz-Date", "X-Amz-Content-Sha256", "X-Amz-Security-Token", "X-Amz-Session-Token"} {
+		for key := range req.Header {
+			if strings.EqualFold(key, name) {
+				delete(req.Header, key)
+			}
+		}
 	}
 }
 

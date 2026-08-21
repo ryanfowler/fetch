@@ -209,6 +209,11 @@ func NewClient(cfg ClientConfig) *Client {
 		if err := normalizeRedirectRequest(req, via); err != nil {
 			return err
 		}
+		// A redirect URL is server-controlled. Never retain userinfo from a
+		// Location header in the request URL or treat it as origin credentials.
+		if req.URL != nil {
+			req.URL.User = nil
+		}
 
 		// Apply the credential boundary after net/http has copied the initial
 		// headers. The standard library compares host suffixes, but an HTTP
@@ -583,6 +588,21 @@ type RequestConfig struct {
 
 // NewRequest returns an *http.Request given the provided configuration.
 func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Request, error) {
+	// URL userinfo is an authentication source, not part of the request URL.
+	// Convert it to Basic auth before constructing the request so diagnostics,
+	// redirects, and signatures never retain credentials in the URL. Explicit
+	// Authorization headers and auth flags are applied below and take their
+	// established precedence over URL userinfo.
+	var urlBasic *core.KeyVal[string]
+	if cfg.URL.User != nil {
+		username := cfg.URL.User.Username()
+		password, hasPassword := cfg.URL.User.Password()
+		if username != "" || hasPassword {
+			urlBasic = &core.KeyVal[string]{Key: username, Val: password}
+		}
+		cfg.URL.User = nil
+	}
+
 	// Append query params directly to RawQuery. url.Values.Encode sorts keys,
 	// which loses the user's ordering even though duplicate parameters are
 	// valid and meaningful to many servers.
@@ -645,6 +665,9 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	}
 	if source != nil {
 		body.Attach(req, source)
+	}
+	if urlBasic != nil {
+		req.SetBasicAuth(urlBasic.Key, urlBasic.Val)
 	}
 
 	// Set the default accept and user-agent headers. Explicit headers below
@@ -767,9 +790,15 @@ func appendQueryParams(raw string, params []core.KeyVal[string]) string {
 		parts = append(parts, raw)
 	}
 	for _, kv := range params {
-		parts = append(parts, url.QueryEscape(kv.Key)+"="+url.QueryEscape(kv.Val))
+		parts = append(parts, escapeQueryParam(kv.Key)+"="+escapeQueryParam(kv.Val))
 	}
 	return strings.Join(parts, "&")
+}
+
+// escapeQueryParam uses RFC 3986 encoding. Unlike form encoding, spaces are
+// encoded as %20, so a later SigV4 pass can distinguish them from literal '+'.
+func escapeQueryParam(value string) string {
+	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
 }
 
 func requestBodySource(r io.Reader, contentType string) (*body.Body, error) {
@@ -891,6 +920,14 @@ func restoreRedirectBody(req, previous, initial *http.Request) error {
 
 func redirectEntityHeaders() []string {
 	return []string{"Content-Length", "Content-Type", "Content-Encoding", "Content-Language", "Content-Location", "Content-Range", "Content-MD5", "Content-Digest", "Content-Disposition", "Transfer-Encoding"}
+}
+
+func deleteHeaderInsensitive(headers http.Header, name string) {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			delete(headers, key)
+		}
+	}
 }
 
 func cloneOriginCookieSet(cookies originCookieSet) originCookieSet {
@@ -1023,13 +1060,17 @@ func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request) {
 		ctx := context.WithValue(req.Context(), ctxRedirectCrossedKey, true)
 		ctx = context.WithValue(ctx, ctxOriginCookiesKey, cookies)
 		*req = *req.WithContext(ctx)
-		for _, name := range []string{"Authorization", "Cookie", "Cookie2", "Proxy-Authorization", "Www-Authenticate", "Proxy-Authenticate"} {
-			req.Header.Del(name)
+		for _, name := range []string{
+			"Authorization", "Cookie", "Cookie2", "Proxy-Authorization",
+			"Www-Authenticate", "Proxy-Authenticate", "X-Amz-Date",
+			"X-Amz-Content-Sha256", "X-Amz-Security-Token", "X-Amz-Session-Token",
+		} {
+			deleteHeaderInsensitive(req.Header, name)
 		}
 		req.Host = ""
 		// Host can also be represented in Header on requests built outside
 		// NewRequest. The transport uses Request.Host, but remove both forms.
-		req.Header.Del("Host")
+		deleteHeaderInsensitive(req.Header, "Host")
 		return
 	}
 

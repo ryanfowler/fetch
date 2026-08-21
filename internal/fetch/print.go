@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -237,12 +238,20 @@ func printRedirectHopSummary(p *core.Printer, hop client.RedirectHop) {
 	location := hop.Response.Header.Get("Location")
 	if location != "" {
 		p.Set(core.Cyan)
-		p.WriteString(core.TerminalSafeText(location))
+		p.WriteString(redactedRedirectLocation(location))
 		p.Reset()
 	}
 
 	p.WriteString("\n")
 	p.Flush()
+}
+
+func redactedRedirectLocation(location string) string {
+	u, err := url.Parse(location)
+	if err != nil {
+		return "[invalid redirect location]"
+	}
+	return core.RedactedURL(u)
 }
 
 func colorForStatus(code int) core.Sequence {

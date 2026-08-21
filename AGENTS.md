@@ -90,6 +90,7 @@ prettier -w .
 - Article mode decodes and extracts at most 16 MiB of content, uses the final URL for link resolution, and never executes JavaScript.
 - Shared timeout budgets and resource-bound helpers live in `internal/core`; finite child operations must reuse the parent budget's absolute deadline, while zero or absent timeouts remain unlimited.
 - Request replayability is explicit: one-shot sources such as stdin are rejected before retry or Digest replay, regular files are reopened with identity/length checks, and dry-run previews do not consume request bytes. Digest supports all RFC 7616 MD5/SHA-256/SHA-512-256 algorithms and their -sess variants, no qop, and qop=auth; malformed or unsupported challenges are errors, and stale nonces are retried once.
+- AWS SigV4 reads `AWS_SESSION_TOKEN`, signs `x-amz-security-token`, preserves duplicate query parameters and literal plus signs during canonicalization, and converts URL userinfo to redacted Basic authorization before signing.
 - Response files and HAR sidecars use exclusive temporary files, atomic commits, best-effort durability sync, and cross-platform sanitization for server-provided filenames; symlink destinations are rejected.
 - HAR recording captures one final exchange, preserves duplicate headers, captures decoded response bodies up to 16 MiB, and never changes the normal streaming pipeline. HAR files can contain credentials and sensitive bodies.
 - Brotli response decoding uses the decoder-only `github.com/google/brotli/go/brotli` module; tests use fixed Brotli fixtures.

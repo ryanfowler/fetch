@@ -2,12 +2,14 @@ package aws
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestSign(t *testing.T) {
+	t.Setenv("AWS_SESSION_TOKEN", "")
 	tests := []struct {
 		name      string
 		region    string
@@ -109,6 +111,7 @@ func TestSign(t *testing.T) {
 }
 
 func TestSignLoadsMissingCredentialsFromEnv(t *testing.T) {
+	t.Setenv("AWS_SESSION_TOKEN", "")
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
 
@@ -129,6 +132,7 @@ func TestSignLoadsMissingCredentialsFromEnv(t *testing.T) {
 }
 
 func TestSignReportsMissingEnvCredentials(t *testing.T) {
+	t.Setenv("AWS_SESSION_TOKEN", "")
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 
@@ -139,6 +143,34 @@ func TestSignReportsMissingEnvCredentials(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "AWS_ACCESS_KEY_ID") {
 		t.Fatalf("Sign() error = %q, want AWS_ACCESS_KEY_ID", err.Error())
+	}
+}
+
+func TestSignIncludesSessionTokenFromEnvironment(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+	t.Setenv("AWS_SESSION_TOKEN", "session-token")
+
+	req, _ := http.NewRequest("GET", "https://examplebucket.s3.amazonaws.com/test.txt", nil)
+	if err := Sign(req, Config{Region: "us-east-1", Service: "s3"}, time.Date(2013, 05, 24, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+	if got := req.Header.Get("X-Amz-Security-Token"); got != "session-token" {
+		t.Fatalf("security token = %q, want session-token", got)
+	}
+	if got := req.Header.Get("Authorization"); !strings.Contains(got, "SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token") {
+		t.Fatalf("Authorization = %q, want signed security token", got)
+	}
+}
+
+func TestCanonicalQueryUsesEncodedSortOrderAndLiteralPlus(t *testing.T) {
+	u, err := url.Parse("https://example.com/?z=last&%C3%A9=first&space=a+b&space=a%20b&empty=&bare&dup=b&dup=a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "%C3%A9=first&bare=&dup=a&dup=b&empty=&space=a%20b&space=a%2Bb&z=last"
+	if got := canonicalQuery(u); got != want {
+		t.Fatalf("canonical query = %q, want %q", got, want)
 	}
 }
 
@@ -165,6 +197,25 @@ func TestGetSignedHeadersCanonicalizesHeaderValues(t *testing.T) {
 			}
 			t.Fatalf("signed header %q not found", key)
 		})
+	}
+}
+
+func TestGetSignedHeadersMergesCaseVariantKeysDeterministically(t *testing.T) {
+	req, _ := http.NewRequest("GET", "https://example.com", nil)
+	req.Header["x-foo"] = []string{"b"}
+	req.Header["X-Foo"] = []string{"a"}
+
+	for i := 0; i < 20; i++ {
+		var got string
+		for _, header := range getSignedHeaders(req) {
+			if header.Key == "x-foo" {
+				got = header.Val
+				break
+			}
+		}
+		if got != "a,b" {
+			t.Fatalf("merged x-foo = %q, want a,b", got)
+		}
 	}
 }
 

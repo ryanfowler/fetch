@@ -401,7 +401,33 @@ func (rc *reflectionClient) invokeHTTP(ctx context.Context, path string, payload
 		return nil, err
 	}
 
+	// Reflection is a normal signed HTTP request. Re-sign same-origin
+	// redirects after net/http has finalized their method, URL, body, and
+	// headers, and remove AWS credentials at an origin boundary.
+	var observerErr error
+	if rc.request.AWSSigv4 != nil {
+		origin := req.URL
+		req = req.WithContext(client.WithRequestObserver(req.Context(), func(next *http.Request) {
+			if client.RedirectCrossedOrigin(next) || !client.SameOrigin(origin, next.URL) {
+				clearAWSHeaders(next)
+				return
+			}
+			if next.Response != nil {
+				clearAWSGeneratedHeaders(next)
+			}
+			if observerErr == nil {
+				observerErr = signAWSRequest(rc.request, next)
+			}
+		}))
+	}
+
 	resp, err := doOnce(rc.request, rc.client, req, nil)
+	if err == nil && observerErr != nil {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		err = observerErr
+	}
 	if err != nil {
 		return nil, err
 	}
