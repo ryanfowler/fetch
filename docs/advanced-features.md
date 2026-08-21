@@ -502,7 +502,9 @@ Sessions are stored as JSON in the user's cache directory:
 - **Expired cookies**: Cookies with an explicit expiry in the past are filtered out on load.
 - **Session cookies** (no explicit expiry): Persist across invocations since the session is explicitly named.
 - **Cookie domain matching**: Delegated to Go's `net/http/cookiejar`, which implements RFC 6265.
-- **Atomic writes**: Session files are written atomically (temp file + rename) to avoid corruption.
+- **Atomic writes**: Session files use owner-only permissions, an operation lock, an exclusive temporary file, and an atomic rename. Saves merge additions, updates, and deletions with the latest file so concurrent fetch processes do not lose cookie changes.
+- **WebSockets**: Named-session cookies are sent with WebSocket handshakes and handshake cookie changes are saved after the session ends.
+- **Dry-run**: Dry-run loads sessions without writing them, including when the session file is corrupted.
 - **Name validation**: Only `[a-zA-Z0-9_-]` characters are allowed to prevent path traversal.
 
 ## Debugging Network Issues

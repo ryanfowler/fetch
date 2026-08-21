@@ -247,9 +247,13 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}()
 
-	// 4. WebSocket: branch to handleWebSocket before edit/gRPC/retry.
+	// 4. WebSocket: branch to handleWebSocket before edit/gRPC/retry. The
+	// handshake can set cookies even when the message loop or a later
+	// handshake validation step fails, so persist the jar on every return path.
 	if r.WS {
-		return handleWebSocket(ctx, r, c, req)
+		code, wsErr := handleWebSocket(ctx, r, c, req)
+		saveSession(r, sess)
+		return code, wsErr
 	}
 
 	// 5. Edit step (user edits request body).
@@ -345,16 +349,22 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	// 8. Make request (with optional retries and per-attempt timeout).
 	code, err := retryableRequest(ctx, r, c, req)
 
-	// Save session cookies after request completes.
-	if sess != nil {
-		if saveErr := sess.Save(); saveErr != nil {
-			p := r.PrinterHandle.Stderr()
-			msg := fmt.Sprintf("unable to save session '%s': %s", sess.Name, saveErr.Error())
-			core.WriteWarningMsgIf(p, msg, r.Verbosity == core.VSilent)
-		}
-	}
+	// Save session cookies after request completes, including response and
+	// redirect errors. Save performs a locked merge with the latest file.
+	saveSession(r, sess)
 
 	return code, err
+}
+
+func saveSession(r *Request, sess *session.Session) {
+	if r.DryRun || sess == nil {
+		return
+	}
+	if saveErr := sess.Save(); saveErr != nil {
+		p := r.PrinterHandle.Stderr()
+		msg := fmt.Sprintf("unable to save session '%s': %s", sess.Name, saveErr.Error())
+		core.WriteWarningMsgIf(p, msg, r.Verbosity == core.VSilent)
+	}
 }
 
 func signAWSRequest(r *Request, req *http.Request) error {
