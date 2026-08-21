@@ -42,6 +42,22 @@ func TestIsValidName(t *testing.T) {
 	}
 }
 
+func TestLoadReadOnlyDoesNotCreateSessionDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := LoadReadOnly("dry-run")
+	if err != nil {
+		t.Fatalf("LoadReadOnly failed: %v", err)
+	}
+	if sess.Name != "dry-run" || len(sess.Cookies) != 0 {
+		t.Fatalf("unexpected read-only session: %+v", sess)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("LoadReadOnly created session directory: err=%v", err)
+	}
+}
+
 func TestLoadSaveRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)

@@ -1,6 +1,8 @@
 package fetch
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -109,6 +111,37 @@ func convertJSONToProtobuf(data io.ReadCloser, desc protoreflect.MessageDescript
 	}
 
 	return protoData, nil
+}
+
+// dryRunGRPCBody adds the five-byte gRPC frame header lazily. Replayable
+// sources remain streamable and files are not materialized just to display a
+// preview. One-shot sources are retained as one-shot and are not opened by
+// dry-run's preview path.
+func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
+	if source == nil || source.ContentLength() == 0 {
+		return body.NewBytes(fetchgrpc.Frame(nil, false), fetchgrpc.ContentType), nil
+	}
+	length := source.ContentLength()
+	// A lengthless stream cannot carry a frame header without first reading
+	// the whole stream. Leave it untouched; dry-run will report that its
+	// one-shot/streaming preview is unavailable instead of consuming it.
+	if length < 0 {
+		return source, nil
+	}
+	if length > int64(^uint32(0)) {
+		return nil, core.LimitError{Subsystem: "gRPC request body", Limit: int64(^uint32(0))}
+	}
+	framedLength := length + 5
+	open := func() (io.ReadCloser, error) {
+		stream, err := source.Open()
+		if err != nil {
+			return nil, err
+		}
+		var header [5]byte
+		binary.BigEndian.PutUint32(header[1:], uint32(length))
+		return newReaderWithCloser(io.MultiReader(bytes.NewReader(header[:]), stream), stream), nil
+	}
+	return body.NewFactory(open, framedLength, fetchgrpc.ContentType, source.Replayable()), nil
 }
 
 // frameGRPCRequest wraps data in gRPC framing.

@@ -114,6 +114,44 @@ func TestNewRequestSetsGetBodyForMultipart(t *testing.T) {
 	}
 }
 
+func TestNewRequestLiteralBodyIsReplayableForDryRun(t *testing.T) {
+	for name, data := range map[string]io.Reader{
+		"strings": strings.NewReader("literal body"),
+		"bytes":   bytes.NewReader([]byte("literal body")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			req, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+				Data:   data,
+				Method: http.MethodPost,
+				URL:    mustURL(t, "https://example.com"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer req.Body.Close()
+			if req.GetBody == nil || req.ContentLength != int64(len("literal body")) {
+				t.Fatalf("GetBody=%v ContentLength=%d, want replayable length %d", req.GetBody != nil, req.ContentLength, len("literal body"))
+			}
+			first, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replay, err := req.GetBody()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer replay.Close()
+			second, err := io.ReadAll(replay)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(first, second) {
+				t.Fatalf("first=%q replay=%q", first, second)
+			}
+		})
+	}
+}
+
 func TestNewRequestUsesLazyReplayableFileBody(t *testing.T) {
 	path := t.TempDir() + "/upload.txt"
 	if err := os.WriteFile(path, []byte("file body"), 0o600); err != nil {
@@ -230,6 +268,26 @@ func TestCLI003RequestDefaultsAndOrdering(t *testing.T) {
 	defer explicitGet.Body.Close()
 	if explicitGet.Method != http.MethodGet {
 		t.Fatalf("explicit method = %q, want GET", explicitGet.Method)
+	}
+}
+
+func TestApplyJarCookiesAddsEffectiveDryRunCookies(t *testing.T) {
+	u := mustURL(t, "https://example.com/path")
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(u, []*http.Cookie{{Name: "session", Value: "secret"}})
+
+	c := NewClient(ClientConfig{})
+	c.SetJar(jar)
+	req, err := c.NewRequest(context.Background(), RequestConfig{URL: u})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = c.ApplyJarCookies(req)
+	if got := req.Header.Get("Cookie"); got != "session=secret" {
+		t.Fatalf("Cookie = %q, want session=secret", got)
 	}
 }
 

@@ -65,10 +65,21 @@ type Session struct {
 // Load loads a session from disk or creates a new empty session.
 // Expired cookies are filtered out on load.
 func Load(name string) (*Session, error) {
+	return load(name, true)
+}
+
+// LoadReadOnly loads a session without creating or modifying its directory.
+// It is used by dry-run so presentation can include existing cookies without
+// changing session state merely because the configured directory is absent.
+func LoadReadOnly(name string) (*Session, error) {
+	return load(name, false)
+}
+
+func load(name string, createDir bool) (*Session, error) {
 	if !IsValidName(name) {
 		return nil, fmt.Errorf("invalid session name %q", name)
 	}
-	dir, err := getSessionsDir()
+	dir, err := getSessionsDir(createDir)
 	if err != nil {
 		return nil, err
 	}
@@ -577,15 +588,16 @@ func cookieExpires(c *http.Cookie, now time.Time) time.Time {
 	return c.Expires
 }
 
-func getSessionsDir() (string, error) {
+func getSessionsDir(create bool) (string, error) {
 	// Allow override for testing.
 	if dir := os.Getenv("FETCH_INTERNAL_SESSIONS_DIR"); dir != "" {
-		err := os.MkdirAll(dir, 0700)
-		if err != nil {
-			return "", err
-		}
-		if err := os.Chmod(dir, 0700); err != nil {
-			return "", err
+		if create {
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				return "", err
+			}
+			if err := os.Chmod(dir, 0700); err != nil {
+				return "", err
+			}
 		}
 		return dir, nil
 	}
@@ -596,13 +608,13 @@ func getSessionsDir() (string, error) {
 	}
 
 	path := filepath.Join(dir, "fetch", "sessions")
-	err = os.MkdirAll(path, 0700)
-	if err != nil {
-		return "", err
+	if create {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return "", err
+		}
+		if err := os.Chmod(path, 0700); err != nil {
+			return "", err
+		}
 	}
-	if err := os.Chmod(path, 0700); err != nil {
-		return "", err
-	}
-
 	return path, nil
 }

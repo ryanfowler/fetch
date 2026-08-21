@@ -567,6 +567,21 @@ func (c *Client) SetJar(jar http.CookieJar) {
 	}
 }
 
+// ApplyJarCookies adds the same cookie-jar values that net/http will add
+// before sending a request. It is intended for dry-run metadata, which is
+// rendered before Client.Do would normally apply the jar. The caller must not
+// call it more than once for the same request.
+func (c *Client) ApplyJarCookies(req *http.Request) *http.Request {
+	if c.c.Jar == nil {
+		return req
+	}
+	req = withOriginCookies(req, c.c.Jar)
+	for _, cookie := range c.c.Jar.Cookies(cookieRequestURL(req)) {
+		req.AddCookie(cookie)
+	}
+	return req
+}
+
 // RequestConfig represents the configuration for creating an HTTP request.
 type RequestConfig struct {
 	Article     bool
@@ -627,8 +642,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		for _, f := range cfg.Form {
 			q.Add(f.Key, f.Val)
 		}
-		formBody := strings.NewReader(q.Encode())
-		source = newSeekableBody(formBody, "application/x-www-form-urlencoded")
+		source = body.NewBytes([]byte(q.Encode()), "application/x-www-form-urlencoded")
 		requestBody = source
 	case cfg.Multipart != nil:
 		source = body.NewFactory(cfg.Multipart.Open, -1, cfg.Multipart.ContentType(), true)
@@ -805,6 +819,25 @@ func requestBodySource(r io.Reader, contentType string) (*body.Body, error) {
 	if f, ok := r.(*os.File); ok && f != os.Stdin {
 		return body.NewFileFromOpenFile(f, contentType)
 	}
+	// CLI literals and generated form bodies use in-memory readers. Copy their
+	// unread portion into a replayable source so dry-run can preview them
+	// without consuming the body that the real request would send.
+	switch value := r.(type) {
+	case *bytes.Reader:
+		data, err := io.ReadAll(value)
+		if err != nil {
+			return nil, err
+		}
+		return body.NewBytes(data, contentType), nil
+	case *bytes.Buffer:
+		return body.NewBytes(value.Bytes(), contentType), nil
+	case *strings.Reader:
+		data, err := io.ReadAll(value)
+		if err != nil {
+			return nil, err
+		}
+		return body.NewBytes(data, contentType), nil
+	}
 	if rs, ok := r.(io.ReadSeeker); ok {
 		return newSeekableBody(rs, contentType), nil
 	}
@@ -955,10 +988,22 @@ func withOriginCookies(req *http.Request, jar http.CookieJar) *http.Request {
 	for _, value := range req.Header.Values("Cookie") {
 		addCookieNames(cookies, value)
 	}
-	for _, cookie := range jar.Cookies(req.URL) {
+	for _, cookie := range jar.Cookies(cookieRequestURL(req)) {
 		cookies[cookie.Name] = struct{}{}
 	}
 	return req.WithContext(context.WithValue(req.Context(), ctxOriginCookiesKey, cookies))
+}
+
+func cookieRequestURL(req *http.Request) *url.URL {
+	if req == nil || req.URL == nil || req.Host == "" {
+		if req == nil {
+			return nil
+		}
+		return req.URL
+	}
+	clone := *req.URL
+	clone.Host = req.Host
+	return &clone
 }
 
 func addCookieNames(set originCookieSet, header string) {

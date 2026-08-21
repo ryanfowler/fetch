@@ -38,7 +38,7 @@ func printRequestMetadataWithURL(p *core.Printer, req *http.Request, httpVersion
 	p.WriteString(" ")
 	p.Set(core.Bold)
 	p.Set(core.Cyan)
-	p.WriteString(path)
+	p.WriteString(core.TerminalSafeText(path))
 	p.Reset()
 
 	q := req.URL.RawQuery
@@ -46,7 +46,7 @@ func printRequestMetadataWithURL(p *core.Printer, req *http.Request, httpVersion
 		p.Set(core.Italic)
 		p.Set(core.Cyan)
 		p.WriteString("?")
-		p.WriteString(q)
+		p.WriteString(core.TerminalSafeText(q))
 		p.Reset()
 	}
 
@@ -84,16 +84,23 @@ func printRequestMetadataWithURL(p *core.Printer, req *http.Request, httpVersion
 	headers := slices.DeleteFunc(getHeaders(req.Header), func(kv core.KeyVal[string]) bool {
 		return strings.EqualFold(kv.Key, "Host")
 	})
-	if req.Body != nil && req.ContentLength > 0 {
+	// Content-Length and Transfer-Encoding are request metadata, not normally
+	// stored in Request.Header by net/http. Add the values that the transport
+	// will use, but do not duplicate an explicitly supplied header.
+	if req.Body != nil && req.ContentLength > 0 && req.Header.Get("Content-Length") == "" {
 		val := strconv.FormatInt(req.ContentLength, 10)
 		headers = addHeader(headers, core.KeyVal[string]{Key: "content-length", Val: val})
+	}
+	if len(req.TransferEncoding) > 0 && req.Header.Get("Transfer-Encoding") == "" {
+		val := strings.Join(req.TransferEncoding, ",")
+		headers = addHeader(headers, core.KeyVal[string]{Key: "transfer-encoding", Val: val})
 	}
 	host := req.URL.Host
 	if req.Host != "" {
 		host = req.Host
 	}
 	if host != "" {
-		headers = addHeader(headers, core.KeyVal[string]{Key: "host", Val: host})
+		headers = addHeader(headers, core.KeyVal[string]{Key: "host", Val: core.TerminalSafeText(host)})
 	}
 
 	for _, h := range headers {
