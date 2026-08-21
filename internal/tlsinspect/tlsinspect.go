@@ -25,15 +25,16 @@ var tlsInspectNow = time.Now
 
 // Config holds the parameters needed to perform a TLS inspection.
 type Config struct {
-	CACerts    []*x509.Certificate
-	ClientCert *tls.Certificate
-	DNSServer  *url.URL
-	HTTP       core.HTTPVersion
-	Insecure   bool
-	TLSMax     uint16
-	TLSMin     uint16
-	Timeout    time.Duration
-	URL        *url.URL
+	CACerts          []*x509.Certificate
+	ClientCert       *tls.Certificate
+	ResolverEndpoint *resolver.Endpoint
+	DNSServer        *url.URL
+	HTTP             core.HTTPVersion
+	Insecure         bool
+	TLSMax           uint16
+	TLSMin           uint16
+	Timeout          time.Duration
+	URL              *url.URL
 }
 
 // Inspect performs a TLS handshake and renders the certificate chain to the
@@ -48,7 +49,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
 	tlsConfig.NextProtos = alpnProtocols(cfg.HTTP)
-	res := resolver.New(resolver.Config{Server: cfg.DNSServer})
+	res := resolver.New(resolver.Config{Endpoint: cfg.ResolverEndpoint, Server: cfg.DNSServer})
 
 	// Resolve host:port.
 	host := cfg.URL.Hostname()

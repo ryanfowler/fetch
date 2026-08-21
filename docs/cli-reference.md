@@ -426,15 +426,25 @@ fetch --retry 3 --retry-delay 2 example.com
 fetch --retry 3 --retry-delay 0.5 example.com
 ```
 
-### `--dns-server IP[:PORT]|URL`
+### `--dns-server ENDPOINT`
 
-Use custom DNS server. Supports UDP DNS and DNS-over-HTTPS.
+Use a custom DNS resolver. Supported endpoints are bare UDP addresses, or
+`udp://`, `tcp://`, `tls://`/`dot://`, `quic://`/`doq://`, and `https://`
+(DNS-over-HTTPS) endpoints. UDP and TCP default to port 53. DoT and DoQ
+default to 853. DoH uses the URL port and requires HTTPS.
 
 ```sh
 fetch --dns-server 8.8.8.8 example.com
-fetch --dns-server 1.1.1.1:53 example.com
+fetch --dns-server tcp://1.1.1.1:53 example.com
+fetch --dns-server dot://dns.example example.com
 fetch --dns-server https://1.1.1.1/dns-query example.com
 ```
+
+Endpoints reject userinfo, fragments, invalid ports, and paths or queries on
+non-DoH transports. Resolver endpoint parsing occurs during CLI/config
+validation, before any network request. TCP, DoT, and DoQ execution is added by
+the later resolver transport work; these valid endpoint forms currently report
+a clear unsupported-transport error when used for a lookup.
 
 ### `--inspect-dns`
 

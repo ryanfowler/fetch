@@ -244,7 +244,7 @@ func (a *App) CLI() *CLI {
 
 			boolFlag(&a.Discard, "discard", "", "Discard the response body"),
 
-			cfgFlag("dns-server", "", "IP[:PORT]|URL", "DNS server IP or DoH URL",
+			cfgFlag("dns-server", "", "ENDPOINT", "DNS resolver endpoint",
 				func() bool { return a.Cfg.DNSServer != nil }, a.Cfg.ParseDNSServer),
 
 			boolFlag(&a.DryRun, "dry-run", "", "Print out the request info and exit"),

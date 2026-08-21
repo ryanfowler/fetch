@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/resolver"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -40,6 +41,9 @@ var inspectTypes = []queryType{
 
 // Config holds the parameters needed to perform a DNS inspection.
 type Config struct {
+	// Endpoint is populated by CLI/config validation. DNSServer is retained
+	// for direct test fixtures and older internal callers.
+	Endpoint  *resolver.Endpoint
 	DNSServer *url.URL
 	Timeout   time.Duration
 	URL       *url.URL
@@ -84,6 +88,10 @@ var (
 // Inspect resolves the configured URL hostname and renders DNS information to
 // the printer. It returns a non-zero exit code on failure.
 func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
+	server := cfg.DNSServer
+	if cfg.Endpoint != nil {
+		server = cfg.Endpoint.URL()
+	}
 	host := cfg.URL.Hostname()
 	if host == "" {
 		writeDNSError(p, errors.New("--inspect-dns requires a hostname"))
@@ -98,7 +106,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 
 	start := time.Now()
 	if ip := net.ParseIP(host); ip != nil {
-		target := resolverTarget(cfg.DNSServer)
+		target := resolverTarget(server)
 		renderIPLiteral(p, host, ip, target.label, time.Since(start))
 		p.Flush()
 		return 0
@@ -115,11 +123,19 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 }
 
 func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*result, error) {
-	target := resolverTarget(cfg.DNSServer)
+	server := cfg.DNSServer
+	if cfg.Endpoint != nil {
+		server = cfg.Endpoint.URL()
+	}
+	target := resolverTarget(server)
 	out := &result{
 		host:     host,
 		resolver: target.label,
 		records:  make(map[string][]record),
+	}
+
+	if cfg.Endpoint != nil && cfg.Endpoint.Transport != resolver.TransportUDP && cfg.Endpoint.Transport != resolver.TransportHTTPS {
+		return nil, fmt.Errorf("resolver transport %s is not implemented", cfg.Endpoint.Transport)
 	}
 
 	if target.useDefault {
@@ -143,8 +159,8 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if cfg.DNSServer != nil && cfg.DNSServer.Scheme != "" {
-				results[i].records, results[i].err = lookupDOHRecords(ctx, cfg.DNSServer, host, qt)
+			if server != nil && server.Scheme != "" {
+				results[i].records, results[i].err = lookupDOHRecords(ctx, server, host, qt)
 				return
 			}
 			results[i].records, results[i].err = lookupUDPRecords(ctx, target.udpAddr, host, qt)

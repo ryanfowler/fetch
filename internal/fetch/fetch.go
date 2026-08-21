@@ -28,6 +28,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/pager"
 	iproto "github.com/ryanfowler/fetch/internal/proto"
+	"github.com/ryanfowler/fetch/internal/resolver"
 	"github.com/ryanfowler/fetch/internal/session"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -55,6 +56,7 @@ type Request struct {
 	Data             io.Reader
 	Digest           *core.KeyVal[string]
 	Discard          bool
+	ResolverEndpoint *resolver.Endpoint
 	DNSServer        *url.URL
 	DryRun           bool
 	Edit             bool

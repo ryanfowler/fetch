@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -18,6 +17,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/resolver"
 	"github.com/ryanfowler/fetch/internal/session"
 )
 
@@ -33,32 +33,36 @@ type Config struct {
 	ConnectTimeout *time.Duration
 	Compress       core.CompressionMode
 	Copy           *bool
-	DNSServer      *url.URL
-	ECH            core.ECHMode
-	Format         core.Format
-	Headers        []core.KeyVal[string]
-	HTTP           core.HTTPVersion
-	IgnoreStatus   *bool
-	Image          core.ImageSetting
-	Insecure       *bool
-	KeyData        []byte
-	KeyPath        string
-	NoEncode       *bool
-	NoPager        *bool
-	Pager          core.PagerMode
-	Proxy          *url.URL
-	QueryParams    []core.KeyVal[string]
-	Redirects      *int
-	Retry          *int
-	RetryDelay     *time.Duration
-	Session        *string
-	Silent         *bool
-	Timeout        *time.Duration
-	Timing         *bool
-	TLSMax         *uint16
-	TLSMin         *uint16
-	Verbosity      *int
-	SortHeaders    *bool
+	// DNSServer is retained for compatibility with older internal consumers.
+	// DNSEndpoint is the validated transport-neutral representation used by
+	// request construction.
+	DNSServer    *url.URL
+	DNSEndpoint  *resolver.Endpoint
+	ECH          core.ECHMode
+	Format       core.Format
+	Headers      []core.KeyVal[string]
+	HTTP         core.HTTPVersion
+	IgnoreStatus *bool
+	Image        core.ImageSetting
+	Insecure     *bool
+	KeyData      []byte
+	KeyPath      string
+	NoEncode     *bool
+	NoPager      *bool
+	Pager        core.PagerMode
+	Proxy        *url.URL
+	QueryParams  []core.KeyVal[string]
+	Redirects    *int
+	Retry        *int
+	RetryDelay   *time.Duration
+	Session      *string
+	Silent       *bool
+	Timeout      *time.Duration
+	Timing       *bool
+	TLSMax       *uint16
+	TLSMin       *uint16
+	Verbosity    *int
+	SortHeaders  *bool
 }
 
 // OptionKeys returns canonical CLI option names represented by populated
@@ -87,7 +91,7 @@ func (c *Config) OptionKeys() []string {
 	if c.Copy != nil {
 		keys = append(keys, "copy")
 	}
-	if c.DNSServer != nil {
+	if c.DNSServer != nil || c.DNSEndpoint != nil {
 		keys = append(keys, "dns-server")
 	}
 	if c.ECH != core.ECHUnknown {
@@ -213,9 +217,10 @@ func (c *Config) Merge(c2 *Config) []string {
 			add("copy")
 		}
 	}
-	if c.DNSServer == nil {
+	if c.DNSServer == nil && c.DNSEndpoint == nil {
 		c.DNSServer = c2.DNSServer
-		if c2.DNSServer != nil {
+		c.DNSEndpoint = c2.DNSEndpoint
+		if c2.DNSServer != nil || c2.DNSEndpoint != nil {
 			add("dns-server")
 		}
 	}
@@ -671,31 +676,20 @@ func (c *Config) ParseCompress(value string) error {
 }
 
 func (c *Config) ParseDNSServer(value string) error {
-	if strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") {
-		u, err := url.Parse(value)
-		if err != nil {
-			return core.NewValueError("dns-server", value, "unable to parse DoH URL", c.isFile)
-		}
-		c.DNSServer = u
-		return nil
+	endpoint, err := resolver.ParseEndpoint(value)
+	// Integration fixtures use a local plaintext HTTP server because they do
+	// not need to test TLS. This private test hook is never set by normal CLI
+	// operation; production endpoint validation always requires HTTPS for DoH.
+	if err != nil && os.Getenv("FETCH_TEST_ALLOW_INSECURE_DNS") == "1" && strings.HasPrefix(strings.ToLower(value), "http://127.0.0.1:") {
+		endpoint, err = resolver.ParseEndpointURL(value, true)
 	}
-
-	port := "53"
-	host := value
-	const usage = "must be in the format <IP[:PORT]>"
-	if colons := strings.Count(value, ":"); colons == 1 || (colons > 1 && strings.HasPrefix(value, "[")) {
-		var err error
-		host, port, err = net.SplitHostPort(value)
-		if err != nil {
-			return core.NewValueError("dns-server", value, usage, c.isFile)
-		}
+	if err != nil {
+		return core.NewValueError("dns-server", value, err.Error(), c.isFile)
 	}
-	if net.ParseIP(host) == nil {
-		return core.NewValueError("dns-server", value, usage, c.isFile)
-	}
-
-	u := url.URL{Host: net.JoinHostPort(host, port)}
-	c.DNSServer = &u
+	c.DNSEndpoint = endpoint
+	// Keep the old URL-shaped field populated for integrations that have not
+	// migrated yet. Production request construction uses DNSEndpoint.
+	c.DNSServer = endpoint.URL()
 	return nil
 }
 

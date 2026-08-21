@@ -573,11 +573,12 @@ func TestMain(t *testing.T) {
 		}
 		urlStr := "http://localhost:" + port
 
-		res := runFetch(t, fetchPath, urlStr, "--dns-server", server.URL+"/dns-query")
+		opts := fetchOpts{env: []string{"FETCH_TEST_ALLOW_INSECURE_DNS=1"}}
+		res := runFetchOpts(t, fetchPath, opts, urlStr, "--dns-server", server.URL+"/dns-query")
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "204 No Content")
 
-		res = runFetch(t, fetchPath, urlStr, "--dns-server", server.URL+"/dns-query-nxdomain")
+		res = runFetchOpts(t, fetchPath, opts, urlStr, "--dns-server", server.URL+"/dns-query-nxdomain")
 		assertExitCode(t, 1, res)
 		assertBufContains(t, res.stderr, "no such host")
 	})

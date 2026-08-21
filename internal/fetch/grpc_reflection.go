@@ -581,18 +581,19 @@ func grpcHeaders(headers []core.KeyVal[string]) []core.KeyVal[string] {
 
 func newClient(r *Request) *client.Client {
 	return client.NewClient(client.ClientConfig{
-		CACerts:        r.CACerts,
-		ClientCert:     r.ClientCert,
-		ConnectTimeout: r.ConnectTimeout,
-		DNSServer:      r.DNSServer,
-		H2C:            shouldUseH2C(r),
-		HTTP:           r.HTTP,
-		Insecure:       r.Insecure,
-		Proxy:          r.Proxy,
-		Redirects:      r.Redirects,
-		TLSMax:         r.TLSMax,
-		TLSMin:         r.TLSMin,
-		UnixSocket:     r.UnixSocket,
+		CACerts:          r.CACerts,
+		ClientCert:       r.ClientCert,
+		ConnectTimeout:   r.ConnectTimeout,
+		ResolverEndpoint: r.ResolverEndpoint,
+		DNSServer:        r.DNSServer,
+		H2C:              shouldUseH2C(r),
+		HTTP:             r.HTTP,
+		Insecure:         r.Insecure,
+		Proxy:            r.Proxy,
+		Redirects:        r.Redirects,
+		TLSMax:           r.TLSMax,
+		TLSMin:           r.TLSMin,
+		UnixSocket:       r.UnixSocket,
 	})
 }
 

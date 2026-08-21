@@ -250,10 +250,16 @@ ca-cert = ca-cert.pem
 
 #### `dns-server`
 
-**Type**: IP address with optional port, or HTTPS URL
+**Type**: Resolver endpoint
 **Default**: System default
 
-Use a custom DNS server for hostname resolution.
+Use a custom DNS server for hostname resolution. Supported forms are bare
+IPv4 or bracketed IPv6 UDP addresses, `host:port`, `udp://`, `tcp://`,
+`tls://`/`dot://`, `quic://`/`doq://`, and HTTPS DoH URLs. UDP/TCP default to
+port 53, while DoT/DoQ default to 853. Non-DoH paths and queries, userinfo,
+and fragments are rejected during configuration validation. TCP, DoT, and DoQ
+forms are parsed now and report an unsupported-transport error until their
+transport implementations land.
 
 ```ini
 # Use Google DNS
@@ -264,6 +270,12 @@ dns-server = 1.1.1.1:53
 
 # Use IPv6 DNS server
 dns-server = [2001:4860:4860::8888]:53
+
+# Use DNS-over-TCP
+dns-server = tcp://1.1.1.1:53
+
+# Use DNS-over-TLS
+dns-server = dot://dns.example
 
 # Use DNS-over-HTTPS
 dns-server = https://1.1.1.1/dns-query
