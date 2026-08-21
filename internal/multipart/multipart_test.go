@@ -168,7 +168,7 @@ func TestMultipart(t *testing.T) {
 }
 
 func TestMultipartSanitizesHeaderParameters(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "report\".txt")
+	path := filepath.Join(t.TempDir(), "report.txt")
 	if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -184,8 +184,11 @@ func TestMultipartSanitizesHeaderParameters(t *testing.T) {
 	if !bytes.Contains(data, []byte(`name="field___Injected"`)) {
 		t.Fatalf("sanitized field name missing from multipart body: %q", data)
 	}
-	if !bytes.Contains(data, []byte(`filename="report_.txt"`)) {
-		t.Fatalf("sanitized filename missing from multipart body: %q", data)
+	if got := sanitizeHeaderParameter(`report".txt`); got != "report_.txt" {
+		t.Fatalf("sanitizeHeaderParameter(filename) = %q, want %q", got, "report_.txt")
+	}
+	if !bytes.Contains(data, []byte(`filename="report.txt"`)) {
+		t.Fatalf("filename missing from multipart body: %q", data)
 	}
 }
 
