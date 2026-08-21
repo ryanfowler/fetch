@@ -450,7 +450,7 @@ endpoints use the configured bootstrap resolver and negotiate the standard
 
 ### `--inspect-dns`
 
-Inspect DNS resolution for the URL hostname only (no HTTP request is made). Displays the resolver backend, A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS records when present, along with per-record TTLs, address count, record count, and lookup duration.
+Inspect DNS resolution for the URL hostname only (no HTTP request is made). Without `--dns-server`, it uses the platform resolver and displays A and AAAA records; the platform resolver does not provide per-record TTLs. With an explicit resolver, it queries A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS concurrently. The output includes resolver security, record counts, and duration. If one query fails, successful records remain visible, a warning identifies the incomplete record types, and the command exits with status 1.
 
 ```sh
 fetch --inspect-dns example.com

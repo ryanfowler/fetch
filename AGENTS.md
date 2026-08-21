@@ -81,7 +81,7 @@ prettier -w .
 - `--grpc-list` and `--grpc-describe` provide grpcurl-style discovery using reflection or local descriptor files.
 - `--grpc` now automatically tries gRPC reflection when no local schema is supplied.
 - Plaintext loopback gRPC servers are supported via `h2c` for both calls and discovery.
-- `--inspect-dns` resolves the URL hostname without making an HTTP request, showing common DNS record types, resolver backend, duration, and per-record TTLs from direct UDP, pipelined TCP/DoT, DoQ, or DoH responses. TCP, DoT, and DoQ inspection queries share one bounded operation-scoped connection.
+- `--inspect-dns` resolves the URL hostname without making an HTTP request. The platform resolver shows A/AAAA records without TTLs; an explicit UDP, pipelined TCP/DoT, DoQ, or DoH resolver queries all supported inspection types concurrently, shows resolver security, duration, and per-record TTLs, and preserves successful records with exit status 1 when a query fails. TCP, DoT, and DoQ inspection queries share one bounded operation-scoped connection.
 - `--inspect-tls --http 3` performs QUIC/TLS inspection with `h3` ALPN instead of the TCP TLS path.
 - `--tls` remains a compatibility alias for setting the minimum TLS version; prefer `--min-tls` in new docs/examples, and use `--max-tls` to cap negotiation or combine min/max for an exact TLS version.
 - WebSocket terminal sessions use the interactive prompt by default and can be controlled with `--ws-interactive auto|on|off`; output-file/clipboard/retry flags are rejected because the WebSocket path streams through the message loop instead of the normal response pipeline.

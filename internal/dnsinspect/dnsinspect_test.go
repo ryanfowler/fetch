@@ -2,7 +2,6 @@ package dnsinspect
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -117,6 +116,81 @@ func TestLookupQueriesRecordTypesConcurrently(t *testing.T) {
 	}
 }
 
+func TestInspectKeepsRecordsAndFailsOnPartialQueryError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			// Force the JSON compatibility path. The query type is carried in
+			// the subsequent GET request.
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		switch r.URL.Query().Get("type") {
+		case "A":
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"192.0.2.1","TTL":60}]}`)
+		case "TXT":
+			io.WriteString(w, `{"Status":2}`)
+		default:
+			io.WriteString(w, `{"Status":0}`)
+		}
+	}))
+	defer server.Close()
+
+	p := core.TestPrinter(false)
+	status := Inspect(context.Background(), p, &Config{
+		DNSServer: mustURL(t, server.URL+"/dns-query"),
+		URL:       mustURL(t, "https://example.com"),
+	})
+	if status != 1 {
+		t.Fatalf("status = %d, want partial-result status 1\n%s", status, p.Bytes())
+	}
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"192.0.2.1",
+		"DNS inspection incomplete",
+		"TXT",
+		"ServFail",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("partial output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestInspectPartialFailureIsSilentButNonzero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		if r.URL.Query().Get("type") == "A" {
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com.","type":1,"data":"192.0.2.1","TTL":60}]}`)
+			return
+		}
+		if r.URL.Query().Get("type") == "TXT" {
+			io.WriteString(w, `{"Status":2}`)
+			return
+		}
+		io.WriteString(w, `{"Status":0}`)
+	}))
+	defer server.Close()
+
+	p := core.TestPrinter(false)
+	status := Inspect(context.Background(), p, &Config{
+		DNSServer: mustURL(t, server.URL),
+		URL:       mustURL(t, "https://example.com"),
+		Silent:    true,
+	})
+	if status != 1 {
+		t.Fatalf("status = %d, want 1", status)
+	}
+	if out := string(p.Bytes()); strings.Contains(out, "warning: DNS inspection incomplete") {
+		t.Fatalf("silent inspection emitted warning:\n%s", out)
+	}
+	if !strings.Contains(string(p.Bytes()), "192.0.2.1") {
+		t.Fatalf("silent inspection lost successful records:\n%s", p.Bytes())
+	}
+}
+
 func TestLookupCollapsesDuplicateCNAMEsWithLowestTTL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("type") {
@@ -168,17 +242,43 @@ func TestLookupUDPRecordsReturnsTTL(t *testing.T) {
 	}
 }
 
-func TestLookupUsesDefaultResolverWhenNoSystemDNSServerDiscovered(t *testing.T) {
-	origReadResolvConf := readResolvConf
+func TestLookupWithoutExplicitServerUsesPlatformResolver(t *testing.T) {
 	origDefaultLookupIPAddr := defaultLookupIPAddr
 	t.Cleanup(func() {
-		readResolvConf = origReadResolvConf
 		defaultLookupIPAddr = origDefaultLookupIPAddr
 	})
 
-	readResolvConf = func() ([]byte, error) {
-		return nil, errors.New("missing resolv.conf")
+	defaultLookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return []net.IPAddr{
+			{IP: net.ParseIP("192.0.2.44")},
+			{IP: net.ParseIP("2001:db8::44")},
+		}, nil
 	}
+
+	res, err := lookup(context.Background(), &Config{}, "example.com", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.resolver != "system resolver" {
+		t.Fatalf("resolver label = %q, want system resolver", res.resolver)
+	}
+	if !res.ttlUnavailable {
+		t.Fatal("ttlUnavailable = false, want true")
+	}
+	if got := recordCount(res); got != 2 {
+		t.Fatalf("record count = %d, want only platform A/AAAA records", got)
+	}
+	if len(res.records) != 2 || len(res.records["A"]) != 1 || len(res.records["AAAA"]) != 1 {
+		t.Fatalf("platform records = %#v, want only A and AAAA", res.records)
+	}
+}
+
+func TestLookupUsesPlatformResolver(t *testing.T) {
+	origDefaultLookupIPAddr := defaultLookupIPAddr
+	t.Cleanup(func() {
+		defaultLookupIPAddr = origDefaultLookupIPAddr
+	})
+
 	var lookedUpHost string
 	defaultLookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
 		lookedUpHost = host
@@ -209,16 +309,7 @@ func TestLookupUsesDefaultResolverWhenNoSystemDNSServerDiscovered(t *testing.T) 
 	}
 }
 
-func TestResolverTargetDoesNotDefaultToLoopback(t *testing.T) {
-	origReadResolvConf := readResolvConf
-	t.Cleanup(func() {
-		readResolvConf = origReadResolvConf
-	})
-
-	readResolvConf = func() ([]byte, error) {
-		return []byte("# no nameservers\n"), nil
-	}
-
+func TestResolverTargetUsesPlatformResolver(t *testing.T) {
 	target := resolverTarget(nil)
 	if !target.useDefault {
 		t.Fatalf("useDefault = false, want true")
