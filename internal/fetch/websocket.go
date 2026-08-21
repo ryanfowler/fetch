@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/ws"
@@ -35,9 +36,10 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	// Prepare the initial message from -d or -j flags. It is sent after the
 	// handshake and is not part of the signed WebSocket upgrade request.
 	var initialMsg []byte
+	var dryRunBody *body.Body
 	if req.Body != nil {
 		if r.DryRun {
-			req.Body.Close()
+			dryRunBody, _ = body.SourceFromContext(req.Context())
 		} else {
 			var err error
 			initialMsg, err = io.ReadAll(req.Body)
@@ -63,6 +65,12 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		req.Header.Del("Sec-WebSocket-Protocol")
 	}
 
+	if r.DryRun {
+		// Client.Do normally applies cookies immediately before transport. The
+		// WebSocket dialer does the same later, so apply them only to this
+		// diagnostic request to show the effective redacted handshake.
+		req = c.ApplyJarCookies(req)
+	}
 	if err := signWebSocketHandshake(r, req); err != nil {
 		return 1, err
 	}
@@ -70,9 +78,18 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	// Print request metadata / dry-run.
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
-		printRequestMetadata(errPrinter, req, r.HTTP, r.Verbosity)
+		printRequestMetadataWithURL(errPrinter, req, r.HTTP, r.Verbosity, r.DryRun)
 		errPrinter.Flush()
 		if r.DryRun {
+			if dryRunBody != nil {
+				if r.Verbosity < core.VExtraVerbose {
+					errPrinter.WriteString("\n")
+					errPrinter.Flush()
+				}
+				if err := printDryRunBodyPreview(errPrinter, dryRunBody, r.Verbosity == core.VSilent); err != nil {
+					return 1, err
+				}
+			}
 			return 0, nil
 		}
 	}

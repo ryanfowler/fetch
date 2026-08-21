@@ -67,6 +67,44 @@ func TestPrintRequestMetadataPrefixes(t *testing.T) {
 	})
 }
 
+func TestPrintRequestMetadataEscapesURLPathControls(t *testing.T) {
+	u := mustParseURL("https://example.com/%1b[2J")
+	req := &http.Request{Method: "GET", URL: u, Proto: "HTTP/1.1"}
+
+	p := newTestPrinter()
+	printRequestMetadata(p, req, core.HTTPDefault, core.VVerbose)
+	out := string(p.Bytes())
+	if strings.Contains(out, "\x1b") {
+		t.Fatalf("request path contains a raw escape: %q", out)
+	}
+	if !strings.Contains(out, `\x1b[2J`) {
+		t.Fatalf("escaped path missing from metadata: %q", out)
+	}
+}
+
+func TestPrintRequestMetadataPreservesDuplicateHeaders(t *testing.T) {
+	req := &http.Request{
+		Method:           "POST",
+		URL:              mustParseURL("https://example.com/upload"),
+		Header:           http.Header{"X-Trace": {"first", "second"}},
+		ContentLength:    4,
+		Body:             http.NoBody,
+		TransferEncoding: []string{"chunked"},
+		Proto:            "HTTP/1.1",
+	}
+
+	p := newTestPrinter()
+	printRequestMetadata(p, req, core.HTTPDefault, core.VVerbose)
+	out := string(p.Bytes())
+
+	if strings.Count(out, "x-trace:") != 2 || !strings.Contains(out, "x-trace: first") || !strings.Contains(out, "x-trace: second") {
+		t.Fatalf("duplicate headers were not preserved:\n%s", out)
+	}
+	if !strings.Contains(out, "transfer-encoding: chunked") {
+		t.Fatalf("transfer encoding was not shown:\n%s", out)
+	}
+}
+
 func TestPrintRequestMetadataUsesRequestHost(t *testing.T) {
 	req := &http.Request{
 		Method: "GET",

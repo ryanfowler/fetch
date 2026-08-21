@@ -188,7 +188,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	var schema *iproto.Schema
 	var requestDesc protoreflect.MessageDescriptor
 	var isClientStreaming bool
-	if r.GRPC {
+	if r.GRPC && !r.DryRun {
 		var err error
 		schema, err = resolveCallSchema(ctx, r, c)
 		if err != nil {
@@ -204,7 +204,11 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	var sess *session.Session
 	if r.Session != "" {
 		var loadErr error
-		sess, loadErr = session.Load(r.Session)
+		if r.DryRun {
+			sess, loadErr = session.LoadReadOnly(r.Session)
+		} else {
+			sess, loadErr = session.Load(r.Session)
+		}
 		if loadErr != nil {
 			if sess == nil {
 				return 0, loadErr
@@ -264,8 +268,19 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}
 
-	// 6. Convert and frame gRPC request AFTER edit.
-	if r.GRPC {
+	// 6. Convert and frame gRPC request AFTER edit. Dry-run frames known-length
+	// replayable bodies lazily, but it must not consume stdin while preparing a
+	// request that will not be sent.
+	if r.GRPC && r.DryRun {
+		source, _ := body.SourceFromContext(req.Context())
+		framed, err := dryRunGRPCBody(source)
+		if err != nil {
+			return 0, err
+		}
+		if framed != nil && framed != source {
+			body.Attach(req, framed)
+		}
+	} else if r.GRPC {
 		if isClientStreaming && requestDesc != nil {
 			// Client/bidi streaming: stream multiple JSON objects as gRPC frames.
 			if req.Body != nil && req.Body != http.NoBody {
@@ -295,6 +310,12 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	if err := signAWSRequest(r, req); err != nil {
 		return 0, err
 	}
+	if r.DryRun {
+		// Client.Do normally lets net/http add jar cookies immediately before
+		// transport. Dry-run prints earlier, so apply the jar here to expose the
+		// effective, redacted Cookie header without writing session state.
+		req = c.ApplyJarCookies(req)
+	}
 	if r.harRecorder != nil {
 		req = req.WithContext(client.WithRequestObserver(req.Context(), r.harRecorder.ObserveRequest))
 	}
@@ -319,27 +340,9 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			if !ok {
 				return 0, errors.New("request body preview is unavailable")
 			}
-			preview, err := source.Preview(core.MaxDryRunBodyPreview)
-			if err != nil {
+			if err := printDryRunBodyPreview(errPrinter, source, r.Verbosity == core.VSilent); err != nil {
 				return 0, err
 			}
-			printable, _, err := isPrintable(bytes.NewReader(preview.Data))
-			if err != nil {
-				return 0, err
-			}
-			if printable {
-				if _, err = os.Stderr.Write(preview.Data); err != nil {
-					return 0, err
-				}
-				if preview.Truncated {
-					core.WriteWarningMsgIf(errPrinter, "request body preview truncated at 1024 bytes", r.Verbosity == core.VSilent)
-				}
-				return 0, nil
-			}
-
-			msg := "the request body appears to be binary"
-			core.WriteWarningMsgIf(errPrinter, msg, r.Verbosity == core.VSilent)
-			return 0, nil
 		}
 
 		// Trailing "> \n" already written by printRequestMetadata.
@@ -356,6 +359,43 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	return code, err
 }
 
+func printDryRunBodyPreview(p *core.Printer, source *body.Body, silent bool) error {
+	// A preview of a replayable source can be retained and replayed by the
+	// body abstraction. A one-shot source, such as stdin, must not be read
+	// during dry-run: doing so can block forever and would consume bytes a
+	// real request would otherwise receive.
+	if !source.Replayable() {
+		core.WriteWarningMsgIf(p, "request body preview is unavailable for a one-shot source", silent)
+		return nil
+	}
+	preview, err := source.Preview(core.MaxDryRunBodyPreview)
+	if err != nil {
+		return err
+	}
+	printable, _, err := isPrintable(bytes.NewReader(preview.Data))
+	if err != nil {
+		return err
+	}
+	if printable {
+		if _, err = p.WriteString(core.TerminalSafeText(string(preview.Data))); err != nil {
+			return err
+		}
+		if preview.Truncated {
+			if len(preview.Data) > 0 && preview.Data[len(preview.Data)-1] != '\n' {
+				p.WriteString("\n")
+			}
+			core.WriteWarningMsgIf(p, "request body preview truncated at 1024 bytes", silent)
+		}
+		return p.Flush()
+	}
+
+	core.WriteWarningMsgIf(p, "the request body appears to be binary", silent)
+	if preview.Truncated {
+		core.WriteWarningMsgIf(p, "request body preview truncated at 1024 bytes", silent)
+	}
+	return nil
+}
+
 func saveSession(r *Request, sess *session.Session) {
 	if r.DryRun || sess == nil {
 		return
@@ -370,6 +410,16 @@ func saveSession(r *Request, sess *session.Session) {
 func signAWSRequest(r *Request, req *http.Request) error {
 	if r.AWSSigv4 == nil {
 		return nil
+	}
+	// SigV4 normally hashes a replayable body or materializes a one-shot body.
+	// A dry-run must not consume stdin merely to print redacted authorization
+	// metadata, so use the standard unsigned-payload marker for that diagnostic
+	// case. No request is sent from dry-run, and replayable sources still use
+	// their exact payload hash.
+	if r.DryRun {
+		if source, ok := body.SourceFromContext(req.Context()); ok && !source.Replayable() && req.Body != nil && req.Body != http.NoBody && req.Header.Get("X-Amz-Content-Sha256") == "" {
+			req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+		}
 	}
 	return aws.Sign(req, *r.AWSSigv4, time.Now().UTC())
 }
@@ -832,20 +882,24 @@ func getExitCodeForStatus(status int) int {
 }
 
 func getHeaders(headers http.Header) []core.KeyVal[string] {
+	// Keep one entry per value. Joining duplicate headers with commas changes
+	// the request metadata for headers whose values are not comma-list syntax.
+	// Stable sorting keeps the supplied value order within a name while
+	// retaining deterministic alphabetical header-name output.
 	out := make([]core.KeyVal[string], 0, len(headers))
-	for k, v := range headers {
-		k = strings.ToLower(k)
-		values := make([]string, 0, len(v))
-		for _, item := range v {
-			if k == "location" {
-				item = redactedRedirectLocation(item)
+	for k, values := range headers {
+		name := strings.ToLower(k)
+		for _, value := range values {
+			if name == "location" {
+				value = redactedRedirectLocation(value)
 			}
-			values = append(values, item)
+			out = append(out, core.KeyVal[string]{
+				Key: name,
+				Val: core.RedactHeaderValue(name, value),
+			})
 		}
-		value := core.RedactHeaderValue(k, strings.Join(values, ","))
-		out = append(out, core.KeyVal[string]{Key: k, Val: value})
 	}
-	slices.SortFunc(out, func(a, b core.KeyVal[string]) int {
+	slices.SortStableFunc(out, func(a, b core.KeyVal[string]) int {
 		return strings.Compare(a.Key, b.Key)
 	})
 	return out
