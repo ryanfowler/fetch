@@ -49,7 +49,14 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
 	tlsConfig.NextProtos = alpnProtocols(cfg.HTTP)
-	res := resolver.New(resolver.Config{Endpoint: cfg.ResolverEndpoint, Server: cfg.DNSServer})
+	res := resolver.New(resolver.Config{
+		Endpoint: cfg.ResolverEndpoint,
+		Server:   cfg.DNSServer,
+		CACerts:  cfg.CACerts,
+		Insecure: cfg.Insecure,
+		TLSMin:   cfg.TLSMin,
+		TLSMax:   cfg.TLSMax,
+	})
 
 	// Resolve host:port.
 	host := cfg.URL.Hostname()

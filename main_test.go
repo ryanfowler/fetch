@@ -156,12 +156,8 @@ func TestIgnoredInspectionFlags(t *testing.T) {
 		"--basic",
 		"--digest",
 		"--aws-sigv4",
-		"--ca-cert",
 		"--cert",
 		"--key",
-		"--tls",
-		"--max-tls",
-		"--insecure",
 		"--format",
 		"--dry-run",
 	)

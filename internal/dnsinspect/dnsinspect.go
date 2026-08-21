@@ -2,6 +2,8 @@ package dnsinspect
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -45,6 +47,11 @@ type Config struct {
 	// for direct test fixtures and older internal callers.
 	Endpoint  *resolver.Endpoint
 	DNSServer *url.URL
+	CACerts   []*x509.Certificate
+	TLSConfig *tls.Config
+	Insecure  bool
+	TLSMin    uint16
+	TLSMax    uint16
 	Timeout   time.Duration
 	URL       *url.URL
 	Silent    bool
@@ -139,7 +146,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		silent:   cfg.Silent,
 	}
 
-	if cfg.Endpoint != nil && cfg.Endpoint.Transport != resolver.TransportUDP && cfg.Endpoint.Transport != resolver.TransportHTTPS {
+	if cfg.Endpoint != nil && cfg.Endpoint.Transport != resolver.TransportUDP && cfg.Endpoint.Transport != resolver.TransportTCP && cfg.Endpoint.Transport != resolver.TransportTLS && cfg.Endpoint.Transport != resolver.TransportHTTPS {
 		return nil, fmt.Errorf("resolver transport %s is not implemented", cfg.Endpoint.Transport)
 	}
 
@@ -158,12 +165,33 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		return out, nil
 	}
 
+	var streamClient *resolver.StreamClient
+	var err error
+	if cfg.Endpoint != nil && (cfg.Endpoint.Transport == resolver.TransportTCP || cfg.Endpoint.Transport == resolver.TransportTLS) {
+		streamClient, err = resolver.NewStreamClient(ctx, resolver.StreamConfig{
+			Endpoint:  cfg.Endpoint,
+			TLSConfig: cfg.TLSConfig,
+			CACerts:   cfg.CACerts,
+			Insecure:  cfg.Insecure,
+			TLSMin:    cfg.TLSMin,
+			TLSMax:    cfg.TLSMax,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("connect to resolver: %w", err)
+		}
+		defer streamClient.Close()
+	}
+
 	results := make([]queryResult, len(inspectTypes))
 	var wg sync.WaitGroup
 	for i, qt := range inspectTypes {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if streamClient != nil {
+				results[i].records, results[i].err = lookupStreamRecords(ctx, streamClient, host, qt)
+				return
+			}
 			if server != nil && server.Scheme != "" {
 				results[i].records, results[i].err = lookupDOHRecords(ctx, server, host, qt)
 				return
@@ -218,6 +246,33 @@ func lookupDefaultResolverRecords(ctx context.Context, host string) ([]record, e
 			records = append(records, record{typ: "A", value: ip.String()})
 		case ip.To16() != nil:
 			records = append(records, record{typ: "AAAA", value: ip.String()})
+		}
+	}
+	return records, nil
+}
+
+func lookupStreamRecords(ctx context.Context, client *resolver.StreamClient, host string, qt queryType) ([]record, error) {
+	name, err := resolver.ParseName(absoluteName(host))
+	if err != nil {
+		return nil, err
+	}
+	question := resolver.Question{Name: name, Type: uint16(qt.dnsType), Class: 1}
+	message, err := client.Query(ctx, absoluteName(host), uint16(qt.dnsType))
+	if err != nil {
+		return nil, err
+	}
+	if message.Header.RCode != 0 {
+		return nil, fmt.Errorf("no DNS records found: %s", resolver.RCodeName(message.Header.RCode))
+	}
+	authorized, err := resolver.AuthorizeAnswers(message, question)
+	if err != nil {
+		return nil, err
+	}
+	records := make([]record, 0, len(authorized))
+	for _, answer := range authorized {
+		value, ok := wireRecordValue(answer)
+		if ok {
+			records = append(records, record{typ: typeLabel(dnsmessage.Type(answer.Type)), value: value, ttl: answer.TTL, hasTTL: true})
 		}
 	}
 	return records, nil

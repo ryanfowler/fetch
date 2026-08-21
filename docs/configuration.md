@@ -257,9 +257,9 @@ Use a custom DNS server for hostname resolution. Supported forms are bare
 IPv4 or bracketed IPv6 UDP addresses, `host:port`, `udp://`, `tcp://`,
 `tls://`/`dot://`, `quic://`/`doq://`, and HTTPS DoH URLs. UDP/TCP default to
 port 53, while DoT/DoQ default to 853. Non-DoH paths and queries, userinfo,
-and fragments are rejected during configuration validation. TCP, DoT, and DoQ
-forms are parsed now and report an unsupported-transport error until their
-transport implementations land.
+and fragments are rejected during configuration validation. TCP and DoT use
+pipelined operation-scoped connections. DoQ is parsed but reports an
+unsupported-transport error until its transport implementation lands.
 
 ```ini
 # Use Google DNS
