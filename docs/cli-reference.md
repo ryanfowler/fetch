@@ -244,11 +244,23 @@ fetch --format on example.com    # Force formatting
 
 ### `--article`
 
-Extract readable HTML as Markdown with YAML frontmatter. Article mode cannot
-be combined with `--discard`, `--remote-name`, or `--remote-header-name`.
+Extract a readable HTML/XHTML page as Markdown with YAML frontmatter. Markdown
+responses (`text/markdown` and `text/x-markdown`) pass through after a `url`
+frontmatter field. Article mode buffers at most 16 MiB of decoded content and
+does not execute JavaScript. It cannot be combined with `--discard`,
+`--remote-name`, or `--remote-header-name`.
+
+The frontmatter fields are `title`, `byline`, `site_name`, `published_time`,
+`lang`, `dir`, `length`, `excerpt`, and `url` when available. String values use
+JSON quoting, which is also valid YAML. The final URL after redirects is used
+for link resolution and the `url` field.
+
+Output files and pipes receive raw, uncolored Markdown. `--format`, `--color`,
+and `--pager` control only terminal presentation.
 
 ```sh
 fetch --article https://example.com/story
+fetch --article -o story.md https://example.com/story
 ```
 
 ### `--compress MODE`

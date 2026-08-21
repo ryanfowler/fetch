@@ -895,6 +895,38 @@ func TestCompressionModeDecodersReportTruncation(t *testing.T) {
 	}
 }
 
+func TestArticleDecodesResponseWhenCompressionIsOff(t *testing.T) {
+	encoded := gzipEncode(t, []byte("<html><body><article><p>article</p></article></body></html>"))
+	c := &Client{c: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Encoding": {"gzip"}},
+			Body:       io.NopCloser(bytes.NewReader(encoded)),
+			Request:    req,
+		}, nil
+	})}}
+	req, err := c.NewRequest(context.Background(), RequestConfig{
+		Article:     true,
+		Compression: core.CompressionOff,
+		URL:         mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "<html><body><article><p>article</p></article></body></html>" {
+		t.Fatalf("article body = %q, want decoded HTML", got)
+	}
+}
+
 func TestDoPreservesEncodedBytesWhenCompressionIsOff(t *testing.T) {
 	encoded := gzipEncode(t, []byte("raw gzip"))
 	c := &Client{c: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

@@ -85,6 +85,16 @@ func newClipboardCopier(r *Request, resp *http.Response) *clipboardCopier {
 	return &clipboardCopier{cmd: cmd, buf: buf, silent: r.Verbosity == core.VSilent}
 }
 
+// setBytes replaces the captured payload after a presentation transform such
+// as article extraction. It preserves the existing clipboard size limit.
+func (cc *clipboardCopier) setBytes(data []byte) {
+	if cc == nil {
+		return
+	}
+	cc.buf = &limitedBuffer{max: maxBodyBytes}
+	_, _ = cc.buf.Write(data)
+}
+
 // finish copies the captured bytes to the system clipboard. It writes a
 // warning to stderr on failure but never returns an error.
 func (cc *clipboardCopier) finish(p *core.Printer) {

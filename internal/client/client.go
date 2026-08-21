@@ -568,6 +568,12 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		mode = core.CompressionAuto
 	}
 	policy := newResponseEncodingPolicy(mode)
+	if cfg.Article {
+		// Article extraction must see decoded bytes even when the user turns
+		// automatic compression negotiation off. Do not add an encoding request;
+		// this only permits decoding encodings supplied by the response.
+		policy = newResponseEncodingPolicy(core.CompressionAuto)
+	}
 	requestContext := context.WithValue(req.Context(), ctxEncodingPolicyKey, policy)
 	req = req.WithContext(requestContext)
 

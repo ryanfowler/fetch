@@ -4,7 +4,7 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## Project Overview
 
-`fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, protobuf, msgpack), image rendering in terminals, gRPC support with reflection/discovery and JSON-to-protobuf conversion, and authentication (Basic, Digest, Bearer, AWS SigV4).
+`fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, Markdown, protobuf, msgpack), readable article extraction, image rendering in terminals, gRPC support with reflection/discovery and JSON-to-protobuf conversion, and authentication (Basic, Digest, Bearer, AWS SigV4).
 
 The repository currently targets Go 1.26.7 in `go.mod` and GitHub Actions.
 
@@ -45,6 +45,7 @@ prettier -w .
 
 ### Key Packages
 
+- **internal/article** - Bounded readability extraction, YAML frontmatter, and HTML-to-Markdown rendering.
 - **internal/aws** - AWS Signature V4 request signing.
 - **internal/body** - Lazy request-body sources and single-read response tee pipelines, including replay, bounded preview/materialization, and exact file checks.
 - **internal/cli** - Command-line argument parsing. `App` struct holds all parsed options.
@@ -85,6 +86,7 @@ prettier -w .
 - WebSocket terminal sessions use the interactive prompt by default and can be controlled with `--ws-interactive auto|on|off`; output-file/clipboard/retry flags are rejected because the WebSocket path streams through the message loop instead of the normal response pipeline.
 - Metadata-only commands (`--help`, `--version`, `--buildinfo`) perform best-effort config parsing for presentation settings, but config errors and background auto-updates cannot block them.
 - Schemeless hostnames default to HTTPS, while `localhost` and all IP literals default to HTTP. Body-producing flags infer POST unless the method is explicit, dry-run shows the normalized absolute URL, and failed schemeless HTTPS connection setup suggests the equivalent HTTP URL when safe.
+- Article mode decodes and extracts at most 16 MiB of content, uses the final URL for link resolution, and never executes JavaScript.
 - Shared timeout budgets and resource-bound helpers live in `internal/core`; finite child operations must reuse the parent budget's absolute deadline, while zero or absent timeouts remain unlimited.
 - Request replayability is explicit: one-shot sources such as stdin are rejected before retry or Digest replay, regular files are reopened with identity/length checks, and dry-run previews do not consume request bytes.
 - Response files use exclusive temporary files, atomic commits, best-effort durability sync, and cross-platform sanitization for server-provided filenames; symlink destinations are rejected.

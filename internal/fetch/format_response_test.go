@@ -39,7 +39,7 @@ func TestFormatResponseStreamsNDJSONThroughReader(t *testing.T) {
 		PrinterHandle: core.NewHandle(core.ColorOff),
 	}
 
-	reader, err := formatResponse(context.Background(), r, resp)
+	reader, err := formatResponse(context.Background(), r, resp, nil)
 	if err != nil {
 		t.Fatalf("formatResponse returned error: %v", err)
 	}
@@ -80,7 +80,7 @@ func readFormattedResponse(t *testing.T, body []byte) []byte {
 		PrinterHandle: core.NewHandle(core.ColorOff),
 	}
 
-	reader, err := formatResponse(context.Background(), r, resp)
+	reader, err := formatResponse(context.Background(), r, resp, nil)
 	if err != nil {
 		t.Fatalf("formatResponse returned error: %v", err)
 	}
