@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,12 +19,32 @@ import (
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/fileutil"
+	"github.com/ryanfowler/fetch/internal/resolver"
 )
 
+// NetworkConfig contains the operational network policy that is safe to
+// carry into update requests. Origin credentials, client certificates,
+// insecure TLS, and forced protocol settings are intentionally excluded.
+type NetworkConfig struct {
+	CACerts          []*x509.Certificate
+	ConnectTimeout   time.Duration
+	ResolverEndpoint *resolver.Endpoint
+	DNSServer        *url.URL
+	Proxy            *url.URL
+}
+
 // Update checks the API for the latest fetch version and upgrades the current
-// executable in-place, returning the exit code to use.
+// executable in-place, returning the exit code to use. It retains the legacy
+// entry point for callers that do not need custom network policy.
 func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool, dryRun bool) int {
-	err := update(ctx, p, timeout, silent, dryRun)
+	return UpdateWithConfig(ctx, p, timeout, silent, dryRun, NetworkConfig{})
+}
+
+// UpdateWithConfig applies the caller's resolver, proxy, CA, and connect
+// timeout policy to metadata and artifact downloads. It does not inherit
+// origin-specific authentication or TLS weakening settings.
+func UpdateWithConfig(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool, dryRun bool, network NetworkConfig) int {
+	err := update(ctx, p, timeout, silent, dryRun, network)
 	if err == nil {
 		return 0
 	}
@@ -32,7 +53,7 @@ func Update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	return 1
 }
 
-func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool, dryRun bool) error {
+func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent bool, dryRun bool, network NetworkConfig) error {
 	if timeout > 0 {
 		// Ensure the context is cancelled after the provided timeout.
 		var cancel context.CancelFunc
@@ -62,11 +83,18 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	}()
 
 	// Perform the update.
-	return updateInner(ctx, p, silent, dryRun)
+	return updateInner(ctx, p, silent, dryRun, network)
 }
 
-func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool) error {
-	c := client.NewClient(client.ClientConfig{})
+func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool, network NetworkConfig) error {
+	c := client.NewClient(client.ClientConfig{
+		CACerts:          network.CACerts,
+		ConnectTimeout:   network.ConnectTimeout,
+		ResolverEndpoint: network.ResolverEndpoint,
+		DNSServer:        network.DNSServer,
+		Proxy:            network.Proxy,
+	})
+	defer c.Close()
 
 	// Get the current executable path and verify that we have write
 	// permission in order to replace the file.

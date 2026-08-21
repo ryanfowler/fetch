@@ -134,73 +134,33 @@ func dialStreamEndpoint(ctx context.Context, cfg StreamConfig) (net.Conn, error)
 		return nil, fmt.Errorf("resolve DNS endpoint %q: no addresses found", ep.ConnectHost)
 	}
 
-	// Race the endpoint's bounded address set so a black-holed family cannot
-	// prevent another address from connecting.
+	addresses = interleaveAddressFamilies(deduplicateAddresses(addresses))
 	if len(addresses) > maxStreamEndpointAddresses {
 		addresses = addresses[:maxStreamEndpointAddresses]
 	}
-	raceCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	attempts := make(chan streamDialResult, len(addresses))
-	for _, address := range addresses {
-		address := address
-		go func() {
-			conn, err := dial(raceCtx, "tcp", net.JoinHostPort(address.IP.String(), fmt.Sprint(ep.Port)))
-			if err == nil && ep.Transport == TransportTLS {
-				tlsConn := tls.Client(conn, streamTLSConfig(cfg, ep))
-				err = tlsConn.HandshakeContext(raceCtx)
-				if err == nil {
-					conn = tlsConn
-				} else {
-					_ = conn.Close()
-				}
-			}
-			attempts <- streamDialResult{conn: conn, err: err}
-		}()
-	}
-
-	var lastErr error
-	for remaining := len(addresses); remaining > 0; remaining-- {
-		select {
-		case result := <-attempts:
-			if result.err == nil {
-				cancel()
-				go closeLosingStreamConnections(attempts, remaining-1)
-				return result.conn, nil
-			}
-			lastErr = result.err
-		case <-ctx.Done():
-			// Do not leave a successful race loser open after the caller
-			// cancels. Context-aware dialers should finish promptly; the
-			// buffered channel also lets late results be closed safely.
-			go closeLosingStreamConnections(attempts, remaining)
-			if lastErr == nil {
-				lastErr = ctx.Err()
-			}
-			return nil, lastErr
+	conn, err := RaceCandidates(ctx, addresses, func(attemptCtx context.Context, address net.IPAddr) (net.Conn, error) {
+		conn, err := dial(attemptCtx, "tcp", net.JoinHostPort(address.IP.String(), fmt.Sprint(ep.Port)))
+		if err != nil || ep.Transport != TransportTLS {
+			return conn, err
 		}
+		tlsConn := tls.Client(conn, streamTLSConfig(cfg, ep))
+		if err := tlsConn.HandshakeContext(attemptCtx); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		return tlsConn, nil
+	}, func(conn net.Conn) {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connect to DNS endpoint %s: %w", ep, err)
 	}
-	if lastErr == nil {
-		lastErr = errors.New("no DNS endpoint addresses succeeded")
-	}
-	return nil, fmt.Errorf("connect to DNS endpoint %s: %w", ep, lastErr)
+	return conn, nil
 }
 
 const maxStreamEndpointAddresses = 16
-
-type streamDialResult struct {
-	conn net.Conn
-	err  error
-}
-
-func closeLosingStreamConnections(results <-chan streamDialResult, count int) {
-	for i := 0; i < count; i++ {
-		result := <-results
-		if result.conn != nil {
-			_ = result.conn.Close()
-		}
-	}
-}
 
 func streamTLSConfig(cfg StreamConfig, ep *Endpoint) *tls.Config {
 	var out *tls.Config

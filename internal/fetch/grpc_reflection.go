@@ -588,6 +588,7 @@ func newClient(r *Request) *client.Client {
 		DNSServer:        r.DNSServer,
 		H2C:              shouldUseH2C(r),
 		HTTP:             r.HTTP,
+		ECH:              r.ECH,
 		Insecure:         r.Insecure,
 		Proxy:            r.Proxy,
 		Redirects:        r.Redirects,

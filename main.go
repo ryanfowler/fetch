@@ -6,10 +6,12 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -93,7 +95,13 @@ func main() {
 
 	// Start async update, if necessary.
 	if !app.Update && !core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
-		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate, getValue(app.Cfg.Silent))
+		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate, getValue(app.Cfg.Silent), update.NetworkConfig{
+			CACerts:          app.Cfg.CACerts,
+			ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
+			ResolverEndpoint: app.Cfg.DNSEndpoint,
+			DNSServer:        app.Cfg.DNSServer,
+			Proxy:            app.Cfg.Proxy,
+		})
 	}
 
 	// Attempt to update the current executable.
@@ -106,7 +114,13 @@ func main() {
 		}
 		p := handle.Stderr()
 		timeout := getValue(app.Cfg.Timeout)
-		status := update.Update(ctx, p, timeout, verbosity == core.VSilent, app.DryRun)
+		status := update.UpdateWithConfig(ctx, p, timeout, verbosity == core.VSilent, app.DryRun, update.NetworkConfig{
+			CACerts:          app.Cfg.CACerts,
+			ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
+			ResolverEndpoint: app.Cfg.DNSEndpoint,
+			DNSServer:        app.Cfg.DNSServer,
+			Proxy:            app.Cfg.Proxy,
+		})
 		os.Exit(statusForContext(ctx, status))
 	}
 
@@ -183,6 +197,7 @@ func main() {
 		ResolverEndpoint: app.Cfg.DNSEndpoint,
 		DNSServer:        app.Cfg.DNSServer,
 		DryRun:           app.DryRun,
+		ECH:              app.Cfg.ECH,
 		Edit:             app.Edit,
 		Form:             app.Form,
 		Format:           app.Cfg.Format,
@@ -491,7 +506,15 @@ func getVerbosity(app *cli.App) core.Verbosity {
 	}
 }
 
-func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration, silent bool) {
+func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration, silent bool, network update.NetworkConfig) {
+	// A custom CA is represented as parsed certificates rather than reusable
+	// paths. Do not silently start a background updater that would lose that
+	// trust policy; explicit --update still carries the certificates directly.
+	if len(network.CACerts) > 0 || (network.Proxy != nil && network.Proxy.User != nil) {
+		// Parsed certificates and proxy credentials are intentionally not
+		// copied into a detached child through argv or the environment.
+		return
+	}
 	// Check the metadata file to see if we should start an async update.
 	ok, err := update.ShouldAttemptUpdate(ctx, p, dur)
 	if err != nil {
@@ -509,7 +532,23 @@ func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration, sil
 	if err != nil {
 		return
 	}
-	_ = exec.Command(path, "--update", "--timeout=300", "--silent").Start()
+	args := []string{"--update", "--timeout=300", "--silent"}
+	if network.ResolverEndpoint != nil {
+		if endpointURL := network.ResolverEndpoint.URL(); endpointURL != nil {
+			args = append(args, "--dns-server", endpointURL.String())
+		}
+	}
+	if network.Proxy != nil {
+		args = append(args, "--proxy", network.Proxy.String())
+	}
+	if network.ConnectTimeout > 0 {
+		args = append(args, "--connect-timeout", strconv.FormatFloat(network.ConnectTimeout.Seconds(), 'f', -1, 64))
+	}
+	cmd := exec.Command(path, args...)
+	cmd.Stdin = nil
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	_ = cmd.Start()
 }
 
 // writeCLIErr writes the provided CLI error to the Printer.
@@ -558,6 +597,7 @@ func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 	return dnsinspect.Inspect(ctx, p, &dnsinspect.Config{
 		Endpoint:  app.Cfg.DNSEndpoint,
 		DNSServer: app.Cfg.DNSServer,
+		Proxy:     app.Cfg.Proxy,
 		CACerts:   app.Cfg.CACerts,
 		Insecure:  getValue(app.Cfg.Insecure),
 		TLSMin:    getValue(app.Cfg.TLSMin),

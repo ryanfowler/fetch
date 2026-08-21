@@ -114,32 +114,37 @@ func inspectQUIC(ctx context.Context, res *resolver.Resolver, addr string, tlsCo
 	if err != nil {
 		return nil, err
 	}
-
-	for _, ip := range endpoint.Addrs {
-		udpAddr := &net.UDPAddr{IP: ip.IP, Port: port}
+	type quicResult struct {
+		conn       *quic.Conn
+		packetConn net.PacketConn
+	}
+	result, err := resolver.RaceCandidates(ctx, endpoint.Addrs, func(attemptCtx context.Context, ip net.IPAddr) (quicResult, error) {
 		var lc net.ListenConfig
-		packetConn, dialErr := lc.ListenPacket(ctx, "udp", ":0")
-		if dialErr != nil {
-			err = dialErr
-			continue
+		packetConn, listenErr := lc.ListenPacket(attemptCtx, "udp", ":0")
+		if listenErr != nil {
+			return quicResult{}, listenErr
 		}
-
-		conn, dialErr := quic.Dial(ctx, packetConn, udpAddr, tlsConfig, nil)
+		conn, dialErr := quic.Dial(attemptCtx, packetConn, &net.UDPAddr{IP: ip.IP, Port: port}, tlsConfig, nil)
 		if dialErr != nil {
-			packetConn.Close()
-			err = dialErr
-			continue
+			_ = packetConn.Close()
+			return quicResult{}, dialErr
 		}
-
-		state := conn.ConnectionState().TLS
-		conn.CloseWithError(0, "")
-		packetConn.Close()
-		return &state, nil
+		return quicResult{conn: conn, packetConn: packetConn}, nil
+	}, func(result quicResult) {
+		if result.conn != nil {
+			_ = result.conn.CloseWithError(0, "QUIC address race lost")
+		}
+		if result.packetConn != nil {
+			_ = result.packetConn.Close()
+		}
+	})
+	if err != nil {
+		return nil, err
 	}
-	if err == nil {
-		err = errors.New("no addresses found")
-	}
-	return nil, err
+	state := result.conn.ConnectionState().TLS
+	_ = result.conn.CloseWithError(0, "")
+	_ = result.packetConn.Close()
+	return &state, nil
 }
 
 func alpnProtocols(httpVersion core.HTTPVersion) []string {
