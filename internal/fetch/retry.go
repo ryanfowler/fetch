@@ -75,7 +75,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 
 		// Set up debug trace for this attempt if -vvv or --timing.
 		var metrics *connectionMetrics
-		if r.Verbosity >= core.VDebug || r.Timing {
+		if r.Verbosity >= core.VDebug || r.Timing || r.harRecorder != nil {
 			var p *core.Printer
 			if r.Verbosity >= core.VDebug {
 				p = r.PrinterHandle.Stderr()

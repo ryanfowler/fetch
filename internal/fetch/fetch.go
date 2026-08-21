@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/format"
+	"github.com/ryanfowler/fetch/internal/har"
 	"github.com/ryanfowler/fetch/internal/image"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/pager"
@@ -61,6 +63,7 @@ type Request struct {
 	GRPC             bool
 	GRPCDescribe     string
 	GRPCList         bool
+	HAR              string
 	Headers          []core.KeyVal[string]
 	HTTP             core.HTTPVersion
 	IgnoreStatus     bool
@@ -99,6 +102,10 @@ type Request struct {
 
 	// responseDescriptor is set internally after proto setup for response formatting.
 	responseDescriptor protoreflect.MessageDescriptor
+
+	// harRecorder is reserved before the request starts and records the final
+	// response exchange. It remains private so callers only provide a path.
+	harRecorder *har.Recorder
 }
 
 func (r *Request) HasGRPCDiscovery() bool {
@@ -141,6 +148,34 @@ func Fetch(ctx context.Context, r *Request) int {
 }
 
 func fetch(ctx context.Context, r *Request) (int, error) {
+	if r.HAR != "" {
+		if r.WS || r.GRPCList || r.GRPCDescribe != "" || r.DryRun {
+			return 0, errors.New("--har cannot be used with WebSocket, gRPC discovery, or --dry-run")
+		}
+		if r.Output != "" && r.Output != "-" {
+			harPath, err := filepath.Abs(r.HAR)
+			if err != nil {
+				return 0, err
+			}
+			outputPath, err := filepath.Abs(r.Output)
+			if err != nil {
+				return 0, err
+			}
+			if sameDestinationPath(harPath, outputPath) {
+				return 0, errors.New("--har path cannot be the same as the response output path")
+			}
+		}
+		recorder, err := har.New(r.HAR, r.Clobber)
+		if err != nil {
+			return 0, err
+		}
+		r.harRecorder = recorder
+		defer func() {
+			_ = recorder.Close()
+			r.harRecorder = nil
+		}()
+	}
+
 	if r.GRPC {
 		applyGRPCDefaults(r)
 	}
@@ -256,6 +291,9 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	if err := signAWSRequest(r, req); err != nil {
 		return 0, err
 	}
+	if r.harRecorder != nil {
+		req = req.WithContext(client.WithRequestObserver(req.Context(), r.harRecorder.ObserveRequest))
+	}
 
 	// 7. Print request metadata / dry-run.
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
@@ -326,8 +364,7 @@ func signAWSRequest(r *Request, req *http.Request) error {
 	return aws.Sign(req, *r.AWSSigv4, time.Now().UTC())
 }
 
-func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRedirects, hadRetries bool, metrics *connectionMetrics) (int, error) {
-	var exitCode int
+func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRedirects, hadRetries bool, metrics *connectionMetrics) (exitCode int, retErr error) {
 	if !r.IgnoreStatus {
 		exitCode = getExitCodeForStatus(resp.StatusCode)
 	}
@@ -346,31 +383,87 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 		p.Flush()
 	}
 
-	// Wrap response body to measure body download time for --timing.
+	// Wrap response body to measure body download time. HAR needs this timing
+	// even when --timing was not requested.
 	var bodyTimer *timedReader
-	if r.Timing && metrics != nil {
+	if (r.Timing || r.harRecorder != nil) && metrics != nil {
 		bodyTimer = newTimedReader(resp.Body)
 		resp.Body = bodyTimer
 	}
 	// Install one response pipeline before any output mode can consume the
 	// body. This allows clipboard/HAR/progress observers to share one read.
-	resp.Body = body.NewStream(resp.Body)
+	if resp.Body == nil {
+		resp.Body = http.NoBody
+	}
+	responseStream := body.NewStream(resp.Body)
+	var harResponse *har.ResponseCapture
+	if r.harRecorder != nil {
+		harResponse = r.harRecorder.CaptureResponse(resp)
+		responseStream.AddTee(harResponse)
+	}
+	resp.Body = responseStream
 	// Every consumer below can block on a body read. Tie the original response
 	// stream to the request context so cancellation closes it promptly, even
 	// when a formatter, file writer, or discard path owns the read loop.
+	var exchangeCompleted time.Time
 	responseContext := ctx
 	if resp.Request != nil {
 		responseContext = resp.Request.Context()
 	}
 	stopBodyClose := closeReaderOnContext(responseContext, resp.Body)
 	defer stopBodyClose()
+	if r.harRecorder != nil {
+		defer func() {
+			timings := har.Timings{TransferSize: -1}
+			if metrics != nil {
+				timings.DNS = metrics.dnsDur
+				timings.Connect = metrics.tcpDur
+				timings.TLS = metrics.tlsDur
+				timings.Wait = metrics.ttfbDur
+				timings.RemoteIP = metrics.remoteIP
+				timings.DNSKnown = !metrics.dnsStart.IsZero()
+				timings.ConnectKnown = !metrics.tcpStart.IsZero()
+				timings.TLSKnown = !metrics.tlsStart.IsZero()
+				timings.WaitKnown = !metrics.ttfbStart.IsZero()
+			}
+			if bodyTimer != nil {
+				timings.Receive = bodyTimer.wallTime()
+				timings.ReceiveKnown = !bodyTimer.firstRead.IsZero()
+			}
+			if wireSize := client.WireContentLength(resp); wireSize >= 0 {
+				timings.TransferSize = wireSize
+				timings.TransferKnown = true
+			} else if progress, ok := resp.Body.(interface{ ProgressBytes() (int64, bool) }); ok {
+				if wireSize, valid := progress.ProgressBytes(); valid {
+					timings.TransferSize = wireSize
+					timings.TransferKnown = true
+				}
+			}
+			if !timings.TransferKnown && len(resp.Header.Values("Content-Encoding")) == 0 && harResponse != nil {
+				timings.TransferSize = harResponse.Size()
+				timings.TransferKnown = true
+			}
+			if retErr != nil {
+				return
+			}
+			if bodyTimer != nil && !bodyTimer.lastRead.IsZero() {
+				timings.CompletedAt = bodyTimer.lastRead
+			} else if !exchangeCompleted.IsZero() {
+				timings.CompletedAt = exchangeCompleted
+			}
+			if harErr := r.harRecorder.Finalize(resp, harResponse, timings); harErr != nil && retErr == nil {
+				exitCode = 0
+				retErr = harErr
+			}
+		}()
+	}
 
 	if r.Discard {
 		_, err := io.Copy(io.Discard, resp.Body)
 		if err != nil {
 			return 0, err
 		}
-		if bodyTimer != nil {
+		if r.Timing && bodyTimer != nil {
 			p := r.PrinterHandle.Stderr()
 			renderWaterfall(p, metrics, bodyTimer)
 			p.Flush()
@@ -378,6 +471,7 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 		if r.GRPC {
 			exitCode = checkGRPCStatus(r, resp, exitCode)
 		}
+		exchangeCompleted = time.Now()
 		return exitCode, nil
 	}
 
@@ -389,23 +483,33 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 		return 0, err
 	}
 
+	if body == nil {
+		// HEAD, discard-to-file, and formatters that consume the body have
+		// completed the response by this point. Body reads take precedence
+		// below when a timed source recorded a more precise completion time.
+		exchangeCompleted = time.Now()
+	}
 	if body != nil {
 		p := r.PrinterHandle.Stderr()
 		// Explicit raw formatting is an opt-in terminal bypass, just like
 		// -o -. Pipes are already safe because they are not terminals.
 		forceRaw := r.Output == "-" || r.Format == core.FormatOff
 		contentType := resp.Header.Get("Content-Type")
-		err = streamToStdoutWithPagerContent(ctx, body, p, forceRaw, r.NoPager, cc != nil, r.Verbosity == core.VSilent, r.Pager, contentType)
+		err = streamToStdoutWithPagerContent(ctx, body, p, forceRaw, r.NoPager, cc != nil || r.harRecorder != nil, r.Verbosity == core.VSilent, r.Pager, contentType)
 		if err != nil {
 			return 0, err
 		}
+	}
+
+	if bodyTimer == nil || bodyTimer.lastRead.IsZero() {
+		exchangeCompleted = time.Now()
 	}
 
 	// Copy captured bytes to clipboard.
 	cc.finish(r.PrinterHandle.Stderr())
 
 	// Render timing waterfall after body is fully consumed.
-	if bodyTimer != nil {
+	if r.Timing && bodyTimer != nil {
 		p := r.PrinterHandle.Stderr()
 		renderWaterfall(p, metrics, bodyTimer)
 		p.Flush()
@@ -435,6 +539,9 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 	}
 	if outputWarning != "" {
 		core.WriteWarningMsgIf(r.PrinterHandle.Stderr(), outputWarning, r.Verbosity == core.VSilent)
+	}
+	if err := rejectHAROutputPath(r, output); err != nil {
+		return nil, err
 	}
 
 	if output != "" && r.Output != "-" {
@@ -528,6 +635,46 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 	return bytes.NewReader(buf), nil
 }
 
+func rejectHAROutputPath(r *Request, output string) error {
+	if r == nil || r.harRecorder == nil || output == "" || output == "-" {
+		return nil
+	}
+	harPath, err := filepath.Abs(r.HAR)
+	if err != nil {
+		return err
+	}
+	outputPath, err := filepath.Abs(output)
+	if err != nil {
+		return err
+	}
+	if sameDestinationPath(harPath, outputPath) {
+		return errors.New("--har path cannot be the same as the response output path")
+	}
+	return nil
+}
+
+func sameDestinationPath(first, second string) bool {
+	canonical := func(path string) string {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return filepath.Clean(path)
+		}
+		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+			abs = resolved
+		}
+		dir, name := filepath.Dir(abs), filepath.Base(abs)
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = resolved
+		}
+		return filepath.Clean(filepath.Join(dir, name))
+	}
+	first, second = canonical(first), canonical(second)
+	if first == second {
+		return true
+	}
+	return strings.EqualFold(first, second) && os.PathSeparator == '\\'
+}
+
 func formatArticleResponse(r *Request, resp *http.Response, cc *clipboardCopier) (io.Reader, error) {
 	_, charset := format.GetContentType(resp.Header)
 	original := resp.Body
@@ -564,6 +711,9 @@ func formatArticleResponse(r *Request, resp *http.Response, cc *clipboardCopier)
 	}
 	if outputWarning != "" {
 		core.WriteWarningMsgIf(r.PrinterHandle.Stderr(), outputWarning, r.Verbosity == core.VSilent)
+	}
+	if err := rejectHAROutputPath(r, output); err != nil {
+		return nil, err
 	}
 	if output != "" && r.Output != "-" {
 		size := int64(len(markdown))

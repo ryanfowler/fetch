@@ -3,7 +3,9 @@ package fetch
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http/httptrace"
+	"strings"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -29,7 +31,8 @@ type connectionMetrics struct {
 	ttfbDur   time.Duration
 
 	// Connection reuse
-	reused bool
+	reused   bool
+	remoteIP string
 }
 
 // newDebugTrace creates an httptrace.ClientTrace that collects connection
@@ -189,6 +192,16 @@ func newDebugTrace(p *core.Printer) (*httptrace.ClientTrace, *connectionMetrics)
 		GotConn: func(info httptrace.GotConnInfo) {
 			m.ttfbStart = time.Now()
 			m.reused = info.Reused
+			if info.Conn != nil {
+				remote := info.Conn.RemoteAddr().String()
+				if host, _, err := net.SplitHostPort(remote); err == nil {
+					if net.ParseIP(strings.Trim(host, "[]")) != nil {
+						m.remoteIP = host
+					}
+				} else if net.ParseIP(strings.Trim(remote, "[]")) != nil {
+					m.remoteIP = remote
+				}
+			}
 
 			if p != nil && info.Reused {
 				p.WriteInfoPrefix()

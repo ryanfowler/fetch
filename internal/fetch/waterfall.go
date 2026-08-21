@@ -15,6 +15,7 @@ type timedReader struct {
 	r         io.ReadCloser
 	firstRead time.Time
 	lastRead  time.Time
+	readTime  time.Duration
 }
 
 func newTimedReader(r io.ReadCloser) *timedReader {
@@ -24,11 +25,13 @@ func newTimedReader(r io.ReadCloser) *timedReader {
 func (t *timedReader) Read(p []byte) (int, error) {
 	before := time.Now()
 	n, err := t.r.Read(p)
+	after := time.Now()
 	if n > 0 {
 		if t.firstRead.IsZero() {
 			t.firstRead = before
 		}
-		t.lastRead = time.Now()
+		t.lastRead = after
+		t.readTime += after.Sub(before)
 	}
 	return n, err
 }
@@ -49,7 +52,7 @@ func (t *timedReader) wallTime() time.Duration {
 	if t.firstRead.IsZero() {
 		return 0
 	}
-	return t.lastRead.Sub(t.firstRead)
+	return t.readTime
 }
 
 // phase represents a single timing phase in the waterfall.

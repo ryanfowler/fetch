@@ -61,6 +61,7 @@ prettier -w .
 - **internal/grpc** - gRPC framing, headers, and status code handling.
 - **internal/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
 - **internal/image** - Multipart form implementation.
+- **internal/har** - Bounded HAR 1.2 final-exchange recording with streaming body capture and atomic output.
 - **internal/proto** - Protocol buffer compilation and message handling for gRPC support.
 - **internal/pager** - Shell-free `$PAGER` parsing and bounded pager process lifecycle for help and response output.
 - **internal/resolver** - Shared DNS resolution and dialing for system DNS, UDP DNS, and DNS-over-HTTPS across HTTP, HTTP/3, gRPC, and TLS inspection.
@@ -89,7 +90,8 @@ prettier -w .
 - Article mode decodes and extracts at most 16 MiB of content, uses the final URL for link resolution, and never executes JavaScript.
 - Shared timeout budgets and resource-bound helpers live in `internal/core`; finite child operations must reuse the parent budget's absolute deadline, while zero or absent timeouts remain unlimited.
 - Request replayability is explicit: one-shot sources such as stdin are rejected before retry or Digest replay, regular files are reopened with identity/length checks, and dry-run previews do not consume request bytes.
-- Response files use exclusive temporary files, atomic commits, best-effort durability sync, and cross-platform sanitization for server-provided filenames; symlink destinations are rejected.
+- Response files and HAR sidecars use exclusive temporary files, atomic commits, best-effort durability sync, and cross-platform sanitization for server-provided filenames; symlink destinations are rejected.
+- HAR recording captures one final exchange, preserves duplicate headers, captures decoded response bodies up to 16 MiB, and never changes the normal streaming pipeline. HAR files can contain credentials and sensitive bodies.
 - Brotli response decoding uses the decoder-only `github.com/google/brotli/go/brotli` module; tests use fixed Brotli fixtures.
 - SSE and NDJSON use bounded, chunk-safe streaming parsers; automatic compression retries compressed SSE once for safe GET/HEAD requests.
 - `-v --help` renders the embedded Markdown CLI reference and uses the configured pager. Pager commands are parsed without a shell, and `NO_PAGER` disables automatic paging.
