@@ -5,12 +5,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"slices"
@@ -167,6 +164,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 
 	var streamClient *resolver.StreamClient
 	var doqClient *resolver.DoQClient
+	var dohClient *resolver.DOHClient
 	var err error
 	if cfg.Endpoint != nil && (cfg.Endpoint.Transport == resolver.TransportTCP || cfg.Endpoint.Transport == resolver.TransportTLS) {
 		streamClient, err = resolver.NewStreamClient(ctx, resolver.StreamConfig{
@@ -196,6 +194,21 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		}
 		defer doqClient.Close()
 	}
+	if server != nil && server.Scheme != "" && streamClient == nil && doqClient == nil {
+		dohClient, err = resolver.NewDOHClient(resolver.DOHConfig{
+			Endpoint:  cfg.Endpoint,
+			ServerURL: server,
+			TLSConfig: cfg.TLSConfig,
+			CACerts:   cfg.CACerts,
+			Insecure:  cfg.Insecure,
+			TLSMin:    cfg.TLSMin,
+			TLSMax:    cfg.TLSMax,
+			Timeout:   cfg.Timeout,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("connect to resolver: %w", err)
+		}
+	}
 
 	results := make([]queryResult, len(inspectTypes))
 	var wg sync.WaitGroup
@@ -211,8 +224,8 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 				results[i].records, results[i].err = lookupDoQRecords(ctx, doqClient, host, qt)
 				return
 			}
-			if server != nil && server.Scheme != "" {
-				results[i].records, results[i].err = lookupDOHRecords(ctx, server, host, qt)
+			if dohClient != nil {
+				results[i].records, results[i].err = lookupDOHRecordsWithClient(ctx, dohClient, host, qt)
 				return
 			}
 			results[i].records, results[i].tcpFallback, results[i].err = lookupUDPRecordsWithFallback(ctx, target.udpAddr, host, qt)
@@ -324,156 +337,26 @@ func lookupDoQRecords(ctx context.Context, client *resolver.DoQClient, host stri
 	return records, nil
 }
 
-func lookupDOHRecords(ctx context.Context, serverURL *url.URL, host string, qt queryType) ([]record, error) {
-	if message, err := resolver.LookupDOHWireMessage(ctx, serverURL, host, int(qt.dnsType)); err == nil {
-		name, parseErr := resolver.ParseName(host)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		authorized, authErr := resolver.AuthorizeAnswers(message, resolver.Question{Name: name, Type: uint16(qt.dnsType), Class: 1})
-		if authErr != nil {
-			return nil, authErr
-		}
-		out := make([]record, 0, len(authorized))
-		for _, answer := range authorized {
-			value, ok := wireRecordValue(answer)
-			if ok {
-				out = append(out, record{typ: typeLabel(dnsmessage.Type(answer.Type)), value: value, ttl: answer.TTL, hasTTL: true})
-			}
-		}
-		return out, nil
-	} else if !errors.Is(err, resolver.ErrDOHProtocolIncompatible) {
-		return nil, err
-	}
-	type answer struct {
-		Name string `json:"name"`
-		Type int    `json:"type"`
-		Data string `json:"data"`
-		TTL  uint32 `json:"TTL"`
-	}
-	type response struct {
-		Status int      `json:"Status"`
-		Answer []answer `json:"Answer"`
-	}
-
-	u := *serverURL
-	q := u.Query()
-	q.Set("name", host)
-	q.Set("type", qt.dohType)
-	u.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+func lookupDOHRecordsWithClient(ctx context.Context, client *resolver.DOHClient, host string, qt queryType) ([]record, error) {
+	answers, err := client.LookupInspectionType(ctx, host, qt.dohType, int(qt.dnsType))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/dns-json")
-	req.Header.Set("User-Agent", core.UserAgent)
-
-	var client http.Client
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<14))
-		if err != nil {
-			return nil, fmt.Errorf("http response code: %d", resp.StatusCode)
+	out := make([]record, 0, len(answers))
+	for _, answer := range answers {
+		typ := dnsmessage.Type(answer.Record.Type)
+		value := ""
+		if answer.Data != "" {
+			value = normalizeDOHValue(typ, answer.Data)
+		} else {
+			value, _ = wireRecordValue(answer.Record)
 		}
-		return nil, fmt.Errorf("%d: %s", resp.StatusCode, raw)
-	}
-
-	rawJSON, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(rawJSON) > 1<<20 {
-		return nil, errors.New("DoH JSON response exceeds the 1 MiB limit")
-	}
-	var res response
-	if err := json.Unmarshal(rawJSON, &res); err != nil {
-		return nil, err
-	}
-	if res.Status != 0 {
-		name := rcodeName(res.Status)
-		if name == "" {
-			return nil, errors.New("no DNS records found")
-		}
-		return nil, fmt.Errorf("no DNS records found: %s", name)
-	}
-
-	qname, err := resolver.ParseName(host)
-	if err != nil {
-		return nil, err
-	}
-	question := resolver.Question{Name: qname, Type: uint16(qt.dnsType), Class: 1}
-	message := &resolver.Message{Answers: make([]resolver.Record, 0, len(res.Answer))}
-	owners := make([]resolver.Name, len(res.Answer))
-	for i, answer := range res.Answer {
-		owner := qname
-		if answer.Name != "" {
-			owner, err = resolver.ParseName(answer.Name)
-			if err != nil {
-				return nil, fmt.Errorf("invalid DoH JSON answer owner: %w", err)
-			}
-		}
-		owners[i] = owner
-		rr := resolver.Record{Owner: owner, Type: uint16(answer.Type), Class: 1, TTL: answer.TTL}
-		raw, generic := parseGenericRDATA(answer.Data)
-		if strings.HasPrefix(strings.TrimSpace(answer.Data), `\#`) && !generic {
-			return nil, errors.New("invalid DoH JSON generic RDATA")
-		}
-		if generic {
-			if err := resolver.ValidateRData(uint16(answer.Type), raw); err != nil {
-				return nil, fmt.Errorf("invalid DoH JSON RDATA: %w", err)
-			}
-			rr.RData = raw
-		}
-		switch answer.Type {
-		case int(dnsmessage.TypeA), int(dnsmessage.TypeAAAA):
-			if generic {
-				break
-			}
-			ip := net.ParseIP(answer.Data)
-			if ip == nil || (answer.Type == int(dnsmessage.TypeA) && ip.To4() == nil) || (answer.Type == int(dnsmessage.TypeAAAA) && (ip.To16() == nil || ip.To4() != nil)) {
-				return nil, errors.New("invalid DoH JSON address")
-			}
-			if answer.Type == int(dnsmessage.TypeA) {
-				rr.RData = append([]byte(nil), ip.To4()...)
-			} else {
-				rr.RData = append([]byte(nil), ip.To16()...)
-			}
-		case int(dnsmessage.TypeCNAME):
-			target, parseErr := resolver.ParseName(answer.Data)
-			if parseErr != nil {
-				return nil, fmt.Errorf("invalid DoH JSON CNAME: %w", parseErr)
-			}
-			rr.Target = &target
-		}
-		message.Answers = append(message.Answers, rr)
-	}
-	authorized, err := resolver.AuthorizeAnswers(message, question)
-	if err != nil {
-		return nil, err
-	}
-	records := make([]record, 0, len(res.Answer))
-	for i, answer := range res.Answer {
-		allowed := false
-		for _, rr := range authorized {
-			if rr.Owner.Equal(owners[i]) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
+		if value == "" {
 			continue
 		}
-		typ := dnsmessage.Type(answer.Type)
-		label := typeLabel(typ)
-		records = append(records, record{typ: label, value: normalizeDOHValue(typ, answer.Data), ttl: answer.TTL, hasTTL: true})
+		out = append(out, record{typ: typeLabel(typ), value: value, ttl: answer.Record.TTL, hasTTL: answer.TTLPresent})
 	}
-	return records, nil
+	return out, nil
 }
 
 func lookupUDPRecords(ctx context.Context, serverAddr, host string, qt queryType) ([]record, error) {
@@ -770,23 +653,6 @@ func typeLabel(typ dnsmessage.Type) string {
 		return "HTTPS"
 	default:
 		return fmt.Sprintf("TYPE%d", uint16(typ))
-	}
-}
-
-func rcodeName(status int) string {
-	switch status {
-	case 1:
-		return "FormatError"
-	case 2:
-		return "ServerFailure"
-	case 3:
-		return "NXDomain"
-	case 4:
-		return "NotImplemented"
-	case 5:
-		return "Refused"
-	default:
-		return ""
 	}
 }
 
