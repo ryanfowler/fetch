@@ -74,9 +74,8 @@ func (r *Resolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr,
 			return net.DefaultResolver.LookupIPAddr(ctx, host)
 		})
 	case r.endpoint.Transport == TransportUDP:
-		res := udpResolver(r.endpoint.Address())
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
-			return res.LookupIPAddr(ctx, host)
+			return lookupWireIPs(ctx, r.endpoint.Address(), host)
 		})
 	case r.endpoint.Transport == TransportHTTPS:
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {

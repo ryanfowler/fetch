@@ -218,7 +218,28 @@ func lookupDefaultResolverRecords(ctx context.Context, host string) ([]record, e
 }
 
 func lookupDOHRecords(ctx context.Context, serverURL *url.URL, host string, qt queryType) ([]record, error) {
+	if message, err := resolver.LookupDOHWireMessage(ctx, serverURL, host, int(qt.dnsType)); err == nil {
+		name, parseErr := resolver.ParseName(host)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		authorized, authErr := resolver.AuthorizeAnswers(message, resolver.Question{Name: name, Type: uint16(qt.dnsType), Class: 1})
+		if authErr != nil {
+			return nil, authErr
+		}
+		out := make([]record, 0, len(authorized))
+		for _, answer := range authorized {
+			value, ok := wireRecordValue(answer)
+			if ok {
+				out = append(out, record{typ: typeLabel(dnsmessage.Type(answer.Type)), value: value, ttl: answer.TTL, hasTTL: true})
+			}
+		}
+		return out, nil
+	} else if !errors.Is(err, resolver.ErrDOHProtocolIncompatible) {
+		return nil, err
+	}
 	type answer struct {
+		Name string `json:"name"`
 		Type int    `json:"type"`
 		Data string `json:"data"`
 		TTL  uint32 `json:"TTL"`
@@ -256,8 +277,15 @@ func lookupDOHRecords(ctx context.Context, serverURL *url.URL, host string, qt q
 		return nil, fmt.Errorf("%d: %s", resp.StatusCode, raw)
 	}
 
+	rawJSON, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(rawJSON) > 1<<20 {
+		return nil, errors.New("DoH JSON response exceeds the 1 MiB limit")
+	}
 	var res response
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	if err := json.Unmarshal(rawJSON, &res); err != nil {
 		return nil, err
 	}
 	if res.Status != 0 {
@@ -268,42 +296,89 @@ func lookupDOHRecords(ctx context.Context, serverURL *url.URL, host string, qt q
 		return nil, fmt.Errorf("no DNS records found: %s", name)
 	}
 
+	qname, err := resolver.ParseName(host)
+	if err != nil {
+		return nil, err
+	}
+	question := resolver.Question{Name: qname, Type: uint16(qt.dnsType), Class: 1}
+	message := &resolver.Message{Answers: make([]resolver.Record, 0, len(res.Answer))}
+	owners := make([]resolver.Name, len(res.Answer))
+	for i, answer := range res.Answer {
+		owner := qname
+		if answer.Name != "" {
+			owner, err = resolver.ParseName(answer.Name)
+			if err != nil {
+				return nil, fmt.Errorf("invalid DoH JSON answer owner: %w", err)
+			}
+		}
+		owners[i] = owner
+		rr := resolver.Record{Owner: owner, Type: uint16(answer.Type), Class: 1, TTL: answer.TTL}
+		raw, generic := parseGenericRDATA(answer.Data)
+		if strings.HasPrefix(strings.TrimSpace(answer.Data), `\#`) && !generic {
+			return nil, errors.New("invalid DoH JSON generic RDATA")
+		}
+		if generic {
+			if err := resolver.ValidateRData(uint16(answer.Type), raw); err != nil {
+				return nil, fmt.Errorf("invalid DoH JSON RDATA: %w", err)
+			}
+			rr.RData = raw
+		}
+		switch answer.Type {
+		case int(dnsmessage.TypeA), int(dnsmessage.TypeAAAA):
+			if generic {
+				break
+			}
+			ip := net.ParseIP(answer.Data)
+			if ip == nil || (answer.Type == int(dnsmessage.TypeA) && ip.To4() == nil) || (answer.Type == int(dnsmessage.TypeAAAA) && (ip.To16() == nil || ip.To4() != nil)) {
+				return nil, errors.New("invalid DoH JSON address")
+			}
+			if answer.Type == int(dnsmessage.TypeA) {
+				rr.RData = append([]byte(nil), ip.To4()...)
+			} else {
+				rr.RData = append([]byte(nil), ip.To16()...)
+			}
+		case int(dnsmessage.TypeCNAME):
+			target, parseErr := resolver.ParseName(answer.Data)
+			if parseErr != nil {
+				return nil, fmt.Errorf("invalid DoH JSON CNAME: %w", parseErr)
+			}
+			rr.Target = &target
+		}
+		message.Answers = append(message.Answers, rr)
+	}
+	authorized, err := resolver.AuthorizeAnswers(message, question)
+	if err != nil {
+		return nil, err
+	}
 	records := make([]record, 0, len(res.Answer))
-	for _, answer := range res.Answer {
+	for i, answer := range res.Answer {
+		allowed := false
+		for _, rr := range authorized {
+			if rr.Owner.Equal(owners[i]) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			continue
+		}
 		typ := dnsmessage.Type(answer.Type)
 		label := typeLabel(typ)
-		records = append(records, record{
-			typ:    label,
-			value:  normalizeDOHValue(typ, answer.Data),
-			ttl:    answer.TTL,
-			hasTTL: true,
-		})
+		records = append(records, record{typ: label, value: normalizeDOHValue(typ, answer.Data), ttl: answer.TTL, hasTTL: true})
 	}
 	return records, nil
 }
 
 func lookupUDPRecords(ctx context.Context, serverAddr, host string, qt queryType) ([]record, error) {
-	name, err := dnsmessage.NewName(absoluteName(host))
+	raw, id, err := resolver.EncodeQuery(absoluteName(host), uint16(qt.dnsType))
 	if err != nil {
 		return nil, err
 	}
-
-	id := uint16(time.Now().UnixNano())
-	msg := dnsmessage.Message{
-		Header: dnsmessage.Header{
-			ID:               id,
-			RecursionDesired: true,
-		},
-		Questions: []dnsmessage.Question{{
-			Name:  name,
-			Type:  qt.dnsType,
-			Class: dnsmessage.ClassINET,
-		}},
-	}
-	raw, err := msg.Pack()
+	name, err := resolver.ParseName(absoluteName(host))
 	if err != nil {
 		return nil, err
 	}
+	question := resolver.Question{Name: name, Type: uint16(qt.dnsType), Class: 1}
 
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, "udp", serverAddr)
@@ -319,80 +394,78 @@ func lookupUDPRecords(ctx context.Context, serverAddr, host string, qt queryType
 		return nil, err
 	}
 
-	buf := make([]byte, 4096)
+	buf := make([]byte, 65535)
 	n, err := conn.Read(buf)
 	if err != nil {
 		return nil, err
 	}
-
-	var res dnsmessage.Message
-	if err := res.Unpack(buf[:n]); err != nil {
+	res, err := resolver.DecodeResponse(buf[:n], id, question)
+	if err != nil {
 		return nil, err
 	}
-	if res.Header.ID != id {
-		return nil, errors.New("mismatched DNS response ID")
-	}
-	if res.Header.RCode != dnsmessage.RCodeSuccess {
-		return nil, fmt.Errorf("no DNS records found: %s", res.Header.RCode.String())
+	if res.Header.RCode != 0 {
+		return nil, fmt.Errorf("no DNS records found: %s", resolver.RCodeName(res.Header.RCode))
 	}
 	if res.Header.Truncated {
 		return nil, errors.New("DNS response was truncated")
 	}
 
-	records := make([]record, 0, len(res.Answers))
-	for _, answer := range res.Answers {
-		rec, ok := resourceRecord(answer)
-		if ok {
-			records = append(records, rec)
+	authorized, err := resolver.AuthorizeAnswers(res, question)
+	if err != nil {
+		return nil, err
+	}
+	records := make([]record, 0, len(authorized))
+	for _, answer := range authorized {
+		value, ok := wireRecordValue(answer)
+		if !ok {
+			continue
 		}
+		records = append(records, record{typ: typeLabel(dnsmessage.Type(answer.Type)), value: value, ttl: answer.TTL, hasTTL: true})
 	}
 	return records, nil
 }
 
-func resourceRecord(res dnsmessage.Resource) (record, bool) {
-	value, ok := resourceValue(res)
-	if !ok {
-		return record{}, false
-	}
-	return record{
-		typ:    typeLabel(res.Header.Type),
-		value:  value,
-		ttl:    res.Header.TTL,
-		hasTTL: true,
-	}, true
-}
-
-func resourceValue(res dnsmessage.Resource) (string, bool) {
-	switch body := res.Body.(type) {
-	case *dnsmessage.AResource:
-		return net.IP(body.A[:]).String(), true
-	case *dnsmessage.AAAAResource:
-		return net.IP(body.AAAA[:]).String(), true
-	case *dnsmessage.CNAMEResource:
-		return body.CNAME.String(), true
-	case *dnsmessage.TXTResource:
-		return strings.Join(body.TXT, " "), true
-	case *dnsmessage.MXResource:
-		return fmt.Sprintf("%d %s", body.Pref, body.MX.String()), true
-	case *dnsmessage.NSResource:
-		return body.NS.String(), true
-	case *dnsmessage.SOAResource:
-		return fmt.Sprintf("%s %s serial=%d refresh=%d retry=%d expire=%d minttl=%d",
-			body.NS.String(), body.MBox.String(), body.Serial, body.Refresh, body.Retry, body.Expire, body.MinTTL), true
-	case *dnsmessage.SRVResource:
-		return fmt.Sprintf("%d %d %d %s", body.Priority, body.Weight, body.Port, body.Target.String()), true
-	case *dnsmessage.SVCBResource:
-		return formatSVCB(body.Priority, body.Target, body.Params), true
-	case *dnsmessage.HTTPSResource:
-		return formatSVCB(body.Priority, body.Target, body.Params), true
-	case *dnsmessage.UnknownResource:
-		if res.Header.Type == dnsTypeCAA {
-			return formatCAA(body.Data), true
+func wireRecordValue(res resolver.Record) (string, bool) {
+	switch res.Type {
+	case uint16(dnsmessage.TypeA), uint16(dnsmessage.TypeAAAA):
+		if ip := resolver.RecordAddress(res); ip != nil {
+			return ip.String(), true
 		}
-		return "0x" + hex.EncodeToString(body.Data), true
-	default:
-		return "", false
+	case uint16(dnsmessage.TypeCNAME), uint16(dnsmessage.TypeNS):
+		if res.Target != nil {
+			return res.Target.String(), true
+		}
+	case uint16(dnsmessage.TypeTXT):
+		parts := make([]string, 0, len(res.TXT))
+		for _, part := range res.TXT {
+			parts = append(parts, string(part))
+		}
+		return strings.Join(parts, " "), true
+	case uint16(dnsmessage.TypeMX):
+		if res.Target != nil {
+			return fmt.Sprintf("%d %s", res.Preference, res.Target), true
+		}
+	case uint16(dnsmessage.TypeSOA):
+		if res.Target != nil && res.Target2 != nil {
+			return fmt.Sprintf("%s %s serial=%d refresh=%d retry=%d expire=%d minttl=%d",
+				res.Target, res.Target2, res.SOAValues[0], res.SOAValues[1], res.SOAValues[2], res.SOAValues[3], res.SOAValues[4]), true
+		}
+	case uint16(dnsmessage.TypeSRV):
+		if res.Target != nil {
+			return fmt.Sprintf("%d %d %d %s", res.Priority, res.Weight, res.Port, res.Target), true
+		}
+	case uint16(dnsTypeCAA):
+		return formatCAA(res.RData), true
+	case uint16(dnsmessage.TypeSVCB), uint16(dnsmessage.TypeHTTPS):
+		params := make([]dnsmessage.SVCParam, 0, len(res.Params))
+		for _, param := range res.Params {
+			params = append(params, dnsmessage.SVCParam{Key: dnsmessage.SVCParamKey(param.Key), Value: append([]byte(nil), param.Value...)})
+		}
+		if res.Target != nil {
+			return formatSVCBValue(res.Priority, res.Target.String(), params), true
+		}
 	}
+	return "0x" + hex.EncodeToString(res.RData), true
 }
 
 func formatCAA(raw []byte) string {
@@ -407,10 +480,6 @@ func formatCAA(raw []byte) string {
 	tag := string(raw[2 : 2+tagLen])
 	value := string(raw[2+tagLen:])
 	return fmt.Sprintf("%d %s %q", flags, tag, value)
-}
-
-func formatSVCB(priority uint16, target dnsmessage.Name, params []dnsmessage.SVCParam) string {
-	return formatSVCBValue(priority, target.String(), params)
 }
 
 func formatSVCBValue(priority uint16, target string, params []dnsmessage.SVCParam) string {
