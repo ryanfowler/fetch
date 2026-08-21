@@ -146,7 +146,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		silent:   cfg.Silent,
 	}
 
-	if cfg.Endpoint != nil && cfg.Endpoint.Transport != resolver.TransportUDP && cfg.Endpoint.Transport != resolver.TransportTCP && cfg.Endpoint.Transport != resolver.TransportTLS && cfg.Endpoint.Transport != resolver.TransportHTTPS {
+	if cfg.Endpoint != nil && cfg.Endpoint.Transport != resolver.TransportUDP && cfg.Endpoint.Transport != resolver.TransportTCP && cfg.Endpoint.Transport != resolver.TransportTLS && cfg.Endpoint.Transport != resolver.TransportQUIC && cfg.Endpoint.Transport != resolver.TransportHTTPS {
 		return nil, fmt.Errorf("resolver transport %s is not implemented", cfg.Endpoint.Transport)
 	}
 
@@ -166,6 +166,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	}
 
 	var streamClient *resolver.StreamClient
+	var doqClient *resolver.DoQClient
 	var err error
 	if cfg.Endpoint != nil && (cfg.Endpoint.Transport == resolver.TransportTCP || cfg.Endpoint.Transport == resolver.TransportTLS) {
 		streamClient, err = resolver.NewStreamClient(ctx, resolver.StreamConfig{
@@ -181,6 +182,20 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		}
 		defer streamClient.Close()
 	}
+	if cfg.Endpoint != nil && cfg.Endpoint.Transport == resolver.TransportQUIC {
+		doqClient, err = resolver.NewDoQClient(ctx, resolver.DoQConfig{
+			Endpoint:  cfg.Endpoint,
+			TLSConfig: cfg.TLSConfig,
+			CACerts:   cfg.CACerts,
+			Insecure:  cfg.Insecure,
+			TLSMin:    cfg.TLSMin,
+			TLSMax:    cfg.TLSMax,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("connect to resolver: %w", err)
+		}
+		defer doqClient.Close()
+	}
 
 	results := make([]queryResult, len(inspectTypes))
 	var wg sync.WaitGroup
@@ -190,6 +205,10 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 			defer wg.Done()
 			if streamClient != nil {
 				results[i].records, results[i].err = lookupStreamRecords(ctx, streamClient, host, qt)
+				return
+			}
+			if doqClient != nil {
+				results[i].records, results[i].err = lookupDoQRecords(ctx, doqClient, host, qt)
 				return
 			}
 			if server != nil && server.Scheme != "" {
@@ -252,6 +271,33 @@ func lookupDefaultResolverRecords(ctx context.Context, host string) ([]record, e
 }
 
 func lookupStreamRecords(ctx context.Context, client *resolver.StreamClient, host string, qt queryType) ([]record, error) {
+	name, err := resolver.ParseName(absoluteName(host))
+	if err != nil {
+		return nil, err
+	}
+	question := resolver.Question{Name: name, Type: uint16(qt.dnsType), Class: 1}
+	message, err := client.Query(ctx, absoluteName(host), uint16(qt.dnsType))
+	if err != nil {
+		return nil, err
+	}
+	if message.Header.RCode != 0 {
+		return nil, fmt.Errorf("no DNS records found: %s", resolver.RCodeName(message.Header.RCode))
+	}
+	authorized, err := resolver.AuthorizeAnswers(message, question)
+	if err != nil {
+		return nil, err
+	}
+	records := make([]record, 0, len(authorized))
+	for _, answer := range authorized {
+		value, ok := wireRecordValue(answer)
+		if ok {
+			records = append(records, record{typ: typeLabel(dnsmessage.Type(answer.Type)), value: value, ttl: answer.TTL, hasTTL: true})
+		}
+	}
+	return records, nil
+}
+
+func lookupDoQRecords(ctx context.Context, client *resolver.DoQClient, host string, qt queryType) ([]record, error) {
 	name, err := resolver.ParseName(absoluteName(host))
 	if err != nil {
 		return nil, err

@@ -443,8 +443,10 @@ fetch --dns-server https://1.1.1.1/dns-query example.com
 Endpoints reject userinfo, fragments, invalid ports, and paths or queries on
 non-DoH transports. Resolver endpoint parsing occurs during CLI/config
 validation, before any network request. TCP and DoT queries use one
-operation-scoped pipelined connection. DoQ is parsed but not implemented yet;
-it reports a clear unsupported-transport error when used for a lookup.
+operation-scoped pipelined connection. DoQ uses one verified QUIC connection
+per resolver operation and one bidirectional stream per DNS query. Hostname
+endpoints use the configured bootstrap resolver and negotiate the standard
+`doq` ALPN.
 
 ### `--inspect-dns`
 

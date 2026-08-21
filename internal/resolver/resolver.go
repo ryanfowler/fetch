@@ -123,6 +123,18 @@ func (r *Resolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr,
 				TLSMax:      r.tlsMax,
 			}, host)
 		})
+	case r.endpoint.Transport == TransportQUIC:
+		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
+			return lookupDoQIPs(ctx, DoQConfig{
+				Endpoint:  r.endpoint,
+				Bootstrap: r.bootstrap,
+				TLSConfig: r.tlsConfig,
+				CACerts:   r.caCerts,
+				Insecure:  r.insecure,
+				TLSMin:    r.tlsMin,
+				TLSMax:    r.tlsMax,
+			}, host)
+		})
 	default:
 		return nil, fmt.Errorf("resolver transport %s is not implemented", r.endpoint.Transport)
 	}
