@@ -341,7 +341,7 @@ func (c *DOHClient) lookupWireType(ctx context.Context, host string, answerType 
 		}
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no such host")
+		return nil, errDNSNoData
 	}
 	return out, nil
 }
@@ -434,7 +434,7 @@ func (c *DOHClient) lookupJSONType(ctx context.Context, host, dnsType string, an
 		}
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no such host")
+		return nil, errDNSNoData
 	}
 	return out, nil
 }
@@ -484,17 +484,6 @@ func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string,
 	if err != nil {
 		return nil, err
 	}
-	if status != 0 || len(res.Answer) == 0 {
-		name := rcodeName(int(status))
-		if name == "" {
-			name = RCodeName(uint16(status))
-		}
-		if status == 0 {
-			return nil, errors.New("no such host")
-		}
-		return nil, fmt.Errorf("no such host: %s", name)
-	}
-
 	qname, err := ParseName(host)
 	if err != nil {
 		return nil, err
@@ -504,12 +493,15 @@ func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string,
 	parsed := make([]DOHRecord, 0, len(res.Answer))
 	age := parseAge(resp.Header.Get("Age"))
 	for index, answer := range res.Answer {
-		owner := qname
-		if answer.Name != "" {
-			owner, err = ParseName(answer.Name)
-			if err != nil {
-				return nil, fmt.Errorf("invalid DoH JSON answer %d owner: %w", index, err)
-			}
+		// The JSON representation must carry an owner for every answer. Do
+		// not infer the queried name: an omitted owner would let a malformed
+		// or spoofed answer become authorized by accident.
+		if answer.Name == "" {
+			return nil, fmt.Errorf("invalid DoH JSON answer %d owner: name is missing", index)
+		}
+		owner, err := ParseName(answer.Name)
+		if err != nil {
+			return nil, fmt.Errorf("invalid DoH JSON answer %d owner: %w", index, err)
 		}
 		typ, err := parseJSONUint(answer.Type, 16, fmt.Sprintf("Answer[%d].type", index))
 		if err != nil {
@@ -549,12 +541,28 @@ func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string,
 				record.RData = append([]byte(nil), ip.To16()...)
 			}
 		case dnsTypeCNAME:
-			target, parseErr := ParseName(answer.Data)
+			var target Name
+			var parseErr error
+			if generic {
+				target, _, parseErr = decodeName(raw, 0)
+				if parseErr == nil {
+					_, next, nextErr := decodeName(raw, 0)
+					if nextErr != nil || next != len(raw) {
+						parseErr = errors.New("CNAME generic RDATA has trailing bytes")
+					}
+				}
+			} else {
+				target, parseErr = ParseName(answer.Data)
+			}
 			if parseErr != nil {
 				return nil, fmt.Errorf("invalid DoH JSON CNAME in answer %d: %w", index, parseErr)
 			}
 			record.Target = &target
 			record.RData, _ = target.Wire()
+		case dnsTypeSVCB, dnsTypeHTTPS:
+			if !generic && !validJSONServiceBinding(answer.Data) {
+				return nil, fmt.Errorf("invalid DoH JSON SVCB/HTTPS in answer %d", index)
+			}
 		default:
 			// The JSON data is retained for inspection. Its numeric type and
 			// owner were validated above even when this resolver is not using it
@@ -562,6 +570,16 @@ func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string,
 		}
 		message.Answers = append(message.Answers, record)
 		parsed = append(parsed, DOHRecord{Record: record, Data: data, TTLPresent: ttlPresent})
+	}
+	if status != 0 || len(res.Answer) == 0 {
+		name := rcodeName(int(status))
+		if name == "" {
+			name = RCodeName(uint16(status))
+		}
+		if status == 0 {
+			return nil, errDNSNoData
+		}
+		return nil, fmt.Errorf("no such host: %s", name)
 	}
 	answers, err := AuthorizeAnswers(message, question)
 	if err != nil {
@@ -578,9 +596,121 @@ func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string,
 		}
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no such host")
+		return nil, errDNSNoData
 	}
 	return out, nil
+}
+
+func validJSONServiceBinding(value string) bool {
+	fields := strings.Fields(value)
+	if len(fields) < 2 {
+		return false
+	}
+	if _, err := strconv.ParseUint(fields[0], 10, 16); err != nil {
+		return false
+	}
+	if _, err := ParseName(fields[1]); err != nil {
+		return false
+	}
+
+	keys := make(map[uint16]struct{}, len(fields)-2)
+	for _, field := range fields[2:] {
+		keyText, valueText, hasValue := strings.Cut(field, "=")
+		key, known := jsonServiceBindingKey(keyText)
+		if !known {
+			return false
+		}
+		if _, duplicate := keys[key]; duplicate {
+			return false
+		}
+		keys[key] = struct{}{}
+		if key == 2 {
+			if hasValue {
+				return false
+			}
+			continue // no-default-alpn is represented without an equals sign.
+		}
+		if !hasValue {
+			return false
+		}
+		if strings.HasPrefix(valueText, "\"") {
+			decoded, err := strconv.Unquote(valueText)
+			if err != nil {
+				return false
+			}
+			valueText = decoded
+		}
+		if !validJSONServiceBindingParam(key, valueText) {
+			return false
+		}
+	}
+	return true
+}
+
+func jsonServiceBindingKey(value string) (uint16, bool) {
+	switch strings.ToLower(value) {
+	case "mandatory":
+		return 0, true
+	case "alpn":
+		return 1, true
+	case "no-default-alpn":
+		return 2, true
+	case "port":
+		return 3, true
+	case "ipv4hint":
+		return 4, true
+	case "ech":
+		return 5, true
+	case "ipv6hint":
+		return 6, true
+	case "dohpath":
+		return 7, true
+	}
+	if strings.HasPrefix(strings.ToLower(value), "key") {
+		key, err := strconv.ParseUint(value[3:], 10, 16)
+		return uint16(key), err == nil
+	}
+	return 0, false
+}
+
+func validJSONServiceBindingParam(key uint16, value string) bool {
+	if value == "" {
+		return false
+	}
+	switch key {
+	case 0:
+		for _, item := range strings.Split(value, ",") {
+			if item == "" {
+				return false
+			}
+			key, known := jsonServiceBindingKey(item)
+			if !known || key == 0 || key == 2 || key == 5 || key == 6 || key == 7 {
+				return false
+			}
+		}
+		return true
+	case 3:
+		_, err := strconv.ParseUint(value, 10, 16)
+		return err == nil
+	case 4:
+		for _, item := range strings.Split(value, ",") {
+			ip := net.ParseIP(item)
+			if ip == nil || ip.To4() == nil {
+				return false
+			}
+		}
+		return true
+	case 6:
+		for _, item := range strings.Split(value, ",") {
+			ip := net.ParseIP(item)
+			if ip == nil || ip.To16() == nil || ip.To4() != nil {
+				return false
+			}
+		}
+		return true
+	default:
+		return true
+	}
 }
 
 func parseJSONGenericRDATA(value string, typ uint16) ([]byte, bool, error) {
@@ -608,7 +738,9 @@ func parseJSONUint(raw json.RawMessage, bits int, field string) (uint64, error) 
 	}
 	value, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, bits)
 	if err != nil {
-		return 0, fmt.Errorf("invalid DoH JSON %s: %w", field, err)
+		// strconv.NumError includes the input. Do not echo an attacker-sized
+		// JSON value into a terminal diagnostic.
+		return 0, fmt.Errorf("invalid DoH JSON %s", field)
 	}
 	return value, nil
 }

@@ -25,6 +25,8 @@ const (
 	maxDNSUDPPayload   = 1232
 )
 
+var errDNSNoData = errors.New("DNS response: NODATA")
+
 const (
 	dnsTypeNS    uint16 = 2
 	dnsTypeCNAME uint16 = 5
@@ -33,6 +35,7 @@ const (
 	dnsTypeTXT   uint16 = 16
 	dnsTypeSRV   uint16 = 33
 	dnsTypeCAA   uint16 = 257
+	dnsTypeRRSIG uint16 = 46
 	dnsTypeSVCB  uint16 = 64
 	dnsTypeHTTPS uint16 = 65
 	dnsTypeOPT   uint16 = 41
@@ -866,7 +869,7 @@ func addressAnswers(message *Message, question Question, typ uint16) ([]net.IPAd
 		}
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no such host")
+		return nil, errDNSNoData
 	}
 	return out, nil
 }
@@ -1080,7 +1083,8 @@ func DecodeResponse(packet []byte, id uint16, question Question) (*Message, erro
 
 // AuthorizeAnswers returns answer records whose owners are the queried name
 // or a bounded, validated CNAME successor. Unrelated answer and glue records
-// are excluded. A reachable cycle or branch explosion is an error.
+// are excluded. A reachable CNAME owner cannot also contain other answer data,
+// and all CNAME records for one owner must agree on one target.
 func AuthorizeAnswers(m *Message, question Question) ([]Record, error) {
 	if m == nil {
 		return nil, errors.New("nil DNS message")
@@ -1088,55 +1092,83 @@ func AuthorizeAnswers(m *Message, question Question) ([]Record, error) {
 	if err := question.Name.validate(); err != nil {
 		return nil, err
 	}
-	const maxChainNodes = 32
-	chains := make(map[string][]Name)
+	if len(m.Answers) > maxDNSRecords {
+		return nil, errors.New("DNS response has too many answer records")
+	}
+
+	// DNS CNAMEs form a chain, not a general graph. Index the complete answer
+	// section first so reverse-ordered answers receive the same authorization as
+	// forward-ordered answers, without scanning the section at every hop.
+	type cnameOwner struct {
+		targets  []Name
+		hasCNAME bool
+		hasOther bool
+	}
+	owners := make(map[string]*cnameOwner, len(m.Answers))
 	for _, record := range m.Answers {
-		if record.Class != question.Class || record.Type != dnsTypeCNAME || record.Target == nil {
+		if record.Class != question.Class {
 			continue
 		}
 		key := nameKey(record.Owner)
-		chains[key] = append(chains[key], *record.Target)
+		entry := owners[key]
+		if entry == nil {
+			entry = &cnameOwner{}
+			owners[key] = entry
+		}
+		switch record.Type {
+		case dnsTypeCNAME:
+			if record.Target == nil {
+				return nil, errors.New("DNS CNAME record has no valid target")
+			}
+			entry.targets = append(entry.targets, *record.Target)
+			entry.hasCNAME = true
+		case dnsTypeRRSIG:
+			// Signatures may accompany a CNAME without violating the CNAME
+			// exclusivity rule. They are still returned when their owner is
+			// authorized.
+		default:
+			entry.hasOther = true
+		}
 	}
-	allowed := make(map[string]struct{}, maxChainNodes)
-	state := make(map[string]uint8, maxChainNodes) // 1 = active, 2 = complete
-	var visit func(Name, int) error
-	visit = func(current Name, depth int) error {
-		if depth > maxChainNodes {
-			return errors.New("DNS CNAME chain limit exceeded")
+
+	const maxCNAMEChainDepth = 16
+	allowed := make(map[string]struct{}, maxCNAMEChainDepth+1)
+	current := question.Name
+	allowed[nameKey(current)] = struct{}{}
+	seen := map[string]struct{}{nameKey(current): {}}
+	for depth := 0; ; depth++ {
+		entry := owners[nameKey(current)]
+		if entry == nil || !entry.hasCNAME {
+			break
 		}
-		key := nameKey(current)
-		switch state[key] {
-		case 1:
-			return errors.New("DNS CNAME loop")
-		case 2:
-			return nil
+		if entry.hasOther {
+			return nil, errors.New("DNS CNAME owner has conflicting answer data")
 		}
-		state[key] = 1
-		allowed[key] = struct{}{}
-		if len(allowed) > maxChainNodes {
-			return errors.New("DNS CNAME chain limit exceeded")
+		if depth >= maxCNAMEChainDepth {
+			return nil, errors.New("DNS CNAME chain exceeds depth limit")
 		}
-		targets := chains[key]
-		if len(targets) > 4 {
-			return errors.New("DNS CNAME branch limit exceeded")
-		}
-		for _, target := range targets {
-			if err := visit(target, depth+1); err != nil {
-				return err
+		target := entry.targets[0]
+		for _, candidate := range entry.targets[1:] {
+			if !candidate.Equal(target) {
+				return nil, errors.New("DNS CNAME owner has conflicting targets")
 			}
 		}
-		state[key] = 2
-		return nil
+		targetKey := nameKey(target)
+		if _, ok := seen[targetKey]; ok {
+			return nil, errors.New("DNS CNAME loop (chain contains a cycle)")
+		}
+		seen[targetKey] = struct{}{}
+		allowed[targetKey] = struct{}{}
+		current = target
 	}
-	if err := visit(question.Name, 0); err != nil {
-		return nil, err
-	}
+
 	out := make([]Record, 0, len(m.Answers))
 	for _, record := range m.Answers {
-		if record.Class == question.Class {
-			if _, ok := allowed[nameKey(record.Owner)]; ok {
-				out = append(out, record)
-			}
+		if record.Class != question.Class {
+			continue
+		}
+		if _, ok := allowed[nameKey(record.Owner)]; ok {
+			out = append(out, record)
 		}
 	}
 	return out, nil
