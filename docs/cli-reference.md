@@ -408,7 +408,7 @@ Maximum number of retries for transient failures. Default: `0` (no retries).
 
 Retries occur on connection errors and retryable status codes (429, 502, 503, 504). Non-retryable errors (4xx, TLS certificate errors) are not retried. Uses exponential backoff with jitter between attempts.
 
-Only the final attempt's response body is written to stdout. Retry notifications are printed to stderr (suppressed with `--silent`).
+All attempts, redirects, response reads, bounded drains, and retry delays share one `--timeout` wall-clock budget. A request body must be replayable before a retry starts. Only the final attempt's response body is written to stdout. Retry notifications are printed to stderr (suppressed with `--silent`).
 
 ```sh
 fetch --retry 3 example.com
@@ -419,7 +419,7 @@ fetch --retry 2 --retry-delay 0.5 example.com
 
 Initial delay between retries in seconds. Default: `1`. Accepts decimal values.
 
-The actual delay uses exponential backoff (delay doubles each attempt, capped at 30s) with ±25% jitter. If the server sends a `Retry-After` header, that value is used when it exceeds the computed delay.
+The actual delay uses exponential backoff (delay doubles each attempt, capped at 30s) with ±25% jitter. If the server sends a `Retry-After` header, that value is used when it exceeds the computed delay and is capped at 30 seconds. A warning is printed when a server value is clamped. The request stops without sleeping when the remaining timeout cannot accommodate the delay.
 
 ```sh
 fetch --retry 3 --retry-delay 2 example.com

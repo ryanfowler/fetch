@@ -47,11 +47,11 @@ func TestComputeDelay(t *testing.T) {
 		}
 	})
 
-	t.Run("retry-after override", func(t *testing.T) {
+	t.Run("retry-after is capped", func(t *testing.T) {
 		retryAfter := 60 * time.Second
 		delay := computeDelay(time.Second, 0, retryAfter)
-		if delay < retryAfter {
-			t.Errorf("delay %v should be at least retry-after %v", delay, retryAfter)
+		if delay != core.MaxRetryAfter {
+			t.Errorf("delay = %v, want capped retry-after %v", delay, core.MaxRetryAfter)
 		}
 	})
 
@@ -88,6 +88,23 @@ func TestFormatDelay(t *testing.T) {
 }
 
 func TestParseRetryAfter(t *testing.T) {
+	t.Run("values are capped at the shared limit", func(t *testing.T) {
+		h := http.Header{"Retry-After": []string{"999999999999999999999999"}}
+		got, clamped := parseRetryAfterAt(h, time.Unix(0, 0))
+		if got != core.MaxRetryAfter || !clamped {
+			t.Fatalf("parseRetryAfterAt = %s, clamped %v; want %s, true", got, clamped, core.MaxRetryAfter)
+		}
+	})
+
+	t.Run("http dates are capped", func(t *testing.T) {
+		now := time.Unix(100, 0)
+		h := http.Header{"Retry-After": []string{now.Add(time.Minute).UTC().Format(http.TimeFormat)}}
+		got, clamped := parseRetryAfterAt(h, now)
+		if got != core.MaxRetryAfter || !clamped {
+			t.Fatalf("parseRetryAfterAt = %s, clamped %v; want %s, true", got, clamped, core.MaxRetryAfter)
+		}
+	})
+
 	t.Run("integer seconds", func(t *testing.T) {
 		h := http.Header{}
 		h.Set("Retry-After", "5")
@@ -194,6 +211,14 @@ func TestShouldRetry(t *testing.T) {
 		}
 	})
 
+	t.Run("503 honors capped Retry-After", func(t *testing.T) {
+		resp := &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": []string{"60"}}}
+		ok, delay := shouldRetry(resp, nil)
+		if !ok || delay != core.MaxRetryAfter {
+			t.Fatalf("shouldRetry = %v, %s; want true, %s", ok, delay, core.MaxRetryAfter)
+		}
+	})
+
 	t.Run("200 is not retryable", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 200}
 		ok, _ := shouldRetry(resp, nil)
@@ -285,6 +310,141 @@ func TestIsRetryableError(t *testing.T) {
 			t.Error("expected ErrRequestTimedOut wrapped in url.Error to be retryable")
 		}
 	})
+}
+
+func TestDelayFitsPreservesEarlierCallerDeadline(t *testing.T) {
+	budget, err := core.NewBudget(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := delayFits(ctx, budget, time.Second); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("delayFits error = %v, want caller deadline", err)
+	}
+}
+
+func TestRetryBudgetCoversDelay(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	r := &Request{
+		Discard:       true,
+		Retry:         1,
+		RetryDelay:    time.Second,
+		Timeout:       50 * time.Millisecond,
+		URL:           mustParseURL(server.URL),
+		PrinterHandle: core.NewHandle(core.ColorOff),
+	}
+	c := client.NewClient(client.ClientConfig{})
+	defer c.Close()
+	req, err := c.NewRequest(context.Background(), client.RequestConfig{URL: r.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = retryableRequest(context.Background(), r, c, req)
+	if err == nil {
+		t.Fatal("retryableRequest succeeded, want shared timeout")
+	}
+	var timeout core.TimeoutError
+	if !errors.As(err, &timeout) {
+		t.Fatalf("error = %v, want timeout", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want one attempt", requests)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("shared timeout took too long: %s", elapsed)
+	}
+}
+
+func TestRetryDrainHasBoundedTime(t *testing.T) {
+	body := newBlockingBody()
+	start := time.Now()
+	if err := drainResponseBody(context.Background(), body); err != nil {
+		t.Fatalf("drainResponseBody: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < maxRetryDrainTime/2 || elapsed > time.Second {
+		t.Fatalf("drain elapsed = %s, want approximately %s", elapsed, maxRetryDrainTime)
+	}
+	select {
+	case <-body.closed:
+	default:
+		t.Fatal("drain did not close the response body")
+	}
+}
+
+func TestRetryBudgetCoversResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("x"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	r := &Request{
+		Discard:       true,
+		Timeout:       50 * time.Millisecond,
+		PrinterHandle: core.NewHandle(core.ColorOff),
+	}
+	c := client.NewClient(client.ClientConfig{})
+	defer c.Close()
+	req, err := c.NewRequest(context.Background(), client.RequestConfig{URL: mustParseURL(server.URL)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = retryableRequest(context.Background(), r, c, req)
+	var timeout core.TimeoutError
+	if !errors.As(err, &timeout) {
+		t.Fatalf("error = %v, want response timeout", err)
+	}
+}
+
+func TestRetryUsesCallerCancellation(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := &Request{Retry: 1, RetryDelay: time.Second, PrinterHandle: core.NewHandle(core.ColorOff)}
+	c := client.NewClient(client.ClientConfig{})
+	defer c.Close()
+	req, err := c.NewRequest(context.Background(), client.RequestConfig{URL: mustParseURL(server.URL)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := retryableRequest(ctx, r, c, req)
+		result <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("caller cancellation did not stop retry")
+	}
 }
 
 func TestSleepWithContext(t *testing.T) {
@@ -670,6 +830,28 @@ func TestFindDigestChallenge(t *testing.T) {
 
 func isClosedFileErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "file already closed")
+}
+
+type blockingBody struct {
+	closed chan struct{}
+}
+
+func newBlockingBody() *blockingBody {
+	return &blockingBody{closed: make(chan struct{})}
+}
+
+func (b *blockingBody) Read([]byte) (int, error) {
+	<-b.closed
+	return 0, errors.New("body closed")
+}
+
+func (b *blockingBody) Close() error {
+	select {
+	case <-b.closed:
+	default:
+		close(b.closed)
+	}
+	return nil
 }
 
 type streamingReadCloser struct {

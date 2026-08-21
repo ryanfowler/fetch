@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
 	imultipart "github.com/ryanfowler/fetch/internal/multipart"
@@ -882,6 +883,54 @@ func TestNewClientUsesProxyFromEnvironment(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("Proxy(%q) = %v, want nil", bypassedReq.URL, got)
+	}
+}
+
+func TestConnectContextUsesEarlierRequestDeadline(t *testing.T) {
+	budget, err := core.NewBudget(time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	ctx := WithConnectBudget(parent, budget)
+	connected, stop := connectContext(ctx, time.Second, "connect")
+	defer stop()
+	deadline, ok := connected.Deadline()
+	if !ok {
+		t.Fatal("connect context has no deadline")
+	}
+	if remaining := time.Until(deadline); remaining > 100*time.Millisecond {
+		t.Fatalf("connect deadline has %s remaining, want parent deadline", remaining)
+	}
+}
+
+func TestConnectTimeoutCoversHTTPSProxyConnect(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			t.Fatalf("proxy method = %s, want CONNECT", r.Method)
+		}
+		<-r.Context().Done()
+	}))
+	defer proxy.Close()
+
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(ClientConfig{Proxy: proxyURL, ConnectTimeout: 50 * time.Millisecond})
+	defer c.Close()
+	req, err := c.NewRequest(context.Background(), RequestConfig{URL: mustURL(t, "https://example.com/")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = c.Do(req)
+	if err == nil {
+		t.Fatal("request succeeded, want proxy CONNECT timeout")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("proxy timeout took too long: %s", elapsed)
 	}
 }
 
