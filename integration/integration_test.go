@@ -2295,7 +2295,8 @@ func TestMain(t *testing.T) {
 			assertExitCode(t, 0, res)
 			assertBufContains(t, res.stderr, "Certificate chain")
 			assertBufContains(t, res.stderr, "test-server")
-			assertBufContains(t, res.stderr, "Test CA")
+			// Only certificates sent by the peer are shown. The local trust
+			// anchor is reported separately when the platform exposes it.
 			// Body should NOT be printed.
 			assertBufEmpty(t, res.stdout)
 		})

@@ -297,17 +297,19 @@ fetch --inspect-tls example.com
 
 Output includes:
 
-- **TLS version and cipher suite** (e.g., TLS 1.3: TLS_AES_256_GCM_SHA384)
+- **TLS version and cipher suite** (e.g., TLS 1.3: TLS_AES_256_GCM_SHA384); QUIC reports `cipher suite unavailable` only when the transport does not expose it
 - **ALPN negotiated protocol** (e.g., h2)
+- **Remote IP, resolver provenance, and connection timing** for the selected TCP or QUIC path
 - **Certificate chain** with tree visualization and expiry status
 - **Subject Alternative Names** (DNS names and IP addresses)
-- **OCSP staple status** (good, revoked, or unknown)
+- **Verification result and trust-anchor status**; platform verifiers do not expose the selected trust anchor
+- **OCSP staple status**; unverified staples are shown neutrally and never claim responder, signature, or freshness validation
 
 Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
 
 HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning when used with `--inspect-tls`.
 
-When combined with `--http 3`, TLS inspection uses a QUIC handshake and offers `h3` ALPN instead of dialing TCP.
+When combined with `--http 3`, TLS inspection uses a QUIC handshake and offers `h3` ALPN instead of dialing TCP. Custom DNS, address-family racing, and `--connect-timeout` apply to both paths. QUIC closes the inspection connection before rendering the result.
 
 ```sh
 # Check certificate chain

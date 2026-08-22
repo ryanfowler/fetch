@@ -23,6 +23,11 @@ type ECHHandshakeInfo struct {
 	Rejected        bool
 	Fallback        bool
 	OuterServerName string
+	// TCPDuration and TLSDuration cover all attempts, including ECH retry
+	// connections. They let inspection separate the raw connect from the
+	// TLS handshake when ECH is performed inside an address-race callback.
+	TCPDuration time.Duration
+	TLSDuration time.Duration
 }
 
 // dialTLSWithECHPolicy performs a TLS handshake and applies the ECH retry and
@@ -47,7 +52,9 @@ func dialTLSWithECHPolicyInfo(ctx context.Context, rawDial func(context.Context)
 	}
 	cfg := base.Clone()
 	for attempt := 0; ; attempt++ {
+		rawStart := time.Now()
 		conn, err := rawDial(ctx)
+		info.TCPDuration += time.Since(rawStart)
 		if err != nil {
 			return nil, info, err
 		}
@@ -59,7 +66,9 @@ func dialTLSWithECHPolicyInfo(ctx context.Context, rawDial func(context.Context)
 		}
 
 		tlsConn := tls.Client(conn, cfg)
+		tlsStart := time.Now()
 		err = tlsConn.HandshakeContext(ctx)
+		info.TLSDuration += time.Since(tlsStart)
 		if err == nil {
 			state := tlsConn.ConnectionState()
 			if len(cfg.EncryptedClientHelloConfigList) > 0 && !state.ECHAccepted {
@@ -94,6 +103,11 @@ func dialTLSWithECHPolicyInfo(ctx context.Context, rawDial func(context.Context)
 			if validateErr != nil {
 				return nil, info, validateErr
 			}
+			outerName, nameErr := resolver.ECHPublicName(retryList)
+			if nameErr != nil {
+				return nil, info, nameErr
+			}
+			info.OuterServerName = outerName
 			cfg = cfg.Clone()
 			cfg.MinVersion = tls.VersionTLS13
 			cfg.EncryptedClientHelloConfigList = retryList

@@ -680,6 +680,7 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		TLSMax:           getValue(app.Cfg.TLSMax),
 		TLSMin:           getValue(app.Cfg.TLSMin),
 		Timeout:          getValue(app.Cfg.Timeout),
+		ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
 		URL:              app.URL,
 	})
 }
