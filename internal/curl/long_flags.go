@@ -2,7 +2,6 @@ package curl
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -89,15 +88,7 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 			return 0, fmt.Errorf("--json requires an argument")
 		}
 		r.DataValues = append(r.DataValues, DataValue{Value: v})
-		// --json implies Content-Type: application/json and Accept: application/json.
-		if !r.HasContentType {
-			r.Headers = append(r.Headers, header{Name: "Content-Type", Value: "application/json"})
-			r.HasContentType = true
-		}
-		if !r.HasAccept {
-			r.Headers = append(r.Headers, header{Name: "Accept", Value: "application/json"})
-			r.HasAccept = true
-		}
+		r.jsonDefaults = true
 		return n, nil
 	case "form":
 		v, n, err := consumeArg()
@@ -224,9 +215,9 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		if err != nil {
 			return 0, fmt.Errorf("--max-redirs requires an argument")
 		}
-		num, err := strconv.Atoi(v)
+		num, err := parseNonNegativeInt("--max-redirs", v)
 		if err != nil {
-			return 0, fmt.Errorf("invalid --max-redirs value: %s", v)
+			return 0, err
 		}
 		r.MaxRedirects = num
 		r.MaxRedirectsSet = true
@@ -236,9 +227,9 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		if err != nil {
 			return 0, fmt.Errorf("--max-time requires an argument")
 		}
-		secs, err := strconv.ParseFloat(v, 64)
+		secs, err := parseNonNegativeFloat("--max-time", v)
 		if err != nil {
-			return 0, fmt.Errorf("invalid --max-time value: %s", v)
+			return 0, err
 		}
 		r.Timeout = secs
 		r.TimeoutSet = true
@@ -248,9 +239,9 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		if err != nil {
 			return 0, fmt.Errorf("--connect-timeout requires an argument")
 		}
-		secs, err := strconv.ParseFloat(v, 64)
+		secs, err := parseNonNegativeFloat("--connect-timeout", v)
 		if err != nil {
-			return 0, fmt.Errorf("invalid --connect-timeout value: %s", v)
+			return 0, err
 		}
 		r.ConnectTimeout = secs
 		r.ConnectTimeoutSet = true
@@ -281,9 +272,9 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		if err != nil {
 			return 0, fmt.Errorf("--retry requires an argument")
 		}
-		num, err := strconv.Atoi(v)
+		num, err := parseNonNegativeInt("--retry", v)
 		if err != nil {
-			return 0, fmt.Errorf("invalid --retry value: %s", v)
+			return 0, err
 		}
 		r.Retry = num
 		r.RetrySet = true
@@ -293,9 +284,9 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		if err != nil {
 			return 0, fmt.Errorf("--retry-delay requires an argument")
 		}
-		secs, err := strconv.ParseFloat(v, 64)
+		secs, err := parseNonNegativeFloat("--retry-delay", v)
 		if err != nil {
-			return 0, fmt.Errorf("invalid --retry-delay value: %s", v)
+			return 0, err
 		}
 		r.RetryDelay = secs
 		r.RetryDelaySet = true
@@ -356,11 +347,20 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		r.Silent = true
 		return 0, nil
 
-	// Behavior — no-ops or mapped to fetch defaults.
-	case "fail", "fail-with-body":
-		return 0, nil
-	case "show-error", "compressed", "no-buffer", "no-keepalive",
-		"progress-bar", "no-progress-meter", "netrc":
+	// Behavior — only options with a genuinely compatible fetch behavior are
+	// accepted as no-ops. Semantic restrictions must not be silently lost.
+	case "fail":
+		return 0, unsupportedFailFlag("--fail")
+	case "netrc", "netrc-file", "netrc-optional":
+		return 0, unsupportedNetrcFlag("--" + name)
+	case "no-buffer":
+		return 0, unsupportedNoBufferFlag("--no-buffer")
+	case "proto-default":
+		return 0, fmt.Errorf("curl --proto-default is not supported by --from-curl; specify the URL scheme explicitly")
+	case "proto-redir":
+		return 0, fmt.Errorf("curl --proto-redir is not supported by --from-curl; fetch only follows HTTP(S) redirects and --from-curl cannot further restrict them")
+	case "compressed", "fail-with-body", "show-error", "no-keepalive",
+		"progress-bar", "no-progress-meter":
 		return 0, nil
 
 	// Protocol restriction.
@@ -370,14 +370,6 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 			return 0, fmt.Errorf("--proto requires an argument")
 		}
 		r.AllowedProto = v
-		return n, nil
-
-	// No-ops that take an argument.
-	case "proto-default", "proto-redir":
-		_, n, err := consumeArg()
-		if err != nil {
-			return 0, fmt.Errorf("--%s requires an argument", name)
-		}
 		return n, nil
 
 	default:

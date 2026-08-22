@@ -557,6 +557,16 @@ func TestFromCurlGetData(t *testing.T) {
 			t.Fatalf("RawQuery = %q, want %q", app.URL.RawQuery, want)
 		}
 	})
+
+	t.Run("generated query is inserted before a fragment", func(t *testing.T) {
+		app, err := Parse([]string{"--from-curl", "curl -G -d a=1 'https://example.com/path?old=1#fragment'"})
+		if err != nil {
+			t.Fatalf("Parse() error = %v", err)
+		}
+		if got, want := app.URL.String(), "https://example.com/path?old=1&a=1#fragment"; got != want {
+			t.Fatalf("URL = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestFromCurlRedirects(t *testing.T) {
@@ -590,11 +600,6 @@ func TestFromCurlRedirects(t *testing.T) {
 			cmd:  "curl -L --max-redirs 0 https://example.com",
 			want: 0,
 		},
-		{
-			name: "location with unlimited max redirs",
-			cmd:  "curl -L --max-redirs -1 https://example.com",
-			want: -1,
-		},
 	}
 
 	for _, tt := range tests {
@@ -610,6 +615,73 @@ func TestFromCurlRedirects(t *testing.T) {
 				t.Fatalf("Redirects = %d, want %d", *app.Cfg.Redirects, tt.want)
 			}
 		})
+	}
+}
+
+func TestFromCurlSingleCurlFileBodiesUseStreamingSources(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "large-body.bin")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", int(core.MaxCompositeMaterialization)+1)), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	app, err := Parse([]string{"--from-curl", `curl -d '@` + path + `' https://example.com`})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	file, ok := app.Data.(*os.File)
+	if !ok {
+		t.Fatalf("Data type = %T, want *os.File for a streaming curl body", app.Data)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	app, err = Parse([]string{"--from-curl", "curl -d @- https://example.com"})
+	if err != nil {
+		t.Fatalf("stdin Parse() error = %v", err)
+	}
+	if app.Data != os.Stdin {
+		t.Fatalf("stdin Data = %T, want os.Stdin", app.Data)
+	}
+}
+
+func TestFromCurlCompositeDataIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "too-large.bin")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", int(core.MaxCompositeMaterialization)+1)), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	_, err := Parse([]string{
+		"--from-curl",
+		`curl -d '@` + path + `' -d suffix https://example.com`,
+	})
+	if err == nil {
+		t.Fatal("expected composite curl body to exceed its materialization limit")
+	}
+	if !strings.Contains(err.Error(), "curl request body exceeds") {
+		t.Fatalf("error = %v, want curl request body limit", err)
+	}
+}
+
+func TestFromCurlDataURLencodePreservesBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payload.bin")
+	if err := os.WriteFile(path, []byte{'a', ' ', 0xff, '&'}, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	app, err := Parse([]string{
+		"--from-curl",
+		`curl --data-urlencode '@` + path + `' https://example.com`,
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	body, err := io.ReadAll(app.Data)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if got, want := string(body), "a+%FF%26"; got != want {
+		t.Fatalf("body = %q, want %q", got, want)
 	}
 }
 

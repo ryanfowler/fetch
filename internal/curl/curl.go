@@ -2,6 +2,8 @@ package curl
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 )
 
@@ -71,6 +73,7 @@ type Result struct {
 	HasContentType    bool
 	HasAccept         bool
 	AllowedProto      string // raw --proto value, e.g. "=https" or "http,https"
+	jsonDefaults      bool
 }
 
 // Parse parses a curl command string and returns a Result.
@@ -118,6 +121,20 @@ func postProcess(r *Result) error {
 			r.Method = "POST"
 		} else if r.UploadFile != "" {
 			r.Method = "PUT"
+		}
+	}
+
+	// --json adds its default headers after parsing all flags. This makes an
+	// explicit header win regardless of whether it appears before or after
+	// --json in the imported command.
+	if r.jsonDefaults {
+		if !r.HasContentType {
+			r.Headers = append(r.Headers, header{Name: "Content-Type", Value: "application/json"})
+			r.HasContentType = true
+		}
+		if !r.HasAccept {
+			r.Headers = append(r.Headers, header{Name: "Accept", Value: "application/json"})
+			r.HasAccept = true
 		}
 	}
 
@@ -189,4 +206,39 @@ func nextArg(args []string) (string, int, error) {
 		return "", 0, fmt.Errorf("missing argument")
 	}
 	return args[0], 1, nil
+}
+
+func parseNonNegativeInt(flag, value string) (int, error) {
+	if strings.HasPrefix(value, "-") {
+		return 0, fmt.Errorf("invalid %s value: %s", flag, value)
+	}
+	value = strings.TrimPrefix(value, "+")
+	if value == "" {
+		return 0, fmt.Errorf("invalid %s value: %s", flag, value)
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s value: %s", flag, value)
+	}
+	return n, nil
+}
+
+func parseNonNegativeFloat(flag, value string) (float64, error) {
+	seconds, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds < 0 {
+		return 0, fmt.Errorf("invalid %s value: %s", flag, value)
+	}
+	return seconds, nil
+}
+
+func unsupportedFailFlag(flag string) error {
+	return fmt.Errorf("curl %s is not supported by --from-curl; fetch already exits non-zero for HTTP error statuses but does not suppress the response body", flag)
+}
+
+func unsupportedNetrcFlag(flag string) error {
+	return fmt.Errorf("curl %s is not supported by --from-curl; use --basic USER:PASS, --bearer TOKEN, or an explicit Authorization header (-H 'Authorization: ...') instead", flag)
+}
+
+func unsupportedNoBufferFlag(flag string) error {
+	return fmt.Errorf("curl %s is not supported by --from-curl; fetch does not implement curl's unbuffered output mode", flag)
 }
