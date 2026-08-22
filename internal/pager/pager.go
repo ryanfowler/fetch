@@ -74,7 +74,10 @@ func StreamContext(ctx context.Context, src io.Reader, mode core.PagerMode, stdo
 		return err
 	}
 	cmd := exec.Command(command.Program, command.Args...)
-	configureProcess(cmd)
+	// An interactive pager must remain in the terminal's foreground process
+	// group. Otherwise it cannot receive keystrokes such as `q`; the parent
+	// still owns the pager's data pipe, so the command appears to hang.
+	configureProcess(cmd, stdoutTerminal)
 	cmd.Stdout = dst
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
