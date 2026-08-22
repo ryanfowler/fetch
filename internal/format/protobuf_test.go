@@ -136,6 +136,39 @@ func TestFormatProtobufNested(t *testing.T) {
 	}
 }
 
+func TestFormatProtobufDeepNestingIsBounded(t *testing.T) {
+	input := appendVarint(nil, 1, 7)
+	for i := 0; i <= core.MaxNestingDepth; i++ {
+		input = appendBytes(nil, 1, input)
+	}
+
+	p := core.TestPrinter(false)
+	if err := FormatProtobuf(input, p); err != nil {
+		t.Fatalf("FormatProtobuf() error = %v", err)
+	}
+	output := string(p.Bytes())
+	if got := strings.Count(output, "(message)"); got != core.MaxNestingDepth {
+		t.Fatalf("nested message count = %d, want %d", got, core.MaxNestingDepth)
+	}
+	if !strings.Contains(output, "(bytes)") || strings.Contains(output, "(varint) 7") {
+		t.Fatalf("deepest value was interpreted as a message: %s", output)
+	}
+}
+
+func TestFormatProtobufRejectsMalformedLengthDelimitedFields(t *testing.T) {
+	cases := [][]byte{
+		{0x0a, 0xff, 0xff, 0xff, 0xff, 0x0f}, // length overflows the input
+		{0x0a, 0x02, 0x01},                   // truncated payload
+		{0x0b, 0x00},                         // deprecated group
+	}
+	for _, input := range cases {
+		p := core.TestPrinter(false)
+		if err := FormatProtobuf(input, p); err == nil {
+			t.Errorf("FormatProtobuf(%x) accepted malformed input", input)
+		}
+	}
+}
+
 func TestFormatProtobufAllWireTypes(t *testing.T) {
 	// Build a message with all supported wire types
 	b := appendVarint(nil, 1, 100)

@@ -43,6 +43,11 @@ const (
 	// formatting and clipboard capture.
 	MaxFormattedBodyBytes = 1 << 20
 
+	// Schema-less protobuf has no descriptor to provide structural bounds.
+	// Keep recursive interpretation and aggregate field work bounded even when
+	// the caller supplies a large protocol message.
+	MaxSchemaLessProtobufFields = 1_000_000
+
 	// Descriptive aliases keep call sites self-documenting while preserving
 	// one canonical value for each limit.
 	MaxCompositeMaterializationBytes = MaxCompositeMaterialization
