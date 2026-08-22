@@ -561,6 +561,7 @@ func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration, sil
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
+	cmd.Env = append(os.Environ(), "FETCH_INTERNAL_AUTO_UPDATE=1")
 	_ = cmd.Start()
 }
 

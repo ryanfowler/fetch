@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,68 +18,86 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/fileutil"
 )
 
-// unpackArtifact decodes the zip archive from the provided io.Reader into
-// "dir", returning any error encountered.
+// unpackArtifact decodes a bounded zip archive into dir. Only the expected
+// executable at the archive root is accepted.
 func unpackArtifact(dir string, r io.Reader) error {
-	root, err := os.OpenRoot(dir)
+	if err := validateExtractionRoot(dir); err != nil {
+		return err
+	}
+	data, err := io.ReadAll(io.LimitReader(r, core.MaxUpdaterArtifactBytes+1))
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	if int64(len(data)) > core.MaxUpdaterArtifactBytes {
+		return core.LimitError{Subsystem: "update archive", Limit: core.MaxUpdaterArtifactBytes}
+	}
 
-	// Read the archive into memory, as we need an io.ReaderAt.
-	data, err := io.ReadAll(r)
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return err
 	}
-	ra := bytes.NewReader(data)
-
-	zr, err := zip.NewReader(ra, int64(len(data)))
-	if err != nil {
-		return err
+	if len(zr.File) > core.MaxUpdaterArchiveEntries {
+		return core.LimitError{Subsystem: "update archive entries", Limit: core.MaxUpdaterArchiveEntries}
 	}
 
+	var total int64
+	found := false
 	for _, f := range zr.File {
-		err = handleZipFile(root, f)
+		name, err := archiveEntryName(f.Name)
 		if err != nil {
 			return err
 		}
-	}
+		if f.FileInfo().IsDir() || f.Mode()&os.ModeSymlink != 0 || !f.Mode().IsRegular() {
+			return fmt.Errorf("archive entry %q is not a regular executable", f.Name)
+		}
+		if found || name != getFetchFilename() {
+			return fmt.Errorf("archive contains duplicate executable entry %q", f.Name)
+		}
+		if f.UncompressedSize64 == 0 || f.UncompressedSize64 > uint64(core.MaxUpdaterUnpackedDataBytes) {
+			return core.LimitError{Subsystem: "update archive entry", Limit: core.MaxUpdaterUnpackedDataBytes}
+		}
+		if total > core.MaxUpdaterUnpackedDataBytes-int64(f.UncompressedSize64) {
+			return core.LimitError{Subsystem: "unpacked update archive", Limit: core.MaxUpdaterUnpackedDataBytes}
+		}
 
-	return nil
-}
-
-// handleZipFile writes the provided directory/file to dir.
-func handleZipFile(root *os.Root, f *zip.File) error {
-	name := f.Name
-
-	// Create parent directories if needed.
-	if dir := path.Dir(name); dir != "." {
-		if err := root.MkdirAll(dir, 0755); err != nil {
+		rc, err := f.Open()
+		if err != nil {
 			return err
 		}
+		out, err := openExtractedExecutable(dir)
+		if err != nil {
+			_ = rc.Close()
+			return err
+		}
+		copyErr := copyArchiveEntry(out, rc, int64(f.UncompressedSize64), &total)
+		if closeErr := rc.Close(); copyErr == nil {
+			copyErr = closeErr
+		}
+		if syncErr := out.Sync(); copyErr == nil {
+			copyErr = syncErr
+		}
+		if closeErr := out.Close(); copyErr == nil {
+			copyErr = closeErr
+		}
+		if copyErr != nil {
+			_ = os.Remove(filepath.Join(dir, getFetchFilename()))
+			return copyErr
+		}
+		if err := os.Chmod(filepath.Join(dir, getFetchFilename()), 0755); err != nil {
+			_ = os.Remove(filepath.Join(dir, getFetchFilename()))
+			return err
+		}
+		found = true
 	}
-
-	if f.FileInfo().IsDir() {
-		return root.MkdirAll(name, f.Mode().Perm())
+	if !found {
+		return errors.New("archive does not contain the fetch executable")
 	}
-
-	rc, err := f.Open()
-	if err != nil {
-		return err
-	}
-	defer rc.Close()
-
-	out, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, rc)
-	return err
+	return nil
 }
 
 // The following Windows self-replace functionality uses similar techniques to
@@ -100,13 +117,11 @@ func init() {
 		return
 	}
 
-	// Ensure the appication has the self-delete suffix.
 	exePath, err := os.Executable()
 	if err != nil || !strings.HasSuffix(exePath, selfDeleteSuffix) {
 		return
 	}
 
-	// Parse out the parent handle and original application path.
 	handleStr, origPath, ok := strings.Cut(data, "_")
 	if !ok {
 		os.Exit(1)
@@ -117,59 +132,78 @@ func init() {
 	}
 	parentHandle := windows.Handle(uintptr(handleUint))
 
-	// Wait indefinitely for the parent process to exit.
 	waitRes, err := windows.WaitForSingleObject(parentHandle, windows.INFINITE)
 	if err != nil || waitRes != windows.WAIT_OBJECT_0 {
 		os.Exit(1)
 	}
 
-	// Delete the original file.
 	originalFileUTF16, err := windows.UTF16PtrFromString(origPath)
 	if err != nil || windows.DeleteFile(originalFileUTF16) != nil {
 		os.Exit(1)
 	}
 
-	// To force Windows to notice the DELETE_ON_CLOSE flag on our inherited
-	// handle, spawn a short-lived process (using cmd.exe) that will
-	// inherit the handle.
 	cmd := exec.Command("cmd.exe", "/c", "exit")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	_ = cmd.Start()
-
 	os.Exit(0)
 }
 
-// selfReplace replaces the current executable, exePath, with a new executable,
-// newExePath, returning any error encountered.
+// selfReplace stages beside the target, moves the running target aside, and
+// installs the complete staged file. Windows cannot rename an executable that
+// is still running, so the old file is scheduled for cleanup after exit.
 func selfReplace(exePath, newExePath string) error {
+	if err := validateReplacementDirectory(exePath); err != nil {
+		return err
+	}
+	info, err := os.Lstat(exePath)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fileutil.ErrSymlinkTarget
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("executable destination is not a regular file")
+	}
+	candidateInfo, err := os.Lstat(newExePath)
+	if err != nil {
+		return err
+	}
+	if candidateInfo.Mode()&os.ModeSymlink != 0 || !candidateInfo.Mode().IsRegular() {
+		return errors.New("staged executable is not a regular file")
+	}
+
 	dir := filepath.Dir(exePath)
 	tempExePath := createTempFilePath(dir, tempSuffix)
-	err := copyFile(tempExePath, newExePath)
-	if err != nil {
+	if err := copyFile(tempExePath, newExePath); err != nil {
 		return err
 	}
 	defer os.Remove(tempExePath)
-
-	oldExePath := createTempFilePath(dir, relocatedSuffix)
-	err = os.Rename(exePath, oldExePath)
-	if err != nil {
+	if err := os.Chmod(tempExePath, 0755); err != nil {
 		return err
 	}
 
-	err = os.Rename(tempExePath, exePath)
-	if err != nil {
+	oldExePath := createTempFilePath(dir, relocatedSuffix)
+	if err := os.Rename(exePath, oldExePath); err != nil {
+		return err
+	}
+	if err := os.Rename(tempExePath, exePath); err != nil {
 		if rollbackErr := os.Rename(oldExePath, exePath); rollbackErr != nil {
 			return errors.Join(err, rollbackErr)
 		}
 		return err
 	}
-
-	return scheduleSelfDeletionOnShutdown(oldExePath)
+	if err := scheduleSelfDeletionOnShutdown(oldExePath); err != nil {
+		// The new executable is already installed. Do not claim that the
+		// original was preserved; leave the old path for conservative cleanup.
+		return &fileutil.CommittedError{Err: err}
+	}
+	return nil
 }
 
 // scheduleSelfDeletionOnShutdown arranges for the given executable to be
 // deleted when the process shuts down.
-func scheduleSelfDeletionOnShutdown(exePath string) error {
+func scheduleSelfDeletionOnShutdown(exePath string) (err error) {
 	exeDir := filepath.Dir(exePath)
 	tempDir := os.TempDir()
 	relocatedExePath := createTempFilePath(tempDir, relocatedSuffix)
@@ -178,7 +212,24 @@ func scheduleSelfDeletionOnShutdown(exePath string) error {
 		exePath = relocatedExePath
 	}
 
+	success := false
 	tempExePath := createTempFilePath(exeDir, selfDeleteSuffix)
+	defer func() {
+		if success {
+			return
+		}
+		var cleanupErr error
+		if removeErr := os.Remove(tempExePath); removeErr != nil && !os.IsNotExist(removeErr) {
+			cleanupErr = errors.Join(cleanupErr, removeErr)
+		}
+		// Keep the relocated old executable. Windows may still need it for
+		// recovery, and deleting the only old copy after a post-commit failure
+		// would make rollback impossible.
+		if cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("clean up replacement files: %w", cleanupErr))
+		}
+	}()
+
 	if err := copyFile(tempExePath, exePath); err != nil {
 		return err
 	}
@@ -188,14 +239,12 @@ func scheduleSelfDeletionOnShutdown(exePath string) error {
 		return err
 	}
 
-	// Prepare security attributes so that the handle is inheritable.
 	sa := windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		InheritHandle:      1,
 		SecurityDescriptor: nil,
 	}
 
-	// Open the temporary exe file with DELETE_ON_CLOSE behavior.
 	handle, err := windows.CreateFile(tempExePathUTF16,
 		windows.GENERIC_READ,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
@@ -208,7 +257,6 @@ func scheduleSelfDeletionOnShutdown(exePath string) error {
 	}
 	defer windows.CloseHandle(handle)
 
-	// Duplicate the current process handle so that the child can wait on it.
 	currentProcess := windows.CurrentProcess()
 	var dupHandle windows.Handle
 	err = windows.DuplicateHandle(
@@ -224,8 +272,6 @@ func scheduleSelfDeletionOnShutdown(exePath string) error {
 	}
 	defer windows.CloseHandle(dupHandle)
 
-	// Launch the temporary executable.
-	// Pass two arguments: the duplicate handle as a string and the original exe path.
 	cmd := exec.Command(tempExePath)
 	envVar := fmt.Sprintf("FETCH_INTERNAL_UPDATE_SELF_DELETE=%d_%s", dupHandle, exePath)
 	cmd.Env = append(os.Environ(), envVar)
@@ -234,7 +280,7 @@ func scheduleSelfDeletionOnShutdown(exePath string) error {
 		return err
 	}
 
-	// Some implementations sleep here to ensure the child inherits the handle.
+	success = true
 	time.Sleep(100 * time.Millisecond)
 	return nil
 }
@@ -259,7 +305,18 @@ func unlockFile(f *os.File) error {
 	return windows.UnlockFileEx(windows.Handle(f.Fd()), 0, allBytes, allBytes, &ol)
 }
 
-// canReplaceFile always returns true on windows.
-func canReplaceFile(_ string) bool {
-	return true
+func validateReplacementDirectory(target string) error {
+	info, err := os.Lstat(filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("replacement directory is not a real directory")
+	}
+	return nil
+}
+
+func canReplaceFile(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0
 }

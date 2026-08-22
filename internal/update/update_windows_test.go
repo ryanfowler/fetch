@@ -64,10 +64,9 @@ func TestUnpackArtifact_PathTraversal(t *testing.T) {
 	}
 }
 
-func TestUnpackArtifact_ExplicitDirectoryEntry(t *testing.T) {
+func TestUnpackArtifact_RejectsNestedDirectoryEntry(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-
 	if _, err := zw.Create("bin/"); err != nil {
 		t.Fatal(err)
 	}
@@ -83,11 +82,11 @@ func TestUnpackArtifact_ExplicitDirectoryEntry(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := unpackArtifact(dir, bytes.NewReader(buf.Bytes())); err != nil {
-		t.Fatalf("unpackArtifact: %v", err)
+	if err := unpackArtifact(dir, bytes.NewReader(buf.Bytes())); err == nil {
+		t.Fatal("unpackArtifact accepted a nested executable")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "bin", "fetch.exe")); err != nil {
-		t.Fatalf("expected file to exist: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "bin", "fetch.exe")); !os.IsNotExist(err) {
+		t.Fatalf("nested payload exists after rejection, stat error = %v", err)
 	}
 }
 
