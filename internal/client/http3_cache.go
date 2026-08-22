@@ -210,11 +210,11 @@ func (c *persistentH3Cache) close() {
 	c.mu.Lock()
 	if !c.closed {
 		c.closed = true
-		// Pending state changes are best effort at shutdown. The worker still
-		// drains them, but close never waits on an unbounded backlog.
-		for len(c.ops) > 0 {
-			<-c.ops
-		}
+		// Pending state changes are best effort at shutdown. Close the queue
+		// while holding the same mutex used by schedule so a worker cannot
+		// race a drain with a sender. Do not drain with a blocking receive:
+		// the worker may already have taken the last operation and be waiting
+		// for this mutex, which would deadlock shutdown.
 		close(c.ops)
 	}
 	c.mu.Unlock()
