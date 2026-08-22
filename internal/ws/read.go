@@ -70,7 +70,7 @@ func writeBinaryIndicator(p *core.Printer, n int) {
 // handleReadErr handles the error from reading a WebSocket message. Normal
 // closure is expected and returns nil.
 func handleReadErr(err error) error {
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil
 	}
 	if closeErr, ok := errors.AsType[websocket.CloseError](err); ok {

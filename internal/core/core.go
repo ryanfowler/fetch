@@ -108,6 +108,18 @@ const (
 	WSMessageBinary
 )
 
+// String returns the user-facing WebSocket message mode name.
+func (m WSMessageMode) String() string {
+	switch m {
+	case WSMessageText:
+		return "text"
+	case WSMessageBinary:
+		return "binary"
+	default:
+		return "auto"
+	}
+}
+
 // Verbosity represents how verbose the output should be.
 type Verbosity int
 

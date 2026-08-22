@@ -101,6 +101,7 @@ type Request struct {
 	Verbosity        core.Verbosity
 	WS               bool
 	WSInteractive    core.WSInteractiveMode
+	WSMessageMode    core.WSMessageMode
 	SchemelessURL    bool
 
 	// responseDescriptor is set internally after proto setup for response formatting.

@@ -231,6 +231,7 @@ func main() {
 		Verbosity:        verbosity,
 		WS:               app.WS,
 		WSInteractive:    app.WSInteractive,
+		WSMessageMode:    app.WSMessageMode,
 		SchemelessURL:    app.SchemelessURL,
 	}
 	if app.HasGRPCDiscovery() {
