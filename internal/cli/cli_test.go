@@ -46,6 +46,28 @@ func TestTLSFlags(t *testing.T) {
 			t.Fatalf("error = %q, want max-tls", err.Error())
 		}
 	})
+
+	for _, version := range []string{"1.0", "1.1"} {
+		t.Run("rejects legacy TLS "+version, func(t *testing.T) {
+			_, err := Parse([]string{"--min-tls", version, "https://example.com"})
+			if err == nil {
+				t.Fatal("expected legacy TLS version to be rejected")
+			}
+			if !strings.Contains(err.Error(), "1.2") || !strings.Contains(err.Error(), "1.3") {
+				t.Fatalf("error = %q, want supported version list", err)
+			}
+		})
+	}
+
+	t.Run("rejects TLS 1.2 maximum for HTTP/3", func(t *testing.T) {
+		app, err := Parse([]string{"--http3", "--max-tls", "1.2", "https://example.com"})
+		if err == nil {
+			err = app.Cfg.Validate()
+		}
+		if err == nil || !strings.Contains(err.Error(), "HTTP/3") {
+			t.Fatalf("Parse() error = %v, want HTTP/3 TLS error", err)
+		}
+	})
 }
 
 func TestCLI002TargetFlags(t *testing.T) {

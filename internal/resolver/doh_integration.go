@@ -15,6 +15,7 @@ func (r *Resolver) SetRoundTripper(transport http.RoundTripper) error {
 		RoundTripper: transport,
 		TLSConfig:    r.tlsConfig,
 		CACerts:      r.caCerts,
+		ClientCert:   r.clientCert,
 		Insecure:     r.insecure,
 		TLSMin:       r.tlsMin,
 		TLSMax:       r.tlsMax,

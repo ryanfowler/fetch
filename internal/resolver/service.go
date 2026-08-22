@@ -459,9 +459,9 @@ func (r *Resolver) lookupServiceRecords(ctx context.Context, host string, typ ui
 	case r.endpoint.Transport == TransportUDP:
 		message, _, err = LookupUDPMessage(ctx, r.endpoint.Address(), host, typ)
 	case r.endpoint.Transport == TransportTCP || r.endpoint.Transport == TransportTLS:
-		message, err = LookupStreamMessage(ctx, StreamConfig{Endpoint: r.endpoint, DialContext: r.dialContext, Bootstrap: r.bootstrap, TLSConfig: r.tlsConfig, CACerts: r.caCerts, Insecure: r.insecure, TLSMin: r.tlsMin, TLSMax: r.tlsMax}, host, typ)
+		message, err = LookupStreamMessage(ctx, StreamConfig{Endpoint: r.endpoint, DialContext: r.dialContext, Bootstrap: r.bootstrap, TLSConfig: r.tlsConfig, CACerts: r.caCerts, ClientCert: r.clientCert, Insecure: r.insecure, TLSMin: r.tlsMin, TLSMax: r.tlsMax}, host, typ)
 	case r.endpoint.Transport == TransportQUIC:
-		message, err = LookupDoQMessage(ctx, DoQConfig{Endpoint: r.endpoint, Bootstrap: r.bootstrap, TLSConfig: r.tlsConfig, CACerts: r.caCerts, Insecure: r.insecure, TLSMin: r.tlsMin, TLSMax: r.tlsMax}, host, typ)
+		message, err = LookupDoQMessage(ctx, DoQConfig{Endpoint: r.endpoint, Bootstrap: r.bootstrap, TLSConfig: r.tlsConfig, CACerts: r.caCerts, ClientCert: r.clientCert, Insecure: r.insecure, TLSMin: r.tlsMin, TLSMax: r.tlsMax}, host, typ)
 	case r.endpoint.Transport == TransportHTTPS:
 		if r.dohClient == nil {
 			return nil, ErrHTTPSRecordsUnavailable

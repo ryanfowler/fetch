@@ -587,17 +587,32 @@ func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 
 	warnIgnoredInspectionFlags(p, inspectionDNS, ignoredInspectionFlags(app, inspectionDNS), getValue(app.Cfg.Silent))
 
+	clientCert, err := app.Cfg.ClientCert()
+	if err != nil {
+		writeCLIErr(p, err)
+		return 1
+	}
+	tlsConfig := (&client.TLSDialConfig{
+		CACerts:    app.Cfg.CACerts,
+		ClientCert: clientCert,
+		Insecure:   getValue(app.Cfg.Insecure),
+		TLSMax:     getValue(app.Cfg.TLSMax),
+		TLSMin:     getValue(app.Cfg.TLSMin),
+	}).BuildTLSConfig()
+
 	return dnsinspect.Inspect(ctx, p, &dnsinspect.Config{
-		Endpoint:  app.Cfg.DNSEndpoint,
-		DNSServer: app.Cfg.DNSServer,
-		Proxy:     app.Cfg.Proxy,
-		CACerts:   app.Cfg.CACerts,
-		Insecure:  getValue(app.Cfg.Insecure),
-		TLSMin:    getValue(app.Cfg.TLSMin),
-		TLSMax:    getValue(app.Cfg.TLSMax),
-		Timeout:   getValue(app.Cfg.Timeout),
-		URL:       app.URL,
-		Silent:    getValue(app.Cfg.Silent),
+		Endpoint:   app.Cfg.DNSEndpoint,
+		DNSServer:  app.Cfg.DNSServer,
+		Proxy:      app.Cfg.Proxy,
+		CACerts:    app.Cfg.CACerts,
+		TLSConfig:  tlsConfig,
+		ClientCert: clientCert,
+		Insecure:   getValue(app.Cfg.Insecure),
+		TLSMin:     getValue(app.Cfg.TLSMin),
+		TLSMax:     getValue(app.Cfg.TLSMax),
+		Timeout:    getValue(app.Cfg.Timeout),
+		URL:        app.URL,
+		Silent:     getValue(app.Cfg.Silent),
 	})
 }
 
@@ -657,6 +672,7 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		ResolverEndpoint: app.Cfg.DNSEndpoint,
 		DNSServer:        app.Cfg.DNSServer,
 		HTTP:             app.Cfg.HTTP,
+		ECH:              app.Cfg.ECH,
 		Insecure:         getValue(app.Cfg.Insecure),
 		TLSMax:           getValue(app.Cfg.TLSMax),
 		TLSMin:           getValue(app.Cfg.TLSMin),

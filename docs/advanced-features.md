@@ -242,12 +242,10 @@ fetch --min-tls 1.2 --max-tls 1.3 example.com  # Allow TLS 1.2 through 1.3
 fetch --min-tls 1.2 --max-tls 1.2 example.com  # Require exactly TLS 1.2
 ```
 
-| Value | Protocol                      |
-| ----- | ----------------------------- |
-| `1.0` | TLS 1.0 (legacy)              |
-| `1.1` | TLS 1.1 (deprecated)          |
-| `1.2` | TLS 1.2 (recommended minimum) |
-| `1.3` | TLS 1.3 (most secure)         |
+| Value | Protocol                    |
+| ----- | --------------------------- |
+| `1.2` | TLS 1.2 (supported minimum) |
+| `1.3` | TLS 1.3 (most secure)       |
 
 ### Insecure Mode
 

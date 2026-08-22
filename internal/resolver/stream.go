@@ -13,6 +13,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 const (
@@ -40,6 +42,7 @@ type StreamConfig struct {
 	Bootstrap   BootstrapFunc
 	TLSConfig   *tls.Config
 	CACerts     []*x509.Certificate
+	ClientCert  *tls.Certificate
 	Insecure    bool
 	TLSMin      uint16
 	TLSMax      uint16
@@ -84,6 +87,14 @@ func NewStreamClient(ctx context.Context, cfg StreamConfig) (*StreamClient, erro
 	}
 	if cfg.Endpoint.Transport != TransportTCP && cfg.Endpoint.Transport != TransportTLS {
 		return nil, fmt.Errorf("DNS stream transport %s is not supported", cfg.Endpoint.Transport)
+	}
+	if err := core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax); err != nil {
+		return nil, err
+	}
+	if cfg.TLSConfig != nil {
+		if err := core.ValidateTLSVersions(cfg.TLSConfig.MinVersion, cfg.TLSConfig.MaxVersion); err != nil {
+			return nil, err
+		}
 	}
 	conn, err := dialStreamEndpoint(ctx, cfg)
 	if err != nil {
@@ -139,7 +150,7 @@ func dialStreamEndpoint(ctx context.Context, cfg StreamConfig) (net.Conn, error)
 		addresses = addresses[:maxStreamEndpointAddresses]
 	}
 	conn, err := RaceCandidates(ctx, addresses, func(attemptCtx context.Context, address net.IPAddr) (net.Conn, error) {
-		conn, err := dial(attemptCtx, "tcp", net.JoinHostPort(address.IP.String(), fmt.Sprint(ep.Port)))
+		conn, err := dial(attemptCtx, "tcp", core.JoinIPHostPort(address, fmt.Sprint(ep.Port)))
 		if err != nil || ep.Transport != TransportTLS {
 			return conn, err
 		}
@@ -163,44 +174,18 @@ func dialStreamEndpoint(ctx context.Context, cfg StreamConfig) (net.Conn, error)
 const maxStreamEndpointAddresses = 16
 
 func streamTLSConfig(cfg StreamConfig, ep *Endpoint) *tls.Config {
-	var out *tls.Config
-	if cfg.TLSConfig != nil {
-		out = cfg.TLSConfig.Clone()
-	} else {
-		out = &tls.Config{}
-	}
-	if cfg.TLSMin != 0 {
-		out.MinVersion = cfg.TLSMin
-	} else if out.MinVersion == 0 {
-		out.MinVersion = tls.VersionTLS12
-	}
-	if cfg.TLSMax != 0 {
-		out.MaxVersion = cfg.TLSMax
-	}
-	if cfg.Insecure {
-		out.InsecureSkipVerify = true
-	}
-	if len(cfg.CACerts) > 0 {
-		pool := out.RootCAs
-		if pool == nil {
-			pool, _ = x509.SystemCertPool()
-		}
-		if pool == nil {
-			pool = x509.NewCertPool()
-		} else {
-			pool = pool.Clone()
-		}
-		for _, cert := range cfg.CACerts {
-			if cert != nil {
-				pool.AddCert(cert)
-			}
-		}
-		out.RootCAs = pool
-	}
-	// The endpoint name is authoritative. Go omits an IP literal from the
-	// TLS SNI extension while still using it for certificate verification.
-	out.ServerName = ep.TLSServerName
-	return out
+	// The endpoint name is authoritative. Go omits an IP literal from the TLS
+	// SNI extension while still using it for certificate verification.
+	return core.BuildTLSConfig(core.TLSConfigOptions{
+		Base:       cfg.TLSConfig,
+		CACerts:    cfg.CACerts,
+		ClientCert: cfg.ClientCert,
+		Insecure:   cfg.Insecure,
+		TLSMax:     cfg.TLSMax,
+		TLSMin:     cfg.TLSMin,
+		ServerName: ep.TLSServerName,
+		NextProtos: []string{},
+	})
 }
 
 // LookupStreamMessage opens an operation-scoped stream, sends one query, and

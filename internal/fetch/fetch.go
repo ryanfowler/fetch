@@ -182,6 +182,9 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	if r.GRPC {
 		applyGRPCDefaults(r)
 	}
+	if r.WS && r.ECH != core.ECHUnknown && r.ECH != core.ECHOff {
+		return 0, errors.New("ECH is not available for WebSocket connections")
+	}
 
 	// 1. Create the HTTP client.
 	c := newClient(r)

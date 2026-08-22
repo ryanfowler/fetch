@@ -13,6 +13,8 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"strings"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 // Config controls hostname resolution. Endpoint is the validated resolver
@@ -45,6 +47,7 @@ type Config struct {
 	SystemPolicy *SystemResolverPolicy
 	TLSConfig    *tls.Config
 	CACerts      []*x509.Certificate
+	ClientCert   *tls.Certificate
 	Insecure     bool
 	TLSMin       uint16
 	TLSMax       uint16
@@ -63,6 +66,7 @@ type Resolver struct {
 	dohClient    *DOHClient
 	tlsConfig    *tls.Config
 	caCerts      []*x509.Certificate
+	clientCert   *tls.Certificate
 	insecure     bool
 	tlsMin       uint16
 	tlsMax       uint16
@@ -86,6 +90,12 @@ func New(cfg Config) *Resolver {
 	if endpoint == nil && cfg.Server != nil {
 		endpoint, err = endpointFromURL(cfg.Server)
 	}
+	if err == nil {
+		err = core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax)
+	}
+	if err == nil && cfg.TLSConfig != nil {
+		err = core.ValidateTLSVersions(cfg.TLSConfig.MinVersion, cfg.TLSConfig.MaxVersion)
+	}
 	systemLookup := cfg.SystemLookupIPAddr
 	if systemLookup == nil {
 		systemLookup = net.DefaultResolver.LookupIPAddr
@@ -100,6 +110,7 @@ func New(cfg Config) *Resolver {
 		systemPolicy: cfg.SystemPolicy,
 		tlsConfig:    cfg.TLSConfig,
 		caCerts:      cfg.CACerts,
+		clientCert:   cfg.ClientCert,
 		insecure:     cfg.Insecure,
 		tlsMin:       cfg.TLSMin,
 		tlsMax:       cfg.TLSMax,
@@ -114,6 +125,7 @@ func New(cfg Config) *Resolver {
 			Bootstrap:    cfg.Bootstrap,
 			TLSConfig:    cfg.TLSConfig,
 			CACerts:      cfg.CACerts,
+			ClientCert:   cfg.ClientCert,
 			Insecure:     cfg.Insecure,
 			TLSMin:       cfg.TLSMin,
 			TLSMax:       cfg.TLSMax,
@@ -152,7 +164,20 @@ func (r *Resolver) CacheIdentity() string {
 	for _, cert := range r.caCerts {
 		if cert != nil {
 			sum := sha256.Sum256(cert.Raw)
-			value += hex.EncodeToString(sum[:]) + ","
+			value += "ca=" + hex.EncodeToString(sum[:]) + ","
+		}
+	}
+	// A client certificate can select a different authenticated DNS view. Keep
+	// its public certificate chain in the resolver identity without ever
+	// including the private key.
+	clientCert := r.clientCert
+	if clientCert == nil && r.tlsConfig != nil && len(r.tlsConfig.Certificates) > 0 {
+		clientCert = &r.tlsConfig.Certificates[0]
+	}
+	if clientCert != nil {
+		for _, der := range clientCert.Certificate {
+			sum := sha256.Sum256(der)
+			value += "client-cert=" + hex.EncodeToString(sum[:]) + ","
 		}
 	}
 	sum := sha256.Sum256([]byte(value))
@@ -210,6 +235,7 @@ func (r *Resolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr,
 				Bootstrap:   r.bootstrap,
 				TLSConfig:   r.tlsConfig,
 				CACerts:     r.caCerts,
+				ClientCert:  r.clientCert,
 				Insecure:    r.insecure,
 				TLSMin:      r.tlsMin,
 				TLSMax:      r.tlsMax,
@@ -218,13 +244,14 @@ func (r *Resolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr,
 	case r.endpoint.Transport == TransportQUIC:
 		return lookupWithTrace(ctx, host, func(ctx context.Context) ([]net.IPAddr, error) {
 			return lookupDoQIPs(ctx, DoQConfig{
-				Endpoint:  r.endpoint,
-				Bootstrap: r.bootstrap,
-				TLSConfig: r.tlsConfig,
-				CACerts:   r.caCerts,
-				Insecure:  r.insecure,
-				TLSMin:    r.tlsMin,
-				TLSMax:    r.tlsMax,
+				Endpoint:   r.endpoint,
+				Bootstrap:  r.bootstrap,
+				TLSConfig:  r.tlsConfig,
+				CACerts:    r.caCerts,
+				ClientCert: r.clientCert,
+				Insecure:   r.insecure,
+				TLSMin:     r.tlsMin,
+				TLSMax:     r.tlsMax,
 			}, host)
 		})
 	default:
@@ -306,7 +333,7 @@ func (r *Resolver) DialContext(ctx context.Context, network, address string) (ne
 			}
 			return RaceCandidates(ctx, addrs, func(ctx context.Context, addr net.IPAddr) (net.Conn, error) {
 				var dialer net.Dialer
-				return dialer.DialContext(ctx, network, net.JoinHostPort(addr.IP.String(), port))
+				return dialer.DialContext(ctx, network, core.JoinIPHostPort(addr, port))
 			}, func(conn net.Conn) {
 				if conn != nil {
 					_ = conn.Close()
@@ -320,7 +347,7 @@ func (r *Resolver) DialContext(ctx context.Context, network, address string) (ne
 	}
 	return RaceCandidates(ctx, endpoint.Addrs, func(ctx context.Context, addr net.IPAddr) (net.Conn, error) {
 		var dialer net.Dialer
-		return dialer.DialContext(ctx, network, net.JoinHostPort(addr.IP.String(), endpoint.Port))
+		return dialer.DialContext(ctx, network, core.JoinIPHostPort(addr, endpoint.Port))
 	}, func(conn net.Conn) {
 		if conn != nil {
 			_ = conn.Close()
