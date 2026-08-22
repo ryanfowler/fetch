@@ -8,11 +8,11 @@
 
 Control how images are rendered:
 
-| Value    | Description                                                |
-| -------- | ---------------------------------------------------------- |
-| `auto`   | Use only built-in decoders (default)                       |
-| `external` | Try built-in decoders, then bounded external adapters     |
-| `off`    | Disable image rendering                                    |
+| Value      | Description                                           |
+| ---------- | ----------------------------------------------------- |
+| `auto`     | Use only built-in decoders (default)                  |
+| `external` | Try built-in decoders, then bounded external adapters |
+| `off`      | Disable image rendering                               |
 
 `native` remains accepted as a compatibility alias for `auto`. External
 programs never run in `auto` mode.

@@ -12,7 +12,7 @@ This guide helps diagnose and fix common issues with `fetch`.
 | 4         | Client error (HTTP 4xx)            |
 | 5         | Server error (HTTP 5xx)            |
 | 6         | Other HTTP status or request error |
-| 130       | Interrupted by Ctrl-C |
+| 130       | Interrupted by Ctrl-C              |
 
 Ctrl-C cancels the active request and exits with status 130. Broken pipes
 (for example, when a downstream command closes stdout) are treated as clean
