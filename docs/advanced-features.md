@@ -216,6 +216,14 @@ to HTTP/1.1 when needed. Authenticated DNS discovery errors are not silently
 downgraded. Use `--http 1` or `--http 2` to disable HTTP/3 discovery and
 racing. Use `--http 3` to require HTTP/3; it never falls back to TCP.
 
+Automatic HTTP/3 alternatives are stored in a bounded persistent cache under
+`os.UserCacheDir()/fetch/http3`. Entries are scoped by HTTPS origin and resolver
+identity. Each origin keeps at most four candidates, the cache keeps at most
+1,024 shards, and entries expire after at most seven days. DNS TTL, DoH `Age`,
+and `Alt-Svc` `ma` values provide shorter expiry when available. Cache files
+are hashed, locked, symlink-safe, and updated atomically. Cache failures do not
+block a request.
+
 ## TLS Configuration
 
 ### TLS Version Bounds

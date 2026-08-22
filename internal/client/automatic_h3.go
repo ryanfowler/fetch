@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ type automaticHTTP3Transport struct {
 	tlsConfig     *tls.Config
 	connectLimit  time.Duration
 	cache         *automaticH3Cache
+	persistent    *persistentH3Cache
 	mu            sync.Mutex
 	tcpTransports map[string]*http.Transport
 	h3Transports  map[string]*http3.Transport
@@ -44,13 +46,15 @@ type automaticHTTP3Transport struct {
 }
 
 func newAutomaticHTTP3Transport(fallback *http.Transport, res *resolver.Resolver, connectTimeout time.Duration, tlsConfig *tls.Config) http.RoundTripper {
+	persistent := newPersistentH3Cache()
 	return &automaticHTTP3Transport{
 		fallback:      fallback,
 		resolver:      res,
 		dialer:        NewResolverDialer(res, connectTimeout),
 		tlsConfig:     tlsConfig,
 		connectLimit:  connectTimeout,
-		cache:         newAutomaticH3Cache(),
+		cache:         newAutomaticH3CacheWithPersistent(persistent),
+		persistent:    persistent,
 		tcpTransports: make(map[string]*http.Transport),
 		h3Transports:  make(map[string]*http3.Transport),
 		h3Packets:     make(map[string]net.PacketConn),
@@ -107,12 +111,19 @@ func (t *automaticHTTP3Transport) Close() error {
 	for _, packet := range packets {
 		_ = packet.Close()
 	}
+	if t.persistent != nil {
+		t.persistent.close()
+	}
 	return firstErr
 }
 
 type automaticH3Cache struct {
-	mu      sync.Mutex
-	entries map[string][]automaticH3Candidate
+	mu         sync.Mutex
+	entries    map[string][]automaticH3Candidate
+	loaded     map[string]bool
+	versions   map[string]uint64
+	dirty      map[string]bool
+	persistent *persistentH3Cache
 }
 
 type automaticH3Candidate struct {
@@ -121,6 +132,9 @@ type automaticH3Candidate struct {
 	addresses []net.IPAddr
 	expires   time.Time
 	source    h3CandidateSource
+	priority  uint16
+	learned   time.Time
+	lastUsed  time.Time
 }
 
 type h3CandidateSource uint8
@@ -131,31 +145,75 @@ const (
 )
 
 func newAutomaticH3Cache() *automaticH3Cache {
-	return &automaticH3Cache{entries: make(map[string][]automaticH3Candidate)}
+	return newAutomaticH3CacheWithPersistent(nil)
+}
+
+func newAutomaticH3CacheWithPersistent(persistent *persistentH3Cache) *automaticH3Cache {
+	return &automaticH3Cache{
+		entries:    make(map[string][]automaticH3Candidate),
+		loaded:     make(map[string]bool),
+		versions:   make(map[string]uint64),
+		dirty:      make(map[string]bool),
+		persistent: persistent,
+	}
 }
 
 func (c *automaticH3Cache) get(key string, now time.Time) []automaticH3Candidate {
 	if c == nil {
 		return nil
 	}
+	var loaded []automaticH3Candidate
+	var loadVersion uint64
+	localDirty := false
+	shouldLoad := false
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.persistent != nil && !c.loaded[key] {
+		shouldLoad = true
+		loadVersion = c.versions[key]
+		localDirty = c.dirty[key]
+	}
+	c.mu.Unlock()
+	if shouldLoad {
+		loaded = c.persistent.load(key, now)
+	}
+
+	c.mu.Lock()
+	if shouldLoad && !c.loaded[key] {
+		// A local discovery or Alt-Svc update wins over a disk snapshot that
+		// was started earlier. Do not overwrite newer in-memory state.
+		if !localDirty && c.versions[key] == loadVersion && !c.dirty[key] {
+			c.entries[key] = loaded
+		}
+		c.loaded[key] = true
+	}
 	values := c.entries[key]
 	out := make([]automaticH3Candidate, 0, len(values))
 	kept := values[:0]
+	touch := false
 	for _, value := range values {
 		if !value.expires.IsZero() && !now.Before(value.expires) {
 			continue
 		}
+		if !value.learned.IsZero() && !now.Before(value.learned.Add(h3CacheMaxAge)) {
+			continue
+		}
 		value.addresses = append([]net.IPAddr(nil), value.addresses...)
+		if value.lastUsed.IsZero() || now.Sub(value.lastUsed) >= h3CacheTouchInterval {
+			value.lastUsed = now
+			touch = true
+		}
 		out = append(out, value)
 		kept = append(kept, value)
+	}
+	if touch && c.persistent != nil {
+		c.persistent.touch(key, out)
 	}
 	if len(kept) == 0 {
 		delete(c.entries, key)
 	} else {
 		c.entries[key] = kept
 	}
+	c.mu.Unlock()
 	return out
 }
 
@@ -165,6 +223,8 @@ func (c *automaticH3Cache) replaceDNS(key string, values []automaticH3Candidate)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.versions[key]++
+	c.dirty[key] = true
 	old := c.entries[key]
 	alts := make([]automaticH3Candidate, 0, len(old))
 	for _, value := range old {
@@ -172,7 +232,15 @@ func (c *automaticH3Cache) replaceDNS(key string, values []automaticH3Candidate)
 			alts = append(alts, value)
 		}
 	}
+	for i := range values {
+		if values[i].learned.IsZero() {
+			values[i].learned = time.Now()
+		}
+	}
 	c.entries[key] = append(alts, cloneH3Candidates(values)...)
+	if c.persistent != nil {
+		c.persistent.replaceDNS(key, c.entries[key])
+	}
 	if len(c.entries[key]) == 0 {
 		delete(c.entries, key)
 		return
@@ -190,16 +258,57 @@ func (c *automaticH3Cache) addAltSvc(key string, value automaticH3Candidate) {
 	if value.port == 0 {
 		return
 	}
+	c.versions[key]++
+	c.dirty[key] = true
+	if !value.expires.IsZero() && !value.expires.After(time.Now()) {
+		values := entries[:0]
+		for _, existing := range entries {
+			if existing.source == h3SourceAltSvc && existing.host == value.host && existing.port == value.port {
+				continue
+			}
+			values = append(values, existing)
+		}
+		if len(values) == 0 {
+			delete(c.entries, key)
+		} else {
+			c.entries[key] = values
+		}
+		if c.persistent != nil {
+			c.persistent.remove(key, value, false)
+		}
+		return
+	}
 	for i := range entries {
 		if entries[i].source == h3SourceAltSvc && entries[i].host == value.host && entries[i].port == value.port {
+			if value.learned.IsZero() {
+				value.learned = time.Now()
+			}
 			entries[i] = value
 			c.entries[key] = entries
+			if c.persistent != nil {
+				c.persistent.addAltSvc(key, value)
+			}
 			return
 		}
 	}
-	entries = append(entries, value)
+	if value.learned.IsZero() {
+		value.learned = time.Now()
+	}
+	insertAt := len(entries)
+	for i, existing := range entries {
+		if existing.source == h3SourceDNS {
+			insertAt = i
+			break
+		}
+	}
+	entries = append(entries, automaticH3Candidate{})
+	copy(entries[insertAt+1:], entries[insertAt:])
+	entries[insertAt] = value
 	c.entries[key] = entries
 	c.trimLocked(key)
+	if c.persistent != nil {
+		c.persistent.addAltSvc(key, value)
+	}
 }
 
 func (c *automaticH3Cache) clearAltSvc(key string) {
@@ -208,6 +317,8 @@ func (c *automaticH3Cache) clearAltSvc(key string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.versions[key]++
+	c.dirty[key] = true
 	values := c.entries[key][:0]
 	for _, value := range c.entries[key] {
 		if value.source != h3SourceAltSvc {
@@ -219,6 +330,9 @@ func (c *automaticH3Cache) clearAltSvc(key string) {
 	} else {
 		c.entries[key] = values
 	}
+	if c.persistent != nil {
+		c.persistent.clearAltSvc(key)
+	}
 }
 
 func (c *automaticH3Cache) remove(value automaticH3Candidate, key string) {
@@ -227,9 +341,11 @@ func (c *automaticH3Cache) remove(value automaticH3Candidate, key string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.versions[key]++
+	c.dirty[key] = true
 	values := c.entries[key][:0]
 	for _, existing := range c.entries[key] {
-		if existing.source == value.source && existing.host == value.host && existing.port == value.port {
+		if h3CandidateMatches(existing, value, true) {
 			continue
 		}
 		values = append(values, existing)
@@ -239,22 +355,51 @@ func (c *automaticH3Cache) remove(value automaticH3Candidate, key string) {
 	} else {
 		c.entries[key] = values
 	}
+	if c.persistent != nil {
+		c.persistent.remove(key, value, true)
+	}
+}
+
+func h3CandidateMatches(existing, value automaticH3Candidate, generation bool) bool {
+	if existing.source != value.source || existing.host != value.host || existing.port != value.port {
+		return false
+	}
+	if generation && !value.learned.IsZero() && !existing.learned.IsZero() && !existing.learned.Equal(value.learned) {
+		return false
+	}
+	return true
 }
 
 func (c *automaticH3Cache) trimLocked(key string) {
-	values := c.entries[key]
-	if len(values) > automaticH3CacheLimit {
-		values = values[len(values)-automaticH3CacheLimit:]
-	}
-	c.entries[key] = values
+	c.entries[key] = selectH3Candidates(c.entries[key])
 	if len(c.entries) > automaticH3OriginLimit {
 		for existing := range c.entries {
 			if existing != key {
 				delete(c.entries, existing)
+				delete(c.loaded, existing)
+				delete(c.versions, existing)
+				delete(c.dirty, existing)
 				break
 			}
 		}
 	}
+}
+
+func selectH3Candidates(values []automaticH3Candidate) []automaticH3Candidate {
+	out := cloneH3Candidates(values)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].source != out[j].source {
+			return out[i].source == h3SourceAltSvc
+		}
+		if out[i].source == h3SourceDNS && out[i].priority != out[j].priority {
+			return out[i].priority < out[j].priority
+		}
+		return out[i].learned.After(out[j].learned)
+	})
+	if len(out) > automaticH3CacheLimit {
+		out = out[:automaticH3CacheLimit]
+	}
+	return out
 }
 
 func cloneH3Candidates(values []automaticH3Candidate) []automaticH3Candidate {
@@ -364,27 +509,26 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 		}
 	}()
 
-	cached := t.cache.get(key, time.Now())
-	for _, candidate := range cached {
-		candidate := candidate
-		go func() {
-			got, packet, err := t.dialH3(raceCtx, origin, candidate)
-			select {
-			case results <- result{kind: "h3", h3: got, packet: packet, candidate: candidate, err: err}:
-			case <-raceCtx.Done():
-				if got != nil {
-					_ = got.CloseWithError(0, "HTTP/3 race cancelled")
-				}
-				if packet != nil {
-					_ = packet.Close()
-				}
-			}
-		}()
-	}
+	// Loading persistent candidates is deliberately outside the request
+	// goroutine. It races normal TCP and fresh discovery instead of making
+	// cache I/O part of the connection hot path.
+	go func() {
+		cached := t.cache.get(key, time.Now())
+		select {
+		case results <- result{kind: "cached", candidates: cached}:
+		case <-raceCtx.Done():
+		}
+	}()
 
 	go func() {
 		discovery, err := t.resolver.DiscoverHTTPS(raceCtx, origin.Hostname(), uint16(parsePort(originPort(origin))), nil)
 		if err != nil {
+			kind := resolver.DiscoveryFailure(err)
+			if kind == resolver.DiscoveryFailureNODATA || kind == resolver.DiscoveryFailureNXDOMAIN {
+				// Authenticated NODATA/NXDOMAIN is a successful fresh
+				// replacement of the DNS RRset, not a transient failure.
+				t.cache.replaceDNS(key, nil)
+			}
 			results <- result{kind: "discovery", err: err}
 			return
 		}
@@ -399,6 +543,8 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 				addresses: append([]net.IPAddr(nil), service.Addresses...),
 				expires:   ttlExpiry(service.TTL, service.TTLPresent),
 				source:    h3SourceDNS,
+				priority:  service.Priority,
+				learned:   time.Now(),
 			})
 		}
 		// A successful fresh RRset replaces old DNS candidates, including an
@@ -407,14 +553,31 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 		results <- result{kind: "discovery", candidates: values}
 	}()
 
-	pending := 1 + len(cached) // TCP plus cached H3; discovery is separate.
-	pending++
+	pending := 3 // TCP, persistent-cache load, and discovery.
 	var lastErr error
 	for pending > 0 {
 		select {
 		case got := <-results:
 			pending--
 			switch got.kind {
+			case "cached":
+				for _, candidate := range got.candidates {
+					candidate := candidate
+					pending++
+					go func() {
+						got, packet, err := t.dialH3(raceCtx, origin, candidate)
+						select {
+						case results <- result{kind: "h3", h3: got, packet: packet, candidate: candidate, err: err}:
+						case <-raceCtx.Done():
+							if got != nil {
+								_ = got.CloseWithError(0, "HTTP/3 race cancelled")
+							}
+							if packet != nil {
+								_ = packet.Close()
+							}
+						}
+					}()
+				}
 			case "tcp":
 				if got.err == nil && got.tcp != nil {
 					return preparedAutomaticConnection{tcp: got.tcp}, nil
@@ -682,7 +845,12 @@ func serviceAdvertisesH3(candidate resolver.ServiceCandidate) bool {
 }
 
 func automaticH3CacheKey(u *url.URL, res *resolver.Resolver) string {
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Hostname()) + ":" + originPort(u) + "|" + res.Provenance()
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	port := 0
+	if parsed, err := strconv.Atoi(originPort(u)); err == nil {
+		port = parsed
+	}
+	return strings.ToLower(u.Scheme) + "://" + net.JoinHostPort(host, strconv.Itoa(port)) + "|" + res.CacheIdentity()
 }
 
 func ttlExpiry(ttl uint32, present bool) time.Time {
@@ -727,7 +895,7 @@ func (t *automaticHTTP3Transport) recordAltSvc(ctx context.Context, origin *url.
 		if err != nil {
 			continue
 		}
-		t.cache.addAltSvc(key, automaticH3Candidate{host: host, port: item.port, addresses: addresses, expires: time.Now().Add(item.maxAge), source: h3SourceAltSvc})
+		t.cache.addAltSvc(key, automaticH3Candidate{host: host, port: item.port, addresses: addresses, expires: time.Now().Add(item.maxAge), source: h3SourceAltSvc, learned: time.Now()})
 	}
 }
 

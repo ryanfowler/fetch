@@ -2,8 +2,10 @@ package resolver
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -130,6 +132,31 @@ func (r *Resolver) Provenance() string {
 		return r.endpoint.Display
 	}
 	return string(r.endpoint.Transport) + "://" + r.endpoint.ConnectHost
+}
+
+// CacheIdentity is a canonical, secret-free identity for persistent caches.
+// Provenance is intended for display and deliberately omits fields such as a
+// DoH query. Cache identity includes every resolver endpoint field that can
+// change the answer source or its verification policy.
+func (r *Resolver) CacheIdentity() string {
+	if r == nil || r.endpoint == nil {
+		return "system"
+	}
+	ep := r.endpoint
+	value := fmt.Sprintf("%s|%s|%d|%s|%s|%s|%s|%t|%s|%d|%d|%t|",
+		ep.Transport, ep.ConnectHost, ep.Port, ep.Path, ep.RawPath, ep.RawQuery,
+		ep.TLSServerName, ep.VerifyTLS, ep.Security, r.tlsMin, r.tlsMax, r.insecure)
+	for _, address := range ep.BootstrapAddrs {
+		value += address.String() + ","
+	}
+	for _, cert := range r.caCerts {
+		if cert != nil {
+			sum := sha256.Sum256(cert.Raw)
+			value += hex.EncodeToString(sum[:]) + ","
+		}
+	}
+	sum := sha256.Sum256([]byte(value))
+	return string(ep.Transport) + ":" + hex.EncodeToString(sum[:])
 }
 
 // NetResolver returns a net.Resolver for system or UDP DNS resolution. DoH,
