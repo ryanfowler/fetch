@@ -109,6 +109,7 @@ prettier -w .
 - SSE and NDJSON use bounded, chunk-safe streaming parsers; automatic compression retries compressed SSE once for safe GET/HEAD requests.
 - `-v --help` renders the embedded Markdown CLI reference and uses the configured pager. Pager commands are parsed without a shell, and `NO_PAGER` disables automatic paging.
 - Build information includes target OS/architecture and Go settings; dependency versions appear with `--buildinfo -v`. Ctrl-C exits with status 130, and broken-pipe output exits cleanly.
+- Release archives are Go-built for Linux, macOS, and Windows targets with `CGO_ENABLED=0`; Unix archives have lowercase SHA-256 sidecars. `install.sh` verifies the sidecar before bounded extraction, stages inside the destination, validates `--version`, and atomically renames the staged executable without following symlink targets.
 5. HTTP client executes request
 6. Response formatted based on Content-Type and output to stdout (optionally via pager)
 
