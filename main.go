@@ -658,6 +658,9 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 	}
 
 	warnIgnoredInspectionFlags(p, inspectionTLS, ignoredInspectionFlags(app, inspectionTLS), getValue(app.Cfg.Silent))
+	if getVerbosity(app) >= core.VDebug && client.ECHDiscoveryNeedsResolverWarning(app.Cfg.ECH, app.URL, app.Cfg.DNSEndpoint, getValue(app.Cfg.Insecure)) {
+		core.WriteWarningMsgIf(p, "ECH discovery is using a DNS resolver whose transport is not authenticated; the resolver can observe or alter the HTTPS record", getValue(app.Cfg.Silent))
+	}
 
 	// Parse client certificate for mTLS.
 	clientCert, err := app.Cfg.ClientCert()

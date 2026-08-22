@@ -128,6 +128,9 @@ func (a *App) markCurlOptions(r *curl.Result) {
 	if r.Insecure {
 		a.markCurlOption("insecure")
 	}
+	if r.ECH != "" {
+		a.markCurlOption("ech")
+	}
 	if r.TLSVersion != "" {
 		a.markCurlOption("min-tls")
 	}

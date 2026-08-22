@@ -521,7 +521,7 @@ func formatSVCParam(param dnsmessage.SVCParam) string {
 	case dnsmessage.SVCParamNoDefaultALPN:
 		return param.Key.String()
 	case dnsmessage.SVCParamECH:
-		return param.Key.String() + "=" + base64.StdEncoding.EncodeToString(param.Value)
+		return "ECH=" + base64.StdEncoding.EncodeToString(param.Value)
 	case dnsmessage.SVCParamPort:
 		if len(param.Value) != 2 {
 			return fmt.Sprintf("%s=0x%s", param.Key.String(), hex.EncodeToString(param.Value))

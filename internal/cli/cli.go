@@ -716,6 +716,17 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		v := true
 		a.Cfg.Insecure = &v
 	}
+	if r.ECH != "" {
+		mode := r.ECH
+		if mode == "hard" || mode == "true" {
+			mode = "on"
+		} else if mode == "false" {
+			mode = "off"
+		}
+		if err := a.Cfg.ParseECH(mode); err != nil {
+			return err
+		}
+	}
 	if r.TLSVersion != "" {
 		if err := a.Cfg.ParseTLS(r.TLSVersion); err != nil {
 			return err

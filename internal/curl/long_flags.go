@@ -165,6 +165,18 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		}
 		r.Key = v
 		return n, nil
+	case "ech":
+		v, n, err := consumeArg()
+		if err != nil {
+			return 0, fmt.Errorf("--ech requires an argument")
+		}
+		switch strings.ToLower(v) {
+		case "hard", "true", "auto", "false":
+			r.ECH = strings.ToLower(v)
+		default:
+			return 0, fmt.Errorf("unsupported curl --ech value %q (expected hard, true, auto, or false)", v)
+		}
+		return n, nil
 	case "tlsv1":
 		r.TLSVersion = "1.0"
 		return 0, nil

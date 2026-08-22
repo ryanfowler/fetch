@@ -182,8 +182,11 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	if r.GRPC {
 		applyGRPCDefaults(r)
 	}
-	if r.WS && r.ECH != core.ECHUnknown && r.ECH != core.ECHOff {
-		return 0, errors.New("ECH is not available for WebSocket connections")
+	// ECH discovery can be confidential only when the resolver transport is
+	// authenticated. Emit this diagnostic once here, before retries and
+	// redirects, rather than from each connection attempt.
+	if r.Verbosity >= core.VDebug && client.ECHDiscoveryNeedsWarning(r.ECH, r.URL, r.ResolverEndpoint, r.Insecure, r.Proxy) {
+		core.WriteWarningMsgIf(r.PrinterHandle.Stderr(), "ECH discovery is using a DNS resolver whose transport is not authenticated; the resolver can observe or alter the HTTPS record", r.Verbosity == core.VSilent)
 	}
 
 	// 1. Create the HTTP client.

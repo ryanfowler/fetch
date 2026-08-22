@@ -281,7 +281,8 @@ validated advertised ECH configuration when one is available. Authenticated
 DNS discovery failures are not silently downgraded. `on` requires a usable
 advertised configuration, rejects explicit HTTP/3, and uses TCP with automatic
 HTTP version selection. ECH requires TLS 1.3; explicit TLS 1.2 bounds are a
-configuration error. ECH is not available through proxies or cleartext HTTP/2.
+configuration error. WSS and TLS inspection use the same ECH discovery and
+handshake reporting. ECH is not available through proxies or cleartext HTTP/2.
 
 ### `--har PATH`
 
@@ -510,7 +511,7 @@ fetch --min-tls 1.2 --max-tls 1.2 example.com
 
 ### `--inspect-tls`
 
-Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. With `--http 3`, inspection uses a QUIC handshake and offers `h3` ALPN. HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning.
+Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. With `--http 3`, inspection uses a QUIC handshake and offers `h3` ALPN. When ECH is enabled, inspection also reports the real or GREASE offer, acceptance or rejection, fallback status, and outer SNI. HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning.
 
 ```sh
 fetch --inspect-tls example.com
@@ -733,7 +734,7 @@ fetch --from-curl 'https://example.com'
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Request      | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G`                                         |
 | Auth         | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                            |
-| TLS          | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`                                                                             |
+| TLS          | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`, `--ech hard|true|auto|false`                                         |
 | Output       | `-o`, `-O`, `-J`                                                                                                                              |
 | Network      | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r`            |
 | HTTP version | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                                       |
