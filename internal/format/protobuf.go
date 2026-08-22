@@ -2,6 +2,7 @@ package format
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 	"unicode"
 	"unicode/utf8"
@@ -18,11 +19,22 @@ import (
 
 // FormatProtobuf formats the provided raw protobuf data to the Printer.
 func FormatProtobuf(buf []byte, p *core.Printer) error {
-	err := formatProtobuf(buf, p, 0)
+	// Format into a private printer first. Besides preventing partial output on
+	// malformed input, this gives the schema-less formatter one bounded output
+	// surface before it is appended to the caller's printer.
+	out := p.NewWriter(io.Discard)
+	bounded := &boundedProtobufPrinter{p: out, max: core.MaxFormattedBodyBytes}
+	state := protobufFormatState{}
+	err := formatProtobuf(buf, bounded, 0, 0, &state)
+	if err == nil {
+		err = bounded.err
+	}
 	if err != nil {
 		p.Discard()
+		return err
 	}
-	return err
+	_, _ = p.Write(out.Bytes())
+	return nil
 }
 
 // FormatProtobufWithSchema formats protobuf data as JSON using the provided schema.
@@ -59,8 +71,72 @@ func FormatProtobufWithDescriptor(buf []byte, md protoreflect.MessageDescriptor,
 	return FormatJSON(jsonBytes, p)
 }
 
-func formatProtobuf(buf []byte, p *core.Printer, indent int) error {
+type protobufFormatState struct {
+	fields int
+}
+
+// protobufOutput is the small part of Printer used by the schema-less
+// formatter. Keeping this interface also lets the existing formatting helpers
+// remain directly testable with a normal Printer.
+type protobufOutput interface {
+	Set(core.Sequence)
+	Reset()
+	WriteString(string) (int, error)
+	WriteRune(rune) (int, error)
+}
+
+// boundedProtobufPrinter prevents a descriptor-less message from expanding
+// the output buffer without limit. Printer itself intentionally has no size
+// policy, so the formatter applies one at its deepest write boundary.
+type boundedProtobufPrinter struct {
+	p   *core.Printer
+	max int64
+	err error
+}
+
+func (w *boundedProtobufPrinter) reserve(n int) bool {
+	if w.err != nil {
+		return false
+	}
+	if n < 0 || int64(len(w.p.Bytes())) > w.max-int64(n) {
+		w.err = core.LimitError{Subsystem: "schema-less protobuf output", Limit: w.max}
+		return false
+	}
+	return true
+}
+
+func (w *boundedProtobufPrinter) Set(s core.Sequence) {
+	if w.reserve(len(string(s)) + 3) {
+		w.p.Set(s)
+	}
+}
+
+func (w *boundedProtobufPrinter) Reset() { w.Set(core.Sequence("0")) }
+
+func (w *boundedProtobufPrinter) WriteString(s string) (int, error) {
+	if !w.reserve(len(s)) {
+		return 0, w.err
+	}
+	return w.p.WriteString(s)
+}
+
+func (w *boundedProtobufPrinter) WriteRune(r rune) (int, error) {
+	n := utf8.RuneLen(r)
+	if n < 0 {
+		n = 3
+	}
+	if !w.reserve(n) {
+		return 0, w.err
+	}
+	return w.p.WriteRune(r)
+}
+
+func formatProtobuf(buf []byte, p protobufOutput, indent, depth int, state *protobufFormatState) error {
 	for len(buf) > 0 {
+		state.fields++
+		if state.fields > core.MaxSchemaLessProtobufFields {
+			return core.LimitError{Subsystem: "schema-less protobuf fields", Limit: core.MaxSchemaLessProtobufFields}
+		}
 		num, wtype, n := protowire.ConsumeTag(buf)
 		if n < 0 {
 			return protowire.ParseError(n)
@@ -112,10 +188,10 @@ func formatProtobuf(buf []byte, p *core.Printer, indent int) error {
 			buf = buf[n:]
 
 			// Try to parse as nested message.
-			if isValidProtobuf(v) {
+			if depth < core.MaxNestingDepth && isValidProtobuf(v) {
 				writeWireType(p, "message")
 				p.WriteString(" {\n")
-				err := formatProtobuf(v, p, indent+1)
+				err := formatProtobuf(v, p, indent+1, depth+1, state)
 				if err != nil {
 					return err
 				}
@@ -192,7 +268,7 @@ func isPrintableBytes(b []byte) bool {
 	return true
 }
 
-func writeFieldNumber(p *core.Printer, num protowire.Number) {
+func writeFieldNumber(p protobufOutput, num protowire.Number) {
 	p.Set(core.Blue)
 	p.Set(core.Bold)
 	p.WriteString(strconv.FormatInt(int64(num), 10))
@@ -200,7 +276,7 @@ func writeFieldNumber(p *core.Printer, num protowire.Number) {
 	p.WriteString(":")
 }
 
-func writeWireType(p *core.Printer, wtype string) {
+func writeWireType(p protobufOutput, wtype string) {
 	p.WriteString(" ")
 	p.Set(core.Dim)
 	p.WriteString("(")
@@ -209,7 +285,7 @@ func writeWireType(p *core.Printer, wtype string) {
 	p.Reset()
 }
 
-func writeProtobufString(p *core.Printer, s string) {
+func writeProtobufString(p protobufOutput, s string) {
 	p.WriteString("\"")
 	p.Set(core.Green)
 	for _, c := range s {
@@ -226,7 +302,7 @@ func writeProtobufString(p *core.Printer, s string) {
 			p.WriteString(`\\`)
 		default:
 			if c < 0x20 || c == 0x7f {
-				fmt.Fprintf(p, "\\u%04x", c)
+				p.WriteString(fmt.Sprintf("\\u%04x", c))
 			} else {
 				p.WriteRune(c)
 			}
@@ -236,7 +312,7 @@ func writeProtobufString(p *core.Printer, s string) {
 	p.WriteString("\"")
 }
 
-func writeProtobufBytes(p *core.Printer, b []byte) {
+func writeProtobufBytes(p protobufOutput, b []byte) {
 	p.Set(core.Yellow)
 	p.WriteString("<")
 	for i, byt := range b {
