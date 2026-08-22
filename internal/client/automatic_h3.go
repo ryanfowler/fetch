@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"sort"
 	"strconv"
@@ -32,32 +33,36 @@ const (
 // together. It only sends the request after one complete TCP/TLS or QUIC/H3
 // setup has won, so a raced request is never sent twice.
 type automaticHTTP3Transport struct {
-	fallback      *http.Transport
-	resolver      *resolver.Resolver
-	dialer        *ResolverDialer
-	tlsConfig     *tls.Config
-	connectLimit  time.Duration
-	cache         *automaticH3Cache
-	persistent    *persistentH3Cache
-	mu            sync.Mutex
-	tcpTransports map[string]*http.Transport
-	h3Transports  map[string]*http3.Transport
-	h3Packets     map[string]net.PacketConn
+	fallback              *http.Transport
+	resolver              *resolver.Resolver
+	dialer                *ResolverDialer
+	tlsConfig             *tls.Config
+	connectLimit          time.Duration
+	cache                 *automaticH3Cache
+	persistent            *persistentH3Cache
+	mu                    sync.Mutex
+	tcpTransports         map[string]*http.Transport
+	h3Transports          map[string]*http3.Transport
+	h3TransportCandidates map[string]automaticH3Candidate
+	h3Packets             map[string]net.PacketConn
+	altSvcSlots           chan struct{}
 }
 
 func newAutomaticHTTP3Transport(fallback *http.Transport, res *resolver.Resolver, connectTimeout time.Duration, tlsConfig *tls.Config) http.RoundTripper {
 	persistent := newPersistentH3Cache()
 	return &automaticHTTP3Transport{
-		fallback:      fallback,
-		resolver:      res,
-		dialer:        NewResolverDialer(res, connectTimeout),
-		tlsConfig:     tlsConfig,
-		connectLimit:  connectTimeout,
-		cache:         newAutomaticH3CacheWithPersistent(persistent),
-		persistent:    persistent,
-		tcpTransports: make(map[string]*http.Transport),
-		h3Transports:  make(map[string]*http3.Transport),
-		h3Packets:     make(map[string]net.PacketConn),
+		fallback:              fallback,
+		resolver:              res,
+		dialer:                NewResolverDialer(res, connectTimeout),
+		tlsConfig:             tlsConfig,
+		connectLimit:          connectTimeout,
+		cache:                 newAutomaticH3CacheWithPersistent(persistent),
+		persistent:            persistent,
+		tcpTransports:         make(map[string]*http.Transport),
+		h3Transports:          make(map[string]*http3.Transport),
+		h3TransportCandidates: make(map[string]automaticH3Candidate),
+		h3Packets:             make(map[string]net.PacketConn),
+		altSvcSlots:           make(chan struct{}, 8),
 	}
 }
 
@@ -432,12 +437,29 @@ func (t *automaticHTTP3Transport) RoundTrip(req *http.Request) (*http.Response, 
 	tcpTransport := t.tcpTransports[key]
 	t.mu.Unlock()
 	if h3Transport != nil {
-		resp, err := h3Transport.RoundTrip(req)
-		if err == nil || !automaticRequestCanFallback(req) {
-			return resp, err
+		resp, err := roundTripHTTP3(h3Transport, req)
+		if err == nil {
+			return resp, nil
+		}
+		t.mu.Lock()
+		candidate := t.h3TransportCandidates[key]
+		t.mu.Unlock()
+		var bodyErr *HTTP3RequestBodyError
+		if errors.As(err, &bodyErr) || (req != nil && req.Context().Err() != nil) {
+			return nil, err
 		}
 		t.removeH3Transport(key, h3Transport)
-		return t.RoundTrip(req)
+		if candidate.port != 0 && !suppressH3Candidate(req, err) {
+			t.cache.remove(candidate, key)
+		}
+		if !automaticRequestCanFallback(req) {
+			return nil, err
+		}
+		retryReq, replayErr := replayAutomaticRequest(req)
+		if replayErr != nil {
+			return nil, replayErr
+		}
+		return t.RoundTrip(retryReq)
 	}
 	if tcpTransport != nil {
 		return tcpTransport.RoundTrip(req)
@@ -657,16 +679,50 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 		conn   *quic.Conn
 		packet net.PacketConn
 	}
+	trace := httptrace.ContextClientTrace(ctx)
 	winner, err := resolver.RaceCandidates(ctx, candidate.addresses, func(attemptCtx context.Context, ip net.IPAddr) (result, error) {
+		address := net.JoinHostPort(ip.IP.String(), strconv.Itoa(int(candidate.port)))
+		if trace != nil && trace.ConnectStart != nil {
+			trace.ConnectStart("udp", address)
+		}
 		var listen net.ListenConfig
 		packet, err := listen.ListenPacket(attemptCtx, "udp", ":0")
 		if err != nil {
+			if trace != nil && trace.ConnectDone != nil {
+				trace.ConnectDone("udp", address, err)
+			}
 			return result{}, err
 		}
+		if trace != nil && trace.TLSHandshakeStart != nil {
+			trace.TLSHandshakeStart()
+		}
 		conn, err := quic.DialEarly(attemptCtx, packet, &net.UDPAddr{IP: ip.IP, Port: int(candidate.port), Zone: ip.Zone}, tlsConfig, qcfg)
+		if err == nil {
+			select {
+			case <-conn.HandshakeComplete():
+			case <-attemptCtx.Done():
+				err = context.Cause(attemptCtx)
+			}
+		}
+		if trace != nil && trace.TLSHandshakeDone != nil {
+			var state tls.ConnectionState
+			if conn != nil && err == nil {
+				state = conn.ConnectionState().TLS
+			}
+			trace.TLSHandshakeDone(state, err)
+		}
 		if err != nil {
+			if conn != nil {
+				_ = conn.CloseWithError(0, "HTTP/3 handshake failed")
+			}
 			_ = packet.Close()
+			if trace != nil && trace.ConnectDone != nil {
+				trace.ConnectDone("udp", address, err)
+			}
 			return result{}, err
+		}
+		if trace != nil && trace.ConnectDone != nil {
+			trace.ConnectDone("udp", address, nil)
 		}
 		return result{conn: conn, packet: packet}, nil
 	}, func(loser result) {
@@ -679,6 +735,9 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	if trace != nil && trace.GotConn != nil {
+		trace.GotConn(httptrace.GotConnInfo{Conn: traceAddrConn{remote: winner.conn.RemoteAddr()}})
 	}
 	return winner.conn, winner.packet, nil
 }
@@ -722,17 +781,17 @@ func (t *automaticHTTP3Transport) roundTripTCP(req *http.Request, prepared prepa
 	t.mu.Unlock()
 	resp, err := rt.RoundTrip(req)
 	if resp != nil && resp.Header != nil {
-		t.recordAltSvc(req.Context(), req.URL, resp.Header.Get("Alt-Svc"))
+		t.scheduleAltSvc(req.Context(), req.URL, resp.Header.Get("Alt-Svc"))
 	}
 	return resp, err
 }
 
 func (t *automaticHTTP3Transport) roundTripH3(req *http.Request, prepared preparedAutomaticConnection, key string) (*http.Response, error) {
+	candidate := prepared.candidate
 	t.mu.Lock()
 	h3 := t.h3Transports[key]
 	if h3 == nil {
 		first := prepared.h3
-		candidate := prepared.candidate
 		h3 = &http3.Transport{
 			DisableCompression: true,
 			TLSClientConfig:    t.tlsConfig.Clone(),
@@ -751,6 +810,7 @@ func (t *automaticHTTP3Transport) roundTripH3(req *http.Request, prepared prepar
 			},
 		}
 		t.h3Transports[key] = h3
+		t.h3TransportCandidates[key] = candidate
 		t.h3Packets[key] = prepared.packet
 		t.evictTransportOriginLocked(key)
 	} else {
@@ -758,18 +818,36 @@ func (t *automaticHTTP3Transport) roundTripH3(req *http.Request, prepared prepar
 		_ = prepared.packet.Close()
 	}
 	t.mu.Unlock()
-	resp, err := h3.RoundTrip(req)
+	resp, err := roundTripHTTP3(h3, req)
 	if err != nil {
+		var bodyErr *HTTP3RequestBodyError
+		if errors.As(err, &bodyErr) || (req != nil && req.Context().Err() != nil) {
+			return nil, err
+		}
 		t.removeH3Transport(key, h3)
+		if !suppressH3Candidate(req, err) {
+			t.cache.remove(candidate, key)
+		}
 		if automaticRequestCanFallback(req) {
-			return t.fallback.RoundTrip(req)
+			fallbackReq, replayErr := replayAutomaticRequest(req)
+			if replayErr != nil {
+				return nil, replayErr
+			}
+			return t.fallback.RoundTrip(fallbackReq)
 		}
 		return nil, err
 	}
 	if resp != nil && resp.Header != nil {
-		t.recordAltSvc(req.Context(), req.URL, resp.Header.Get("Alt-Svc"))
+		t.scheduleAltSvc(req.Context(), req.URL, resp.Header.Get("Alt-Svc"))
 	}
 	return resp, nil
+}
+
+func suppressH3Candidate(req *http.Request, err error) bool {
+	if req != nil && req.Context().Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
 }
 
 func automaticRequestCanFallback(req *http.Request) bool {
@@ -777,6 +855,26 @@ func automaticRequestCanFallback(req *http.Request) bool {
 		return false
 	}
 	return req.Method == http.MethodGet || req.Method == http.MethodHead
+}
+
+// replayAutomaticRequest returns a request with an independent body for a
+// policy-approved fallback. Bodyless requests are returned unchanged. Keeping
+// this helper explicit prevents a future fallback path from accidentally
+// reusing a stream already consumed by QUIC.
+func replayAutomaticRequest(req *http.Request) (*http.Request, error) {
+	if req == nil || req.Body == nil || req.Body == http.NoBody {
+		return req, nil
+	}
+	if req.GetBody == nil {
+		return nil, errors.New("HTTP/3 fallback requires a replayable request body")
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return nil, fmt.Errorf("replay request body for HTTP/3 fallback: %w", err)
+	}
+	copy := req.Clone(req.Context())
+	copy.Body = body
+	return copy, nil
 }
 
 // evictTransportOriginLocked bounds retained per-origin transports. It is
@@ -791,6 +889,7 @@ func (t *automaticHTTP3Transport) evictTransportOriginLocked(exclude string) {
 			continue
 		}
 		delete(t.h3Transports, key)
+		delete(t.h3TransportCandidates, key)
 		packet := t.h3Packets[key]
 		delete(t.h3Packets, key)
 		_ = transport.Close()
@@ -826,6 +925,7 @@ func (t *automaticHTTP3Transport) removeH3Transport(key string, transport *http3
 		return
 	}
 	delete(t.h3Transports, key)
+	delete(t.h3TransportCandidates, key)
 	packet := t.h3Packets[key]
 	delete(t.h3Packets, key)
 	t.mu.Unlock()
@@ -866,6 +966,24 @@ func parsePort(value string) int {
 		return 443
 	}
 	return port
+}
+
+func (t *automaticHTTP3Transport) scheduleAltSvc(ctx context.Context, origin *url.URL, header string) {
+	if t == nil || strings.TrimSpace(header) == "" || origin == nil {
+		return
+	}
+	select {
+	case t.altSvcSlots <- struct{}{}:
+	default:
+		// Alt-Svc is an optimization. Never make response delivery wait for
+		// DNS or cache maintenance, and never create an unbounded goroutine
+		// backlog when a server sends it on every response.
+		return
+	}
+	go func() {
+		defer func() { <-t.altSvcSlots }()
+		t.recordAltSvc(ctx, origin, header)
+	}()
 }
 
 func (t *automaticHTTP3Transport) recordAltSvc(ctx context.Context, origin *url.URL, header string) {
