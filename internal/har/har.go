@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -354,7 +355,7 @@ func buildEntry(resp *http.Response, response *ResponseCapture, timings Timings)
 		if requestOmitted {
 			requestObject.PostData.Comment = BodyOmittedComment
 		} else {
-			requestObject.PostData.setBody(requestBody)
+			requestObject.PostData.setBody(requestBody, isBinaryMIME(request.request.Header.Get("Content-Type")))
 		}
 	}
 
@@ -362,7 +363,7 @@ func buildEntry(resp *http.Response, response *ResponseCapture, timings Timings)
 		Status:      resp.StatusCode,
 		StatusText:  statusText(resp),
 		HTTPVersion: resp.Proto,
-		Headers:     responseHeaders(resp.Header),
+		Headers:     responseHeadersWithTrailers(resp),
 		Cookies:     responseCookies(resp),
 		HeadersSize: -1,
 		BodySize:    timings.TransferSize,
@@ -372,7 +373,7 @@ func buildEntry(resp *http.Response, response *ResponseCapture, timings Timings)
 	if responseOmitted {
 		responseObject.Content.Comment = BodyOmittedComment
 	} else {
-		responseObject.Content.setBody(responseBody)
+		responseObject.Content.setBody(responseBody, isBinaryMIME(resp.Header.Get("Content-Type")))
 	}
 	if responseObject.HTTPVersion == "" {
 		responseObject.HTTPVersion = requestVersion
@@ -465,6 +466,22 @@ func requestHeaders(req *http.Request) []NameValue {
 }
 
 func responseHeaders(h http.Header) []NameValue { return headers(h) }
+
+func responseHeadersWithTrailers(resp *http.Response) []NameValue {
+	if resp == nil {
+		return []NameValue{}
+	}
+	out := responseHeaders(resp.Header)
+	// HAR 1.2 has no separate trailer field. Preserve trailers as additional
+	// response header entries; this keeps grpc-status/grpc-message and custom
+	// trailers available without pretending they were initial headers.
+	for name, values := range resp.Trailer {
+		for _, value := range values {
+			out = append(out, NameValue{Name: name, Value: value})
+		}
+	}
+	return out
+}
 
 func headers(h http.Header) []NameValue {
 	if len(h) == 0 {
@@ -584,16 +601,16 @@ type TimingsHAR struct {
 	Receive float64 `json:"receive"`
 }
 
-func (p *PostData) setBody(data []byte) {
-	if isText(data) {
+func (p *PostData) setBody(data []byte, forceBinary bool) {
+	if !forceBinary && isText(data) {
 		p.Text = string(data)
 		return
 	}
 	p.Text = base64.StdEncoding.EncodeToString(data)
 	p.Encoding = "base64"
 }
-func (c *Content) setBody(data []byte) {
-	if isText(data) {
+func (c *Content) setBody(data []byte, forceBinary bool) {
+	if !forceBinary && isText(data) {
 		c.Text = string(data)
 		return
 	}
@@ -602,4 +619,13 @@ func (c *Content) setBody(data []byte) {
 }
 func isText(data []byte) bool {
 	return utf8.Valid(data)
+}
+
+func isBinaryMIME(value string) bool {
+	mediaType, _, err := mime.ParseMediaType(value)
+	if err != nil {
+		mediaType = strings.TrimSpace(strings.ToLower(strings.SplitN(value, ";", 2)[0]))
+	}
+	mediaType = strings.ToLower(mediaType)
+	return strings.HasPrefix(mediaType, "application/grpc")
 }

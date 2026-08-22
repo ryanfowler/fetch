@@ -221,16 +221,34 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	// 3. Resolve any proto schema and configure gRPC descriptors.
 	var schema *iproto.Schema
 	var requestDesc protoreflect.MessageDescriptor
-	var isClientStreaming bool
-	if r.GRPC && !r.DryRun {
+	var isClientStreaming, isServerStreaming bool
+	if r.GRPC {
 		var err error
+		// Local descriptors are useful during dry-run because they let us show
+		// the same framed/converted request that a real call would send. A
+		// schema-less dry-run must not perform reflection network I/O; binary
+		// input can still be framed, while JSON input is rejected below because
+		// its conversion is impossible without a descriptor.
 		schema, err = resolveCallSchema(ctx, r, c)
 		if err != nil {
 			return 0, err
 		}
-		requestDesc, r.responseDescriptor, isClientStreaming, err = setupGRPC(r, schema)
+		requestDesc, r.responseDescriptor, isClientStreaming, isServerStreaming, err = setupGRPC(r, schema)
 		if err != nil {
-			return 0, err
+			// Reflection is advisory for a binary schema-less call. A
+			// descriptor set that does not contain the requested method must
+			// not prevent the raw framed request from being sent. JSON input
+			// still requires a usable descriptor for conversion.
+			if requiresGRPCSchema(r) {
+				return 0, err
+			}
+			schema = nil
+			requestDesc = nil
+			r.responseDescriptor = nil
+			isClientStreaming, isServerStreaming = false, false
+		}
+		if r.harRecorder != nil && (schema == nil || requestDesc == nil || isClientStreaming || isServerStreaming) {
+			return 0, errors.New("--har for gRPC requires a positively identified unary method")
 		}
 	}
 
@@ -279,21 +297,25 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}
 
-	// 6. Convert and frame gRPC request AFTER edit. Dry-run frames known-length
-	// replayable bodies lazily, but it must not consume stdin while preparing a
-	// request that will not be sent.
-	if r.GRPC && r.DryRun {
-		source, _ := body.SourceFromContext(req.Context())
-		framed, err := dryRunGRPCBody(source)
-		if err != nil {
-			return 0, err
-		}
-		if framed != nil && framed != source {
-			body.Attach(req, framed)
-		}
-	} else if r.GRPC {
-		if isClientStreaming && requestDesc != nil {
-			// Client/bidi streaming: stream multiple JSON objects as gRPC frames.
+	// 6. Convert and frame gRPC request AFTER edit. Protocol conversion is
+	// the one dry-run path that may consume a one-shot source: without reading
+	// it there is no way to show the effective protobuf frame. The shared
+	// materialization cap guarantees that this happens once and remains
+	// bounded. Raw binary dry-runs materialize only when framing requires a
+	// lengthless source.
+	if r.GRPC {
+		if isClientStreaming && requestDesc != nil && requiresGRPCSchema(r) {
+			if r.DryRun {
+				// A replayable file can be converted directly through the
+				// streaming factory. Materialize only a one-shot source so the
+				// preview can open the converted stream without consuming it
+				// twice.
+				if err := materializeGRPCDryRunBody(req); err != nil {
+					return 0, err
+				}
+			}
+			// Client/bidi streaming JSON: convert multiple objects to separate
+			// gRPC frames while preserving backpressure.
 			if req.Body != nil && req.Body != http.NoBody {
 				setStreamingGRPCBody(req, requestDesc)
 			} else {
@@ -302,19 +324,29 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 				req.GetBody = nil
 			}
 		} else {
-			// Unary / server-streaming: existing single-message path.
-			if requestDesc != nil && req.Body != nil && req.Body != http.NoBody {
+			// Unary / server-streaming: convert JSON with the descriptor, then
+			// frame one protobuf message.
+			if requestDesc != nil && requiresGRPCSchema(r) && req.Body != nil && req.Body != http.NoBody {
 				converted, err := convertJSONToProtobuf(req.Body, requestDesc)
 				if err != nil {
 					return 0, err
 				}
 				setReplayableBody(req, converted)
 			}
-			framed, err := frameGRPCRequest(req.Body)
-			if err != nil {
-				return 0, err
+			if r.DryRun {
+				source, _ := body.SourceFromContext(req.Context())
+				framed, err := dryRunGRPCBody(source)
+				if err != nil {
+					return 0, err
+				}
+				body.Attach(req, framed)
+			} else {
+				framed, err := frameGRPCRequest(req.Body)
+				if err != nil {
+					return 0, err
+				}
+				setReplayableBody(req, framed)
 			}
-			setReplayableBody(req, framed)
 		}
 	}
 

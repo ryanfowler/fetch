@@ -766,6 +766,15 @@ func resolveCallSchema(ctx context.Context, r *Request, c *client.Client) (*ipro
 	if r.URL == nil {
 		return nil, nil
 	}
+	// Dry-run must not make a reflection request. A binary body can be framed
+	// without a descriptor, but JSON-to-protobuf conversion cannot. Return a
+	// local, actionable error before any network activity in that case.
+	if r.DryRun {
+		if requiresGRPCSchema(r) {
+			return nil, &reflectionUnavailableError{err: errors.New("JSON gRPC request conversion requires a local schema during dry-run")}
+		}
+		return nil, nil
+	}
 	serviceName, _, err := parseGRPCPath(r.URL.Path)
 	if err != nil {
 		return nil, err

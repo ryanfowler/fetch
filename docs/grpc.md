@@ -150,6 +150,13 @@ When no local schema is provided:
 
 If reflection is unavailable and you need schema-aware behavior, pass `--proto-file` or `--proto-desc`.
 
+A schema-less binary request is still sent as one gRPC-framed message when
+reflection fails. A schema-less JSON request fails before the application
+request is sent because JSON conversion needs a descriptor. Dry-run does not
+perform reflection network requests. With a local schema, dry-run performs the
+same bounded JSON-to-protobuf conversion as a real call and previews the
+framed request; conversion input is limited to 16 MiB.
+
 ## Request Bodies
 
 ### JSON to Protobuf
@@ -463,6 +470,12 @@ cat messages.ndjson | fetch --grpc --proto-file service.proto \
 ```
 
 Both directions flow on the same HTTP/2 stream. The response is formatted and displayed as messages arrive, just like server streaming.
+
+`--har PATH` records unary gRPC calls. Framed request and response bodies are
+stored as base64, and gRPC trailers are preserved as response header entries.
+HAR is rejected for client-, server-, and bidirectional streaming calls when a
+schema identifies the method, because an unbounded stream cannot be represented
+by the bounded unary capture.
 
 ## Limitations
 

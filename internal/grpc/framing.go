@@ -11,15 +11,36 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
+// CheckedFrameLength validates the message length and returns the complete
+// wire-frame length. Keeping the addition here prevents every framing caller
+// from having to repeat overflow checks before allocating or writing headers.
+func CheckedFrameLength(messageLength int64) (int64, error) {
+	if messageLength < 0 {
+		return 0, fmt.Errorf("gRPC message length is negative: %d", messageLength)
+	}
+	if messageLength > MaxMessageSize {
+		return 0, fmt.Errorf("gRPC message too large: %d bytes", messageLength)
+	}
+	if uint64(messageLength) > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("gRPC message length overflows the frame header: %d bytes", messageLength)
+	}
+	maxInt64 := int64(^uint64(0) >> 1)
+	if messageLength > maxInt64-5 {
+		return 0, fmt.Errorf("gRPC frame length overflows int: %d bytes", messageLength)
+	}
+	return messageLength + 5, nil
+}
+
 // Frame wraps a valid message in gRPC length-prefixed format.
 // Format: [compressed:1][length:4][data]. It returns nil when data cannot
 // be represented by a strict gRPC frame; callers that need the reason should
 // use FrameChecked.
 func Frame(data []byte, compressed bool) []byte {
-	if int64(len(data)) > MaxMessageSize || uint64(len(data)) > uint64(^uint32(0)) {
+	frameLength, err := CheckedFrameLength(int64(len(data)))
+	if err != nil {
 		return nil
 	}
-	buf := make([]byte, 5+len(data))
+	buf := make([]byte, int(frameLength))
 	if compressed {
 		buf[0] = 1
 	} else {
@@ -40,11 +61,8 @@ const maxMessageSize = MaxMessageSize
 // messages that cannot be represented by the wire format or exceed the
 // configured message limit.
 func FrameChecked(data []byte, compressed bool) ([]byte, error) {
-	if int64(len(data)) > MaxMessageSize {
-		return nil, fmt.Errorf("gRPC message too large: %d bytes", len(data))
-	}
-	if uint64(len(data)) > uint64(^uint32(0)) {
-		return nil, fmt.Errorf("gRPC message length overflows the frame header: %d bytes", len(data))
+	if _, err := CheckedFrameLength(int64(len(data))); err != nil {
+		return nil, err
 	}
 	return Frame(data, compressed), nil
 }

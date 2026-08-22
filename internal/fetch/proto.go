@@ -69,27 +69,32 @@ func parseGRPCPath(urlPath string) (serviceName, methodName string, err error) {
 }
 
 // setupGRPC configures request for gRPC protocol.
-// Returns request/response descriptors, whether the method is client-streaming, and any error.
-func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor, protoreflect.MessageDescriptor, bool, error) {
+// Returns request/response descriptors, whether the method is client- or
+// server-streaming, and any error. The streaming information is kept separate
+// from the descriptors because a schema-less binary call can still be sent
+// when reflection is unavailable, but a bounded HAR capture cannot safely
+// assume that such a call is unary.
+func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor, protoreflect.MessageDescriptor, bool, bool, error) {
 	var requestDesc, responseDesc protoreflect.MessageDescriptor
-	var isClientStreaming bool
+	var isClientStreaming, isServerStreaming bool
 	if schema != nil && r.URL != nil {
 		serviceName, methodName, err := parseGRPCPath(r.URL.Path)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, false, false, err
 		}
 
 		fullMethod := serviceName + "/" + methodName
 		method, err := schema.FindMethod(fullMethod)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, false, false, err
 		}
 		requestDesc = method.Input()
 		responseDesc = method.Output()
 		isClientStreaming = method.IsStreamingClient()
+		isServerStreaming = method.IsStreamingServer()
 	}
 
-	return requestDesc, responseDesc, isClientStreaming, nil
+	return requestDesc, responseDesc, isClientStreaming, isServerStreaming, nil
 }
 
 // convertJSONToProtobuf converts JSON body to protobuf.
@@ -113,10 +118,36 @@ func convertJSONToProtobuf(data io.ReadCloser, desc protoreflect.MessageDescript
 	return protoData, nil
 }
 
-// dryRunGRPCBody adds the five-byte gRPC frame header lazily. Replayable
-// sources remain streamable and files are not materialized just to display a
-// preview. One-shot sources are retained as one-shot and are not opened by
-// dry-run's preview path.
+// materializeGRPCDryRunBody makes protocol conversion deterministic without
+// opening a request source more than once. It is intentionally called only
+// when a descriptor is available and JSON must be converted; raw binary
+// dry-runs remain one-shot and lazy.
+func materializeGRPCDryRunBody(req *http.Request) error {
+	if req == nil || req.Body == nil || req.Body == http.NoBody {
+		return nil
+	}
+	source, ok := body.SourceFromContext(req.Context())
+	if !ok || source == nil {
+		return errors.New("gRPC request body source is unavailable")
+	}
+	if source.Replayable() {
+		return nil
+	}
+	if _, err := source.Materialize(core.MaxCompositeMaterialization); err != nil {
+		return fmt.Errorf("failed to materialize gRPC request body for dry-run: %w", err)
+	}
+	// Materialize changes the source to replayable, but req.GetBody still
+	// reflects the pre-materialization one-shot state. Reattach it so the
+	// streaming conversion and preview use the same replay contract.
+	body.Attach(req, source)
+	return nil
+}
+
+// dryRunGRPCBody adds the five-byte gRPC frame header lazily. A lengthless
+// source must be materialized because the frame header cannot be emitted
+// until the message length is known. This is a protocol conversion, so the
+// shared 16 MiB materialization cap applies and a one-shot source is consumed
+// at most once.
 func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
 	if source == nil || source.ContentLength() == 0 {
 		framed, err := fetchgrpc.FrameChecked(nil, false)
@@ -126,16 +157,19 @@ func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
 		return body.NewBytes(framed, fetchgrpc.ContentType), nil
 	}
 	length := source.ContentLength()
-	// A lengthless stream cannot carry a frame header without first reading
-	// the whole stream. Leave it untouched; dry-run will report that its
-	// one-shot/streaming preview is unavailable instead of consuming it.
 	if length < 0 {
-		return source, nil
+		if _, err := source.Materialize(fetchgrpc.MaxMessageSize); err != nil {
+			return nil, fmt.Errorf("failed to materialize gRPC request body for dry-run: %w", err)
+		}
+		length = source.ContentLength()
 	}
 	if length > fetchgrpc.MaxMessageSize {
 		return nil, core.LimitError{Subsystem: "gRPC request body", Limit: fetchgrpc.MaxMessageSize}
 	}
-	framedLength := length + 5
+	framedLength, err := fetchgrpc.CheckedFrameLength(length)
+	if err != nil {
+		return nil, err
+	}
 	open := func() (io.ReadCloser, error) {
 		stream, err := source.Open()
 		if err != nil {
@@ -156,7 +190,7 @@ func frameGRPCRequest(data io.ReadCloser) ([]byte, error) {
 		defer data.Close()
 
 		var err error
-		rawData, err = core.ReadAllLimited(data, core.MaxCompositeMaterialization, "gRPC request body")
+		rawData, err = core.ReadAllLimited(data, fetchgrpc.MaxMessageSize, "gRPC request body")
 		if err != nil {
 			return nil, fmt.Errorf("failed to read request body: %w", err)
 		}
@@ -170,9 +204,13 @@ func frameGRPCRequest(data io.ReadCloser) ([]byte, error) {
 	return framedData, nil
 }
 
-// streamGRPCRequest reads JSON objects from data, converts each to protobuf,
+// streamGRPCRequest reads JSON values from data, converts each to protobuf,
 // frames each as a gRPC message, and streams them through an io.Pipe.
-// Returns an io.ReadCloser to use as the request body.
+//
+// A json.Decoder may read beyond one value into its internal buffer. The
+// small forwarding buffer below returns decoder.Buffered to the shared input
+// before the next decoder is created; without it, adjacent messages can be
+// silently lost.
 func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) io.ReadCloser {
 	pr, pw := io.Pipe()
 	input := &closeOnceReadCloser{ReadCloser: data}
@@ -180,8 +218,10 @@ func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) 
 		defer pw.Close()
 		defer input.Close()
 
+		jsonInput := &streamJSONInput{r: input}
 		for {
-			decoder := json.NewDecoder(&boundedJSONReader{r: input, max: core.MaxCompositeMaterialization})
+			limited := &boundedJSONReader{r: jsonInput, max: core.MaxCompositeMaterialization}
+			decoder := json.NewDecoder(limited)
 			var raw json.RawMessage
 			err := decoder.Decode(&raw)
 			if err == io.EOF {
@@ -208,6 +248,15 @@ func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) 
 			if _, err := pw.Write(frame); err != nil {
 				return // pipe closed by reader
 			}
+
+			// The decoder owns any bytes it read after the current value. Return
+			// them to the forwarding reader before decoding the next value. The
+			// reader is bounded so this cannot turn a look-ahead into an
+			// unbounded allocation.
+			if err := jsonInput.prepend(decoder.Buffered()); err != nil {
+				pw.CloseWithError(fmt.Errorf("failed to buffer JSON message: %w", err))
+				return
+			}
 		}
 	}()
 	return &grpcPipeReader{PipeReader: pr, input: input}
@@ -233,21 +282,63 @@ func (r *grpcPipeReader) Close() error {
 	return errors.Join(r.PipeReader.Close(), r.input.Close())
 }
 
+// streamJSONInput preserves the bytes that json.Decoder read ahead of the
+// current value. It is used by one producer goroutine only.
+type streamJSONInput struct {
+	r       io.Reader
+	pending []byte
+}
+
+func (r *streamJSONInput) Read(p []byte) (int, error) {
+	if len(r.pending) > 0 {
+		n := copy(p, r.pending)
+		r.pending = r.pending[n:]
+		return n, nil
+	}
+	return r.r.Read(p)
+}
+
+func (r *streamJSONInput) prepend(buffer io.Reader) error {
+	if buffer == nil {
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(buffer, core.MaxCompositeMaterialization+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > core.MaxCompositeMaterialization || int64(len(r.pending)) > core.MaxCompositeMaterialization-int64(len(data)) {
+		return core.LimitError{Subsystem: "gRPC request body", Limit: core.MaxCompositeMaterialization}
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	pendingLength := len(data) + len(r.pending)
+	pending := make([]byte, 0, pendingLength)
+	pending = append(pending, data...)
+	pending = append(pending, r.pending...)
+	r.pending = pending
+	return nil
+}
+
+// boundedJSONReader prevents a single JSON value from making the decoder read
+// without a bound. One extra byte lets a valid value be distinguished from a
+// value that is exactly at the limit.
 type boundedJSONReader struct {
-	r     io.Reader
-	max   int64
-	bytes int64
+	r    io.Reader
+	max  int64
+	read int64
 }
 
 func (r *boundedJSONReader) Read(p []byte) (int, error) {
-	if r.bytes >= r.max+1 {
+	if r.read >= r.max+1 {
 		return 0, core.LimitError{Subsystem: "gRPC request body", Limit: r.max}
 	}
-	if len(p) > 1 {
-		p = p[:1]
+	remaining := r.max + 1 - r.read
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
 	}
 	n, err := r.r.Read(p)
-	r.bytes += int64(n)
+	r.read += int64(n)
 	return n, err
 }
 
