@@ -7,6 +7,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -1965,9 +1966,60 @@ func TestMain(t *testing.T) {
 		var newVersion atomic.Pointer[string]
 		newVersion.Store(&version)
 		var updateRequests atomic.Int64
+		buildArtifact := func() []byte {
+			f, err := os.Open(updateFetchPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			stat, err := f.Stat()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			buf := new(bytes.Buffer)
+			if runtime.GOOS == "windows" {
+				zw := zip.NewWriter(buf)
+				h, err := zip.FileInfoHeader(stat)
+				if err != nil {
+					t.Fatal(err)
+				}
+				hw, err := zw.CreateHeader(h)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = io.Copy(hw, f); err != nil {
+					t.Fatal(err)
+				}
+				if err := zw.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				gw := gzip.NewWriter(buf)
+				tw := tar.NewWriter(gw)
+				h, err := tar.FileInfoHeader(stat, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := tw.WriteHeader(h); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := io.Copy(tw, f); err != nil {
+					t.Fatal(err)
+				}
+				if err := tw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if err := gw.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return buf.Bytes()
+		}
+
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			updateRequests.Add(1)
-			if r.URL.Path != "/artifact" {
+			if r.URL.Path != "/artifact" && r.URL.Path != "/artifact.sha256" {
 				type Asset struct {
 					Name string `json:"name"`
 					URL  string `json:"browser_download_url"`
@@ -1983,68 +2035,23 @@ func TestMain(t *testing.T) {
 				if runtime.GOOS == "windows" {
 					suffix = "zip"
 				}
-				rel.Assets = append(rel.Assets, Asset{
-					Name: fmt.Sprintf("fetch-%s-%s-%s.%s",
-						*newVersion.Load(), runtime.GOOS, runtime.GOARCH, suffix),
-					URL: *urlStr.Load() + "/artifact",
-				})
+				name := fmt.Sprintf("fetch-%s-%s-%s.%s", *newVersion.Load(), runtime.GOOS, runtime.GOARCH, suffix)
+				rel.Assets = append(rel.Assets,
+					Asset{Name: name, URL: *urlStr.Load() + "/artifact"},
+					Asset{Name: name + ".sha256", URL: *urlStr.Load() + "/artifact.sha256"},
+				)
 				json.NewEncoder(w).Encode(rel)
 				return
 			}
 
-			f, err := os.Open(updateFetchPath)
-			if err != nil {
-				w.WriteHeader(400)
+			artifact := buildArtifact()
+			if r.URL.Path == "/artifact.sha256" {
+				digest := sha256.Sum256(artifact)
+				fmt.Fprintf(w, "%x  fetch.%s\n", digest, runtime.GOOS)
 				return
 			}
-			defer f.Close()
-			stat, err := f.Stat()
-			if err != nil {
-				w.WriteHeader(400)
-				return
-			}
-
-			buf := new(bytes.Buffer)
-			if runtime.GOOS == "windows" {
-				zw := zip.NewWriter(buf)
-				h, err := zip.FileInfoHeader(stat)
-				if err != nil {
-					w.WriteHeader(400)
-					return
-				}
-				hw, err := zw.CreateHeader(h)
-				if err != nil {
-					w.WriteHeader(400)
-					return
-				}
-				if _, err = io.Copy(hw, f); err != nil {
-					w.WriteHeader(400)
-					return
-				}
-				zw.Close()
-			} else {
-				gw := gzip.NewWriter(buf)
-				tw := tar.NewWriter(gw)
-				h, err := tar.FileInfoHeader(stat, "")
-				if err != nil {
-					w.WriteHeader(400)
-					return
-				}
-				err = tw.WriteHeader(h)
-				if err != nil {
-					w.WriteHeader(400)
-					return
-				}
-				if _, err = io.Copy(tw, f); err != nil {
-					w.WriteHeader(400)
-					return
-				}
-				tw.Close()
-				gw.Close()
-			}
-
 			w.WriteHeader(200)
-			w.Write(buf.Bytes())
+			_, _ = w.Write(artifact)
 		})
 		defer server.Close()
 		urlStr.Store(&server.URL)

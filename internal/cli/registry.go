@@ -377,6 +377,8 @@ var flagDefinitions = map[string]Flag{
 	"scope":           {Requires: []string{"install-skill", "uninstall-skill"}},
 	"force":           {Requires: []string{"install-skill", "uninstall-skill"}},
 	"ws-message-mode": {Modes: []OptionMode{ModeWebSocket}},
+	"check-update":    {Conflicts: []string{"update"}},
+	"update":          {Conflicts: []string{"check-update"}},
 
 	"aws-sigv4": {Conflicts: []string{"basic", "bearer", "digest"}, IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
 	"basic":     {Conflicts: []string{"aws-sigv4", "bearer", "digest"}, IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
