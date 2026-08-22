@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
+
+	gproto "google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 func TestHARRecordsFinalRetryExchange(t *testing.T) {
@@ -100,6 +103,102 @@ func TestHARRecordsDecodedBodyAndWireSize(t *testing.T) {
 	response := document.Log.Entries[0].Response
 	if response.Content.Text != "decoded" || response.Content.Size != int64(len("decoded")) || response.BodySize != int64(encoded.Len()) {
 		t.Fatalf("decoded content/transfer size = %+v, encoded length = %d", response, encoded.Len())
+	}
+}
+
+func TestHARRecordsUnaryGRPCBodiesAsBase64AndTrailers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/grpc+proto")
+		w.Header().Set("Trailer", "grpc-status, grpc-message")
+		w.WriteHeader(http.StatusOK)
+		payload := []byte{0x08, 0x01}
+		frame := append([]byte{0, 0, 0, 0, byte(len(payload))}, payload...)
+		_, _ = w.Write(frame)
+		w.Header().Set("grpc-status", "0")
+		w.Header().Set("grpc-message", "complete")
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	descPath := filepath.Join(dir, "service.pb")
+	strType := descriptorpb.FieldDescriptorProto_TYPE_STRING
+	fds := &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{{
+		Name: new("service.proto"), Package: new("pkg"), Syntax: new("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{
+			{Name: new("Request")},
+			{Name: new("Response"), Field: []*descriptorpb.FieldDescriptorProto{{Name: new("value"), Number: new(int32(1)), Type: &strType}}},
+		},
+		Service: []*descriptorpb.ServiceDescriptorProto{{Name: new("Service"), Method: []*descriptorpb.MethodDescriptorProto{{Name: new("Call"), InputType: new(".pkg.Request"), OutputType: new(".pkg.Response")}}}},
+	}}}
+	descData, err := gproto.Marshal(fds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(descPath, descData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	harPath := filepath.Join(dir, "grpc.har")
+	r := &Request{
+		URL:           mustParseURL(server.URL + "/pkg.Service/Call"),
+		GRPC:          true,
+		HTTP:          core.HTTP1,
+		Data:          strings.NewReader("raw"),
+		ContentType:   "application/octet-stream",
+		ProtoDesc:     descPath,
+		HAR:           harPath,
+		Discard:       true,
+		Compression:   core.CompressionOff,
+		PrinterHandle: core.NewHandle(core.ColorOff),
+		Verbosity:     core.VSilent,
+	}
+	if status := Fetch(t.Context(), r); status != 0 {
+		t.Fatalf("Fetch() status = %d", status)
+	}
+	data, err := os.ReadFile(harPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Log struct {
+			Entries []struct {
+				Request struct {
+					PostData struct {
+						Text     string `json:"text"`
+						Encoding string `json:"encoding"`
+					} `json:"postData"`
+				} `json:"request"`
+				Response struct {
+					Headers []struct {
+						Name  string `json:"name"`
+						Value string `json:"value"`
+					} `json:"headers"`
+					Content struct {
+						Text     string `json:"text"`
+						Encoding string `json:"encoding"`
+					} `json:"content"`
+				} `json:"response"`
+			} `json:"entries"`
+		} `json:"log"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Log.Entries) != 1 {
+		t.Fatalf("HAR entries = %d, want one", len(document.Log.Entries))
+	}
+	entry := document.Log.Entries[0]
+	if entry.Request.PostData.Encoding != "base64" || entry.Response.Content.Encoding != "base64" {
+		t.Fatalf("gRPC bodies were not encoded as base64: %+v", entry)
+	}
+	trailerFound := false
+	for _, header := range entry.Response.Headers {
+		if strings.EqualFold(header.Name, "grpc-status") && header.Value == "0" {
+			trailerFound = true
+		}
+	}
+	if !trailerFound {
+		t.Fatalf("HAR response did not preserve grpc-status trailer: %+v", entry.Response.Headers)
 	}
 }
 

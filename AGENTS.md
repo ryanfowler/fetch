@@ -58,7 +58,10 @@ prettier -w .
 - **internal/fetch** - Core HTTP request execution. `fetch.go:Fetch()` is the main entry point that builds requests, handles gRPC framing/reflection/discovery, and routes to formatters.
 - **internal/fileutil** - Shared file helpers, including cross-platform atomic replacement for temp-file write flows.
 - **internal/format** - Response body formatters (JSON, XML, YAML, HTML, CSS, CSV, msgpack, protobuf, SSE, NDJSON). Each formatter writes colored output to a `Printer`.
-- **internal/grpc** - gRPC framing, headers, and status code handling.
+- **internal/grpc** - gRPC framing, headers, and status code handling. Schema-less binary calls
+  remain usable when reflection is unavailable; JSON conversion requires a
+  descriptor, streaming conversion preserves decoder look-ahead, dry-run
+  conversion is bounded to 16 MiB, and unary HAR bodies are base64 encoded.
 - **internal/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
 - **internal/image** - Multipart form implementation.
 - **internal/har** - Bounded HAR 1.2 final-exchange recording with streaming body capture and atomic output.
@@ -79,7 +82,7 @@ prettier -w .
 ## Recent Notes
 
 - `--grpc-list` and `--grpc-describe` provide grpcurl-style discovery using reflection or local descriptor files.
-- `--grpc` now automatically tries gRPC reflection when no local schema is supplied.
+- `--grpc` now automatically tries gRPC reflection when no local schema is supplied. Schema-less binary calls remain sendable when reflection fails, while JSON conversion requires a descriptor; streaming JSON conversion preserves decoder look-ahead, dry-run conversion is bounded to 16 MiB, and unary gRPC HAR bodies are base64 encoded with trailers preserved.
 - Plaintext loopback gRPC servers are supported via `h2c` for both calls and discovery.
 - `--inspect-dns` resolves the URL hostname without making an HTTP request. The platform resolver shows A/AAAA records without TTLs; an explicit UDP, pipelined TCP/DoT, DoQ, or DoH resolver queries all supported inspection types concurrently, shows resolver security, duration, and per-record TTLs, and preserves successful records with exit status 1 when a query fails. TCP, DoT, and DoQ inspection queries share one bounded operation-scoped connection.
 - `--inspect-tls --http 3` performs QUIC/TLS inspection with `h3` ALPN instead of the TCP TLS path.
