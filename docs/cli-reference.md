@@ -783,12 +783,20 @@ Check the latest GitHub release without downloading or replacing the executable.
 The command uses bounded HTTPS requests and carries only operational proxy, DNS,
 CA, and timeout settings.
 
+Automatic checks run only for a validated normal request. They use the platform
+user cache interval and start a detached, silent updater child. The child does
+not inherit interactive standard input or terminal signals. Automatic failures
+are non-fatal to the request. Metadata-only commands, skill management,
+dry-runs, and updater children do not start another automatic check.
+
 ### `--update`
 
 Update fetch binary in place. The selected archive must have a matching SHA-256
 sidecar. Metadata is limited to 1 MiB, checksums to 1 KiB, and archives to 128
 MiB. The archive is streamed to a temporary file and verified before extraction.
-Use with `--dry-run` to validate the release and checksum without installing.
+Use with `--dry-run` to validate release metadata, asset selection, checksum
+availability, and executable preflight without downloading or replacing the
+binary. Dry-run does not update the automatic-check timestamp.
 
 ### `--complete SHELL`
 
