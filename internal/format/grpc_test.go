@@ -2,12 +2,30 @@ package format
 
 import (
 	"bytes"
+	"compress/gzip"
 	"strings"
 	"testing"
 
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/grpc"
 )
+
+func TestFormatGRPCStreamWithGzip(t *testing.T) {
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(appendVarint(nil, 1, 42)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	framed := grpc.Frame(compressed.Bytes(), true)
+	p := core.NewHandle(core.ColorOff).Stderr()
+	if err := FormatGRPCStreamWithEncoding(bytes.NewReader(framed), nil, p, "gzip"); err != nil {
+		t.Fatalf("FormatGRPCStreamWithEncoding() error = %v", err)
+	}
+}
 
 func TestFormatGRPCStream(t *testing.T) {
 	t.Run("single frame", func(t *testing.T) {
@@ -65,7 +83,7 @@ func TestFormatGRPCStream(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for compressed frame")
 		}
-		if !strings.Contains(err.Error(), "compressed gRPC messages are not supported") {
+		if !strings.Contains(err.Error(), "has no grpc-encoding") {
 			t.Fatalf("FormatGRPCStream() error = %v", err)
 		}
 	})

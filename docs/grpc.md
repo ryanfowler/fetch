@@ -412,9 +412,13 @@ fetch --grpc --proto-file service.proto \
 
 For streaming responses, messages are separated by blank lines in the output. Formatting and flushing happen incrementally, so results appear in real time.
 
-### gRPC Status
+### Compression, Framing, and Status
 
-`fetch` reports gRPC status errors from response trailers. If the server returns a non-OK gRPC status (e.g., `INTERNAL`, `NOT_FOUND`), the error is printed to stderr and the exit code is set to 1.
+Requests advertise gzip response-message support with `grpc-accept-encoding: gzip`. Gzip-compressed response messages are decoded as they arrive. An unknown `grpc-encoding`, a missing encoding for a compressed frame, or invalid gzip data is an error.
+
+Each gRPC frame has a strict five-byte header. The compressed flag must be `0` or `1`, and encoded and decompressed messages are limited to 64 MiB. Truncated frames and invalid lengths fail before an unchecked allocation.
+
+`fetch` reads the final gRPC status from trailers after the response body is consumed. Trailers-only responses are read from initial headers. A non-OK gRPC status (for example, `INTERNAL` or `NOT_FOUND`) is printed to stderr and sets the exit code to 1, even when the HTTP status is 200. `grpc-message` is escaped in terminal diagnostics.
 
 ## Client Streaming
 

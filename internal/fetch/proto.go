@@ -119,7 +119,11 @@ func convertJSONToProtobuf(data io.ReadCloser, desc protoreflect.MessageDescript
 // dry-run's preview path.
 func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
 	if source == nil || source.ContentLength() == 0 {
-		return body.NewBytes(fetchgrpc.Frame(nil, false), fetchgrpc.ContentType), nil
+		framed, err := fetchgrpc.FrameChecked(nil, false)
+		if err != nil {
+			return nil, err
+		}
+		return body.NewBytes(framed, fetchgrpc.ContentType), nil
 	}
 	length := source.ContentLength()
 	// A lengthless stream cannot carry a frame header without first reading
@@ -128,8 +132,8 @@ func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
 	if length < 0 {
 		return source, nil
 	}
-	if length > int64(^uint32(0)) {
-		return nil, core.LimitError{Subsystem: "gRPC request body", Limit: int64(^uint32(0))}
+	if length > fetchgrpc.MaxMessageSize {
+		return nil, core.LimitError{Subsystem: "gRPC request body", Limit: fetchgrpc.MaxMessageSize}
 	}
 	framedLength := length + 5
 	open := func() (io.ReadCloser, error) {
@@ -159,7 +163,10 @@ func frameGRPCRequest(data io.ReadCloser) ([]byte, error) {
 	}
 
 	// Frame with gRPC format (works for empty data too).
-	framedData := fetchgrpc.Frame(rawData, false)
+	framedData, err := fetchgrpc.FrameChecked(rawData, false)
+	if err != nil {
+		return nil, err
+	}
 	return framedData, nil
 }
 
@@ -193,7 +200,11 @@ func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) 
 				pw.CloseWithError(fmt.Errorf("failed to convert JSON to protobuf: %w", err))
 				return
 			}
-			frame := fetchgrpc.Frame(protoData, false)
+			frame, err := fetchgrpc.FrameChecked(protoData, false)
+			if err != nil {
+				pw.CloseWithError(err)
+				return
+			}
 			if _, err := pw.Write(frame); err != nil {
 				return // pipe closed by reader
 			}
