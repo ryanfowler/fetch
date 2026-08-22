@@ -307,18 +307,15 @@ func validateSkillMode(app *App, cli *CLI) error {
 	if app.URL != nil {
 		return fmt.Errorf("skill commands cannot be combined with a URL")
 	}
-	requestOnly := map[string]bool{
-		"article": true, "compress": true, "data": true, "digest": true, "dns-server": true,
-		"ech": true, "edit": true, "form": true, "grpc": true, "grpc-describe": true,
-		"grpc-list": true, "har": true, "header": true, "http": true, "image": true,
-		"inspect-dns": true, "inspect-tls": true, "method": true, "multipart": true,
-		"output": true, "query": true, "range": true, "redirects": true, "remote-header-name": true,
-		"remote-name": true, "retry": true, "retry-delay": true, "session": true, "unix": true,
-		"ws-message-mode": true, "ws-interactive": true, "basic": true, "bearer": true,
-		"aws-sigv4": true, "ca-cert": true, "cert": true, "key": true, "insecure": true,
+	// Skill operations are metadata commands. Keep their allowed surface
+	// deliberately small so presentation, config, update, and request flags
+	// cannot be silently ignored.
+	allowed := map[string]bool{
+		"skill": true, "install-skill": true, "uninstall-skill": true,
+		"scope": true, "force": true, "dry-run": true,
 	}
 	for _, flag := range cli.Options().Flags() {
-		if flag.IsSet() && requestOnly[flag.Long] {
+		if flag.IsSet() && !allowed[flag.Long] {
 			return newExclusiveFlagsError(flag.Long, "skill command")
 		}
 	}

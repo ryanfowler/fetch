@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	_ "embed"
+	"embed"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +25,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/format"
 	"github.com/ryanfowler/fetch/internal/multipart"
 	"github.com/ryanfowler/fetch/internal/pager"
+	"github.com/ryanfowler/fetch/internal/skill"
 	"github.com/ryanfowler/fetch/internal/tlsinspect"
 	"github.com/ryanfowler/fetch/internal/update"
 )
@@ -35,6 +36,13 @@ import (
 //
 //go:embed docs/cli-reference.md
 var verboseHelp []byte
+
+// The source of truth remains under skills/fetch. The root package owns this
+// directive because go:embed cannot include files above a package directory;
+// internal/skill receives the immutable embedded bytes for installation.
+//
+//go:embed skills/fetch/SKILL.md skills/fetch/references/*.md skills/fetch/evals/*.json
+var embeddedSkillFiles embed.FS
 
 func main() {
 	// Cancel the context when one of the below signals are caught.
@@ -64,6 +72,11 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+
+	if app.Skill || app.InstallSkill != "" || app.UninstallSkill != "" {
+		status := handleSkillCommand(ctx, app)
+		os.Exit(statusForContext(ctx, status))
 	}
 
 	// Metadata-only commands should never be blocked by config errors or start
@@ -264,6 +277,47 @@ func main() {
 	}
 	status := fetch.Fetch(ctx, &req)
 	os.Exit(statusForContext(ctx, status))
+}
+
+func handleSkillCommand(ctx context.Context, app *cli.App) int {
+	files := []skill.File{
+		{Path: "SKILL.md", Data: mustReadEmbeddedSkill("skills/fetch/SKILL.md")},
+		{Path: "references/diagnostics.md", Data: mustReadEmbeddedSkill("skills/fetch/references/diagnostics.md")},
+		{Path: "references/grpc.md", Data: mustReadEmbeddedSkill("skills/fetch/references/grpc.md")},
+		{Path: "references/http.md", Data: mustReadEmbeddedSkill("skills/fetch/references/http.md")},
+		{Path: "references/websocket.md", Data: mustReadEmbeddedSkill("skills/fetch/references/websocket.md")},
+		{Path: "evals/evals.json", Data: mustReadEmbeddedSkill("skills/fetch/evals/evals.json")},
+	}
+	bundle, err := skill.NewBundle(core.Version, files)
+	if err != nil {
+		core.WriteErrorMsg(core.NewHandle(app.Cfg.Color).Stderr(), err)
+		return 1
+	}
+	status, err := skill.Execute(ctx, skill.Options{
+		Print:          app.Skill,
+		InstallAgent:   app.InstallSkill,
+		UninstallAgent: app.UninstallSkill,
+		Scope:          app.Scope,
+		Force:          app.Force,
+		DryRun:         app.DryRun,
+		Stdin:          os.Stdin,
+		Stdout:         os.Stdout,
+		Stderr:         os.Stderr,
+		Interactive:    core.IsStdinTerm,
+	}, bundle)
+	if err != nil {
+		core.WriteErrorMsg(core.NewHandle(app.Cfg.Color).Stderr(), err)
+		return 1
+	}
+	return status
+}
+
+func mustReadEmbeddedSkill(path string) []byte {
+	data, err := embeddedSkillFiles.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
 
 func handleMetadataCommand(ctx context.Context, app *cli.App, handle *core.Handle, args []string) int {
