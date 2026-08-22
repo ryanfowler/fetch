@@ -1,6 +1,6 @@
 # fetch
 
-A modern HTTP(S) client for the command line.
+A modern HTTP(S) client for the command line, implemented in Go.
 
 ![Example of fetch with an image and JSON responses](./assets/example.png)
 
@@ -16,6 +16,10 @@ A modern HTTP(S) client for the command line.
 - **DNS inspection** - Inspect hostname resolution, record families, TTLs, and resolver timing
 - **Timing waterfall** - Visualize request timing phases (DNS, TCP, TLS, TTFB, transfer) with a waterfall chart
 - **Configuration** - Global and per-host configuration file support
+- **Article extraction** - Extract readable HTML as Markdown with YAML frontmatter
+- **HAR recording** - Capture the final exchange in a bounded HAR 1.2 sidecar
+- **Automatic HTTP/3 and ECH** - Use HTTPS/SVCB discovery with explicit downgrade controls
+- **Agent Skill** - Print or install the portable skill offline for supported agents
 
 ## Quick Start
 
@@ -45,6 +49,7 @@ fetch picsum.photos/1024/1024
 
 ## Documentation
 
+- **[Documentation index](docs/index.md)** - Feature and maintainer guide index
 - **[Getting Started](docs/getting-started.md)** - Installation, first steps, and basic concepts
 - **[CLI Reference](docs/cli-reference.md)** - Complete reference for all command-line options
 - **[Configuration](docs/configuration.md)** - Configuration file format and options
@@ -55,8 +60,16 @@ fetch picsum.photos/1024/1024
 - **[WebSocket](docs/websocket.md)** - Bidirectional WebSocket connections
 - **[gRPC](docs/grpc.md)** - Making gRPC requests with Protocol Buffers
 - **[Advanced Features](docs/advanced-features.md)** - DNS, proxies, TLS, HTTP versions, and more
+- **[Encrypted ClientHello](docs/ech.md)** - ECH modes, discovery, and downgrade safety
+- **[Article Extraction](docs/article.md)** - Readable HTML and Markdown output
+- **[HAR Recording](docs/har.md)** - Bounded exchange capture and sensitivity rules
+- **[Self-update and Installer](docs/updates.md)** - Verified Go artifacts and atomic replacement
+- **[Agent Skill](docs/agent-skill.md)** - Offline print, install, and uninstall workflow
+- **[Shell Completion](docs/completions.md)** - Bash, Zsh, Fish, and PowerShell
+- **[Limits and Safety](docs/limits.md)** - Resource caps and security invariants
+- **[Migration Note](docs/migration-go.md)** - Pinned parity oracle and Go-only build policy
 - **[Troubleshooting](docs/troubleshooting.md)** - Common issues, debugging, and exit codes
 
 ## License
 
-`fetch` is released under the [MIT License](LICENSE).
+`fetch` is released under the [MIT License](LICENSE). See the [documentation index](docs/index.md) for the complete user and maintainer reference.

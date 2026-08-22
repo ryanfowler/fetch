@@ -188,7 +188,7 @@ func (a *App) CLI() *CLI {
 
 			stringFlag(&a.Complete, "complete", "", "SHELL", "Output shell completion").
 				WithValues([]core.KeyVal[string]{
-					{Key: "bash"}, {Key: "fish"}, {Key: "zsh"},
+					{Key: "bash"}, {Key: "fish"}, {Key: "powershell"}, {Key: "zsh"},
 				}).
 				WithHideValues(),
 

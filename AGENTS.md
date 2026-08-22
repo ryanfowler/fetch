@@ -6,7 +6,7 @@ This file provides guidance to AI agents when working with code in this reposito
 
 `fetch` is a modern HTTP(S) client CLI written in Go. It features automatic response formatting (JSON, XML, YAML, HTML, CSS, CSV, Markdown, protobuf, msgpack), readable article extraction, image rendering in terminals, gRPC support with reflection/discovery and JSON-to-protobuf conversion, and authentication (Basic, Digest, Bearer, AWS SigV4).
 
-The repository currently targets Go 1.27.0 in `go.mod` and GitHub Actions.
+The repository currently targets Go 1.27.0 in `go.mod` and GitHub Actions. Use Go 1.27.0 or a later compatible Go 1.27 patch release; release builds use `CGO_ENABLED=0` for supported targets.
 
 ## Common Commands
 
@@ -33,6 +33,9 @@ go mod tidy && go mod verify
 # Run linter (CI uses staticcheck)
 staticcheck ./...
 
+# Validate documentation links and skill JSON fixtures
+python3 scripts/check-docs.py
+
 # Format other files
 prettier -w .
 ```
@@ -50,7 +53,7 @@ prettier -w .
 - **internal/body** - Lazy request-body sources and single-read response tee pipelines, including replay, bounded preview/materialization, and exact file checks.
 - **internal/cli** - Command-line argument parsing. `App` struct holds all parsed options.
 - **internal/client** - HTTP client wrapper and HTTP version-specific transport setup.
-- **internal/complete** - Shell completion implementation.
+- **internal/complete** - Bash, Fish, PowerShell, and Zsh completion generated from the shared option registry.
 - **internal/config** - INI-format config file parsing with host-specific overrides.
 - **internal/core** - Shared types (`Printer`, `Color`, `Format`, `HTTPVersion`), timeout budgets, checked arithmetic, bounded readers/buffers, resource limits, and error categories.
 - **internal/curl** - Curl command parser for `--from-curl` flag. Tokenizes and parses curl command strings into an intermediate `Result` struct.
@@ -63,7 +66,7 @@ prettier -w .
   descriptor, streaming conversion preserves decoder look-ahead, dry-run
   conversion is bounded to 16 MiB, and unary HAR bodies are base64 encoded.
 - **internal/image** - Terminal image rendering (Kitty, iTerm2 inline, block-character fallback).
-- **internal/image** - Multipart form implementation.
+- **internal/multipart** - Replayable multipart form-body construction and header-parameter safety.
 - **internal/har** - Bounded HAR 1.2 final-exchange recording with streaming body capture and atomic output.
 - **internal/proto** - Protocol buffer compilation and message handling for gRPC support.
 - **internal/pager** - Shell-free `$PAGER` parsing and bounded pager process lifecycle for help and response output.
@@ -78,6 +81,8 @@ prettier -w .
 2. Config file merged (`config.GetFile`)
 3. `fetch.Request` built from merged config
 4. If gRPC: load local proto schema or resolve it via reflection, setup descriptors, convert JSON→protobuf, frame message
+5. HTTP client executes the request with shared resolver, proxy, TLS, retry, and timeout policy
+6. Response is decoded, formatted, and written to stdout or an atomic output destination, optionally through a pager
 
 ## Recent Notes
 
@@ -107,13 +112,12 @@ prettier -w .
 - Proxy selection uses explicit configuration, scheme-specific environment variables, `ALL_PROXY`, then direct connection. Uppercase variables win, CGI `HTTP_PROXY` is ignored, and `NO_PROXY` supports wildcard, host/domain, IP, CIDR, IDNA, and port matching without treating malformed entries as a global bypass. HTTP, HTTPS, SOCKS5, and SOCKS5H share the HTTP transport layer; proxy TLS is verified separately from origin TLS, and SOCKS5 resolves destinations locally while SOCKS5H sends hostnames to the proxy.
 - System HTTPS/SVCB discovery uses `resolvectl` on Linux when available, then a bounded `/etc/resolv.conf` fallback that skips malformed nameservers and honors `rotate`, `attempts`, and `timeout`.
 - SSE and NDJSON use bounded, chunk-safe streaming parsers; automatic compression retries compressed SSE once for safe GET/HEAD requests.
-- `-v --help` renders the embedded Markdown CLI reference and uses the configured pager. Pager commands are parsed without a shell, and `NO_PAGER` disables automatic paging.
+- `-v --help` renders the embedded Markdown CLI reference and uses the configured pager. Pager commands are parsed without a shell, and `NO_PAGER` disables automatic paging. Bash, Fish, PowerShell, and Zsh completion use the same option registry and omit hidden flags.
 - Build information includes target OS/architecture and Go settings; dependency versions appear with `--buildinfo -v`. Ctrl-C exits with status 130, and broken-pipe output exits cleanly.
 - Release archives are Go-built for Linux, macOS, and Windows targets with `CGO_ENABLED=0`; Unix archives have lowercase SHA-256 sidecars. `install.sh` verifies the sidecar before bounded extraction, stages inside the destination, validates `--version`, and atomically renames the staged executable without following symlink targets.
-5. HTTP client executes request
-6. Response formatted based on Content-Type and output to stdout (optionally via pager)
+- Documentation is indexed in `docs/index.md`; `docs/cli-reference.md` is embedded by the binary. `scripts/check-docs.py` validates local Markdown links and skill JSON fixtures. The migration oracle is recorded in `docs/migration-go.md`; Rust and Cargo are not build dependencies.
 
-Retryable requests replay bodies by calling `req.GetBody` when available, reopening file-backed bodies directly when possible, and only spooling the original body to a temp file as a final fallback for one-shot streams. This avoids holding large uploads in memory and keeps retries working for closable bodies like `*os.File`.
+Retryable requests require replayable bodies. They call `req.GetBody` when available and reopen validated file-backed bodies directly, without reading large uploads into memory. One-shot sources such as stdin fail before retry, Digest, or a redirect that requires replay; bounded materialization is used only for features such as signing or protocol conversion.
 Multipart `-F` request bodies are produced by a replayable factory with a stable boundary; request construction sets `req.GetBody` so 307/308 redirects can resend them without relying on retry/digest spooling.
 Redirect handling preserves non-POST methods and replayable bodies for 301/302, applies strict origin credential boundaries, preserves same-origin custom Host values, and resolves each redirected destination through the configured DNS backend.
 

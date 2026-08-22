@@ -12,6 +12,10 @@ fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 
 Use DNS inspection to distinguish resolution failures, record-family issues, and
 resolver-specific behavior. It performs inspection rather than an HTTP request.
+Without `--dns-server`, only platform A/AAAA records are shown and TTLs are not
+available. With an explicit UDP, TCP, DoT, DoQ, or DoH resolver, supported record
+types are queried concurrently. Successful records remain visible when one query
+fails; the command warns that results are incomplete and exits nonzero.
 
 ## TLS
 
@@ -20,9 +24,11 @@ fetch --inspect-tls https://example.com
 ```
 
 Inspect certificate names, chain, validity, and negotiated protocol before
-changing trust settings. Do not use `--insecure` as a generic workaround. If a
-private CA is expected, identify and use the intended CA configuration; only use
-`--insecure` when explicitly requested or clearly required and explain the risk.
+changing trust settings. With `--http 3`, TLS inspection uses QUIC and reports an
+unavailable cipher suite rather than guessing. ECH inspection reports real or
+GREASE acceptance and fallback. Do not use `--insecure` as a generic workaround.
+If a private CA is expected, identify and use the intended CA configuration; only
+use `--insecure` when explicitly requested or clearly required and explain the risk.
 
 ## HTTP and timing
 

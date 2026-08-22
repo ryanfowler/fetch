@@ -151,6 +151,26 @@ func TestCompleteFish(t *testing.T) {
 	}
 }
 
+func TestPowerShellCompletion(t *testing.T) {
+	if shell := GetShell("powershell"); shell == nil {
+		t.Fatal("PowerShell completion is not registered")
+	}
+	got := Complete(PowerShell{}, []string{"fetch", "--comp"})
+	if !strings.Contains(got, "--compress\t") || !strings.Contains(got, "--complete\t") {
+		t.Fatalf("PowerShell completion = %q", got)
+	}
+	got = Complete(PowerShell{}, []string{"fetch", "--color", ""})
+	if !strings.Contains(got, "auto\t") {
+		t.Fatalf("PowerShell value completion after a trailing space = %q", got)
+	}
+	register := (PowerShell{}).Register()
+	if !strings.Contains(register, "Register-ArgumentCompleter") ||
+		!strings.Contains(register, "EndOffset -le $cursorPosition") ||
+		!strings.Contains(register, "@('--complete=powershell', '--') + $elements") {
+		t.Fatalf("PowerShell registration script is invalid: %q", register)
+	}
+}
+
 func TestCompleteCLI002AliasesAndValues(t *testing.T) {
 	got := Complete(Bash{}, []string{"fetch", "--http"})
 	for _, want := range []string{"--http ", "--http1 ", "--http2 ", "--http3 "} {

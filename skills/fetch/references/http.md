@@ -13,6 +13,12 @@ Use `--ignore-status` only when the caller intentionally handles error bodies.
 
 ## Build requests
 
+Schemeless hostnames use HTTPS; schemeless IP literals use HTTP. Body options
+infer POST unless an explicit method is supplied. File and multipart bodies are
+streamed from ordinary regular files and checked for replacement or premature
+EOF. Stdin is one-shot. A retry, Digest challenge, or 307/308 redirect that
+needs replay requires a replayable body.
+
 ```sh
 fetch --dry-run -vv -j @request.json https://api.example.com/items
 fetch -j @request.json https://api.example.com/items
@@ -70,5 +76,7 @@ fetch --from-curl 'curl -H "Accept: application/json" https://example.com'
 fetch --dry-run --from-curl 'curl -X PUT --data @data.json https://example.com/item/1'
 ```
 
-Translation can reject unsupported semantic curl flags. Inspect state-changing
-translations with `--dry-run` before executing them.
+Translation can reject unsupported semantic curl flags. A single `-d @file` or
+`-d @-` streams through the native body path; composite materialization is
+capped at 16 MiB. Inspect state-changing translations with `--dry-run` before
+executing them.

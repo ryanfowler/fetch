@@ -23,6 +23,8 @@ func GetShell(name string) Shell {
 		return Fish{}
 	case "zsh":
 		return Zsh{}
+	case "powershell":
+		return PowerShell{}
 	default:
 		return nil
 	}

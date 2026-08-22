@@ -100,13 +100,30 @@ client-rendered pages.
 `--compress off` when the encoded response bytes must be preserved. Article
 responses are capped at 16 MiB after decoding. HAR request and response body
 capture is capped at 16 MiB and the HAR file may contain credentials, cookies,
-headers, and sensitive bodies.
+headers, and sensitive bodies. HAR is for ordinary HTTP and unary gRPC; it is
+not available for WebSockets, inspection, gRPC discovery, dry-run, or unbounded
+streaming calls.
 
 Use `--http 1`, `--http 2`, or `--http 3` to force a protocol. Automatic HTTP/3
 is opportunistic for direct HTTPS and never sends the request twice. `--ech
 auto` uses Encrypted ClientHello when DNS advertises a valid configuration;
 `--ech on` requires accepted ECH and cannot be combined with forced HTTP/3.
-Inspect DNS and TLS before changing trust or transport settings.
+ECH is not used through proxies or cleartext HTTP/2. Inspect DNS and TLS before
+changing trust or transport settings. The repository's `docs/limits.md`
+describes the shared body and protocol caps.
+
+## Request safety
+
+File and multipart bodies require ordinary regular files and stream without
+loading the complete file into memory. A replaced, resized, or prematurely
+truncated file fails instead of sending a partial body. Stdin is one-shot and
+cannot be replayed for a retry, Digest challenge, or redirect that needs the
+body again. Composite curl and protocol materialization is capped at 16 MiB.
+
+WebSocket text lines, binary messages, and interactive entries are limited to
+16 MiB. After piped stdin reaches EOF, the client sends a bounded normal close
+handshake and continues receiving until the peer closes. Use
+`--ws-message-mode text|binary|auto` when message type matters.
 
 ## Security
 
