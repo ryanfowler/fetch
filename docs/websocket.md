@@ -42,9 +42,9 @@ fetch --ws-message-mode text ws://api.example.com/ws
 cat payload.bin | fetch --ws-message-mode binary ws://api.example.com/ws
 ```
 
-The initial payload and each text line are limited to 16 MiB. Binary stdin uses bounded reusable chunks. After stdin reaches EOF, receiving continues until the peer closes or the operation is canceled.
+The initial payload and each text line are limited to 16 MiB. Binary stdin uses bounded reusable chunks. After stdin reaches EOF, `fetch` sends a normal close frame and waits for the peer close response while receiving in-flight messages. Cancellation closes the connection and input source.
 
-When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Use Ctrl+C or Ctrl+D to exit.
+When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Empty entries are valid messages. Ctrl+D performs a normal close handshake; Ctrl+C cancels the connection. Interactive history is byte-bounded.
 
 Control this behavior with `--ws-interactive`:
 

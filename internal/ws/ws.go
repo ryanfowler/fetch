@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -33,28 +35,30 @@ type Config struct {
 // reads from the server until close or Ctrl+C.
 //
 // When stdin is provided (piped input), it sends messages concurrently while
-// reading responses.
+// reading responses. EOF performs a WebSocket close handshake instead of
+// cancelling the receive side, so delayed peer responses are not discarded.
 func Run(ctx context.Context, cfg Config) error {
-	// Bound complete incoming WebSocket messages before the library allocates
-	// their payload. This applies to both the terminal and piped paths.
+	if cfg.Conn == nil {
+		return errors.New("WebSocket connection is nil")
+	}
+
+	// SetReadLimit makes coder/websocket reject a message after reading only
+	// one byte beyond the limit. Configure it before the first Read: Read
+	// otherwise allocates the complete message.
 	cfg.Conn.SetReadLimit(core.MaxWebSocketMessageBytes)
 
 	if cfg.IsInteractive {
 		return runInteractive(ctx, cfg)
 	}
 
-	// Send initial message from -d / -j flag.
 	if err := sendInitialMessage(ctx, &cfg); err != nil {
 		return err
 	}
 
-	if cfg.Stdin != nil {
-		return runBidirectional(ctx, cfg)
+	if cfg.Stdin == nil {
+		return readLoop(ctx, cfg)
 	}
-
-	// No stdin: just read messages from the server until it closes or
-	// the context is cancelled (Ctrl+C).
-	return readLoop(ctx, cfg)
+	return runBidirectional(ctx, cfg)
 }
 
 func sendInitialMessage(ctx context.Context, cfg *Config) error {
@@ -105,43 +109,114 @@ func initialMessageType(mode core.WSMessageMode, data []byte) (websocket.Message
 	}
 }
 
-// runBidirectional handles the case where we have both stdin and server
-// messages. It reads stdin in a separate goroutine and processes server
-// messages in the main goroutine.
+// runBidirectional owns both directions after the handshake. There is one
+// reader and one writer, as required by coder/websocket. The close operation
+// is allowed to coordinate with the reader; this lets the reader print data
+// that arrived just before the peer's close frame.
 func runBidirectional(ctx context.Context, cfg Config) error {
-	ctx, cancel := context.WithCancel(ctx)
+	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Write stdin lines in a background goroutine.
-	stdinDone := make(chan error, 1)
+	// A context cancellation must unblock both network operations and a
+	// closable stdin source. An arbitrary Reader cannot be interrupted, so it
+	// is deliberately not retained in an additional goroutine after return.
+	stopCancellation := make(chan struct{})
 	go func() {
-		stdinDone <- writeLoop(ctx, cfg)
-	}()
-
-	// Read server messages in a separate goroutine. This allows us to
-	// detect when stdin is done and start a graceful shutdown.
-	readDone := make(chan error, 1)
-	go func() {
-		readDone <- readLoop(ctx, cfg)
-	}()
-
-	// Wait for either stdin EOF or server close.
-	select {
-	case err := <-readDone:
-		// Cancel and return immediately — writeLoop may be blocked
-		// reading from stdin and cannot be interrupted.
-		cancel()
-		return err
-	case err := <-stdinDone:
-		if err != nil {
-			cancel()
-			return err
+		select {
+		case <-ctx.Done():
+			closeInput(cfg.Stdin)
+			_ = cfg.Conn.CloseNow()
+		case <-stopCancellation:
 		}
+	}()
+	defer close(stopCancellation)
 
-		// Piped input is finished, but the receive side remains active until
-		// the peer closes or the caller cancels the operation. This preserves
-		// delayed responses instead of discarding them after an arbitrary
-		// drain window.
-		return <-readDone
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- writeLoop(sessionCtx, cfg) }()
+
+	readDone := make(chan error, 1)
+	go func() { readDone <- readLoop(sessionCtx, cfg) }()
+
+	for {
+		select {
+		case <-ctx.Done():
+			closeInput(cfg.Stdin)
+			cancel()
+			_ = cfg.Conn.CloseNow()
+			return contextTerminationError(ctx)
+		case err := <-readDone:
+			closeInput(cfg.Stdin)
+			cancel()
+			_ = cfg.Conn.CloseNow()
+			return err
+
+		case err := <-writeDone:
+			if err != nil {
+				closeInput(cfg.Stdin)
+				cancel()
+				_ = cfg.Conn.CloseNow()
+				return err
+			}
+
+			// EOF is a local, orderly shutdown. Conn.Close writes and flushes
+			// the normal close frame, then waits for the peer response with the
+			// library's finite close-handshake deadline. The reader remains
+			// active while this happens, so peer data already in flight is not
+			// needlessly dropped.
+			closeDone := startNormalClose(cfg.Conn)
+
+			for {
+				select {
+				case err := <-readDone:
+					if err != nil {
+						cancel()
+						return err
+					}
+					// A peer close can finish the reader before Conn.Close's
+					// bookkeeping returns. Give that operation a short chance
+					// to finish so it does not outlive this session.
+					select {
+					case closeErr := <-closeDone:
+						cancel()
+						return normalizeCloseError(closeErr)
+					case <-time.After(time.Second):
+						cancel()
+						return nil
+					}
+				case closeErr := <-closeDone:
+					cancel()
+					return normalizeCloseError(closeErr)
+				case <-ctx.Done():
+					closeInput(cfg.Stdin)
+					cancel()
+					_ = cfg.Conn.CloseNow()
+					return contextTerminationError(ctx)
+				}
+			}
+		}
 	}
+}
+
+func closeInput(input io.Reader) {
+	if closer, ok := input.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+func contextTerminationError(ctx context.Context) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("WebSocket connection timed out: %w", ctx.Err())
+	}
+	return nil
+}
+
+func normalizeCloseError(err error) error {
+	if err == nil || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	var closeErr websocket.CloseError
+	if errors.As(err, &closeErr) && (closeErr.Code == websocket.StatusNormalClosure || closeErr.Code == websocket.StatusGoingAway) {
+		return nil
+	}
+	return err
 }

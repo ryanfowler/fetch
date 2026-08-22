@@ -399,3 +399,93 @@ func TestServerCloseNormal(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestIncomingMessageLimitIsEnforced(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_ = conn.Write(r.Context(), websocket.MessageBinary, make([]byte, int(core.MaxWebSocketMessageBytes)+1))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = Run(ctx, Config{
+		Conn:   conn,
+		Stderr: core.TestPrinter(false),
+		Stdout: core.TestPrinter(false),
+	})
+	if !errors.Is(err, websocket.ErrMessageTooBig) {
+		t.Fatalf("error = %v, want ErrMessageTooBig", err)
+	}
+}
+
+func TestPipedEOFPerformsCloseHandshake(t *testing.T) {
+	closed := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			closed <- err
+			return
+		}
+		defer conn.CloseNow()
+		if _, _, err := conn.Read(r.Context()); err != nil {
+			closed <- err
+			return
+		}
+		_, _, err = conn.Read(r.Context())
+		closed <- err
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, Config{
+		Conn:   conn,
+		Stdin:  strings.NewReader("payload\n"),
+		Stderr: core.TestPrinter(false),
+		Stdout: core.TestPrinter(false),
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	select {
+	case err := <-closed:
+		if websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+			t.Fatalf("server close error = %v, want normal close", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("server did not receive the close handshake")
+	}
+}
+
+func TestMessageQueueUsesByteBudget(t *testing.T) {
+	q := newMessageQueue()
+	payload := make([]byte, int(core.MaxWebSocketMessageBytes))
+	if err := q.push(context.Background(), wsMessage{typ: websocket.MessageBinary, data: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.push(context.Background(), wsMessage{typ: websocket.MessageBinary, data: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if got := q.bytes(); got > interactiveQueueBytes {
+		t.Fatalf("queue bytes = %d, want <= %d", got, interactiveQueueBytes)
+	}
+	q.pop()
+	q.pop()
+	if got := q.bytes(); got != 0 {
+		t.Fatalf("queue bytes after pop = %d, want 0", got)
+	}
+}
