@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
 env:
-  GO_VERSION: "1.26.7"
+  GO_VERSION: "1.27.0"
 
 jobs:
   check:
@@ -33,7 +33,7 @@ jobs:
       - name: Lint
         uses: dominikh/staticcheck-action@v1.4.1
         with:
-          version: "2026.1"
+          version: "2026.2.1"
           install-go: false
 
   test:
