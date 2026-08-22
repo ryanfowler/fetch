@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package update
 
 import (
 	"os/exec"
@@ -12,9 +12,9 @@ const (
 	createNewProcessGroup = 0x00000200
 )
 
-// configureDetachedProcess prevents the updater from attaching to the
+// ConfigureDetachedProcess prevents the updater from attaching to the
 // invoking console and gives it an independent process group.
-func configureDetachedProcess(cmd *exec.Cmd) {
+func ConfigureDetachedProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: detachedProcess | createNewProcessGroup,
 	}

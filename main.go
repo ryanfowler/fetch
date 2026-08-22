@@ -643,7 +643,7 @@ func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration, sil
 		args = append(args, "--connect-timeout", strconv.FormatFloat(network.ConnectTimeout.Seconds(), 'f', -1, 64))
 	}
 	cmd := exec.Command(path, args...)
-	configureDetachedProcess(cmd)
+	update.ConfigureDetachedProcess(cmd)
 	cmd.Env = append(os.Environ(), "FETCH_INTERNAL_AUTO_UPDATE=1")
 	// Use real null-device handles instead of os/exec's pipe-backed adapters.
 	// This prevents the child from inheriting terminal input and lets the
