@@ -65,6 +65,7 @@ func TestShouldAttemptUpdateTreatsMetadataDefensively(t *testing.T) {
 	cache := t.TempDir()
 	t.Setenv("HOME", cache)
 	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("LOCALAPPDATA", cache)
 	cacheDir, err := getCacheDir()
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +111,7 @@ func TestShouldAttemptUpdateHonorsIntervalAndDisabling(t *testing.T) {
 	cache := t.TempDir()
 	t.Setenv("HOME", cache)
 	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("LOCALAPPDATA", cache)
 	dir, err := getCacheDir()
 	if err != nil {
 		t.Fatal(err)
@@ -129,6 +131,7 @@ func TestShouldAttemptUpdateRejectsSymlinkedMetadata(t *testing.T) {
 	cache := t.TempDir()
 	t.Setenv("HOME", cache)
 	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("LOCALAPPDATA", cache)
 	dir, err := getCacheDir()
 	if err != nil {
 		t.Fatal(err)
