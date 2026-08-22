@@ -783,7 +783,7 @@ Print version.
 ### `--buildinfo`
 
 Print build information as JSON. The output includes the fetch version, Go
-version, target operating system and architecture, and build settings. Add
+version and build settings. Add
 `-v` to include module dependency versions. Metadata commands read
 configuration on a best-effort basis; an invalid config does not prevent help,
 version, or build information output.

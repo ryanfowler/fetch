@@ -236,8 +236,8 @@ func TestMain(t *testing.T) {
 		}
 		res := runFetch(t, path, "--buildinfo")
 		assertExitCode(t, 0, res)
-		assertBufContains(t, res.stdout, `"target_os"`)
-		assertBufContains(t, res.stdout, `"target_arch"`)
+		assertBufNotContains(t, res.stdout, `"target_os"`)
+		assertBufNotContains(t, res.stdout, `"target_arch"`)
 		assertBufContains(t, res.stdout, `"go"`)
 	})
 
