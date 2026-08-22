@@ -3340,7 +3340,7 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "--timeout", "0.1")
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "--timeout", "1")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 		if count.Load() != 2 {

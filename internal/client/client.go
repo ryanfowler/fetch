@@ -484,8 +484,19 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 	rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, qcfg *quic.Config) (*quic.Conn, error) {
 		ctx, cancel := connectContext(ctx, connectTimeout, "DNS/QUIC/TLS connect")
 		defer cancel()
-
+		trace := httptrace.ContextClientTrace(ctx)
+		if trace != nil && trace.DNSStart != nil {
+			trace.DNSStart(httptrace.DNSStartInfo{Host: addr})
+		}
 		endpoint, err := res.ResolveAddress(ctx, "udp", addr)
+		if trace != nil && trace.DNSDone != nil {
+			info := httptrace.DNSDoneInfo{Addrs: nil, Err: err}
+			if err == nil {
+				info.Addrs = make([]net.IPAddr, len(endpoint.Addrs))
+				copy(info.Addrs, endpoint.Addrs)
+			}
+			trace.DNSDone(info)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -549,31 +560,53 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 			conn       *quic.Conn
 			packetConn net.PacketConn
 		}
-		trace := httptrace.ContextClientTrace(ctx)
 		result, err := resolver.RaceCandidates(ctx, endpoint.Addrs, func(attemptCtx context.Context, ip net.IPAddr) (quicResult, error) {
+			address := net.JoinHostPort(ip.IP.String(), strconv.Itoa(port))
+			if trace != nil && trace.ConnectStart != nil {
+				trace.ConnectStart("udp", address)
+			}
 			var lc net.ListenConfig
 			packetConn, listenErr := lc.ListenPacket(attemptCtx, "udp", ":0")
+			if listenErr != nil && trace != nil && trace.ConnectDone != nil {
+				trace.ConnectDone("udp", address, listenErr)
+			}
 			if listenErr != nil {
 				return quicResult{}, listenErr
-			}
-			if trace != nil && trace.TLSHandshakeStart != nil {
-				trace.TLSHandshakeStart()
 			}
 			config := qcfg
 			if config != nil {
 				config = config.Clone()
 			}
+			if trace != nil && trace.TLSHandshakeStart != nil {
+				trace.TLSHandshakeStart()
+			}
 			conn, dialErr := quic.DialEarly(attemptCtx, packetConn, &net.UDPAddr{IP: ip.IP, Port: port}, tlsCfg, config)
+			if dialErr == nil {
+				select {
+				case <-conn.HandshakeComplete():
+				case <-attemptCtx.Done():
+					dialErr = context.Cause(attemptCtx)
+				}
+			}
 			if trace != nil && trace.TLSHandshakeDone != nil {
 				var state tls.ConnectionState
-				if conn != nil {
+				if conn != nil && dialErr == nil {
 					state = conn.ConnectionState().TLS
 				}
 				trace.TLSHandshakeDone(state, dialErr)
 			}
 			if dialErr != nil {
+				if conn != nil {
+					_ = conn.CloseWithError(0, "HTTP/3 handshake failed")
+				}
 				_ = packetConn.Close()
+				if trace != nil && trace.ConnectDone != nil {
+					trace.ConnectDone("udp", address, dialErr)
+				}
 				return quicResult{}, dialErr
+			}
+			if trace != nil && trace.ConnectDone != nil {
+				trace.ConnectDone("udp", address, nil)
 			}
 			return quicResult{conn: conn, packetConn: packetConn}, nil
 		}, func(result quicResult) {
@@ -636,7 +669,7 @@ func (t *http3TimingTransport) addPacketConn(conn net.PacketConn) {
 }
 
 func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := t.rt.RoundTrip(req)
+	resp, err := roundTripHTTP3(t.rt, req)
 
 	// Call GotFirstResponseByte when response headers arrive.
 	if err == nil {
@@ -648,6 +681,16 @@ func (t *http3TimingTransport) RoundTrip(req *http.Request) (*http.Response, err
 	}
 
 	return resp, err
+}
+
+// CloseIdleConnections releases idle QUIC sessions without interrupting an
+// active response. Client.Close calls Close after this method and therefore
+// also releases the packet sockets owned by this wrapper.
+func (t *http3TimingTransport) CloseIdleConnections() {
+	if t == nil || t.rt == nil {
+		return
+	}
+	t.rt.CloseIdleConnections()
 }
 
 func (t *http3TimingTransport) Close() error {
