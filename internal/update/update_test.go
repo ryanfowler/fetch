@@ -63,15 +63,16 @@ func TestUpdateLastAttemptTime_OverwritesExistingMetadata(t *testing.T) {
 
 func TestShouldAttemptUpdateTreatsMetadataDefensively(t *testing.T) {
 	cache := t.TempDir()
+	t.Setenv("HOME", cache)
 	t.Setenv("XDG_CACHE_HOME", cache)
+	cacheDir, err := getCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	write := func(t *testing.T, value string) {
 		t.Helper()
-		dir := filepath.Join(cache, "fetch")
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(value), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(cacheDir, "metadata.json"), []byte(value), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -100,16 +101,17 @@ func TestShouldAttemptUpdateTreatsMetadataDefensively(t *testing.T) {
 			if test.name == "missing" {
 				return
 			}
-			_ = os.Remove(filepath.Join(cache, "fetch", "metadata.json"))
+			_ = os.Remove(filepath.Join(cacheDir, "metadata.json"))
 		})
 	}
 }
 
 func TestShouldAttemptUpdateHonorsIntervalAndDisabling(t *testing.T) {
 	cache := t.TempDir()
+	t.Setenv("HOME", cache)
 	t.Setenv("XDG_CACHE_HOME", cache)
-	dir := filepath.Join(cache, "fetch")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	dir, err := getCacheDir()
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := updateLastAttemptTime(dir, time.Now()); err != nil {
@@ -125,9 +127,10 @@ func TestShouldAttemptUpdateHonorsIntervalAndDisabling(t *testing.T) {
 
 func TestShouldAttemptUpdateRejectsSymlinkedMetadata(t *testing.T) {
 	cache := t.TempDir()
+	t.Setenv("HOME", cache)
 	t.Setenv("XDG_CACHE_HOME", cache)
-	dir := filepath.Join(cache, "fetch")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	dir, err := getCacheDir()
+	if err != nil {
 		t.Fatal(err)
 	}
 	target := filepath.Join(t.TempDir(), "metadata")
