@@ -304,7 +304,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	// bounded. Raw binary dry-runs materialize only when framing requires a
 	// lengthless source.
 	if r.GRPC {
-		if isClientStreaming && requestDesc != nil && requiresGRPCSchema(r) {
+		if isClientStreaming && requestDesc != nil {
 			if r.DryRun {
 				// A replayable file can be converted directly through the
 				// streaming factory. Materialize only a one-shot source so the
