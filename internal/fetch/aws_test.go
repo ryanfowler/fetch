@@ -3,6 +3,7 @@ package fetch
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -62,6 +63,62 @@ func TestSignWebSocketHandshakeUsesEmptyPayloadAndPreservesBody(t *testing.T) {
 	}
 	if req.ContentLength != int64(len("initial message")) {
 		t.Fatalf("content length = %d, want %d", req.ContentLength, len("initial message"))
+	}
+}
+
+func TestWebSocketMetadataRequestIncludesEffectiveUpgrade(t *testing.T) {
+	u, err := url.Parse("wss://example.com/socket")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Add("X-Duplicate", "one")
+	req.Header.Add("X-Duplicate", "two")
+
+	metadata := websocketMetadataRequest(req, []string{"graphql-ws"})
+	if metadata.URL.Scheme != "https" {
+		t.Fatalf("metadata URL scheme = %q, want https", metadata.URL.Scheme)
+	}
+	for name, want := range map[string]string{
+		"Connection":             "Upgrade",
+		"Upgrade":                "websocket",
+		"Sec-WebSocket-Version":  "13",
+		"Sec-WebSocket-Key":      "[generated]",
+		"Sec-WebSocket-Protocol": "graphql-ws",
+	} {
+		if got := metadata.Header.Get(name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if got := metadata.Header.Values("X-Duplicate"); len(got) != 2 || got[0] != "one" || got[1] != "two" {
+		t.Fatalf("duplicate headers = %v, want [one two]", got)
+	}
+	if req.URL.Scheme != "wss" {
+		t.Fatal("metadata construction mutated the original URL")
+	}
+}
+
+func TestWebSocketHandshakeErrorBoundsAndEscapesExcerpt(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Status:     "403 Forbidden",
+		Body:       io.NopCloser(strings.NewReader("bad\x1b[2J" + strings.Repeat("x", 2048))),
+	}
+	err := websocketHandshakeError(resp, errors.New("upgrade rejected"))
+	if err == nil {
+		t.Fatal("expected handshake error")
+	}
+	if strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("error contains raw escape: %q", err)
+	}
+	if !strings.Contains(err.Error(), "response excerpt") || !strings.Contains(err.Error(), "403 Forbidden") {
+		t.Fatalf("error = %q, want status and bounded excerpt", err)
+	}
+	if len(err.Error()) > 1400 {
+		t.Fatalf("error length = %d, want bounded excerpt", len(err.Error()))
 	}
 }
 

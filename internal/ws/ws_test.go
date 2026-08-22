@@ -17,6 +17,36 @@ import (
 	"github.com/coder/websocket"
 )
 
+func TestBinaryMessagesAreRawWhenStdoutIsNotTerminal(t *testing.T) {
+	stdout := core.TestPrinter(false)
+	stderr := core.TestPrinter(false)
+	data := []byte{0x00, 0xff, 'x'}
+	if err := writeBinaryMessageForTerminal(data, Config{Stdout: stdout, Stderr: stderr}, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.Bytes(); !reflect.DeepEqual(got, data) {
+		t.Fatalf("stdout = %v, want %v", got, data)
+	}
+	if len(stderr.Bytes()) != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.Bytes())
+	}
+}
+
+func TestBinaryMessagesNeverReachTerminalStdout(t *testing.T) {
+	stdout := core.TestPrinter(false)
+	stderr := core.TestPrinter(false)
+	data := []byte{0x00, 0xff, 'x'}
+	if err := writeBinaryMessageForTerminal(data, Config{Stdout: stdout, Stderr: stderr}, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(stdout.Bytes()) != 0 {
+		t.Fatalf("stdout = %v, want empty", stdout.Bytes())
+	}
+	if got := string(stderr.Bytes()); got != "[binary 3 bytes]\n" {
+		t.Fatalf("stderr = %q, want binary indicator", got)
+	}
+}
+
 func TestShouldFormat(t *testing.T) {
 	if shouldFormat(core.FormatOff) {
 		t.Fatal("FormatOff should return false")

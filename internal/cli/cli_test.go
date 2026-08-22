@@ -386,10 +386,17 @@ func TestWebSocketSchemeExclusives(t *testing.T) {
 		args []string
 		flag string
 	}{
+		{name: "compress", args: []string{"ws://example.com", "--compress", "gzip"}, flag: "compress"},
+		{name: "no encode", args: []string{"ws://example.com", "--no-encode"}, flag: "no-encode"},
 		{name: "copy", args: []string{"ws://example.com", "--copy"}, flag: "copy"},
 		{name: "output", args: []string{"ws://example.com", "--output", "out.txt"}, flag: "output"},
 		{name: "remote name", args: []string{"ws://example.com", "--remote-name"}, flag: "remote-name"},
 		{name: "retry", args: []string{"ws://example.com", "--retry", "1"}, flag: "retry"},
+		{name: "retry delay", args: []string{"ws://example.com", "--retry-delay", "1s"}, flag: "retry-delay"},
+		{name: "range", args: []string{"ws://example.com", "--range", "1-2"}, flag: "range"},
+		{name: "digest", args: []string{"ws://example.com", "--digest", "user:pass"}, flag: "digest"},
+		{name: "ignore status", args: []string{"ws://example.com", "--ignore-status"}, flag: "ignore-status"},
+		{name: "redirects", args: []string{"ws://example.com", "--redirects", "1"}, flag: "redirects"},
 	}
 
 	for _, tt := range tests {
@@ -402,6 +409,20 @@ func TestWebSocketSchemeExclusives(t *testing.T) {
 				t.Fatalf("error = %q, want --%s", err.Error(), tt.flag)
 			}
 		})
+	}
+}
+
+func TestWebSocketHTTPVersionValidation(t *testing.T) {
+	for _, args := range [][]string{
+		{"--http", "2", "ws://example.com"},
+		{"--http3", "ws://example.com"},
+	} {
+		if _, err := Parse(args); err == nil || !strings.Contains(err.Error(), "cannot use WebSocket") {
+			t.Fatalf("Parse(%v) error = %v, want WebSocket HTTP-version error", args, err)
+		}
+	}
+	if _, err := Parse([]string{"--http1", "ws://example.com"}); err != nil {
+		t.Fatalf("HTTP/1.1 should be valid for WebSocket: %v", err)
 	}
 }
 

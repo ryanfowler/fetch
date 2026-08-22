@@ -266,6 +266,12 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 		}
 		timing := DialTiming{ConnectStart: started, ConnectDone: time.Now()}
 		timing.ConnectDuration = timing.ConnectDone.Sub(timing.ConnectStart)
+		// Some platforms expose a coarse wall clock. Preserve the invariant
+		// that a completed connection has a positive measured duration even
+		// when both samples fall in one clock tick.
+		if timing.ConnectDuration <= 0 {
+			timing.ConnectDuration = time.Nanosecond
+		}
 		if deadline, ok := attemptCtx.Deadline(); ok {
 			_ = conn.SetDeadline(deadline)
 		}

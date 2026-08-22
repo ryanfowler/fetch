@@ -276,6 +276,9 @@ func Parse(args []string) (*App, error) {
 	if err := validateSchemeExclusives(&app, cli, long); err != nil {
 		return &app, err
 	}
+	if app.WS && app.Cfg.HTTP > core.HTTP1 {
+		return &app, fmt.Errorf("cannot use WebSocket with %s", app.Cfg.HTTP.String())
+	}
 	if app.URL != nil && !app.WS && app.WSInteractive != core.WSInteractiveAuto {
 		return &app, fmt.Errorf("'--ws-interactive' requires a ws:// or wss:// URL")
 	}
