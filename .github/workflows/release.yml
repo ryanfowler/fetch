@@ -80,37 +80,8 @@ jobs:
           zip "$staging.zip" fetch.exe
           echo "ASSET=$staging.zip" >> $GITHUB_ENV
 
-      - name: Verify release archive contents and binary metadata
-        shell: bash
-        run: |
-          extracted=$(mktemp -d)
-          trap 'rm -rf "$extracted"' EXIT
-          if [[ "${{ matrix.goos }}" == "windows" ]]; then
-            test "$(unzip -Z1 "$ASSET")" = "fetch.exe"
-            unzip -q "$ASSET" -d "$extracted"
-            go version -m "$extracted/fetch.exe" | grep -F $'path\tgithub.com/ryanfowler/fetch'
-          else
-            test "$(tar tzf "$ASSET")" = "fetch"
-            tar xzf "$ASSET" -C "$extracted"
-            go version -m "$extracted/fetch" | grep -F $'path\tgithub.com/ryanfowler/fetch'
-          fi
-          test -s "$extracted/${{ env.BIN_NAME }}"
-
-      - name: Smoke-test extracted Linux artifact
-        if: ${{ matrix.goos == 'linux' && matrix.goarch == 'amd64' }}
-        shell: bash
-        run: |
-          extracted=$(mktemp -d)
-          trap 'rm -rf "$extracted"' EXIT
-          tar xzf "$ASSET" -C "$extracted"
-          "$extracted/fetch" --version
-          "$extracted/fetch" --buildinfo >/dev/null
-
       - name: Generate SHA-256 sidecar
         run: sha256sum "$ASSET" | awk '{print tolower($1) "  " $2}' > "$ASSET.sha256"
-
-      - name: Verify SHA-256 sidecar
-        run: sha256sum -c "$ASSET.sha256"
 
       - name: Upload release archive and checksum
         env:

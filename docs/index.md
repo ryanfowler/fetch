@@ -30,8 +30,6 @@ reference by task.
 ## Maintainer reference
 
 - [Go migration note](migration-go.md)
-- [Release qualification](release-qualification.md)
-- [Qualification report](release-qualification-report.md)
 - [Repository maintainer guide](../AGENTS.md)
 
 The CLI reference is embedded in the Go binary and is rendered by
