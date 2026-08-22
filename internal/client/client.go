@@ -39,6 +39,7 @@ type Client struct {
 	initErr      error
 	proxy        *url.URL
 	httpVersion  core.HTTPVersion
+	echMode      core.ECHMode
 }
 
 // RedirectHop represents a single redirect in the chain.
@@ -179,7 +180,7 @@ func NewClient(cfg ClientConfig) *Client {
 		if cfg.H2C {
 			transport = getH2CTransport(baseDial, res, cfg.Proxy, cfg.ConnectTimeout)
 		} else {
-			transport = getHTTP2Transport(baseDial, res, cfg.Proxy, tlsConfig, cfg.ConnectTimeout)
+			transport = getHTTP2Transport(baseDial, res, cfg.Proxy, tlsConfig, cfg.ConnectTimeout, cfg.ECH)
 		}
 	case core.HTTP3:
 		transport = getHTTP3Transport(res, tlsConfig, cfg.ConnectTimeout, cfg.ECH)
@@ -193,6 +194,13 @@ func NewClient(cfg ClientConfig) *Client {
 			ForceAttemptHTTP2:  cfg.HTTP != core.HTTP1,
 			Protocols:          &http.Protocols{},
 			TLSClientConfig:    tlsConfig.Clone(),
+		}
+		if cfg.ECH != core.ECHUnknown && cfg.ECH != core.ECHOff && cfg.Proxy == nil {
+			// A custom TLS dial is required because net/http otherwise creates
+			// the tls.Config before the resolver can supply the origin's ECH
+			// configuration. Proxy-specific ECH wiring belongs to the proxy
+			// transport integration and must not weaken its certificate checks.
+			rt.DialTLSContext = newECHHTTPDialTLS(baseDial, res, tlsConfig, cfg.ECH, cfg.ConnectTimeout, cfg.HTTP)
 		}
 
 		// net/http provides the HTTP proxy CONNECT machinery, but its SOCKS
@@ -372,8 +380,11 @@ func NewClient(cfg ClientConfig) *Client {
 	if initErr == nil {
 		initErr = core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax)
 	}
-	if initErr == nil && cfg.ECH != core.ECHUnknown && cfg.ECH != core.ECHOff && (cfg.HTTP == core.HTTP1 || cfg.HTTP == core.HTTP2) {
-		initErr = errors.New("ECH is not available for the selected HTTP version")
+	if initErr == nil && cfg.H2C && cfg.ECH != core.ECHUnknown && cfg.ECH != core.ECHOff {
+		initErr = errors.New("ECH cannot be used with cleartext HTTP/2")
+	}
+	if initErr == nil {
+		initErr = core.ValidateECHPolicy(cfg.ECH, cfg.HTTP, cfg.TLSMin, cfg.TLSMax)
 	}
 	if initErr == nil && cfg.HTTP == core.HTTP3 && cfg.TLSMax != 0 && cfg.TLSMax < tls.VersionTLS13 {
 		initErr = errors.New("HTTP/3 requires max-tls 1.3 or higher")
@@ -384,6 +395,7 @@ func NewClient(cfg ClientConfig) *Client {
 		initErr:      initErr,
 		proxy:        cfg.Proxy,
 		httpVersion:  cfg.HTTP,
+		echMode:      cfg.ECH,
 	}
 }
 
@@ -466,10 +478,10 @@ func wrapDialWithConnectTimeout(baseDial func(context.Context, string, string) (
 	}
 }
 
-func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, explicitProxy *url.URL, tlsConfig *tls.Config, connectTimeout time.Duration) http.RoundTripper {
+func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, explicitProxy *url.URL, tlsConfig *tls.Config, connectTimeout time.Duration, echMode core.ECHMode) http.RoundTripper {
 	return &http2.Transport{
 		AllowHTTP:          false,
-		DialTLSContext:     newHTTP2DialTLS(baseDial, res, explicitProxy, "https", tlsConfig, connectTimeout),
+		DialTLSContext:     newHTTP2DialTLS(baseDial, res, explicitProxy, "https", tlsConfig, connectTimeout, echMode),
 		DisableCompression: true,
 		TLSClientConfig:    tlsConfig.Clone(),
 	}
@@ -478,7 +490,7 @@ func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn,
 func getH2CTransport(baseDial func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, explicitProxy *url.URL, connectTimeout time.Duration) http.RoundTripper {
 	return &http2.Transport{
 		AllowHTTP:          true,
-		DialTLSContext:     newHTTP2DialTLS(baseDial, res, explicitProxy, "http", nil, connectTimeout),
+		DialTLSContext:     newHTTP2DialTLS(baseDial, res, explicitProxy, "http", nil, connectTimeout, core.ECHOff),
 		DisableCompression: true,
 	}
 }
@@ -1338,14 +1350,15 @@ func (c *Client) ValidateTransport(req *http.Request) error {
 	if req == nil || req.URL == nil {
 		return errors.New("request URL is required")
 	}
-	if c.httpVersion == core.HTTP3 {
-		proxy, err := ProxyForURL(c.proxy, req.URL)
-		if err != nil {
-			return err
-		}
-		if proxy != nil {
-			return errors.New("HTTP/3 cannot be used with a proxy")
-		}
+	proxy, err := ProxyForURL(c.proxy, req.URL)
+	if err != nil {
+		return err
+	}
+	if c.echMode != core.ECHUnknown && c.echMode != core.ECHOff && proxy != nil {
+		return errors.New("ECH is not available through a proxy")
+	}
+	if c.httpVersion == core.HTTP3 && proxy != nil {
+		return errors.New("HTTP/3 cannot be used with a proxy")
 	}
 	return nil
 }

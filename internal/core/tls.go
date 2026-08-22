@@ -24,6 +24,33 @@ type TLSConfigOptions struct {
 
 // ValidateTLSVersions validates the TLS bounds accepted by fetch. A zero
 // minimum means the secure TLS 1.2 default, and a zero maximum means no cap.
+// ValidateECHPolicy validates the ECH mode before any network operation. The
+// mode is deliberately independent from the TLS handshake implementation so
+// transports cannot silently weaken an explicit policy.
+//
+// A zero TLS bound means that the caller did not set that bound. In that case
+// ECH may raise the effective minimum to TLS 1.3. An explicit TLS 1.2 bound is
+// a configuration conflict because it permits a handshake that cannot carry
+// ECH.
+func ValidateECHPolicy(mode ECHMode, httpVersion HTTPVersion, min, max uint16) error {
+	if mode == ECHUnknown || mode == ECHOff {
+		return nil
+	}
+	if err := ValidateTLSVersions(min, max); err != nil {
+		return err
+	}
+	if mode != ECHAuto && mode != ECHOn {
+		return fmt.Errorf("unsupported ECH mode %d", mode)
+	}
+	if mode == ECHOn && httpVersion == HTTP3 {
+		return fmt.Errorf("ECH on cannot be used with explicit HTTP/3; use automatic HTTP version selection")
+	}
+	if min == tls.VersionTLS12 || max == tls.VersionTLS12 {
+		return fmt.Errorf("ECH requires TLS 1.3; remove the explicit TLS 1.2 bound")
+	}
+	return nil
+}
+
 func ValidateTLSVersions(min, max uint16) error {
 	valid := func(version uint16) bool {
 		return version == 0 || version == tls.VersionTLS12 || version == tls.VersionTLS13

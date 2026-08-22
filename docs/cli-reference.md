@@ -275,7 +275,13 @@ explicit modes is an error.
 
 ### `--ech MODE`
 
-Configure Encrypted ClientHello with `auto`, `on`, or `off`.
+Configure Encrypted ClientHello with `auto`, `on`, or `off`. The default is
+`off`. `auto` discovers HTTPS/SVCB records with address resolution and uses a
+validated advertised ECH configuration when one is available. Authenticated
+DNS discovery failures are not silently downgraded. `on` requires a usable
+advertised configuration, rejects explicit HTTP/3, and uses TCP with automatic
+HTTP version selection. ECH requires TLS 1.3; explicit TLS 1.2 bounds are a
+configuration error. ECH is not available through proxies or cleartext HTTP/2.
 
 ### `--har PATH`
 

@@ -251,6 +251,21 @@ func ResolveHTTPS(ctx context.Context, host string, records HTTPSRecordLookup, a
 			if result.TTLPresent && (!candidateTTLPresent || result.TTL < candidateTTL) {
 				candidateTTL, candidateTTLPresent = result.TTL, true
 			}
+			echConfig := []byte(nil)
+			if len(service.ECH) > 0 {
+				filtered, filterErr := SupportedECHConfigList(service.ECH)
+				if filterErr != nil {
+					// An ECHConfigList containing only versions unknown to this
+					// client is a valid DNS value, but it is not usable for this
+					// connection. Malformed framing cannot reach this point because
+					// ParseSVCBRRSet rejects the complete RRset atomically.
+					if !strings.Contains(filterErr.Error(), "no supported ECH configuration") {
+						return result, classifyDiscoveryError(filterErr, options.Authenticated)
+					}
+				} else {
+					echConfig = filtered
+				}
+			}
 			candidate := ServiceCandidate{
 				OriginName:    origin,
 				TargetName:    target,
@@ -258,7 +273,7 @@ func ResolveHTTPS(ctx context.Context, host string, records HTTPSRecordLookup, a
 				Port:          options.DefaultPort,
 				ALPN:          cloneALPN(service.ALPN),
 				NoDefaultALPN: service.NoDefaultALPN,
-				ECH:           append([]byte(nil), service.ECH...),
+				ECH:           echConfig,
 				TTL:           candidateTTL,
 				TTLPresent:    candidateTTLPresent,
 			}

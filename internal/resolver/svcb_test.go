@@ -201,6 +201,44 @@ func TestParseSVCBRDataRejectsReservedParameterKey(t *testing.T) {
 	}
 }
 
+func TestValidateECHConfigListFiltersUnknownVersions(t *testing.T) {
+	contents := []byte{
+		0, // config ID
+		0, 0x20,
+		0, 1, 7,
+		0, 4, 0, 1, 0, 1,
+		0, 1, 'x',
+		0, 0,
+	}
+	value := make([]byte, 2+4+len(contents)+4+len(contents))
+	binary.BigEndian.PutUint16(value, uint16(len(value)-2))
+	offset := 2
+	binary.BigEndian.PutUint16(value[offset:], 0x1234)
+	binary.BigEndian.PutUint16(value[offset+2:], uint16(len(contents)))
+	offset += 4 + len(contents)
+	binary.BigEndian.PutUint16(value[offset:], 0xfe0d)
+	binary.BigEndian.PutUint16(value[offset+2:], uint16(len(contents)))
+	copy(value[offset+4:], contents)
+
+	info, err := ValidateECHConfigList(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ConfigurationCount != 2 || info.UnsupportedCount != 1 || len(info.Supported) != 2+4+len(contents) {
+		t.Fatalf("ECH list info = %#v", info)
+	}
+	if got := binary.BigEndian.Uint16(info.Supported[2:]); got != 0xfe0d {
+		t.Fatalf("supported version = %#x, want 0xfe0d", got)
+	}
+}
+
+func TestValidateECHConfigListRejectsOnlyUnknownVersions(t *testing.T) {
+	value := []byte{0, 4, 0x12, 0x34, 0, 0}
+	if _, err := ValidateECHConfigList(value); err == nil || !strings.Contains(err.Error(), "no supported") {
+		t.Fatalf("error = %v, want unsupported-config error", err)
+	}
+}
+
 func TestParseSVCBRDataAcceptsFramedECHConfigList(t *testing.T) {
 	contents := []byte{
 		0,       // config ID

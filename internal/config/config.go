@@ -386,6 +386,9 @@ func (c *Config) Validate() error {
 	if c.HTTP == core.HTTP3 && c.TLSMax != nil && *c.TLSMax < tls.VersionTLS13 {
 		return fmt.Errorf("HTTP/3 requires max-tls 1.3 or higher")
 	}
+	if err := core.ValidateECHPolicy(c.ECH, c.HTTP, tlsMin, tlsMax); err != nil {
+		return err
+	}
 	if c.KeyData != nil && c.CertData == nil {
 		return missingClientCertError{keyPath: c.KeyPath}
 	}
