@@ -113,8 +113,9 @@ fetch --timeout 5 ws://api.example.com/ws
 
 ## Limitations
 
-- WebSocket requires HTTP/1.1 for the upgrade handshake. Using `--http 3` with WebSocket is not supported.
-- WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`, `--form`, `--multipart`, `--xml`, `--edit`, output-file/clipboard flags, or retry flags.
+- WebSocket requires HTTP/1.1 for the upgrade handshake. Forcing HTTP/2 or HTTP/3 is rejected; HTTP/1.1 remains supported.
+- WebSocket uses the normal proxy, DNS, TLS, ECH, and session-cookie configuration.
+- WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`, `--form`, `--multipart`, `--xml`, `--edit`, output-file/clipboard flags, Digest authentication, redirects, ranges, compression flags, or retry flags.
 - Incoming WebSocket messages are limited to 16 MiB.
-- Binary message content is not displayed; only a size indicator is shown.
-- The pager is disabled for WebSocket output.
+- Binary messages are written byte-for-byte to a pipe or redirected stdout. A terminal receives only a safe size indicator.
+- The pager and image rendering do not apply to WebSocket output; fetch warns when these options are selected.

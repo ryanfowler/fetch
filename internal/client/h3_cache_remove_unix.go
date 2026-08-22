@@ -22,10 +22,18 @@ func removeH3CacheFile(dir, name string) error {
 		}
 		return err
 	}
-	info, statErr := os.NewFile(uintptr(fd), name).Stat()
-	_ = unix.Close(fd)
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		_ = unix.Close(fd)
+		return os.ErrInvalid
+	}
+	info, statErr := file.Stat()
+	closeErr := file.Close()
 	if statErr != nil {
 		return statErr
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	if !info.Mode().IsRegular() {
 		return os.ErrInvalid

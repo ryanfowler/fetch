@@ -580,6 +580,14 @@ func grpcHeaders(headers []core.KeyVal[string]) []core.KeyVal[string] {
 }
 
 func newClient(r *Request) *client.Client {
+	httpVersion := r.HTTP
+	// The WebSocket upgrade is an HTTP/1.1 handshake. Keep the transport on
+	// HTTP/1.1 even when a request is constructed directly rather than through
+	// CLI validation; callers using the CLI still receive the explicit
+	// HTTP/2/HTTP/3 mode error before reaching this point.
+	if r.WS {
+		httpVersion = core.HTTP1
+	}
 	return client.NewClient(client.ClientConfig{
 		CACerts:          r.CACerts,
 		ClientCert:       r.ClientCert,
@@ -587,7 +595,7 @@ func newClient(r *Request) *client.Client {
 		ResolverEndpoint: r.ResolverEndpoint,
 		DNSServer:        r.DNSServer,
 		H2C:              shouldUseH2C(r),
-		HTTP:             r.HTTP,
+		HTTP:             httpVersion,
 		ECH:              r.ECH,
 		Insecure:         r.Insecure,
 		Proxy:            r.Proxy,

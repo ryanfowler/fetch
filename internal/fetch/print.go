@@ -19,6 +19,20 @@ func printRequestMetadata(p *core.Printer, req *http.Request, httpVersion core.H
 	printRequestMetadataWithURL(p, req, httpVersion, verbosity, false)
 }
 
+func printResolverMetadata(p *core.Printer, c *client.Client) {
+	p.Set(core.Bold)
+	p.Set(core.Blue)
+	p.WriteString("resolver")
+	p.Reset()
+	p.WriteString(": ")
+	if c == nil {
+		p.WriteString("system")
+	} else {
+		p.WriteString(core.TerminalSafeText(c.ResolverProvenance()))
+	}
+	p.WriteString("\n")
+}
+
 func printProxyMetadata(p *core.Printer, explicit *url.URL, target *url.URL) {
 	decision, err := client.SelectProxy(explicit, target)
 	if err != nil {
@@ -183,7 +197,10 @@ func printResponseMetadata(p *core.Printer, v core.Verbosity, resp *http.Respons
 }
 
 func printResponseHeaders(p *core.Printer, resp *http.Response, usePrefix bool) {
-	method := resp.Request.Method
+	method := ""
+	if resp.Request != nil {
+		method = resp.Request.Method
+	}
 	headers := getHeaders(resp.Header)
 	if method != "HEAD" && resp.ContentLength >= 0 && resp.Header.Get("Content-Length") == "" {
 		val := strconv.FormatInt(resp.ContentLength, 10)

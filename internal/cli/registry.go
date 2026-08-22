@@ -330,12 +330,13 @@ func applyFlagDefinition(flag *Flag) {
 }
 
 var websocketExcluded = map[string][]string{
-	"clobber": {"ws", "wss"}, "copy": {"ws", "wss"}, "discard": {"ws", "wss"},
-	"edit": {"ws", "wss"}, "form": {"ws", "wss"}, "grpc": {"ws", "wss"},
-	"grpc-describe": {"ws", "wss"}, "grpc-list": {"ws", "wss"}, "multipart": {"ws", "wss"},
-	"output": {"ws", "wss"}, "remote-header-name": {"ws", "wss"}, "remote-name": {"ws", "wss"},
+	"clobber": {"ws", "wss"}, "compress": {"ws", "wss"}, "copy": {"ws", "wss"}, "discard": {"ws", "wss"},
+	"edit": {"ws", "wss"}, "no-encode": {"ws", "wss"}, "form": {"ws", "wss"}, "grpc": {"ws", "wss"},
+	"grpc-describe": {"ws", "wss"}, "grpc-list": {"ws", "wss"}, "ignore-status": {"ws", "wss"}, "multipart": {"ws", "wss"},
+	"redirects": {"ws", "wss"},
+	"output":    {"ws", "wss"}, "range": {"ws", "wss"}, "remote-header-name": {"ws", "wss"}, "remote-name": {"ws", "wss"},
 	"retry": {"ws", "wss"}, "retry-delay": {"ws", "wss"}, "xml": {"ws", "wss"},
-	"har": {"ws", "wss"},
+	"digest": {"ws", "wss"}, "har": {"ws", "wss"},
 }
 
 var fromCurlOptions = map[string]bool{

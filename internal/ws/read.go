@@ -35,7 +35,7 @@ func readLoop(ctx context.Context, cfg Config) error {
 		case websocket.MessageText:
 			writeErr = writeTextMessage(data, cfg.Stdout, cfg.Format)
 		case websocket.MessageBinary:
-			writeErr = writeBinaryIndicator(cfg.Stderr, len(data))
+			writeErr = writeBinaryMessage(data, cfg)
 		}
 		if writeErr != nil {
 			if core.IsBrokenPipe(writeErr) {
@@ -74,6 +74,23 @@ func shouldFormat(f core.Format) bool {
 		return true
 	}
 	return core.IsStdoutTerm
+}
+
+// writeBinaryMessage keeps binary payloads byte-exact when stdout is not a
+// terminal. Raw binary must never be written to a terminal, where it could
+// contain control sequences or corrupt the user's session.
+func writeBinaryMessage(data []byte, cfg Config) error {
+	return writeBinaryMessageForTerminal(data, cfg, core.IsStdoutTerm)
+}
+
+func writeBinaryMessageForTerminal(data []byte, cfg Config, stdoutTerminal bool) error {
+	if !stdoutTerminal {
+		if _, err := cfg.Stdout.Write(data); err != nil {
+			return err
+		}
+		return cfg.Stdout.Flush()
+	}
+	return writeBinaryIndicator(cfg.Stderr, len(data))
 }
 
 // writeBinaryIndicator writes a binary message indicator to stderr.

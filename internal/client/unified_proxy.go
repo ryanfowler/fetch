@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/resolver"
 )
 
@@ -17,24 +18,26 @@ import (
 // avoids sharing proxy state between concurrent requests while retaining the
 // standard HTTP transport's pooling and redirect behavior inside each route.
 type unifiedProxyTransport struct {
-	mu        sync.Mutex
-	routes    map[string]*http.Transport
-	explicit  *url.URL
-	base      func(context.Context, string, string) (net.Conn, error)
-	proxyBase func(context.Context, string, string) (net.Conn, error)
-	res       *resolver.Resolver
-	tls       *tls.Config
-	timeout   time.Duration
+	mu          sync.Mutex
+	routes      map[string]*http.Transport
+	explicit    *url.URL
+	base        func(context.Context, string, string) (net.Conn, error)
+	proxyBase   func(context.Context, string, string) (net.Conn, error)
+	res         *resolver.Resolver
+	tls         *tls.Config
+	timeout     time.Duration
+	httpVersion core.HTTPVersion
 }
 
 func newUnifiedProxyTransport(cfg ClientConfig, base func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, tlsConfig *tls.Config) *unifiedProxyTransport {
 	return &unifiedProxyTransport{
-		routes:   make(map[string]*http.Transport),
-		explicit: cfg.Proxy,
-		base:     base,
-		res:      res,
-		tls:      tlsConfig,
-		timeout:  cfg.ConnectTimeout,
+		routes:      make(map[string]*http.Transport),
+		explicit:    cfg.Proxy,
+		base:        base,
+		res:         res,
+		tls:         tlsConfig,
+		timeout:     cfg.ConnectTimeout,
+		httpVersion: cfg.HTTP,
 	}
 }
 
@@ -59,7 +62,7 @@ func (t *unifiedProxyTransport) route(key string, proxy *url.URL) *http.Transpor
 	}
 	rt := &http.Transport{
 		DisableCompression: true,
-		ForceAttemptHTTP2:  true,
+		ForceAttemptHTTP2:  t.httpVersion != core.HTTP1,
 		Protocols:          &http.Protocols{},
 		TLSClientConfig:    t.tls.Clone(),
 	}
@@ -84,7 +87,7 @@ func (t *unifiedProxyTransport) route(key string, proxy *url.URL) *http.Transpor
 	}
 	rt.DialContext = dial
 	rt.Protocols.SetHTTP1(true)
-	rt.Protocols.SetHTTP2(true)
+	rt.Protocols.SetHTTP2(t.httpVersion != core.HTTP1)
 	t.routes[key] = rt
 	return rt
 }

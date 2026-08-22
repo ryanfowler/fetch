@@ -3,9 +3,11 @@ package fetch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"os"
 	"strings"
 
@@ -27,10 +29,18 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		req.Method = "GET"
 	}
 
-	// Timing waterfall is not supported for persistent WebSocket connections.
+	// Timing waterfall and the normal pager/image response pipeline do not
+	// apply to a persistent WebSocket message stream. Keep these diagnostics
+	// close to the handshake so they are emitted even when the peer rejects it.
+	p := r.PrinterHandle.Stderr()
 	if r.Timing {
-		p := r.PrinterHandle.Stderr()
 		core.WriteWarningMsgIf(p, "--timing is not supported for WebSocket connections", r.Verbosity == core.VSilent)
+	}
+	if r.Pager != core.PagerUnknown || r.NoPager {
+		core.WriteWarningMsgIf(p, "pager does not apply to WebSocket output", r.Verbosity == core.VSilent)
+	}
+	if r.Image != core.ImageUnknown {
+		core.WriteWarningMsgIf(p, "image rendering does not apply to WebSocket messages", r.Verbosity == core.VSilent)
 	}
 
 	// Prepare the initial message from -d or -j flags. It is sent after the
@@ -59,13 +69,15 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 
 	// Extract Sec-WebSocket-Protocol for DialOptions.Subprotocols.
 	var subprotocols []string
-	if proto := req.Header.Get("Sec-WebSocket-Protocol"); proto != "" {
-		for p := range strings.SplitSeq(proto, ",") {
+	for _, protoHeader := range req.Header.Values("Sec-WebSocket-Protocol") {
+		for p := range strings.SplitSeq(protoHeader, ",") {
 			p = strings.TrimSpace(p)
 			if p != "" {
 				subprotocols = append(subprotocols, p)
 			}
 		}
+	}
+	if len(subprotocols) > 0 {
 		req.Header.Del("Sec-WebSocket-Protocol")
 	}
 
@@ -79,12 +91,22 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		return 1, err
 	}
 
-	// Print request metadata / dry-run.
+	// Print request metadata / dry-run. coder/websocket adds the upgrade
+	// headers inside Dial, so render a safe preview of that effective request
+	// rather than the pre-handshake request assembled by NewRequest.
 	if r.Verbosity >= core.VExtraVerbose || r.DryRun {
 		errPrinter := r.PrinterHandle.Stderr()
-		printRequestMetadataWithURL(errPrinter, req, r.HTTP, r.Verbosity, r.DryRun)
+		metadataReq := websocketMetadataRequest(req, subprotocols)
+		if !r.DryRun {
+			// net/http applies the jar immediately before sending the
+			// handshake. Include the same cookies in verbose metadata without
+			// mutating the request that coder/websocket will send.
+			metadataReq = c.ApplyJarCookies(metadataReq)
+		}
+		printRequestMetadataWithURL(errPrinter, metadataReq, r.HTTP, r.Verbosity, r.DryRun)
 		if r.Verbosity >= core.VDebug {
 			printProxyMetadata(errPrinter, r.Proxy, req.URL)
+			printResolverMetadata(errPrinter, c)
 		}
 		errPrinter.Flush()
 		if r.DryRun {
@@ -131,18 +153,27 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	}
 
 	conn, resp, err := websocket.Dial(dialCtx, req.URL.String(), opts)
-	if err != nil {
-		return 1, err
-	}
-	defer conn.CloseNow()
-	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	// Print response metadata.
+	// Print response metadata even when the server rejects the upgrade. The
+	// websocket package returns the response with a bounded body excerpt on
+	// handshake errors, which is useful for diagnosing a non-101 response.
 	if r.Verbosity >= core.VNormal && resp != nil {
 		p := r.PrinterHandle.Stderr()
 		printResponseMetadata(p, r.Verbosity, resp)
+		if r.Verbosity >= core.VVerbose {
+			if protocol := resp.Header.Get("Sec-WebSocket-Protocol"); protocol != "" {
+				p.WriteString("subprotocol: ")
+				p.WriteString(core.TerminalSafeText(protocol))
+				p.WriteString("\n")
+			}
+		}
 		p.Flush()
 	}
+	if err != nil {
+		return 1, websocketHandshakeError(resp, err)
+	}
+	defer conn.CloseNow()
+	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	// Detect interactive mode: default to TUI only when all three FDs are terminals.
 	interactive := core.IsStdinTerm && core.IsStdoutTerm && core.IsStderrTerm
@@ -186,6 +217,73 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		return 1, err
 	}
 	return 0, nil
+}
+
+func websocketMetadataRequest(req *http.Request, subprotocols []string) *http.Request {
+	metadata := req.Clone(req.Context())
+	metadata.Method = http.MethodGet
+	metadata.Body = http.NoBody
+	metadata.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
+	metadata.ContentLength = 0
+
+	// coder/websocket normalizes ws/wss to http/https before handing the
+	// request to net/http and always overwrites these protocol headers.
+	if metadata.URL != nil {
+		metadata.URL = cloneWebSocketHTTPURL(metadata.URL)
+	}
+	metadata.Header.Set("Connection", "Upgrade")
+	metadata.Header.Set("Upgrade", "websocket")
+	metadata.Header.Set("Sec-WebSocket-Version", "13")
+	metadata.Header.Set("Sec-WebSocket-Key", "[generated]")
+	if len(subprotocols) > 0 {
+		metadata.Header.Set("Sec-WebSocket-Protocol", strings.Join(subprotocols, ","))
+	}
+	return metadata
+}
+
+func cloneWebSocketHTTPURL(u *url.URL) *url.URL {
+	if u == nil {
+		return nil
+	}
+	clone := *u
+	switch strings.ToLower(clone.Scheme) {
+	case "ws":
+		clone.Scheme = "http"
+	case "wss":
+		clone.Scheme = "https"
+	}
+	return &clone
+}
+
+func websocketHandshakeError(resp *http.Response, err error) error {
+	if err == nil {
+		err = errors.New("handshake failed")
+	}
+	safeErr := core.TerminalSafeText(err.Error())
+	if resp == nil {
+		return errors.New(safeErr)
+	}
+	status := core.TerminalSafeText(resp.Status)
+	if status == "" {
+		status = fmt.Sprintf("status %d", resp.StatusCode)
+	}
+	message := fmt.Sprintf("WebSocket handshake failed with %s: %s", status, safeErr)
+	if resp.Body == nil {
+		return errors.New(message)
+	}
+	const maxHandshakeExcerpt = 1024
+	excerpt, readErr := io.ReadAll(io.LimitReader(resp.Body, maxHandshakeExcerpt+1))
+	_ = resp.Body.Close()
+	if len(excerpt) > maxHandshakeExcerpt {
+		excerpt = excerpt[:maxHandshakeExcerpt]
+	}
+	if len(excerpt) == 0 {
+		return errors.New(message)
+	}
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return fmt.Errorf("%s (reading response excerpt: %s)", message, core.TerminalSafeText(readErr.Error()))
+	}
+	return fmt.Errorf("%s: response excerpt %q", message, core.TerminalSafeText(string(excerpt)))
 }
 
 func signWebSocketHandshake(r *Request, req *http.Request) error {

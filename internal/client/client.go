@@ -40,6 +40,7 @@ type Client struct {
 	proxy        *url.URL
 	httpVersion  core.HTTPVersion
 	echMode      core.ECHMode
+	resolver     *resolver.Resolver
 }
 
 // RedirectHop represents a single redirect in the chain.
@@ -396,6 +397,7 @@ func NewClient(cfg ClientConfig) *Client {
 		proxy:        cfg.Proxy,
 		httpVersion:  cfg.HTTP,
 		echMode:      cfg.ECH,
+		resolver:     res,
 	}
 }
 
@@ -754,6 +756,16 @@ func (c *Client) Close() error {
 // HTTPClient returns the underlying *http.Client.
 func (c *Client) HTTPClient() *http.Client {
 	return c.c
+}
+
+// ResolverProvenance identifies the resolver policy used by this client. It
+// is safe for diagnostics because resolver endpoints redact credentials during
+// parsing and display construction.
+func (c *Client) ResolverProvenance() string {
+	if c == nil || c.resolver == nil {
+		return "system"
+	}
+	return c.resolver.Provenance()
 }
 
 // SetJar sets the cookie jar on the HTTP client.
