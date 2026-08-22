@@ -2,7 +2,6 @@ package curl
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 )
 
@@ -100,9 +99,9 @@ func parseShortFlags(r *Result, flags string, rest []string) (int, error) {
 			if err != nil {
 				return 0, fmt.Errorf("-m requires an argument")
 			}
-			secs, err := strconv.ParseFloat(v, 64)
+			secs, err := parseNonNegativeFloat("-m", v)
 			if err != nil {
-				return 0, fmt.Errorf("invalid -m value: %s", v)
+				return 0, err
 			}
 			r.Timeout = secs
 			r.TimeoutSet = true
@@ -154,10 +153,15 @@ func parseShortFlags(r *Result, flags string, rest []string) (int, error) {
 			r.Verbose++
 		case 's':
 			r.Silent = true
-		case 'S', 'N', 'n', 'f':
-			// No-ops.
-		case '#':
-			// No-op: --progress-bar.
+		case 'S', '#':
+			// Compatible error/presentation options. Fetch already has the
+			// corresponding default behavior.
+		case 'N':
+			return 0, unsupportedNoBufferFlag("-N/--no-buffer")
+		case 'n':
+			return 0, unsupportedNetrcFlag("-n/--netrc")
+		case 'f':
+			return 0, unsupportedFailFlag("-f")
 		case '0':
 			r.HTTPVersion = "1.0"
 		default:

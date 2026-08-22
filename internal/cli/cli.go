@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/url"
@@ -619,47 +620,33 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		}
 	}
 
-	// Data.
+	// Data. A single ordinary -d @file or -d @- value can use the native
+	// lazy body source. Every other form needs materialization for curl's
+	// concatenation, query, or URL-encoding semantics.
 	if len(r.DataValues) > 0 {
-		// Process each data value individually: raw values are used as-is,
-		// non-raw values go through RequestBody for @file expansion,
-		// IsURLEncode values read file contents and URL-encode them.
-		parts := make([]string, 0, len(r.DataValues))
-		for _, dv := range r.DataValues {
-			if dv.IsRaw {
-				parts = append(parts, dv.Value)
-			} else if dv.IsURLEncode {
-				encoded, err := urlEncodeFromValue(dv.Value)
-				if err != nil {
-					return err
-				}
-				parts = append(parts, encoded)
+		if !r.GetFlag && len(r.DataValues) == 1 && isStreamingCurlData(r.DataValues[0]) {
+			reader, _, err := RequestBody(r.DataValues[0].Value)
+			if err != nil {
+				return err
+			}
+			a.Data = reader
+			a.dataSet = true
+		} else {
+			data, err := materializeCurlData(r.DataValues)
+			if err != nil {
+				return err
+			}
+			if r.GetFlag {
+				appendRawQuery(a.URL, string(data))
 			} else {
-				reader, _, err := RequestBody(dv.Value)
-				if err != nil {
-					return err
-				}
-				b, err := core.ReadAllLimited(reader, core.MaxCompositeMaterialization, "curl request body")
-				if c, ok := reader.(io.Closer); ok {
-					c.Close()
-				}
-				if err != nil {
-					return err
-				}
-				parts = append(parts, string(b))
+				a.Data = bytes.NewReader(data)
+				a.dataSet = true
 			}
 		}
-		data := strings.Join(parts, "&")
-		if r.GetFlag {
-			appendRawQuery(a.URL, data)
-		} else {
-			a.Data = strings.NewReader(data)
-			a.dataSet = true
 
-			// Set default content type for -d data if not explicitly set.
-			if !r.HasContentType {
-				a.ContentType = "application/x-www-form-urlencoded"
-			}
+		// Set default content type for -d data if not explicitly set.
+		if !r.HasContentType && !r.GetFlag {
+			a.ContentType = "application/x-www-form-urlencoded"
 		}
 	}
 
@@ -852,44 +839,132 @@ func parseAWSSigv4(s string) (region, service string, err error) {
 	return "", "", fmt.Errorf("invalid aws-sigv4 format: %q, expected 'aws:amz:REGION:SERVICE' or 'REGION/SERVICE'", s)
 }
 
-// urlEncodeFromValue handles --data-urlencode file forms:
-//   - "@filename" reads the file and URL-encodes the contents.
-//   - "name@filename" reads the file, URL-encodes the contents, and prepends "name=".
-func urlEncodeFromValue(s string) (string, error) {
-	if strings.HasPrefix(s, "@") {
-		// @filename form.
-		content, err := readFileForURLEncode(s[1:])
-		if err != nil {
-			return "", err
-		}
-		return url.QueryEscape(content), nil
-	}
-
-	// name@filename form.
-	name, filename, ok := strings.Cut(s, "@")
-	if !ok || name == "" {
-		return url.QueryEscape(s), nil
-	}
-	content, err := readFileForURLEncode(filename)
-	if err != nil {
-		return "", err
-	}
-	return name + "=" + url.QueryEscape(content), nil
+func isStreamingCurlData(value curl.DataValue) bool {
+	return !value.IsRaw && !value.IsURLEncode && strings.HasPrefix(value.Value, "@")
 }
 
-func readFileForURLEncode(path string) (string, error) {
+// materializeCurlData applies curl's ordered ampersand concatenation while
+// keeping the complete generated body within the shared materialization cap.
+// File and stdin sources are read in chunks, so an over-limit source is not
+// first copied into an unbounded intermediate buffer.
+func materializeCurlData(values []curl.DataValue) ([]byte, error) {
+	out := core.NewBoundedBuffer(core.MaxCompositeMaterialization, "curl request body")
+	for i, value := range values {
+		if i > 0 {
+			if _, err := out.Write([]byte{'&'}); err != nil {
+				return nil, err
+			}
+		}
+		if err := appendCurlDataValue(out, value); err != nil {
+			return nil, err
+		}
+	}
+	return append([]byte(nil), out.Bytes()...), nil
+}
+
+func appendCurlDataValue(out *core.BoundedBuffer, value curl.DataValue) error {
+	if value.IsRaw {
+		_, err := out.Write([]byte(value.Value))
+		return err
+	}
+	if value.IsURLEncode {
+		return appendCurlURLEncodedValue(out, value.Value)
+	}
+	return appendCurlBodyValue(out, value.Value)
+}
+
+func appendCurlBodyValue(out *core.BoundedBuffer, value string) error {
+	reader, _, err := RequestBody(value)
+	if err != nil {
+		return err
+	}
+	if closer, ok := reader.(io.Closer); ok {
+		defer closer.Close()
+	}
+	return appendCurlReader(out, reader)
+}
+
+func appendCurlURLEncodedValue(out *core.BoundedBuffer, value string) error {
+	if strings.HasPrefix(value, "@") {
+		return appendCurlURLEncodedFile(out, value[1:])
+	}
+	if name, path, ok := strings.Cut(value, "@"); ok && name != "" {
+		if _, err := out.Write([]byte(name + "=")); err != nil {
+			return err
+		}
+		return appendCurlURLEncodedFile(out, path)
+	}
+	_, err := out.Write([]byte(url.QueryEscape(value)))
+	return err
+}
+
+func appendCurlURLEncodedFile(out *core.BoundedBuffer, path string) error {
 	reader, _, err := RequestBody("@" + path)
 	if err != nil {
-		return "", err
+		return err
 	}
-	if c, ok := reader.(io.Closer); ok {
-		defer c.Close()
+	if closer, ok := reader.(io.Closer); ok {
+		defer closer.Close()
 	}
-	b, err := core.ReadAllLimited(reader, core.MaxCompositeMaterialization, "curl request body")
-	if err != nil {
-		return "", err
+	return appendCurlEscapedReader(out, reader)
+}
+
+func appendCurlReader(out *core.BoundedBuffer, reader io.Reader) error {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return string(b), nil
+}
+
+func appendCurlEscapedReader(out *core.BoundedBuffer, reader io.Reader) error {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			if writeErr := appendCurlEscapedBytes(out, buf[:n]); writeErr != nil {
+				return writeErr
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func appendCurlEscapedBytes(out *core.BoundedBuffer, data []byte) error {
+	const hex = "0123456789ABCDEF"
+	for _, b := range data {
+		switch {
+		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9', b == '-', b == '_', b == '.', b == '~':
+			if _, err := out.Write([]byte{b}); err != nil {
+				return err
+			}
+		case b == ' ':
+			if _, err := out.Write([]byte{'+'}); err != nil {
+				return err
+			}
+		default:
+			encoded := []byte{'%', hex[b>>4], hex[b&0x0f]}
+			if _, err := out.Write(encoded); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func appendRawQuery(u *url.URL, query string) {

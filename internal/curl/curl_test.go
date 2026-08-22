@@ -2,6 +2,7 @@ package curl
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -341,6 +342,48 @@ func TestParseSimple(t *testing.T) {
 				tt.check(t, result)
 			}
 		})
+	}
+}
+
+func TestParseJSONDefaultsRespectExplicitHeadersRegardlessOfOrder(t *testing.T) {
+	for _, command := range []string{
+		`curl --json '{"ok":true}' -H 'Accept: text/plain' -H 'Content-Type: application/custom' https://example.com`,
+		`curl -H 'Accept: text/plain' -H 'Content-Type: application/custom' --json '{"ok":true}' https://example.com`,
+	} {
+		result, err := Parse(command)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", command, err)
+		}
+		var accepts, contentTypes []string
+		for _, header := range result.Headers {
+			switch strings.ToLower(header.Name) {
+			case "accept":
+				accepts = append(accepts, header.Value)
+			case "content-type":
+				contentTypes = append(contentTypes, header.Value)
+			}
+		}
+		if !reflect.DeepEqual(accepts, []string{"text/plain"}) {
+			t.Fatalf("Accept headers for %q = %q", command, accepts)
+		}
+		if !reflect.DeepEqual(contentTypes, []string{"application/custom"}) {
+			t.Fatalf("Content-Type headers for %q = %q", command, contentTypes)
+		}
+	}
+}
+
+func TestParseRejectsNegativeNumericValues(t *testing.T) {
+	for _, command := range []string{
+		"curl --max-redirs -1 https://example.com",
+		"curl --max-time -5 https://example.com",
+		"curl -m -5 https://example.com",
+		"curl --connect-timeout -5 https://example.com",
+		"curl --retry -1 https://example.com",
+		"curl --retry-delay -5 https://example.com",
+	} {
+		if _, err := Parse(command); err == nil {
+			t.Fatalf("Parse(%q) succeeded; want an invalid numeric value", command)
+		}
 	}
 }
 
@@ -862,20 +905,14 @@ func TestParseVerbosity(t *testing.T) {
 }
 
 func TestParseBehavior(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-	}{
-		{name: "fail", input: "curl -f https://example.com"},
-		{name: "fail long", input: "curl --fail https://example.com"},
-		{name: "fail-with-body", input: "curl --fail-with-body https://example.com"},
+	if _, err := Parse("curl --fail-with-body https://example.com"); err != nil {
+		t.Fatalf("Parse() error = %v", err)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := Parse(tt.input)
-			if err != nil {
-				t.Fatalf("Parse() error = %v", err)
+	for _, input := range []string{"curl -f https://example.com", "curl --fail https://example.com"} {
+		t.Run(input, func(t *testing.T) {
+			if _, err := Parse(input); err == nil {
+				t.Fatal("expected unsupported fail mode to be rejected")
 			}
 		})
 	}
@@ -889,16 +926,11 @@ func TestParseNoOps(t *testing.T) {
 		{name: "compressed", input: "curl --compressed https://example.com"},
 		{name: "show-error", input: "curl -S https://example.com"},
 		{name: "show-error long", input: "curl --show-error https://example.com"},
-		{name: "no-buffer", input: "curl -N https://example.com"},
-		{name: "no-buffer long", input: "curl --no-buffer https://example.com"},
 		{name: "no-keepalive", input: "curl --no-keepalive https://example.com"},
 		{name: "progress-bar", input: "curl -# https://example.com"},
 		{name: "progress-bar long", input: "curl --progress-bar https://example.com"},
 		{name: "no-progress-meter", input: "curl --no-progress-meter https://example.com"},
-		{name: "netrc", input: "curl -n https://example.com"},
-		{name: "netrc long", input: "curl --netrc https://example.com"},
-		{name: "proto-default", input: "curl --proto-default https https://example.com"},
-		{name: "proto-redir", input: "curl --proto-redir '=https' https://example.com"},
+		{name: "fail-with-body", input: "curl --fail-with-body https://example.com"},
 	}
 
 	for _, tt := range tests {
@@ -909,6 +941,21 @@ func TestParseNoOps(t *testing.T) {
 			}
 			if result.URL != "https://example.com" {
 				t.Fatalf("expected URL to be https://example.com, got %s", result.URL)
+			}
+		})
+	}
+
+	for _, input := range []string{
+		"curl -N https://example.com",
+		"curl --no-buffer https://example.com",
+		"curl -n https://example.com",
+		"curl --netrc https://example.com",
+		"curl --proto-default https https://example.com",
+		"curl --proto-redir '=https' https://example.com",
+	} {
+		t.Run("reject "+input, func(t *testing.T) {
+			if _, err := Parse(input); err == nil {
+				t.Fatal("expected unsupported option to be rejected")
 			}
 		})
 	}
