@@ -29,7 +29,6 @@ reference by task.
 
 ## Maintainer reference
 
-- [Go migration note](migration-go.md)
 - [Repository maintainer guide](../AGENTS.md)
 
 The CLI reference is embedded in the Go binary and is rendered by

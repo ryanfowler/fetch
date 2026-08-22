@@ -24,8 +24,6 @@ To build from source:
 go install github.com/ryanfowler/fetch@latest
 ```
 
-The installer never uses Cargo or a Rust toolchain.
-
 ## Manual update
 
 ```sh

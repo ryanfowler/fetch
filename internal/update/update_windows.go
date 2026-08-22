@@ -100,8 +100,8 @@ func unpackArtifact(dir string, r io.Reader) error {
 	return nil
 }
 
-// The following Windows self-replace functionality uses similar techniques to
-// the 'self-replace' Rust crate: https://github.com/mitsuhiko/self-replace
+// The following Windows self-replace functionality uses safe staged replacement
+// and cleanup techniques.
 
 const (
 	relocatedSuffix  = ".__relocated.exe"

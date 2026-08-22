@@ -67,7 +67,6 @@ fetch picsum.photos/1024/1024
 - **[Agent Skill](docs/agent-skill.md)** - Offline print, install, and uninstall workflow
 - **[Shell Completion](docs/completions.md)** - Bash, Zsh, Fish, and PowerShell
 - **[Limits and Safety](docs/limits.md)** - Resource caps and security invariants
-- **[Migration Note](docs/migration-go.md)** - Pinned parity oracle and Go-only build policy
 - **[Troubleshooting](docs/troubleshooting.md)** - Common issues, debugging, and exit codes
 
 ## License
