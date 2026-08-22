@@ -309,15 +309,17 @@ fetch --color off example.com
 
 ### `--image OPTION`
 
-Control image rendering. Values: `auto`, `external`, or `off`. The legacy
-`native` spelling remains accepted for compatibility.
+Control image rendering. Values: `auto`, `external`, or `off`. `auto` uses
+built-in decoders only. `external` allows bounded `vips`, `magick`, and
+`ffmpeg` adapters after built-in decoding. The legacy `native` spelling
+remains accepted as an alias for `auto`.
 
-- `auto` - Try optimal protocol, fallback to external tools
-- `native` - Use only built-in decoders (JPEG, PNG, TIFF, WebP)
+- `auto` - Use only built-in decoders (JPEG, PNG, TIFF, WebP)
+- `external` - Try built-in decoders, then bounded external adapters
 - `off` - Disable image rendering
 
 ```sh
-fetch --image native example.com/image.png
+fetch --image auto example.com/image.png
 fetch --image off example.com/photo.jpg
 ```
 

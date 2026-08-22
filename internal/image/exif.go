@@ -30,10 +30,17 @@ func orientImage(src []byte, img image.Image) image.Image {
 	}
 }
 
+const (
+	maxExifScanBytes = 1 << 20
+	maxExifEntries   = 4096
+)
+
 // parseOrientation returns the exif orientation value from the provided image.
 // If the image does not contain any exif data, or the data is invalid, it
-// returns "0".
+// returns "0". The scan is bounded so a malformed JPEG cannot turn metadata
+// parsing into an unbounded walk.
 func parseOrientation(r io.Reader) int {
+	r = io.LimitReader(r, maxExifScanBytes)
 	// Read and verify the JPEG SOI marker.
 	var marker uint16
 	err := binary.Read(r, binary.BigEndian, &marker)
@@ -63,8 +70,9 @@ func parseOrientation(r io.Reader) int {
 		}
 
 		if marker == 0xffe1 {
-			// APP1 marker.
-			r = io.LimitReader(r, int64(length))
+			// APP1 marker. The length includes its two length bytes. Keep the
+			// EXIF parser inside this segment, even for malformed metadata.
+			r = io.LimitReader(r, int64(length-2))
 			break
 		}
 
@@ -128,10 +136,11 @@ func parseOrientation(r io.Reader) int {
 		return 0
 	}
 
-	// Parse the number of directory entries.
+	// Parse the number of directory entries. A valid EXIF APP1 segment is
+	// small; cap work before iterating attacker-controlled entry counts.
 	var numEntries uint16
 	err = binary.Read(r, order, &numEntries)
-	if err != nil {
+	if err != nil || numEntries > maxExifEntries {
 		return 0
 	}
 

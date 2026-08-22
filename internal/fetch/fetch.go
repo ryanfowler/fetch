@@ -647,6 +647,13 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 		return nil, err
 	}
 
+	// An explicit stdout output path is a raw byte route. Do this before image
+	// decoding so users can download an image to a pipe without invoking a
+	// renderer or an external adapter.
+	if r.Output == "-" {
+		return resp.Body, nil
+	}
+
 	if output != "" && r.Output != "-" {
 		size := client.WireContentLength(resp)
 		p := r.PrinterHandle.Stderr()
@@ -720,7 +727,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 
 	// Special cases that need extra context beyond ([]byte, *Printer).
 	if contentType == format.TypeImage {
-		return nil, image.Render(ctx, buf, r.Image == core.ImageNative)
+		return nil, image.RenderWithMode(ctx, buf, r.Image)
 	}
 	if contentType == format.TypeProtobuf && r.responseDescriptor != nil {
 		if format.FormatProtobufWithDescriptor(buf, r.responseDescriptor, p) == nil {

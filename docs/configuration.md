@@ -124,11 +124,11 @@ format = on
 Control image rendering in the terminal.
 
 ```ini
-# Try optimal protocol, fallback to external tools
+# Use built-in decoders only (external adapters require image = external)
 image = auto
 
-# Use only built-in decoders (jpeg, png, tiff, webp)
-image = native
+# Allow bounded external adapters after built-in decoders
+image = external
 
 # Disable image rendering
 image = off

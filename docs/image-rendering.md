@@ -10,12 +10,15 @@ Control how images are rendered:
 
 | Value    | Description                                                |
 | -------- | ---------------------------------------------------------- |
-| `auto`   | Try optimal protocol, fallback to external tools (default) |
-| `native` | Use only built-in decoders                                 |
+| `auto`   | Use only built-in decoders (default)                       |
+| `external` | Try built-in decoders, then bounded external adapters     |
 | `off`    | Disable image rendering                                    |
 
+`native` remains accepted as a compatibility alias for `auto`. External
+programs never run in `auto` mode.
+
 ```sh
-fetch --image native example.com/photo.jpg
+fetch --image auto example.com/photo.jpg
 fetch --image off example.com/image.png
 ```
 
@@ -32,7 +35,7 @@ These formats are decoded without external tools:
 
 ### With External Adapters
 
-When `--image auto` (default), these additional formats are supported if you have the required tools installed:
+When `--image external` is selected, these additional formats are supported if you have the required tools installed:
 
 - **AVIF** - `.avif`
 - **HEIF/HEIC** - `.heif`, `.heic`
@@ -130,10 +133,10 @@ Set image rendering preferences in your [configuration file](configuration.md):
 # Disable image rendering
 image = off
 
-# Use only native decoders
-image = native
+# Allow bounded external adapters after built-in decoders
+image = external
 
-# Auto-detect (default)
+# Built-in decoders only (default)
 image = auto
 ```
 
@@ -155,10 +158,10 @@ fetch example.com/photo.jpg
 fetch -o photo.jpg example.com/photo.jpg
 ```
 
-### Force Native Decoding
+### Force Built-in Decoding
 
 ```sh
-fetch --image native example.com/image.png
+fetch --image auto example.com/image.png
 ```
 
 ### Disable Image Rendering
@@ -172,7 +175,7 @@ fetch --image off example.com/image.jpg
 ### Image Not Displaying
 
 1. **Check terminal support**: Not all terminals support inline images
-2. **Verify format**: Use `--image native` to test if it's a format issue
+2. **Verify format**: Use `--image auto` to test built-in decoding without running external programs
 3. **Install adapters**: Install VIPS, ImageMagick, or FFmpeg for more formats
 4. **Check terminal size**: Very small terminals may not render properly
 
@@ -186,7 +189,7 @@ fetch --image off example.com/image.jpg
 
 1. **Terminal color support**: Ensure your terminal supports 24-bit color
 2. **tmux/screen**: May reduce color depth
-3. **Try native decoding**: `--image native`
+3. **Try built-in decoding**: `--image auto`
 
 ### Image Dimensions Too Large
 
@@ -195,8 +198,9 @@ fetch --image off example.com/image.jpg
 ## Limitations
 
 - **Animated GIFs**: Only the first frame is displayed
-- **Maximum size**: 8192x8192 pixels
-- **Memory limit**: Images are loaded into memory for processing
+- **Maximum dimensions**: 8192x8192 pixels
+- **Adapter stdout**: External adapter output is capped at 64 MiB
+- **External adapters**: Each adapter has a deadline, does not inherit stdin, and is terminated with its process tree on cancellation
 - **Terminal multiplexers**: tmux and screen may interfere with image protocols
 
 ## See Also

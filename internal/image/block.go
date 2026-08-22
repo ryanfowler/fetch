@@ -71,26 +71,22 @@ func supportsTrueColor() bool {
 }
 
 // imageBlockOutputDimensions returns the desired number of block columns and rows.
-// (Each block represents two vertical pixels.)
+// (Each block represents two vertical pixels.) It uses checked scaling because
+// terminal dimensions are not trusted allocation inputs.
 func imageBlockOutputDimensions(img image.Image, termWidth, termHeight int) (int, int) {
-	// Use only 4/5ths of the terminal height.
-	cols := termWidth
-	rows := 2 * termHeight * 4 / 5
-
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
-
-	// If image is smaller than bounds, return the scaled image dimensions.
-	if width <= cols && height <= rows {
-		return width, height/2 + height%2
+	if width <= 0 || height <= 0 {
+		return 1, 1
+	}
+	if termWidth <= 0 || termHeight <= 0 {
+		return 1, 1
 	}
 
-	// Otherwise calculate appropriate size.
-	if cols*height <= width*rows {
-		return cols, max((height*cols)/width/2, 1)
-	}
-
-	return (width * rows) / height, max(rows/2, 1)
+	cols := minPositive(termWidth, width)
+	pixelHeight := boundedScale(termHeight, 8, 5, height)
+	targetWidth, targetHeight := fitImage(width, height, cols, pixelHeight)
+	return targetWidth, max((targetHeight+1)/2, 1)
 }
 
 // pixelToColor converts a color.Color into a *rgbColor (or nil if fully transparent).
