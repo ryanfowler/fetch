@@ -406,8 +406,8 @@ var (
 	portPattern      = regexp.MustCompile(`(?i)((?:https?|wss?|quic)://(?:localhost|127\.0\.0\.1|\[::1\]|::1):)\d{1,5}`)
 	datePattern      = regexp.MustCompile(`(?i)(?:\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})\b|\b(?:mon|tue|wed|thu|fri|sat|sun), \d{2} (?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec) \d{4} \d{2}:\d{2}:\d{2} GMT\b|\b\d{4}-\d{2}-\d{2}\b)`)
 	versionPattern   = regexp.MustCompile(`(?i)(?:go1\.\d+(?:\.\d+)?|rustc\s+\d+\.\d+\.\d+|fetch\s+(?:\(devel\)|v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?))`)
-	headerPattern    = regexp.MustCompile(`^([<>] ?)([!#$%&'*+\-.^_` + "|" + `~0-9A-Za-z]+):[ \t].*$`)
-	httpStartPattern = regexp.MustCompile(`^[<>] ?(?:HTTP/\d(?:\.\d+)?\s+\d{3}|[A-Z]+(?:\s+.*)?\s+HTTP/\d(?:\.\d+)?)`)
+	headerPattern    = regexp.MustCompile(`^(?:[<>] ?)?([!#$%&'*+\-.^_` + "|" + `~0-9A-Za-z]+):[ \t].*$`)
+	httpStartPattern = regexp.MustCompile(`^(?:[<>] ?)?(?:HTTP/\d(?:\.\d+)?\s+\d{3}|[A-Z]+(?:\s+.*)?\s+HTTP/\d(?:\.\d+)?)`)
 )
 
 func normalizeText(value, workDir string, options Options) string {
@@ -480,27 +480,10 @@ func isHTTPHeaderBlockStart(lines []string, index int) bool {
 }
 
 func canonicalHeaderBlock(lines []string) []string {
-	canonical := make([]string, 0, len(lines))
-	for _, line := range lines {
-		withoutNewline := strings.TrimSuffix(line, "\n")
-		prefix := headerPrefix(line)
-		colon := strings.IndexByte(withoutNewline[len(prefix):], ':')
-		if colon < 0 {
-			canonical = append(canonical, line)
-			continue
-		}
-		colon += len(prefix)
-		name := strings.ToLower(strings.TrimSpace(withoutNewline[len(prefix):colon]))
-		value := strings.TrimSpace(withoutNewline[colon+1:])
-		values := strings.Split(value, ",")
-		for index, item := range values {
-			newline := "\n"
-			if index == len(values)-1 && !strings.HasSuffix(line, "\n") {
-				newline = ""
-			}
-			canonical = append(canonical, prefix+name+": "+strings.TrimSpace(item)+newline)
-		}
-	}
+	// Sort complete lines only. Do not split comma-separated values or trim
+	// them: duplicate occurrences and value bytes are part of parity, and
+	// Set-Cookie is not safely comma-combinable.
+	canonical := append([]string(nil), lines...)
 	sort.SliceStable(canonical, func(left, right int) bool {
 		return strings.ToLower(headerName(canonical[left])) < strings.ToLower(headerName(canonical[right]))
 	})
@@ -520,14 +503,12 @@ func headerPrefix(line string) string {
 
 func headerName(line string) string {
 	line = strings.TrimSuffix(line, "\n")
-	colon := strings.IndexByte(line, ':')
+	start := len(headerPrefix(line))
+	colon := strings.IndexByte(line[start:], ':')
 	if colon < 0 {
-		return line
+		return line[start:]
 	}
-	start := strings.IndexAny(line, "<>")
-	if start < 0 {
-		start = 0
-	}
+	colon += start
 	return strings.TrimSpace(line[start:colon])
 }
 

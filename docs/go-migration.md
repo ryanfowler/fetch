@@ -54,3 +54,11 @@ header names without order while retaining every duplicate value.
 Fixtures are organized by subsystem in their own test files. New parity cases
 should use local servers and explicit deadlines, and must not depend on public
 network services or the developer's config, session, cache, or output files.
+
+## Release gate
+
+Run `scripts/qualify-release.sh` for the final formatting, module, analysis,
+race, vulnerability, cross-build, and release smoke checks. A release
+candidate must also run it with `--require-parity` and
+`FETCH_PARITY_RUST_BINARY` set. See [release qualification](release-qualification.md)
+for the complete procedure and the intentional Go header-order difference.

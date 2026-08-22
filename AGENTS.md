@@ -36,6 +36,9 @@ staticcheck ./...
 # Validate documentation links and skill JSON fixtures
 python3 scripts/check-docs.py
 
+# Run the full release qualification gate (requires staticcheck and govulncheck)
+scripts/qualify-release.sh
+
 # Format other files
 prettier -w .
 ```
@@ -113,8 +116,8 @@ prettier -w .
 - System HTTPS/SVCB discovery uses `resolvectl` on Linux when available, then a bounded `/etc/resolv.conf` fallback that skips malformed nameservers and honors `rotate`, `attempts`, and `timeout`.
 - SSE and NDJSON use bounded, chunk-safe streaming parsers; automatic compression retries compressed SSE once for safe GET/HEAD requests.
 - `-v --help` renders the embedded Markdown CLI reference and uses the configured pager. Pager commands are parsed without a shell, and `NO_PAGER` disables automatic paging. Bash, Fish, PowerShell, and Zsh completion use the same option registry and omit hidden flags.
-- Build information includes Go settings; dependency versions appear with `--buildinfo -v`. Ctrl-C exits with status 130, and broken-pipe output exits cleanly.
-- Release archives are Go-built for Linux, macOS, and Windows targets with `CGO_ENABLED=0`; Unix archives have lowercase SHA-256 sidecars. `install.sh` verifies the sidecar before bounded extraction, stages inside the destination, validates `--version`, and atomically renames the staged executable without following symlink targets.
+- Build information includes target OS/architecture and Go settings; dependency versions appear with `--buildinfo -v`. Ctrl-C exits with status 130, and broken-pipe output exits cleanly.
+- Release archives are Go-built for Linux, macOS, and Windows targets with `CGO_ENABLED=0`; Unix archives have lowercase SHA-256 sidecars. `install.sh` verifies the sidecar before bounded extraction, stages inside the destination, validates `--version`, and atomically renames the staged executable without following symlink targets. `scripts/qualify-release.sh` runs the final format, module, analysis, race, vulnerability, parity, cross-build, and release smoke checks; the Rust oracle is external and opt-in.
 - Documentation is indexed in `docs/index.md`; `docs/cli-reference.md` is embedded by the binary. `scripts/check-docs.py` validates local Markdown links and skill JSON fixtures. The migration oracle is recorded in `docs/migration-go.md`; Rust and Cargo are not build dependencies.
 
 Retryable requests require replayable bodies. They call `req.GetBody` when available and reopen validated file-backed bodies directly, without reading large uploads into memory. One-shot sources such as stdin fail before retry, Digest, or a redirect that requires replay; bounded materialization is used only for features such as signing or protocol conversion.

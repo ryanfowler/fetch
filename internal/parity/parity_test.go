@@ -32,8 +32,8 @@ func TestCompareIgnoresHeaderOrderButPreservesDuplicates(t *testing.T) {
 
 	goResult.Stderr = []byte("< HTTP/1.1 200 OK\n< x-parity-response: first,second\n")
 	rustResult.Stderr = []byte("< HTTP/1.1 200 OK\n< x-parity-response: first\n< x-parity-response: second\n")
-	if err := CompareResults(Case{Name: "comma-joined-duplicate-header"}, goResult, rustResult, DefaultOptions()); err != nil {
-		t.Fatalf("comma-joined and repeated header values should compare equally: %v", err)
+	if err := CompareResults(Case{Name: "comma-joined-duplicate-header"}, goResult, rustResult, DefaultOptions()); err == nil {
+		t.Fatal("comma-joined and repeated header values must remain distinct")
 	}
 	if err := CompareResults(Case{Name: "yaml-order"}, Result{ExitCode: 0, Stdout: []byte("z: value\na: value\n")}, Result{ExitCode: 0, Stdout: []byte("a: value\nz: value\n")}, DefaultOptions()); err == nil {
 		t.Fatal("unprefixed YAML-like output must not be treated as HTTP headers")
