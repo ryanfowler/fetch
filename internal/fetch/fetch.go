@@ -194,23 +194,9 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	c := newClient(r)
 	defer c.Close()
 
-	// 2. Resolve any proto schema and configure gRPC descriptors.
-	var schema *iproto.Schema
-	var requestDesc protoreflect.MessageDescriptor
-	var isClientStreaming bool
-	if r.GRPC && !r.DryRun {
-		var err error
-		schema, err = resolveCallSchema(ctx, r, c)
-		if err != nil {
-			return 0, err
-		}
-		requestDesc, r.responseDescriptor, isClientStreaming, err = setupGRPC(r, schema)
-		if err != nil {
-			return 0, err
-		}
-	}
-
-	// 3. Load session and set cookie jar, if configured.
+	// 2. Load session before reflection so cookies apply to discovery requests.
+	// Reflection is part of the normal gRPC request flow and must use the same
+	// cookie, TLS, proxy, DNS, and authentication policy as the final call.
 	var sess *session.Session
 	if r.Session != "" {
 		var loadErr error
@@ -229,6 +215,23 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			core.WriteWarningMsgIf(p, msg, r.Verbosity == core.VSilent)
 		}
 		c.SetJar(sess.Jar())
+		defer saveSession(r, sess)
+	}
+
+	// 3. Resolve any proto schema and configure gRPC descriptors.
+	var schema *iproto.Schema
+	var requestDesc protoreflect.MessageDescriptor
+	var isClientStreaming bool
+	if r.GRPC && !r.DryRun {
+		var err error
+		schema, err = resolveCallSchema(ctx, r, c)
+		if err != nil {
+			return 0, err
+		}
+		requestDesc, r.responseDescriptor, isClientStreaming, err = setupGRPC(r, schema)
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	headers := r.Headers
@@ -262,12 +265,10 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	}()
 
 	// 4. WebSocket: branch to handleWebSocket before edit/gRPC/retry. The
-	// handshake can set cookies even when the message loop or a later
-	// handshake validation step fails, so persist the jar on every return path.
+	// session save is deferred above, so handshake cookie changes persist even
+	// when the message loop or a later validation step fails.
 	if r.WS {
-		code, wsErr := handleWebSocket(ctx, r, c, req)
-		saveSession(r, sess)
-		return code, wsErr
+		return handleWebSocket(ctx, r, c, req)
 	}
 
 	// 5. Edit step (user edits request body).
@@ -365,10 +366,6 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 
 	// 8. Make request (with optional retries and per-attempt timeout).
 	code, err := retryableRequest(ctx, r, c, req)
-
-	// Save session cookies after request completes, including response and
-	// redirect errors. Save performs a locked merge with the latest file.
-	saveSession(r, sess)
 
 	return code, err
 }

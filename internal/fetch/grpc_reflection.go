@@ -12,11 +12,13 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	fetchgrpc "github.com/ryanfowler/fetch/internal/grpc"
 	iproto "github.com/ryanfowler/fetch/internal/proto"
+	"github.com/ryanfowler/fetch/internal/session"
 
 	"google.golang.org/protobuf/encoding/protowire"
 	gproto "google.golang.org/protobuf/proto"
@@ -31,6 +33,21 @@ const (
 
 type reflectionUnavailableError struct {
 	err error
+}
+
+// reflectionResponseError is the protocol-level ErrorResponse returned by
+// ServerReflectionInfo. It is distinct from a transport or gRPC status error:
+// only its UNIMPLEMENTED code permits trying the v1alpha service.
+type reflectionResponseError struct {
+	code    int32
+	message string
+}
+
+func (e *reflectionResponseError) Error() string {
+	if e.message == "" {
+		return fmt.Sprintf("reflection error (%d)", e.code)
+	}
+	return fmt.Sprintf("reflection error (%d): %s", e.code, e.message)
 }
 
 func (e *reflectionUnavailableError) Error() string {
@@ -62,7 +79,10 @@ func (b *descriptorSetBuilder) Add(encoded [][]byte) error {
 		if name == "" {
 			return errors.New("reflected descriptor is missing a file name")
 		}
-		if _, exists := b.files[name]; exists {
+		if existing, exists := b.files[name]; exists {
+			if !gproto.Equal(existing, fd) {
+				return fmt.Errorf("reflected descriptor %q was returned with inconsistent definitions", name)
+			}
 			continue
 		}
 		b.files[name] = fd
@@ -97,6 +117,24 @@ var reflectionProtocols = []reflectionProtocol{
 
 type reflectionInvoker func(ctx context.Context, path string, payload []byte) ([][]byte, error)
 
+type reflectionLimitState struct {
+	messages  int
+	bytes     int64
+	wireBytes int64
+	accounted bool
+}
+
+type reflectionLimitContextKey struct{}
+
+func withReflectionLimitState(ctx context.Context, state *reflectionLimitState) context.Context {
+	return context.WithValue(ctx, reflectionLimitContextKey{}, state)
+}
+
+func reflectionLimitStateFromContext(ctx context.Context) *reflectionLimitState {
+	state, _ := ctx.Value(reflectionLimitContextKey{}).(*reflectionLimitState)
+	return state
+}
+
 type reflectionClient struct {
 	request *Request
 	client  *client.Client
@@ -112,10 +150,40 @@ func newReflectionClient(r *Request, c *client.Client) *reflectionClient {
 	return rc
 }
 
+// reflectionContext gives one reflection operation the same wall-clock
+// request and connection budgets used by ordinary requests. In particular,
+// v1 and v1alpha fallback share these absolute deadlines.
+func reflectionContext(ctx context.Context, r *Request) (context.Context, context.CancelFunc, error) {
+	if r == nil {
+		return ctx, func() {}, nil
+	}
+	requestBudget, err := core.NewBudget(r.Timeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	connectBudget, err := core.NewBudget(r.ConnectTimeout)
+	if err != nil {
+		return nil, nil, err
+	}
+	operationCtx, cancel := requestBudget.WithContext(ctx, "gRPC reflection")
+	if connectBudget.Limited() {
+		operationCtx = client.WithConnectBudget(operationCtx, connectBudget)
+	}
+	return operationCtx, cancel, nil
+}
+
 func (rc *reflectionClient) ListServices(ctx context.Context) ([]string, error) {
 	var lastErr error
+	state := new(reflectionLimitState)
+	ctx = withReflectionLimitState(ctx, state)
 	for i, protocol := range reflectionProtocols {
+		state.accounted = false
 		frames, err := rc.invoke(ctx, protocol.path, buildReflectionListRequest())
+		if !state.accounted {
+			if err := accountReflectionFrames(state, frames); err != nil {
+				return nil, &reflectionUnavailableError{err: err}
+			}
+		}
 		if err != nil {
 			if i == 0 && isReflectionUnimplemented(err) {
 				lastErr = err
@@ -126,9 +194,31 @@ func (rc *reflectionClient) ListServices(ctx context.Context) ([]string, error) 
 		if len(frames) == 0 {
 			return nil, &reflectionUnavailableError{err: errors.New("empty reflection response")}
 		}
-		names, err := parseReflectionListResponse(frames[0])
-		if err != nil {
-			return nil, &reflectionUnavailableError{err: err}
+		allNames := make(map[string]struct{})
+		fallback := false
+		for _, frame := range frames {
+			names, parseErr := parseReflectionListResponse(frame)
+			if parseErr != nil {
+				if i == 0 && isReflectionUnimplemented(parseErr) {
+					lastErr = parseErr
+					fallback = true
+					break
+				}
+				return nil, &reflectionUnavailableError{err: parseErr}
+			}
+			for _, name := range names {
+				if name == "" {
+					return nil, &reflectionUnavailableError{err: errors.New("reflection service response contains an empty service name")}
+				}
+				allNames[name] = struct{}{}
+			}
+		}
+		if fallback {
+			continue
+		}
+		names := make([]string, 0, len(allNames))
+		for name := range allNames {
+			names = append(names, name)
 		}
 		sort.Strings(names)
 		return names, nil
@@ -138,8 +228,16 @@ func (rc *reflectionClient) ListServices(ctx context.Context) ([]string, error) 
 
 func (rc *reflectionClient) SchemaForSymbol(ctx context.Context, symbol string) (*iproto.Schema, error) {
 	var lastErr error
+	state := new(reflectionLimitState)
+	ctx = withReflectionLimitState(ctx, state)
 	for i, protocol := range reflectionProtocols {
+		state.accounted = false
 		frames, err := rc.invoke(ctx, protocol.path, buildReflectionSymbolRequest(symbol))
+		if !state.accounted {
+			if err := accountReflectionFrames(state, frames); err != nil {
+				return nil, &reflectionUnavailableError{err: err}
+			}
+		}
 		if err != nil {
 			if i == 0 && isReflectionUnimplemented(err) {
 				lastErr = err
@@ -148,14 +246,23 @@ func (rc *reflectionClient) SchemaForSymbol(ctx context.Context, symbol string) 
 			return nil, &reflectionUnavailableError{err: err}
 		}
 		builder := newDescriptorSetBuilder()
+		fallback := false
 		for _, frame := range frames {
-			descs, err := parseReflectionFileDescriptorResponse(frame)
-			if err != nil {
-				return nil, &reflectionUnavailableError{err: err}
+			descs, parseErr := parseReflectionFileDescriptorResponse(frame)
+			if parseErr != nil {
+				if i == 0 && isReflectionUnimplemented(parseErr) {
+					lastErr = parseErr
+					fallback = true
+					break
+				}
+				return nil, &reflectionUnavailableError{err: parseErr}
 			}
 			if err := builder.Add(descs); err != nil {
 				return nil, &reflectionUnavailableError{err: err}
 			}
+		}
+		if fallback {
+			continue
 		}
 		schema, err := builder.Build()
 		if err != nil {
@@ -176,12 +283,16 @@ func buildReflectionListRequest() []byte {
 func buildReflectionSymbolRequest(symbol string) []byte {
 	var data []byte
 	data = protowire.AppendTag(data, 4, protowire.BytesType)
-	data = protowire.AppendString(data, symbol)
+	data = protowire.AppendString(data, normalizeReflectionSymbol(symbol))
 	return data
 }
 
 func parseReflectionListResponse(raw []byte) ([]string, error) {
-	var names []string
+	var (
+		names          []string
+		hasServiceList bool
+		responseErr    error
+	)
 	for len(raw) > 0 {
 		num, typ, n := protowire.ConsumeTag(raw)
 		if n < 0 {
@@ -190,22 +301,30 @@ func parseReflectionListResponse(raw []byte) ([]string, error) {
 		raw = raw[n:]
 		switch {
 		case num == 6 && typ == protowire.BytesType:
+			if responseErr != nil {
+				return nil, errors.New("reflection response contains conflicting result fields")
+			}
 			listData, m := protowire.ConsumeBytes(raw)
 			if m < 0 {
 				return nil, protowire.ParseError(m)
 			}
 			raw = raw[m:]
-			var err error
-			names, err = parseReflectionServiceList(listData)
-			if err != nil {
-				return nil, err
+			list, listErr := parseReflectionServiceList(listData)
+			if listErr != nil {
+				return nil, listErr
 			}
+			hasServiceList = true
+			names = append(names, list...)
 		case num == 7 && typ == protowire.BytesType:
+			if hasServiceList || responseErr != nil {
+				return nil, errors.New("reflection response contains conflicting result fields")
+			}
 			errData, m := protowire.ConsumeBytes(raw)
 			if m < 0 {
 				return nil, protowire.ParseError(m)
 			}
-			return nil, parseReflectionError(errData)
+			raw = raw[m:]
+			responseErr = parseReflectionError(errData)
 		default:
 			m := protowire.ConsumeFieldValue(num, typ, raw)
 			if m < 0 {
@@ -214,7 +333,10 @@ func parseReflectionListResponse(raw []byte) ([]string, error) {
 			raw = raw[m:]
 		}
 	}
-	if names == nil {
+	if responseErr != nil {
+		return nil, responseErr
+	}
+	if !hasServiceList {
 		return nil, errors.New("missing list services response")
 	}
 	return names, nil
@@ -251,6 +373,10 @@ func parseReflectionServiceList(raw []byte) ([]string, error) {
 }
 
 func parseReflectionServiceName(raw []byte) (string, error) {
+	var (
+		name    string
+		hasName bool
+	)
 	for len(raw) > 0 {
 		num, typ, n := protowire.ConsumeTag(raw)
 		if n < 0 {
@@ -258,11 +384,19 @@ func parseReflectionServiceName(raw []byte) (string, error) {
 		}
 		raw = raw[n:]
 		if num == 1 && typ == protowire.BytesType {
-			name, m := protowire.ConsumeString(raw)
+			if hasName {
+				return "", errors.New("reflection service response contains duplicate service names")
+			}
+			value, m := protowire.ConsumeString(raw)
 			if m < 0 {
 				return "", protowire.ParseError(m)
 			}
-			return name, nil
+			if !utf8.ValidString(value) {
+				return "", errors.New("reflection service response contains invalid UTF-8")
+			}
+			name, hasName = value, true
+			raw = raw[m:]
+			continue
 		}
 		m := protowire.ConsumeFieldValue(num, typ, raw)
 		if m < 0 {
@@ -270,11 +404,17 @@ func parseReflectionServiceName(raw []byte) (string, error) {
 		}
 		raw = raw[m:]
 	}
-	return "", errors.New("reflection service response missing service name")
+	if !hasName {
+		return "", errors.New("reflection service response missing service name")
+	}
+	return name, nil
 }
 
 func parseReflectionFileDescriptorResponse(raw []byte) ([][]byte, error) {
-	var files [][]byte
+	var (
+		files       [][]byte
+		responseErr error
+	)
 	for len(raw) > 0 {
 		num, typ, n := protowire.ConsumeTag(raw)
 		if n < 0 {
@@ -283,22 +423,29 @@ func parseReflectionFileDescriptorResponse(raw []byte) ([][]byte, error) {
 		raw = raw[n:]
 		switch {
 		case num == 4 && typ == protowire.BytesType:
+			if responseErr != nil {
+				return nil, errors.New("reflection response contains conflicting result fields")
+			}
 			fdData, m := protowire.ConsumeBytes(raw)
 			if m < 0 {
 				return nil, protowire.ParseError(m)
 			}
 			raw = raw[m:]
-			var err error
-			files, err = parseReflectionDescriptorList(fdData)
-			if err != nil {
-				return nil, err
+			list, listErr := parseReflectionDescriptorList(fdData)
+			if listErr != nil {
+				return nil, listErr
 			}
+			files = append(files, list...)
 		case num == 7 && typ == protowire.BytesType:
+			if len(files) > 0 || responseErr != nil {
+				return nil, errors.New("reflection response contains conflicting result fields")
+			}
 			errData, m := protowire.ConsumeBytes(raw)
 			if m < 0 {
 				return nil, protowire.ParseError(m)
 			}
-			return nil, parseReflectionError(errData)
+			raw = raw[m:]
+			responseErr = parseReflectionError(errData)
 		default:
 			m := protowire.ConsumeFieldValue(num, typ, raw)
 			if m < 0 {
@@ -306,6 +453,9 @@ func parseReflectionFileDescriptorResponse(raw []byte) ([][]byte, error) {
 			}
 			raw = raw[m:]
 		}
+	}
+	if responseErr != nil {
+		return nil, responseErr
 	}
 	if files == nil {
 		return nil, errors.New("missing file descriptor response")
@@ -340,32 +490,48 @@ func parseReflectionDescriptorList(raw []byte) ([][]byte, error) {
 }
 
 func parseReflectionError(raw []byte) error {
-	var msg string
+	var (
+		code    int32
+		hasCode bool
+		msg     string
+	)
 	for len(raw) > 0 {
 		num, typ, n := protowire.ConsumeTag(raw)
 		if n < 0 {
 			return protowire.ParseError(n)
 		}
 		raw = raw[n:]
-		if num == 2 && typ == protowire.BytesType {
-			val, m := protowire.ConsumeString(raw)
+		switch {
+		case num == 1 && typ == protowire.VarintType:
+			value, m := protowire.ConsumeVarint(raw)
 			if m < 0 {
 				return protowire.ParseError(m)
 			}
-			msg = val
+			code = int32(value)
+			hasCode = true
 			raw = raw[m:]
-			continue
+		case num == 2 && typ == protowire.BytesType:
+			value, m := protowire.ConsumeString(raw)
+			if m < 0 {
+				return protowire.ParseError(m)
+			}
+			if !utf8.ValidString(value) {
+				return errors.New("reflection error response contains invalid UTF-8")
+			}
+			msg = value
+			raw = raw[m:]
+		default:
+			m := protowire.ConsumeFieldValue(num, typ, raw)
+			if m < 0 {
+				return protowire.ParseError(m)
+			}
+			raw = raw[m:]
 		}
-		m := protowire.ConsumeFieldValue(num, typ, raw)
-		if m < 0 {
-			return protowire.ParseError(m)
-		}
-		raw = raw[m:]
 	}
-	if msg == "" {
-		msg = "reflection request failed"
+	if !hasCode {
+		return errors.New("reflection error response is missing an error code")
 	}
-	return errors.New(msg)
+	return &reflectionResponseError{code: code, message: msg}
 }
 
 func (rc *reflectionClient) invokeHTTP(ctx context.Context, path string, payload []byte) ([][]byte, error) {
@@ -440,7 +606,11 @@ func (rc *reflectionClient) invokeHTTP(ctx context.Context, path string, payload
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected HTTP status: %s", resp.Status)
 	}
-	frames, err := readGRPCFrames(resp.Body, resp.Header.Get("grpc-encoding"))
+	state := reflectionLimitStateFromContext(ctx)
+	if state != nil {
+		state.accounted = true
+	}
+	frames, err := readGRPCFramesWithLimits(resp.Body, resp.Header.Get("grpc-encoding"), state)
 	if err != nil {
 		return nil, err
 	}
@@ -473,6 +643,27 @@ func discoverGRPC(ctx context.Context, r *Request) (int, error) {
 	if c != nil {
 		defer c.Close()
 	}
+	// Reflection discovery uses the same session jar as ordinary gRPC calls.
+	// Attach it before ListServices/Describe so cookies can authorize discovery
+	// and cookie updates from the response are persisted.
+	var sess *session.Session
+	if c != nil && r.Session != "" {
+		var loadErr error
+		if r.DryRun {
+			sess, loadErr = session.LoadReadOnly(r.Session)
+		} else {
+			sess, loadErr = session.Load(r.Session)
+		}
+		if loadErr != nil {
+			if sess == nil {
+				return 0, loadErr
+			}
+			msg := fmt.Sprintf("session '%s' is corrupted, starting fresh: %s", r.Session, loadErr.Error())
+			core.WriteWarningMsgIf(r.PrinterHandle.Stderr(), msg, r.Verbosity == core.VSilent)
+		}
+		c.SetJar(sess.Jar())
+		defer saveSession(r, sess)
+	}
 
 	p := r.PrinterHandle.Stdout()
 	if r.GRPCList {
@@ -481,7 +672,12 @@ func discoverGRPC(ctx context.Context, r *Request) (int, error) {
 			names = schema.ListServices()
 			sort.Strings(names)
 		} else {
-			names, err = newReflectionClient(r, c).ListServices(ctx)
+			reflectionCtx, cancel, budgetErr := reflectionContext(ctx, r)
+			if budgetErr != nil {
+				return 0, budgetErr
+			}
+			names, err = newReflectionClient(r, c).ListServices(reflectionCtx)
+			cancel()
 			if err != nil {
 				return 0, err
 			}
@@ -523,10 +719,38 @@ func loadDiscoverySchema(ctx context.Context, r *Request) (*iproto.Schema, bool,
 
 	applyGRPCDefaults(r)
 	c := newClient(r)
+	// Describe performs reflection inside this helper, before discoverGRPC can
+	// attach its normal session jar. Attach it here as well so discovery
+	// authentication and Set-Cookie handling use the ordinary request policy.
+	var sess *session.Session
+	if r.Session != "" {
+		var loadErr error
+		if r.DryRun {
+			sess, loadErr = session.LoadReadOnly(r.Session)
+		} else {
+			sess, loadErr = session.Load(r.Session)
+		}
+		if loadErr != nil {
+			if sess == nil {
+				c.Close()
+				return nil, false, nil, loadErr
+			}
+			msg := fmt.Sprintf("session '%s' is corrupted, starting fresh: %s", r.Session, loadErr.Error())
+			core.WriteWarningMsgIf(r.PrinterHandle.Stderr(), msg, r.Verbosity == core.VSilent)
+		}
+		c.SetJar(sess.Jar())
+		defer saveSession(r, sess)
+	}
 	if r.GRPCDescribe == "" {
 		return nil, false, c, nil
 	}
-	schema, err = newReflectionClient(r, c).SchemaForSymbol(ctx, normalizeReflectionSymbol(r.GRPCDescribe))
+	reflectionCtx, cancel, budgetErr := reflectionContext(ctx, r)
+	if budgetErr != nil {
+		c.Close()
+		return nil, false, nil, budgetErr
+	}
+	defer cancel()
+	schema, err = newReflectionClient(r, c).SchemaForSymbol(reflectionCtx, normalizeReflectionSymbol(r.GRPCDescribe))
 	if err != nil {
 		c.Close()
 		return nil, false, nil, err
@@ -546,7 +770,12 @@ func resolveCallSchema(ctx context.Context, r *Request, c *client.Client) (*ipro
 	if err != nil {
 		return nil, err
 	}
-	schema, err = newReflectionClient(r, c).SchemaForSymbol(ctx, serviceName)
+	reflectionCtx, cancel, budgetErr := reflectionContext(ctx, r)
+	if budgetErr != nil {
+		return nil, budgetErr
+	}
+	defer cancel()
+	schema, err = newReflectionClient(r, c).SchemaForSymbol(reflectionCtx, serviceName)
 	if err != nil {
 		if requiresGRPCSchema(r) {
 			return nil, err
@@ -646,29 +875,67 @@ func reflectionURL(base *url.URL, path string) (*url.URL, error) {
 }
 
 func readGRPCFrames(r io.Reader, encoding string) ([][]byte, error) {
+	return readGRPCFramesWithLimits(r, encoding, nil)
+}
+
+func readGRPCFramesWithLimits(r io.Reader, encoding string, state *reflectionLimitState) ([][]byte, error) {
+	if state == nil {
+		state = new(reflectionLimitState)
+	}
 	frames := make([][]byte, 0, min(core.MaxReflectionMessages, 8))
-	var totalBytes int64
 	for {
-		frame, compressed, err := fetchgrpc.ReadFrame(r)
+		length, compressed, err := fetchgrpc.ReadFrameHeader(r)
 		if err == io.EOF {
 			return frames, nil
 		}
 		if err != nil {
 			return nil, err
 		}
-		frame, err = fetchgrpc.DecodeMessage(frame, compressed, encoding)
+		if state.messages >= core.MaxReflectionMessages {
+			return nil, fmt.Errorf("gRPC reflection response exceeds %d messages", core.MaxReflectionMessages)
+		}
+		remainingWire := core.MaxReflectionBytes - state.wireBytes
+		if remainingWire < 0 || uint64(length) > uint64(remainingWire) {
+			return nil, fmt.Errorf("gRPC reflection response exceeds %d bytes", core.MaxReflectionBytes)
+		}
+		frame, err := fetchgrpc.ReadFrameBody(r, length, remainingWire)
 		if err != nil {
 			return nil, err
 		}
-		if len(frames) >= core.MaxReflectionMessages {
-			return nil, fmt.Errorf("gRPC reflection response exceeds %d messages", core.MaxReflectionMessages)
-		}
-		if int64(len(frame)) > core.MaxReflectionBytes-totalBytes {
+		state.wireBytes += int64(len(frame))
+
+		remainingDecoded := core.MaxReflectionBytes - state.bytes
+		if remainingDecoded < 0 {
 			return nil, fmt.Errorf("gRPC reflection response exceeds %d bytes", core.MaxReflectionBytes)
 		}
-		totalBytes += int64(len(frame))
+		frame, err = fetchgrpc.DecodeMessageLimited(frame, compressed, encoding, remainingDecoded)
+		if err != nil {
+			if errors.Is(err, core.ErrLimitExceeded) {
+				return nil, fmt.Errorf("gRPC reflection response exceeds %d bytes", core.MaxReflectionBytes)
+			}
+			return nil, err
+		}
+		if int64(len(frame)) > remainingDecoded {
+			return nil, fmt.Errorf("gRPC reflection response exceeds %d bytes", core.MaxReflectionBytes)
+		}
+		state.bytes += int64(len(frame))
+		state.messages++
 		frames = append(frames, frame)
 	}
+}
+
+func accountReflectionFrames(state *reflectionLimitState, frames [][]byte) error {
+	for _, frame := range frames {
+		if state.messages >= core.MaxReflectionMessages {
+			return fmt.Errorf("gRPC reflection response exceeds %d messages", core.MaxReflectionMessages)
+		}
+		if int64(len(frame)) > core.MaxReflectionBytes-state.bytes {
+			return fmt.Errorf("gRPC reflection response exceeds %d bytes", core.MaxReflectionBytes)
+		}
+		state.messages++
+		state.bytes += int64(len(frame))
+	}
+	return nil
 }
 
 func grpcStatusFromResponse(resp *http.Response) *fetchgrpc.Status {
@@ -685,11 +952,8 @@ func grpcStatusFromResponse(resp *http.Response) *fetchgrpc.Status {
 }
 
 func isReflectionUnimplemented(err error) bool {
-	var status *fetchgrpc.Status
-	if errors.As(err, &status) {
-		return status.Code == fetchgrpc.Unimplemented
-	}
-	return false
+	var responseErr *reflectionResponseError
+	return errors.As(err, &responseErr) && responseErr.code == int32(fetchgrpc.Unimplemented)
 }
 
 type describeKind int
@@ -839,7 +1103,7 @@ func scalarFieldType(field protoreflect.FieldDescriptor) string {
 }
 
 func normalizeReflectionSymbol(symbol string) string {
-	symbol = strings.TrimPrefix(symbol, "/")
+	symbol = strings.TrimLeft(symbol, "./")
 	if idx := strings.LastIndex(symbol, "/"); idx >= 0 {
 		return symbol[:idx] + "." + symbol[idx+1:]
 	}
