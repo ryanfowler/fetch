@@ -3,7 +3,9 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -22,7 +24,10 @@ const (
 	minRows      = 5
 	readBufSize  = 256
 	stdinChanBuf = 64
-	maxMessages  = 10000
+	// History is a redraw aid, not a transcript store. Keep it byte bounded
+	// so a peer cannot make an interactive session retain many large frames.
+	maxHistoryBytes = 1 << 20
+	maxPendingInput = 4 * readBufSize
 )
 
 var promptWidth = runewidth.StringWidth(promptStr)
@@ -50,6 +55,18 @@ func runInteractive(ctx context.Context, cfg Config) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// A raw terminal read is not context-aware. Close the descriptor when
+	// the session ends so the input goroutine cannot survive cancellation.
+	stopInputClose := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = os.Stdin.Close()
+		case <-stopInputClose:
+		}
+	}()
+	defer close(stopInputClose)
+
 	im := &interactiveMode{
 		cfg:    cfg,
 		term:   t,
@@ -58,26 +75,19 @@ func runInteractive(ctx context.Context, cfg Config) error {
 		status: "connected",
 	}
 
-	// Channel for raw stdin bytes.
+	// The input channel is intentionally small. The reader blocks instead of
+	// accumulating terminal input while rendering is busy.
 	inputCh := make(chan []byte, stdinChanBuf)
-	// Channel for server messages.
-	type serverMsg struct {
-		typ  websocket.MessageType
-		data []byte
-		err  error
-	}
-	msgCh := make(chan serverMsg, 16)
-	// Channel for resize events.
+	inputErr := make(chan error, 1)
+	msgQueue := newMessageQueue()
 	resizeCh := make(chan struct{}, 1)
 
-	// Read raw stdin.
 	go func() {
 		buf := make([]byte, readBufSize)
 		for {
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				b := make([]byte, n)
-				copy(b, buf[:n])
+				b := append([]byte(nil), buf[:n]...)
 				select {
 				case inputCh <- b:
 				case <-ctx.Done():
@@ -85,6 +95,9 @@ func runInteractive(ctx context.Context, cfg Config) error {
 				}
 			}
 			if err != nil {
+				if !errors.Is(err, io.EOF) {
+					inputErr <- fmt.Errorf("read WebSocket terminal input: %w", err)
+				}
 				close(inputCh)
 				return
 			}
@@ -94,13 +107,12 @@ func runInteractive(ctx context.Context, cfg Config) error {
 	initialRow, pending := detectCursorRow(inputCh)
 	im.setupScreen(rows, cols, initialRow)
 
-	// Read server messages.
+	// There is exactly one connection reader. messageQueue applies a byte
+	// budget before this goroutine accepts another complete message.
 	go func() {
 		for {
 			typ, data, err := cfg.Conn.Read(ctx)
-			select {
-			case msgCh <- serverMsg{typ, data, err}:
-			case <-ctx.Done():
+			if msgQueue.push(ctx, wsMessage{typ: typ, data: data, err: err}) != nil {
 				return
 			}
 			if err != nil {
@@ -109,10 +121,8 @@ func runInteractive(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	// Watch for terminal resize.
 	go t.watchResize(ctx, resizeCh)
 
-	// Send initial message from -d / -j flag.
 	if err := sendInitialMessage(ctx, &cfg); err != nil {
 		im.teardownScreen()
 		return err
@@ -126,20 +136,37 @@ func runInteractive(ctx context.Context, cfg Config) error {
 		}
 	}
 
+	var inputSource <-chan []byte = inputCh
+	var inputError <-chan error = inputErr
+	var closeDone <-chan error
 	for {
 		select {
-		case raw, ok := <-inputCh:
+		case err := <-inputError:
+			inputError = nil
+			im.teardownScreen()
+			cancel()
+			_ = cfg.Conn.CloseNow()
+			return err
+		case raw, ok := <-inputSource:
 			if !ok {
-				im.teardownScreen()
-				cancel()
-				return nil
+				im.localEOF = true
+				inputSource = nil
+			} else {
+				pending = append(pending, raw...)
+				if len(pending) > maxPendingInput {
+					pending = pending[len(pending)-maxPendingInput:]
+				}
+				pending = im.handleInput(ctx, pending)
 			}
-			pending = append(pending, raw...)
-			pending = im.handleInput(ctx, pending)
+			if im.localEOF && closeDone == nil {
+				closeDone = startNormalClose(cfg.Conn)
+			}
 
-		case msg := <-msgCh:
+		case <-msgQueue.C():
+			msg := msgQueue.pop()
 			if msg.err != nil {
 				im.teardownScreen()
+				cancel()
 				return handleReadErr(msg.err)
 			}
 			switch msg.typ {
@@ -156,14 +183,34 @@ func runInteractive(ctx context.Context, cfg Config) error {
 			} else {
 				im.teardownScreen()
 				cancel()
+				_ = cfg.Conn.CloseNow()
 				return nil
 			}
 
+		case err := <-closeDone:
+			im.teardownScreen()
+			cancel()
+			return normalizeCloseError(err)
+
 		case <-ctx.Done():
 			im.teardownScreen()
-			return nil
+			_ = cfg.Conn.CloseNow()
+			return contextTerminationError(ctx)
 		}
 	}
+}
+
+const localCloseDrainDelay = 50 * time.Millisecond
+
+func startNormalClose(conn *websocket.Conn) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		timer := time.NewTimer(localCloseDrainDelay)
+		defer timer.Stop()
+		<-timer.C
+		done <- conn.Close(websocket.StatusNormalClosure, "")
+	}()
+	return done
 }
 
 func detectCursorRow(inputCh <-chan []byte) (int, []byte) {
@@ -199,9 +246,10 @@ func detectCursorRowWithTimeout(inputCh <-chan []byte, timeoutDur time.Duration)
 
 // messageEntry records a message for redraw.
 type messageEntry struct {
-	arrow string // "→" or "←"; empty for binary indicator
-	data  []byte // message content; nil for binary indicator
-	binN  int    // byte count for binary indicator
+	arrow  string // "→" or "←"; empty for binary indicator
+	data   []byte // message content, including an empty text message
+	binN   int    // byte count for binary indicator
+	binary bool
 }
 
 // interactiveMode holds the state for the interactive terminal UI.
@@ -217,6 +265,10 @@ type interactiveMode struct {
 	nextRow  int // next row to write a message in the scroll region (1-indexed)
 	status   string
 	messages []messageEntry
+	// localEOF requests a normal close after Ctrl-D or stdin EOF. It is
+	// separate from cancel so the close handshake can finish first.
+	localEOF     bool
+	historyBytes int64
 }
 
 // setupScreen configures the scroll region and draws the separators and input line.
@@ -318,10 +370,10 @@ func (im *interactiveMode) replayMessagesLocked() {
 	}
 
 	for _, msg := range im.messages[start:] {
-		if msg.data != nil {
-			im.writeMessageLocked(msg.arrow, msg.data)
-		} else {
+		if msg.binary {
 			im.writeBinaryLocked(msg.arrow, msg.binN)
+		} else {
+			im.writeMessageLocked(msg.arrow, msg.data)
 		}
 	}
 }
@@ -444,10 +496,7 @@ func (im *interactiveMode) renderMessage(arrow string, data []byte) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 
-	im.messages = append(im.messages, messageEntry{arrow: arrow, data: data})
-	if len(im.messages) > maxMessages {
-		im.messages = im.messages[len(im.messages)-maxMessages:]
-	}
+	im.retainMessageLocked(messageEntry{arrow: arrow, data: data})
 	im.writeMessageLocked(arrow, data)
 	im.drawInputLineLocked()
 }
@@ -465,12 +514,35 @@ func (im *interactiveMode) renderBinaryIndicatorWithArrow(arrow string, n int) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 
-	im.messages = append(im.messages, messageEntry{arrow: arrow, binN: n})
-	if len(im.messages) > maxMessages {
-		im.messages = im.messages[len(im.messages)-maxMessages:]
-	}
+	// A binary message is represented by a small indicator in history, not
+	// by retaining its payload.
+	im.retainMessageLocked(messageEntry{arrow: arrow, binN: n, binary: true})
 	im.writeBinaryLocked(arrow, n)
 	im.drawInputLineLocked()
+}
+
+func (im *interactiveMode) retainMessageLocked(msg messageEntry) {
+	entryBytes := int64(len(msg.data))
+	if entryBytes > maxHistoryBytes {
+		return
+	}
+	if msg.binary {
+		// Keep a bounded accounting unit for binary indicators.
+		entryBytes = 32
+	} else {
+		msg.data = append([]byte(nil), msg.data...)
+	}
+	im.messages = append(im.messages, msg)
+	im.historyBytes += entryBytes
+	for im.historyBytes > maxHistoryBytes && len(im.messages) > 0 {
+		old := im.messages[0]
+		im.messages = im.messages[1:]
+		if old.binary {
+			im.historyBytes -= 32
+		} else {
+			im.historyBytes -= int64(len(old.data))
+		}
+	}
 }
 
 func (im *interactiveMode) writeMessageLocked(arrow string, data []byte) {
@@ -511,7 +583,7 @@ func (im *interactiveMode) formatMessage(data []byte) string {
 }
 
 func (im *interactiveMode) messageRowCount(msg messageEntry) int {
-	if msg.data == nil {
+	if msg.binary {
 		return 2
 	}
 	prefixWidth := runewidth.StringWidth(msg.arrow + " ")
@@ -599,9 +671,12 @@ func (im *interactiveMode) handleInput(ctx context.Context, buf []byte) []byte {
 
 		// Control characters.
 		switch b {
-		case 0x03, 0x04: // Ctrl+C, Ctrl+D
+		case 0x03: // Ctrl+C
 			im.cancel()
 			return nil
+		case 0x04: // Ctrl+D
+			im.localEOF = true
+			return buf[i+1:]
 		case 0x0D: // Enter
 			im.sendMessage(ctx)
 			i++
@@ -750,10 +825,8 @@ func (im *interactiveMode) sendMessage(ctx context.Context) {
 	im.drawInputLineLocked()
 	im.mu.Unlock()
 
-	if len(text) == 0 {
-		return
-	}
-
+	// An empty entry is a valid interactive text message. This also keeps
+	// interactive input consistent with empty piped lines.
 	data := []byte(text)
 	typ, typeErr := initialMessageType(im.cfg.MessageMode, data)
 	if typeErr != nil {
