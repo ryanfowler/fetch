@@ -121,7 +121,6 @@ is set. Explicit `--proxy` and configuration values take precedence over the
 environment. `NO_PROXY` entries may be `*`, exact hosts, domain suffixes,
 IP literals, CIDR ranges, or entries with a port. Invalid entries are ignored.
 
-
 ```sh
 export HTTP_PROXY="http://proxy.example.com:8080"
 export HTTPS_PROXY="http://proxy.example.com:8080"

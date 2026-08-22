@@ -747,14 +747,14 @@ fetch --from-curl 'https://example.com'
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | Request                    | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G`                              |
 | Auth                       | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                 |
-| TLS                        | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`, `--ech hard|true|auto|false`                                   |
-| Output                    | `-o`, `-O`, `-J`                                                                                                                   |
-| Network                   | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r` |
-| HTTP version              | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                            |
-| Headers                   | `-A`, `-e`, `-b`                                                                                                                   |
-| Verbosity                 | `-v`, `-s`                                                                                                                         |
-| Protocol                  | `--proto` (restricts allowed protocols; errors if URL scheme is not allowed)                                                       |
-| Default-compatible no-ops | `--compressed`, `-S`/`--show-error`, `--fail-with-body`, `--no-keepalive`                                                          |
+| TLS                        | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`, `--ech hard                                                    | true | auto | false` |
+| Output                     | `-o`, `-O`, `-J`                                                                                                                   |
+| Network                    | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r` |
+| HTTP version               | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                            |
+| Headers                    | `-A`, `-e`, `-b`                                                                                                                   |
+| Verbosity                  | `-v`, `-s`                                                                                                                         |
+| Protocol                   | `--proto` (restricts allowed protocols; errors if URL scheme is not allowed)                                                       |
+| Default-compatible no-ops  | `--compressed`, `-S`/`--show-error`, `--fail-with-body`, `--no-keepalive`                                                          |
 | Presentation compatibility | `-#`/`--progress-bar`, `--no-progress-meter`                                                                                       |
 
 **Notes:**
@@ -859,16 +859,16 @@ subprocess caps.
 
 ## Environment Variables
 
-| Variable                | Description                      |
-| ----------------------- | -------------------------------- |
-| `AWS_ACCESS_KEY_ID`     | AWS access key for `--aws-sigv4` |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key for `--aws-sigv4` |
-| `AWS_SESSION_TOKEN` | Optional temporary AWS session token for `--aws-sigv4` |
-| `VISUAL` / `EDITOR`     | Editor for `--edit` option       |
-| `HTTPS_PROXY` / `https_proxy` | HTTPS/WSS proxy URL                         |
-| `HTTP_PROXY` / `http_proxy`   | HTTP/WS proxy URL                           |
-| `ALL_PROXY` / `all_proxy`     | Fallback proxy URL                          |
-| `NO_PROXY` / `no_proxy`       | Hosts, domains, IPs, CIDR ranges, or ports |
+| Variable                      | Description                                            |
+| ----------------------------- | ------------------------------------------------------ |
+| `AWS_ACCESS_KEY_ID`           | AWS access key for `--aws-sigv4`                       |
+| `AWS_SECRET_ACCESS_KEY`       | AWS secret key for `--aws-sigv4`                       |
+| `AWS_SESSION_TOKEN`           | Optional temporary AWS session token for `--aws-sigv4` |
+| `VISUAL` / `EDITOR`           | Editor for `--edit` option                             |
+| `HTTPS_PROXY` / `https_proxy` | HTTPS/WSS proxy URL                                    |
+| `HTTP_PROXY` / `http_proxy`   | HTTP/WS proxy URL                                      |
+| `ALL_PROXY` / `all_proxy`     | Fallback proxy URL                                     |
+| `NO_PROXY` / `no_proxy`       | Hosts, domains, IPs, CIDR ranges, or ports             |
 
 ## File References
 
