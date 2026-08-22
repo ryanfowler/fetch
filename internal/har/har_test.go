@@ -3,7 +3,7 @@ package har
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/v2"
 	"io"
 	"net/http"
 	"net/url"

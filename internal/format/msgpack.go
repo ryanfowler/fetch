@@ -3,7 +3,7 @@ package format
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"math"
 	"strconv"
@@ -17,8 +17,8 @@ import (
 // MessagePack map keys are not restricted to strings, unlike JSON object keys.
 // This parser converts the supported scalar key types to their JSON string
 // representation before formatting. Binary keys use base64 so arbitrary bytes
-// remain representable. It also validates strings itself because encoding/json
-// would otherwise replace invalid UTF-8 instead of reporting it.
+// remain representable. It also validates strings itself so malformed strings
+// produce a parser error before JSON formatting.
 func FormatMsgPack(buf []byte, p *core.Printer) error {
 	parser := msgPackParser{input: buf}
 	var out bytes.Buffer

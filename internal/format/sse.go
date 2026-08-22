@@ -2,7 +2,7 @@ package format
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
@@ -48,11 +48,10 @@ func writeEventStreamType(t string, p *core.Printer) error {
 }
 
 func writeEventStreamData(d string, p *core.Printer) error {
-	dec := json.NewDecoder(strings.NewReader(d))
-	dec.UseNumber()
+	dec := jsontext.NewDecoder(strings.NewReader(d))
 	if formatNDJSONValue(dec, p) == nil {
 		// Ensure there are no more tokens in the event.
-		_, err := dec.Token()
+		_, err := dec.ReadToken()
 		if errors.Is(err, io.EOF) {
 			p.WriteString("\n")
 			return p.Flush()

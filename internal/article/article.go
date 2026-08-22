@@ -2,7 +2,7 @@ package article
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -128,12 +128,10 @@ func pushString(out *strings.Builder, key, value string) {
 func quoteYAMLString(value string) string {
 	// Keep this helper local so frontmatter has one escaping rule for all
 	// metadata fields. JSON string quoting is valid and safe as a YAML scalar.
-	// Disable HTML escaping so URLs retain readable '&' and '<' characters.
-	var out strings.Builder
-	encoder := json.NewEncoder(&out)
-	encoder.SetEscapeHTML(false)
-	_ = encoder.Encode(value)
-	return strings.TrimSuffix(out.String(), "\n")
+	// encoding/json/v2 does not escape HTML characters by default, so URLs
+	// retain readable '&' and '<' characters.
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }
 
 func normalizedMediaType(value string) string {

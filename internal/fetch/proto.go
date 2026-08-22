@@ -3,7 +3,7 @@ package fetch
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
@@ -207,8 +207,8 @@ func frameGRPCRequest(data io.ReadCloser) ([]byte, error) {
 // streamGRPCRequest reads JSON values from data, converts each to protobuf,
 // frames each as a gRPC message, and streams them through an io.Pipe.
 //
-// A json.Decoder may read beyond one value into its internal buffer. The
-// small forwarding buffer below returns decoder.Buffered to the shared input
+// A jsontext.Decoder may read beyond one value into its internal buffer. The
+// small forwarding buffer below returns decoder.UnreadBuffer to the shared input
 // before the next decoder is created; without it, adjacent messages can be
 // silently lost.
 func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) io.ReadCloser {
@@ -221,9 +221,8 @@ func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) 
 		jsonInput := &streamJSONInput{r: input}
 		for {
 			limited := &boundedJSONReader{r: jsonInput, max: core.MaxCompositeMaterialization}
-			decoder := json.NewDecoder(limited)
-			var raw json.RawMessage
-			err := decoder.Decode(&raw)
+			decoder := jsontext.NewDecoder(limited)
+			raw, err := decoder.ReadValue()
 			if err == io.EOF {
 				return
 			}
@@ -235,7 +234,7 @@ func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) 
 				pw.CloseWithError(core.LimitError{Subsystem: "gRPC request body", Limit: core.MaxCompositeMaterialization})
 				return
 			}
-			protoData, err := proto.JSONToProtobuf(raw, desc)
+			protoData, err := proto.JSONToProtobuf([]byte(raw), desc)
 			if err != nil {
 				pw.CloseWithError(fmt.Errorf("failed to convert JSON to protobuf: %w", err))
 				return
@@ -253,7 +252,7 @@ func streamGRPCRequest(data io.ReadCloser, desc protoreflect.MessageDescriptor) 
 			// them to the forwarding reader before decoding the next value. The
 			// reader is bounded so this cannot turn a look-ahead into an
 			// unbounded allocation.
-			if err := jsonInput.prepend(decoder.Buffered()); err != nil {
+			if err := jsonInput.prepend(decoder.UnreadBuffer()); err != nil {
 				pw.CloseWithError(fmt.Errorf("failed to buffer JSON message: %w", err))
 				return
 			}
@@ -282,7 +281,7 @@ func (r *grpcPipeReader) Close() error {
 	return errors.Join(r.PipeReader.Close(), r.input.Close())
 }
 
-// streamJSONInput preserves the bytes that json.Decoder read ahead of the
+// streamJSONInput preserves the bytes that jsontext.Decoder read ahead of the
 // current value. It is used by one producer goroutine only.
 type streamJSONInput struct {
 	r       io.Reader
@@ -298,19 +297,12 @@ func (r *streamJSONInput) Read(p []byte) (int, error) {
 	return r.r.Read(p)
 }
 
-func (r *streamJSONInput) prepend(buffer io.Reader) error {
-	if buffer == nil {
+func (r *streamJSONInput) prepend(data []byte) error {
+	if len(data) == 0 {
 		return nil
-	}
-	data, err := io.ReadAll(io.LimitReader(buffer, core.MaxCompositeMaterialization+1))
-	if err != nil {
-		return err
 	}
 	if int64(len(data)) > core.MaxCompositeMaterialization || int64(len(r.pending)) > core.MaxCompositeMaterialization-int64(len(data)) {
 		return core.LimitError{Subsystem: "gRPC request body", Limit: core.MaxCompositeMaterialization}
-	}
-	if len(data) == 0 {
-		return nil
 	}
 	pendingLength := len(data) + len(r.pending)
 	pending := make([]byte, 0, pendingLength)

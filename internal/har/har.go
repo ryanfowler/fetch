@@ -4,7 +4,8 @@ package har
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -158,11 +159,15 @@ func (r *Recorder) Finalize(resp *http.Response, response *ResponseCapture, timi
 
 	entry := buildEntry(resp, response, timings)
 	log := harLog{Version: Version, Creator: creator(), Entries: []Entry{entry}}
-	data, err := json.MarshalIndent(harDocument{Log: log}, "", "  ")
+	data, err := json.Marshal(harDocument{Log: log})
 	if err != nil {
 		return fmt.Errorf("unable to encode HAR: %w", err)
 	}
-	data = append(data, '\n')
+	formatted := jsontext.Value(data)
+	if err := formatted.Indent(jsontext.WithIndent("  ")); err != nil {
+		return fmt.Errorf("unable to format HAR: %w", err)
+	}
+	data = append(formatted, '\n')
 	if _, err := r.temp.Write(data); err != nil {
 		return fmt.Errorf("unable to write HAR: %w", err)
 	}
@@ -575,8 +580,8 @@ type Cookie struct {
 	Path     string `json:"path,omitempty"`
 	Domain   string `json:"domain,omitempty"`
 	Expires  string `json:"expires,omitempty"`
-	HttpOnly bool   `json:"httpOnly,omitempty"`
-	Secure   bool   `json:"secure,omitempty"`
+	HttpOnly bool   `json:"httpOnly,omitzero"`
+	Secure   bool   `json:"secure,omitzero"`
 }
 type PostData struct {
 	MIMEType string `json:"mimeType"`

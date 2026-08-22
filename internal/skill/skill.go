@@ -6,7 +6,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -897,10 +898,15 @@ func writeBundle(root string, b Bundle) error {
 			return err
 		}
 	}
-	data, err := json.MarshalIndent(b.manifest(), "", "  ")
+	data, err := json.Marshal(b.manifest(), json.Deterministic(true))
 	if err != nil {
 		return err
 	}
+	formatted := jsontext.Value(data)
+	if err := formatted.Indent(jsontext.WithIndent("  ")); err != nil {
+		return err
+	}
+	data = formatted
 	data = append(data, '\n')
 	return atomicWrite(filepath.Join(root, metadataName), data)
 }

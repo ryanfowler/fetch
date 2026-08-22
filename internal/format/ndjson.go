@@ -2,11 +2,10 @@ package format
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -14,14 +13,13 @@ import (
 // FormatJSONLine formats the provided raw JSON data as a single compact line
 // to the Printer.
 func FormatJSONLine(buf []byte, p *core.Printer) error {
-	dec := json.NewDecoder(bytes.NewReader(buf))
-	dec.UseNumber()
+	dec := jsontext.NewDecoder(bytes.NewReader(buf))
 	err := formatNDJSONValue(dec, p)
 	if err != nil {
 		p.Discard()
 		return err
 	}
-	tok, err := dec.Token()
+	tok, err := dec.ReadToken()
 	if !errors.Is(err, io.EOF) {
 		p.Discard()
 		return fmt.Errorf("unexpected token: %v", tok)
@@ -61,89 +59,77 @@ func FormatNDJSON(r io.Reader, p *core.Printer) error {
 	}
 }
 
-func formatNDJSONValue(dec *json.Decoder, p *core.Printer) error {
-	token, err := dec.Token()
+func formatNDJSONValue(dec *jsontext.Decoder, p *core.Printer) error {
+	token, err := dec.ReadToken()
 	if err != nil {
 		return err
 	}
-
 	return formatNDJSONValueToken(dec, p, token)
 }
 
-func formatNDJSONValueToken(dec *json.Decoder, p *core.Printer, token any) error {
-	switch t := token.(type) {
-	case json.Delim:
-		switch t {
-		case '{':
-			return formatNDJSONObject(dec, p)
-		case '[':
-			return formatNDJSONArray(dec, p)
-		case ']', '}':
-			return fmt.Errorf("unexpected token: %q", t)
-		}
-		p.WriteString(string(t))
-	case bool:
-		p.WriteString(strconv.FormatBool(t))
-	case string:
-		writeJSONString(p, t)
-	case json.Number:
-		p.WriteString(string(t))
-	case nil:
-		p.WriteString("null")
+func formatNDJSONValueToken(dec *jsontext.Decoder, p *core.Printer, token jsontext.Token) error {
+	switch token.Kind() {
+	case jsontext.KindBeginObject:
+		return formatNDJSONObject(dec, p)
+	case jsontext.KindBeginArray:
+		return formatNDJSONArray(dec, p)
+	case jsontext.KindEndObject, jsontext.KindEndArray:
+		return fmt.Errorf("unexpected token: %q", token.String())
+	case jsontext.KindTrue, jsontext.KindFalse, jsontext.KindNull, jsontext.KindNumber:
+		p.WriteString(token.String())
+	case jsontext.KindString:
+		writeJSONString(p, token.String())
+	default:
+		return fmt.Errorf("unexpected token: %q", token.String())
 	}
-
 	return nil
 }
 
-func formatNDJSONObject(dec *json.Decoder, p *core.Printer) error {
+func formatNDJSONObject(dec *jsontext.Decoder, p *core.Printer) error {
 	p.WriteString("{")
 
 	var hasFields bool
 	for {
-		tok, err := dec.Token()
+		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
 
-		switch t := tok.(type) {
-		case json.Delim:
-			if t != '}' {
-				return fmt.Errorf("unexpected token: %q", string(t))
-			}
+		switch tok.Kind() {
+		case jsontext.KindEndObject:
 			if hasFields {
 				p.WriteString(" ")
 			}
 			p.WriteString("}")
 			return nil
-		case string:
+		case jsontext.KindString:
 			if hasFields {
 				p.WriteString(",")
 			}
 			p.WriteString(" ")
 			hasFields = true
-			writeJSONKey(p, t)
+			writeJSONKey(p, tok.String())
 
-			err = formatNDJSONValue(dec, p)
-			if err != nil {
+			if err := formatNDJSONValue(dec, p); err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("unexpected token: %q", t)
+			return fmt.Errorf("unexpected token: %q", tok.String())
 		}
 	}
 }
 
-func formatNDJSONArray(dec *json.Decoder, p *core.Printer) error {
+func formatNDJSONArray(dec *jsontext.Decoder, p *core.Printer) error {
 	p.WriteString("[")
 
 	var hasFields bool
 	for {
-		tok, err := dec.Token()
+		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
 
-		if t, ok := tok.(json.Delim); ok && t == ']' {
+		if tok.Kind() == jsontext.KindEndArray {
 			p.WriteString("]")
 			return nil
 		}
@@ -153,8 +139,7 @@ func formatNDJSONArray(dec *json.Decoder, p *core.Printer) error {
 		}
 		hasFields = true
 
-		err = formatNDJSONValueToken(dec, p, tok)
-		if err != nil {
+		if err := formatNDJSONValueToken(dec, p, tok); err != nil {
 			return err
 		}
 	}

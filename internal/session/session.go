@@ -1,7 +1,8 @@
 package session
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"net"
 	"net/http"
@@ -122,11 +123,15 @@ func (s *Session) Save() error {
 		return fmt.Errorf("reload session before save: %w", err)
 	}
 	merged := mergeCookies(s.baseCookies, s.Cookies, latest)
-	data, err := json.MarshalIndent(sessionFile{Cookies: merged}, "", "  ")
+	data, err := json.Marshal(sessionFile{Cookies: merged})
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
+	formatted := jsontext.Value(data)
+	if err := formatted.Indent(jsontext.WithIndent("  ")); err != nil {
+		return err
+	}
+	data = append(formatted, '\n')
 
 	if err := writeSessionFile(s.path, data); err != nil {
 		return err

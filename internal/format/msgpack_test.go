@@ -2,7 +2,7 @@ package format
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"reflect"
 	"strings"
 	"testing"
