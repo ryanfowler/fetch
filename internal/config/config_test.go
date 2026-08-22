@@ -99,6 +99,16 @@ func TestMergeCombinesCertificateAndKeyFromDifferentScopes(t *testing.T) {
 	if string(cli.CertData) != "configured-cert" || cli.CertPath != "configured.crt" {
 		t.Fatalf("certificate was not merged: path=%q data=%q", cli.CertPath, cli.CertData)
 	}
+
+	cli = &Config{CertData: []byte("cli-cert"), CertPath: "cli.crt"}
+	global = &Config{KeyData: []byte("configured-key"), KeyPath: "configured.key"}
+	cli.Merge(global)
+	if string(cli.CertData) != "cli-cert" || cli.CertPath != "cli.crt" {
+		t.Fatalf("certificate was replaced: path=%q data=%q", cli.CertPath, cli.CertData)
+	}
+	if string(cli.KeyData) != "configured-key" || cli.KeyPath != "configured.key" {
+		t.Fatalf("key was not merged: path=%q data=%q", cli.KeyPath, cli.KeyData)
+	}
 }
 
 func TestParseHeaderPreservesValueWhitespace(t *testing.T) {

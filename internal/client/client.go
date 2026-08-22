@@ -154,7 +154,9 @@ func NewClient(cfg ClientConfig) *Client {
 		Server:             cfg.DNSServer,
 		SystemLookupIPAddr: cfg.SystemLookupIPAddr,
 		Proxy:              proxy,
+		TLSConfig:          tlsConfig,
 		CACerts:            cfg.CACerts,
+		ClientCert:         cfg.ClientCert,
 		Insecure:           cfg.Insecure,
 		TLSMin:             cfg.TLSMin,
 		TLSMax:             cfg.TLSMax,
@@ -190,7 +192,7 @@ func NewClient(cfg ClientConfig) *Client {
 			DisableCompression: true,
 			ForceAttemptHTTP2:  cfg.HTTP != core.HTTP1,
 			Protocols:          &http.Protocols{},
-			TLSClientConfig:    tlsConfig,
+			TLSClientConfig:    tlsConfig.Clone(),
 		}
 
 		// net/http provides the HTTP proxy CONNECT machinery, but its SOCKS
@@ -268,7 +270,7 @@ func NewClient(cfg ClientConfig) *Client {
 			autoHTTPSProxy, httpsProxyErr := ProxyForURL(nil, &url.URL{Scheme: "https", Host: "example.com"})
 			autoHTTPProxy, httpProxyErr := ProxyForURL(nil, &url.URL{Scheme: "http", Host: "example.com"})
 			if httpsProxyErr == nil && httpProxyErr == nil && autoHTTPSProxy == nil && autoHTTPProxy == nil {
-				transport = newAutomaticHTTP3Transport(rt, res, cfg.ConnectTimeout, tlsConfig)
+				transport = newAutomaticHTTP3Transport(rt, res, cfg.ConnectTimeout, tlsConfig, cfg.ECH)
 			}
 		}
 	}
@@ -367,6 +369,15 @@ func NewClient(cfg ClientConfig) *Client {
 	if cfg.HTTP == core.HTTP3 && cfg.Proxy != nil {
 		initErr = errors.New("HTTP/3 cannot be used with a proxy")
 	}
+	if initErr == nil {
+		initErr = core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax)
+	}
+	if initErr == nil && cfg.ECH != core.ECHUnknown && cfg.ECH != core.ECHOff && (cfg.HTTP == core.HTTP1 || cfg.HTTP == core.HTTP2) {
+		initErr = errors.New("ECH is not available for the selected HTTP version")
+	}
+	if initErr == nil && cfg.HTTP == core.HTTP3 && cfg.TLSMax != 0 && cfg.TLSMax < tls.VersionTLS13 {
+		initErr = errors.New("HTTP/3 requires max-tls 1.3 or higher")
+	}
 	return &Client{
 		c:            client,
 		maxRedirects: maxRedirects,
@@ -460,7 +471,7 @@ func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn,
 		AllowHTTP:          false,
 		DialTLSContext:     newHTTP2DialTLS(baseDial, res, explicitProxy, "https", tlsConfig, connectTimeout),
 		DisableCompression: true,
-		TLSClientConfig:    tlsConfig,
+		TLSClientConfig:    tlsConfig.Clone(),
 	}
 }
 
@@ -475,7 +486,7 @@ func getH2CTransport(baseDial func(context.Context, string, string) (net.Conn, e
 func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTimeout time.Duration, echMode core.ECHMode) http.RoundTripper {
 	rt := &http3.Transport{
 		DisableCompression: true,
-		TLSClientConfig:    tlsConfig,
+		TLSClientConfig:    tlsConfig.Clone(),
 	}
 
 	wrapper := &http3TimingTransport{rt: rt}
@@ -561,7 +572,7 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 			packetConn net.PacketConn
 		}
 		result, err := resolver.RaceCandidates(ctx, endpoint.Addrs, func(attemptCtx context.Context, ip net.IPAddr) (quicResult, error) {
-			address := net.JoinHostPort(ip.IP.String(), strconv.Itoa(port))
+			address := core.JoinIPHostPort(ip, strconv.Itoa(port))
 			if trace != nil && trace.ConnectStart != nil {
 				trace.ConnectStart("udp", address)
 			}
@@ -580,7 +591,9 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 			if trace != nil && trace.TLSHandshakeStart != nil {
 				trace.TLSHandshakeStart()
 			}
-			conn, dialErr := quic.DialEarly(attemptCtx, packetConn, &net.UDPAddr{IP: ip.IP, Port: port}, tlsCfg, config)
+			// Give every raced QUIC handshake its own TLS state.
+			attemptTLS := tlsCfg.Clone()
+			conn, dialErr := quic.DialEarly(attemptCtx, packetConn, &net.UDPAddr{IP: ip.IP, Port: port, Zone: ip.Zone}, attemptTLS, config)
 			if dialErr == nil {
 				select {
 				case <-conn.HandshakeComplete():

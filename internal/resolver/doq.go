@@ -3,7 +3,6 @@ package resolver
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 const (
@@ -86,7 +86,10 @@ func NewDoQClient(ctx context.Context, cfg DoQConfig) (*DoQClient, error) {
 			quicConfig.HandshakeIdleTimeout = quicTimeout
 			quicConfig.MaxIdleTimeout = quicTimeout
 		}
-		conn, dialErr := dial(attemptCtx, packetConn, &net.UDPAddr{IP: address.IP, Port: int(cfg.Endpoint.Port)}, tlsConfig, quicConfig)
+		// Each raced handshake receives an independent config. This prevents
+		// connection-specific TLS state or future policy changes from leaking
+		// between candidates.
+		conn, dialErr := dial(attemptCtx, packetConn, &net.UDPAddr{IP: address.IP, Port: int(cfg.Endpoint.Port), Zone: address.Zone}, tlsConfig.Clone(), quicConfig)
 		if dialErr != nil {
 			_ = packetConn.Close()
 			if strings.Contains(strings.ToLower(dialErr.Error()), "application protocol") {
@@ -168,13 +171,14 @@ func bootstrapDoQEndpoint(ctx context.Context, cfg DoQConfig) ([]net.IPAddr, err
 }
 
 func doqTLSConfig(cfg DoQConfig, ep *Endpoint) (*tls.Config, error) {
-	var out *tls.Config
-	if cfg.TLSConfig != nil {
-		out = cfg.TLSConfig.Clone()
-	} else {
-		out = &tls.Config{}
+	if err := core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax); err != nil {
+		return nil, err
 	}
-
+	if cfg.TLSConfig != nil {
+		if err := core.ValidateTLSVersions(cfg.TLSConfig.MinVersion, cfg.TLSConfig.MaxVersion); err != nil {
+			return nil, err
+		}
+	}
 	// QUIC uses TLS 1.3. Do not allow a caller's lower minimum to make the
 	// result look like a valid but unusable DoQ configuration.
 	if cfg.TLSMax != 0 && cfg.TLSMax < tls.VersionTLS13 {
@@ -183,38 +187,16 @@ func doqTLSConfig(cfg DoQConfig, ep *Endpoint) (*tls.Config, error) {
 	if cfg.TLSMin > tls.VersionTLS13 {
 		return nil, errors.New("DNS-over-QUIC does not support a TLS version above 1.3")
 	}
-	out.MinVersion = tls.VersionTLS13
-	if cfg.TLSMax != 0 {
-		out.MaxVersion = cfg.TLSMax
-	}
-	if out.MaxVersion != 0 && out.MaxVersion < tls.VersionTLS13 {
-		return nil, errors.New("DNS-over-QUIC requires TLS 1.3")
-	}
-	if cfg.Insecure {
-		out.InsecureSkipVerify = true
-	}
-	if len(cfg.CACerts) > 0 {
-		pool := out.RootCAs
-		if pool == nil {
-			pool, _ = x509.SystemCertPool()
-		}
-		if pool == nil {
-			pool = x509.NewCertPool()
-		} else {
-			pool = pool.Clone()
-		}
-		for _, cert := range cfg.CACerts {
-			if cert != nil {
-				pool.AddCert(cert)
-			}
-		}
-		out.RootCAs = pool
-	}
-	out.ServerName = ep.TLSServerName
-	// DoQ has one standard ALPN. Replacing, rather than appending to, a
-	// caller-supplied list prevents accidental negotiation of HTTP/3.
-	out.NextProtos = []string{doqALPN}
-	return out, nil
+	return core.BuildTLSConfig(core.TLSConfigOptions{
+		Base:       cfg.TLSConfig,
+		CACerts:    cfg.CACerts,
+		ClientCert: cfg.ClientCert,
+		Insecure:   cfg.Insecure,
+		TLSMax:     cfg.TLSMax,
+		TLSMin:     tls.VersionTLS13,
+		ServerName: ep.TLSServerName,
+		NextProtos: []string{doqALPN},
+	}), nil
 }
 
 // Query sends one DNS query on its own bidirectional QUIC stream and validates

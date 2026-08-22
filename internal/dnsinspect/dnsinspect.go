@@ -44,17 +44,18 @@ var inspectTypes = []queryType{
 type Config struct {
 	// Endpoint is populated by CLI/config validation. DNSServer is retained
 	// for direct test fixtures and older internal callers.
-	Endpoint  *resolver.Endpoint
-	DNSServer *url.URL
-	Proxy     *url.URL
-	CACerts   []*x509.Certificate
-	TLSConfig *tls.Config
-	Insecure  bool
-	TLSMin    uint16
-	TLSMax    uint16
-	Timeout   time.Duration
-	URL       *url.URL
-	Silent    bool
+	Endpoint   *resolver.Endpoint
+	DNSServer  *url.URL
+	Proxy      *url.URL
+	CACerts    []*x509.Certificate
+	TLSConfig  *tls.Config
+	ClientCert *tls.Certificate
+	Insecure   bool
+	TLSMin     uint16
+	TLSMax     uint16
+	Timeout    time.Duration
+	URL        *url.URL
+	Silent     bool
 }
 
 type queryType struct {
@@ -199,12 +200,13 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	var err error
 	if cfg.Endpoint != nil && (cfg.Endpoint.Transport == resolver.TransportTCP || cfg.Endpoint.Transport == resolver.TransportTLS) {
 		streamClient, err = resolver.NewStreamClient(ctx, resolver.StreamConfig{
-			Endpoint:  cfg.Endpoint,
-			TLSConfig: cfg.TLSConfig,
-			CACerts:   cfg.CACerts,
-			Insecure:  cfg.Insecure,
-			TLSMin:    cfg.TLSMin,
-			TLSMax:    cfg.TLSMax,
+			Endpoint:   cfg.Endpoint,
+			TLSConfig:  cfg.TLSConfig,
+			CACerts:    cfg.CACerts,
+			ClientCert: cfg.ClientCert,
+			Insecure:   cfg.Insecure,
+			TLSMin:     cfg.TLSMin,
+			TLSMax:     cfg.TLSMax,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("connect to resolver: %w", err)
@@ -213,12 +215,13 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	}
 	if cfg.Endpoint != nil && cfg.Endpoint.Transport == resolver.TransportQUIC {
 		doqClient, err = resolver.NewDoQClient(ctx, resolver.DoQConfig{
-			Endpoint:  cfg.Endpoint,
-			TLSConfig: cfg.TLSConfig,
-			CACerts:   cfg.CACerts,
-			Insecure:  cfg.Insecure,
-			TLSMin:    cfg.TLSMin,
-			TLSMax:    cfg.TLSMax,
+			Endpoint:   cfg.Endpoint,
+			TLSConfig:  cfg.TLSConfig,
+			CACerts:    cfg.CACerts,
+			ClientCert: cfg.ClientCert,
+			Insecure:   cfg.Insecure,
+			TLSMin:     cfg.TLSMin,
+			TLSMax:     cfg.TLSMax,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("connect to resolver: %w", err)
@@ -228,15 +231,16 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	if server != nil && server.Scheme != "" && streamClient == nil && doqClient == nil {
 		proxy := client.ProxyFunc(cfg.Proxy)
 		dohClient, err = resolver.NewDOHClient(resolver.DOHConfig{
-			Endpoint:  cfg.Endpoint,
-			ServerURL: server,
-			Proxy:     proxy,
-			TLSConfig: cfg.TLSConfig,
-			CACerts:   cfg.CACerts,
-			Insecure:  cfg.Insecure,
-			TLSMin:    cfg.TLSMin,
-			TLSMax:    cfg.TLSMax,
-			Timeout:   cfg.Timeout,
+			Endpoint:   cfg.Endpoint,
+			ServerURL:  server,
+			Proxy:      proxy,
+			TLSConfig:  cfg.TLSConfig,
+			CACerts:    cfg.CACerts,
+			ClientCert: cfg.ClientCert,
+			Insecure:   cfg.Insecure,
+			TLSMin:     cfg.TLSMin,
+			TLSMax:     cfg.TLSMax,
+			Timeout:    cfg.Timeout,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("connect to resolver: %w", err)

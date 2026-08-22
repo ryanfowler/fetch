@@ -601,8 +601,6 @@ func (a *App) CLI() *CLI {
 
 func tlsValues() []core.KeyVal[string] {
 	return []core.KeyVal[string]{
-		{Key: "1.0", Val: "TLS v1.0"},
-		{Key: "1.1", Val: "TLS v1.1"},
 		{Key: "1.2", Val: "TLS v1.2"},
 		{Key: "1.3", Val: "TLS v1.3"},
 	}

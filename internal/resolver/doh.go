@@ -37,6 +37,7 @@ type DOHConfig struct {
 	Bootstrap    BootstrapFunc
 	TLSConfig    *tls.Config
 	CACerts      []*x509.Certificate
+	ClientCert   *tls.Certificate
 	Insecure     bool
 	TLSMin       uint16
 	TLSMax       uint16
@@ -61,6 +62,14 @@ func NewDOHClient(cfg DOHConfig) (*DOHClient, error) {
 	}
 	if serverURL == nil || serverURL.Host == "" {
 		return nil, errors.New("DoH endpoint is missing")
+	}
+	if err := core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax); err != nil {
+		return nil, err
+	}
+	if cfg.TLSConfig != nil {
+		if err := core.ValidateTLSVersions(cfg.TLSConfig.MinVersion, cfg.TLSConfig.MaxVersion); err != nil {
+			return nil, err
+		}
 	}
 	if !strings.EqualFold(serverURL.Scheme, "https") && !strings.EqualFold(serverURL.Scheme, "http") {
 		return nil, fmt.Errorf("DoH endpoint has unsupported scheme %q", serverURL.Scheme)
@@ -107,42 +116,16 @@ func cloneURL(u *url.URL) *url.URL {
 }
 
 func dohTLSConfig(cfg DOHConfig, serverName string) *tls.Config {
-	var out *tls.Config
-	if cfg.TLSConfig != nil {
-		out = cfg.TLSConfig.Clone()
-	} else {
-		out = &tls.Config{}
-	}
-	if cfg.TLSMin != 0 {
-		out.MinVersion = cfg.TLSMin
-	} else if out.MinVersion == 0 {
-		out.MinVersion = tls.VersionTLS12
-	}
-	if cfg.TLSMax != 0 {
-		out.MaxVersion = cfg.TLSMax
-	}
-	if cfg.Insecure {
-		out.InsecureSkipVerify = true
-	}
-	if len(cfg.CACerts) > 0 {
-		pool := out.RootCAs
-		if pool == nil {
-			pool, _ = x509.SystemCertPool()
-		}
-		if pool == nil {
-			pool = x509.NewCertPool()
-		} else {
-			pool = pool.Clone()
-		}
-		for _, cert := range cfg.CACerts {
-			if cert != nil {
-				pool.AddCert(cert)
-			}
-		}
-		out.RootCAs = pool
-	}
-	out.ServerName = serverName
-	return out
+	return core.BuildTLSConfig(core.TLSConfigOptions{
+		Base:       cfg.TLSConfig,
+		CACerts:    cfg.CACerts,
+		ClientCert: cfg.ClientCert,
+		Insecure:   cfg.Insecure,
+		TLSMax:     cfg.TLSMax,
+		TLSMin:     cfg.TLSMin,
+		ServerName: serverName,
+		NextProtos: []string{"h2", "http/1.1"},
+	})
 }
 
 func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *Endpoint, serverURL *url.URL) DialContextFunc {
@@ -174,7 +157,7 @@ func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *End
 		}
 		var lastErr error
 		for _, ip := range addresses {
-			conn, dialErr := dial(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			conn, dialErr := dial(ctx, network, core.JoinIPHostPort(ip, port))
 			if dialErr == nil {
 				return conn, nil
 			}

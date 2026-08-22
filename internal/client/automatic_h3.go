@@ -17,6 +17,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/resolver"
 )
 
@@ -37,6 +38,7 @@ type automaticHTTP3Transport struct {
 	resolver              *resolver.Resolver
 	dialer                *ResolverDialer
 	tlsConfig             *tls.Config
+	ech                   core.ECHMode
 	connectLimit          time.Duration
 	cache                 *automaticH3Cache
 	persistent            *persistentH3Cache
@@ -48,13 +50,14 @@ type automaticHTTP3Transport struct {
 	altSvcSlots           chan struct{}
 }
 
-func newAutomaticHTTP3Transport(fallback *http.Transport, res *resolver.Resolver, connectTimeout time.Duration, tlsConfig *tls.Config) http.RoundTripper {
+func newAutomaticHTTP3Transport(fallback *http.Transport, res *resolver.Resolver, connectTimeout time.Duration, tlsConfig *tls.Config, echMode core.ECHMode) http.RoundTripper {
 	persistent := newPersistentH3Cache()
 	return &automaticHTTP3Transport{
 		fallback:              fallback,
 		resolver:              res,
 		dialer:                NewResolverDialer(res, connectTimeout),
 		tlsConfig:             tlsConfig,
+		ech:                   echMode,
 		connectLimit:          connectTimeout,
 		cache:                 newAutomaticH3CacheWithPersistent(persistent),
 		persistent:            persistent,
@@ -134,6 +137,7 @@ type automaticH3Cache struct {
 type automaticH3Candidate struct {
 	host      string
 	port      uint16
+	ech       []byte
 	addresses []net.IPAddr
 	expires   time.Time
 	source    h3CandidateSource
@@ -562,6 +566,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 			values = append(values, automaticH3Candidate{
 				host:      service.TargetName.String(),
 				port:      service.Port,
+				ech:       append([]byte(nil), service.ECH...),
 				addresses: append([]net.IPAddr(nil), service.Addresses...),
 				expires:   ttlExpiry(service.TTL, service.TTLPresent),
 				source:    h3SourceDNS,
@@ -602,6 +607,11 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 				}
 			case "tcp":
 				if got.err == nil && got.tcp != nil {
+					if t.ech == core.ECHOn {
+						_ = got.tcp.Close()
+						lastErr = errors.New("ECH is required but the TCP connection did not use ECH")
+						continue
+					}
 					return preparedAutomaticConnection{tcp: got.tcp}, nil
 				}
 				lastErr = got.err
@@ -669,10 +679,17 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 	if candidate.port == 0 || len(candidate.addresses) == 0 {
 		return nil, nil, errors.New("HTTP/3 candidate has no address")
 	}
-	tlsConfig := t.tlsConfig.Clone()
-	tlsConfig.NextProtos = []string{http3.NextProtoH3}
-	if tlsConfig.ServerName == "" {
-		tlsConfig.ServerName = origin.Hostname()
+	if t.ech == core.ECHOn && len(candidate.ech) == 0 {
+		return nil, nil, errors.New("ECH is required but the HTTP/3 candidate has no ECH configuration")
+	}
+	baseTLSConfig := t.tlsConfig.Clone()
+	if len(candidate.ech) > 0 && (t.ech == core.ECHAuto || t.ech == core.ECHOn) {
+		baseTLSConfig.MinVersion = tls.VersionTLS13
+		baseTLSConfig.EncryptedClientHelloConfigList = append([]byte(nil), candidate.ech...)
+	}
+	baseTLSConfig.NextProtos = []string{http3.NextProtoH3}
+	if baseTLSConfig.ServerName == "" {
+		baseTLSConfig.ServerName = core.TLSVerificationName(origin.Hostname())
 	}
 	qcfg := (&quic.Config{}).Clone()
 	type result struct {
@@ -681,7 +698,7 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 	}
 	trace := httptrace.ContextClientTrace(ctx)
 	winner, err := resolver.RaceCandidates(ctx, candidate.addresses, func(attemptCtx context.Context, ip net.IPAddr) (result, error) {
-		address := net.JoinHostPort(ip.IP.String(), strconv.Itoa(int(candidate.port)))
+		address := core.JoinIPHostPort(ip, strconv.Itoa(int(candidate.port)))
 		if trace != nil && trace.ConnectStart != nil {
 			trace.ConnectStart("udp", address)
 		}
@@ -696,7 +713,10 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 		if trace != nil && trace.TLSHandshakeStart != nil {
 			trace.TLSHandshakeStart()
 		}
-		conn, err := quic.DialEarly(attemptCtx, packet, &net.UDPAddr{IP: ip.IP, Port: int(candidate.port), Zone: ip.Zone}, tlsConfig, qcfg)
+		// Each raced QUIC handshake must receive independent TLS state.
+		attemptTLS := baseTLSConfig.Clone()
+		attemptQUIC := qcfg.Clone()
+		conn, err := quic.DialEarly(attemptCtx, packet, &net.UDPAddr{IP: ip.IP, Port: int(candidate.port), Zone: ip.Zone}, attemptTLS, attemptQUIC)
 		if err == nil {
 			select {
 			case <-conn.HandshakeComplete():

@@ -30,6 +30,7 @@ type Config struct {
 	ResolverEndpoint *resolver.Endpoint
 	DNSServer        *url.URL
 	HTTP             core.HTTPVersion
+	ECH              core.ECHMode
 	Insecure         bool
 	TLSMax           uint16
 	TLSMin           uint16
@@ -40,6 +41,18 @@ type Config struct {
 // Inspect performs a TLS handshake and renders the certificate chain to the
 // printer. It returns a non-zero exit code on failure.
 func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
+	if cfg.ECH == core.ECHAuto || cfg.ECH == core.ECHOn {
+		writeTLSError(p, errors.New("ECH is not available for TLS inspection yet"))
+		return 1
+	}
+	if err := core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax); err != nil {
+		writeTLSError(p, err)
+		return 1
+	}
+	if cfg.HTTP == core.HTTP3 && cfg.TLSMax != 0 && cfg.TLSMax < tls.VersionTLS13 {
+		writeTLSError(p, errors.New("HTTP/3 requires max-tls 1.3 or higher"))
+		return 1
+	}
 	tlsDialCfg := &client.TLSDialConfig{
 		CACerts:    cfg.CACerts,
 		ClientCert: cfg.ClientCert,
@@ -50,12 +63,13 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
 	tlsConfig.NextProtos = alpnProtocols(cfg.HTTP)
 	res := resolver.New(resolver.Config{
-		Endpoint: cfg.ResolverEndpoint,
-		Server:   cfg.DNSServer,
-		CACerts:  cfg.CACerts,
-		Insecure: cfg.Insecure,
-		TLSMin:   cfg.TLSMin,
-		TLSMax:   cfg.TLSMax,
+		Endpoint:   cfg.ResolverEndpoint,
+		Server:     cfg.DNSServer,
+		CACerts:    cfg.CACerts,
+		ClientCert: cfg.ClientCert,
+		Insecure:   cfg.Insecure,
+		TLSMin:     cfg.TLSMin,
+		TLSMax:     cfg.TLSMax,
 	})
 
 	// Resolve host:port.
@@ -65,7 +79,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		port = "443"
 	}
 	addr := net.JoinHostPort(host, port)
-	tlsConfig.ServerName = host
+	tlsConfig.ServerName = core.TLSVerificationName(host)
 
 	// Apply timeout to context so it covers both code paths uniformly.
 	if cfg.Timeout > 0 {
@@ -130,7 +144,7 @@ func inspectQUIC(ctx context.Context, res *resolver.Resolver, addr string, tlsCo
 		if listenErr != nil {
 			return quicResult{}, listenErr
 		}
-		conn, dialErr := quic.Dial(attemptCtx, packetConn, &net.UDPAddr{IP: ip.IP, Port: port}, tlsConfig, nil)
+		conn, dialErr := quic.Dial(attemptCtx, packetConn, &net.UDPAddr{IP: ip.IP, Port: port, Zone: ip.Zone}, tlsConfig.Clone(), nil)
 		if dialErr != nil {
 			_ = packetConn.Close()
 			return quicResult{}, dialErr

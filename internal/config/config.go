@@ -186,12 +186,18 @@ func (c *Config) Merge(c2 *Config) []string {
 		c.CACerts = append(c2.CACerts, c.CACerts...)
 		add("ca-cert")
 	}
-	if c.CertPath == "" && c.CertData == nil {
+	if c.CertPath == "" && c.CertData == nil && (c2.CertPath != "" || c2.CertData != nil) {
 		c.CertData = c2.CertData
 		c.CertPath = c2.CertPath
-		if c2.CertPath != "" || c2.CertData != nil {
-			add("cert")
-		}
+		add("cert")
+	}
+	// Certificate and key are merged independently. This permits either CLI
+	// component to pair with the component supplied by a lower-precedence
+	// config scope; validation runs only after all scopes have been merged.
+	if c.KeyPath == "" && c.KeyData == nil && (c2.KeyPath != "" || c2.KeyData != nil) {
+		c.KeyData = c2.KeyData
+		c.KeyPath = c2.KeyPath
+		add("key")
 	}
 	if c.Color == core.ColorUnknown {
 		c.Color = c2.Color
@@ -262,13 +268,6 @@ func (c *Config) Merge(c2 *Config) []string {
 		c.Insecure = c2.Insecure
 		if c2.Insecure != nil {
 			add("insecure")
-		}
-	}
-	if c.KeyPath == "" && c.KeyData == nil {
-		c.KeyData = c2.KeyData
-		c.KeyPath = c2.KeyPath
-		if c2.KeyPath != "" || c2.KeyData != nil {
-			add("key")
 		}
 	}
 	if c.NoEncode == nil {
@@ -371,8 +370,21 @@ func (c *Config) Merge(c2 *Config) []string {
 // Validate checks cross-option constraints that can only be evaluated after
 // CLI, global, and host-specific configuration have been merged.
 func (c *Config) Validate() error {
+	var tlsMin, tlsMax uint16
+	if c.TLSMin != nil {
+		tlsMin = *c.TLSMin
+	}
+	if c.TLSMax != nil {
+		tlsMax = *c.TLSMax
+	}
 	if c.TLSMin != nil && c.TLSMax != nil && *c.TLSMin > *c.TLSMax {
 		return fmt.Errorf("min-tls must be less than or equal to max-tls")
+	}
+	if err := core.ValidateTLSVersions(tlsMin, tlsMax); err != nil {
+		return err
+	}
+	if c.HTTP == core.HTTP3 && c.TLSMax != nil && *c.TLSMax < tls.VersionTLS13 {
+		return fmt.Errorf("HTTP/3 requires max-tls 1.3 or higher")
 	}
 	if c.KeyData != nil && c.CertData == nil {
 		return missingClientCertError{keyPath: c.KeyPath}
@@ -571,7 +583,7 @@ func (c *Config) ParseCACerts(value string) error {
 		if os.IsNotExist(err) {
 			return core.FileNotExistsError(value)
 		}
-		return err
+		return invalidCACertError{path: value, err: err}
 	}
 
 	var ok bool
@@ -579,14 +591,16 @@ func (c *Config) ParseCACerts(value string) error {
 		var block *pem.Block
 		block, data = pem.Decode(data)
 		if block == nil {
+			if len(strings.TrimSpace(string(data))) != 0 {
+				return invalidCACertError{path: value, err: errors.New("invalid PEM data")}
+			}
 			break
 		}
 		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
 			continue
 		}
 
-		certBytes := block.Bytes
-		cert, err := x509.ParseCertificate(certBytes)
+		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
 			return invalidCACertError{path: value, err: err}
 		}
@@ -940,16 +954,12 @@ func (c *Config) ParseSortHeaders(value string) error {
 
 func parseTLSVersion(flag, value string, isFile bool) (uint16, error) {
 	switch value {
-	case "1.0":
-		return tls.VersionTLS10, nil
-	case "1.1":
-		return tls.VersionTLS11, nil
 	case "1.2":
 		return tls.VersionTLS12, nil
 	case "1.3":
 		return tls.VersionTLS13, nil
 	default:
-		const usage = "must be one of [1.0, 1.1, 1.2, 1.3]"
+		const usage = "must be one of [1.2, 1.3]"
 		return 0, core.NewValueError(flag, value, usage, isFile)
 	}
 }

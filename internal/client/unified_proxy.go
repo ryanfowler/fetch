@@ -61,7 +61,7 @@ func (t *unifiedProxyTransport) route(key string, proxy *url.URL) *http.Transpor
 		DisableCompression: true,
 		ForceAttemptHTTP2:  true,
 		Protocols:          &http.Protocols{},
-		TLSClientConfig:    t.tls,
+		TLSClientConfig:    t.tls.Clone(),
 	}
 	var dial func(context.Context, string, string) (net.Conn, error)
 	firstHop := t.base

@@ -400,10 +400,10 @@ http = 2
 #### `tls`
 
 **Type**: String
-**Values**: `1.0`, `1.1`, `1.2`, `1.3`
+**Values**: `1.2`, `1.3`
 **Default**: `1.2`
 
-Specify the minimum TLS version to use. This is an alias for `min-tls`.
+Specify the minimum TLS version to use. This is an alias for `min-tls`. Supported values are `1.2` and `1.3`.
 
 ```ini
 # Require TLS 1.2 or higher
@@ -416,7 +416,7 @@ tls = 1.3
 #### `min-tls`
 
 **Type**: String
-**Values**: `1.0`, `1.1`, `1.2`, `1.3`
+**Values**: `1.2`, `1.3`
 **Default**: `1.2`
 
 Specify the minimum TLS version to use.
@@ -428,10 +428,10 @@ min-tls = 1.2
 #### `max-tls`
 
 **Type**: String
-**Values**: `1.0`, `1.1`, `1.2`, `1.3`
+**Values**: `1.2`, `1.3`
 **Default**: No maximum
 
-Specify the maximum TLS version to use. Set `min-tls` and `max-tls` to the same value to require an exact TLS version.
+Specify the maximum TLS version to use. Supported values are `1.2` and `1.3`. Set `min-tls` and `max-tls` to the same value to require an exact TLS version.
 
 ```ini
 # Require exactly TLS 1.2

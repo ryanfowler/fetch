@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http/httptrace"
-	"strings"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -136,6 +135,11 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 	if req.Network == "" {
 		req.Network = "tcp"
 	}
+	if req.TLSConfig != nil {
+		if err := core.ValidateTLSVersions(req.TLSConfig.MinVersion, req.TLSConfig.MaxVersion); err != nil {
+			return DialResult{}, err
+		}
+	}
 	if req.Mode == "" {
 		req.Mode = DialDirect
 	}
@@ -219,7 +223,7 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 	}
 	attempt := func(attemptCtx context.Context, ip net.IPAddr) (connection, error) {
 		started := time.Now()
-		address := net.JoinHostPort(ip.IP.String(), req.Port)
+		address := core.JoinIPHostPort(ip, req.Port)
 		if req.Recorder != nil {
 			req.Recorder.ConnectionStarted(req.Network, address)
 		}
@@ -264,9 +268,10 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 				if serverName == "" {
 					serverName = req.Host
 				}
-				if net.ParseIP(strings.Trim(serverName, "[]")) == nil {
-					cfg.ServerName = strings.TrimSuffix(serverName, ".")
-				}
+				// Keep IP literals in ServerName so certificate hostname
+				// verification still checks the IP SAN. crypto/tls omits an IP
+				// literal from SNI itself.
+				cfg.ServerName = core.TLSVerificationName(serverName)
 			}
 			if len(cfg.NextProtos) == 0 && len(req.ALPN) > 0 {
 				cfg.NextProtos = append([]string(nil), req.ALPN...)
