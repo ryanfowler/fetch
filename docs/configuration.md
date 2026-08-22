@@ -63,6 +63,12 @@ auto-update = 30m
 auto-update = 1d
 ```
 
+Automatic-update state is stored in the platform user cache, not beside the
+configuration file. The metadata is bounded and treated as advisory: corrupt,
+unsupported, future, or symlinked state causes a fresh check and never blocks a
+normal request. A successful or failed real update attempt records the check
+interval. Dry runs, metadata commands, and lock contention do not.
+
 ### Output Control Options
 
 #### `copy`

@@ -154,20 +154,21 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	}
 	defer unlock()
 
-	defer func() {
-		// Update the last updated time in the metadata file.
-		err = updateLastAttemptTime(cacheDir, time.Now())
-		if err != nil {
-			msg := fmt.Sprintf("unable to record the 'last update attempt' timestamp: %s", err.Error())
+	// Perform the update. Record an attempt only after the executable
+	// preflight has succeeded and a real release lookup starts. Dry runs,
+	// lock contention, and preflight failures never modify updater metadata.
+	attemptStarted := false
+	err = updateInner(ctx, p, silent, dryRun, network, func() { attemptStarted = true })
+	if !dryRun && attemptStarted {
+		if metadataErr := updateLastAttemptTime(cacheDir, time.Now()); metadataErr != nil {
+			msg := fmt.Sprintf("unable to record the 'last update attempt' timestamp: %s", metadataErr.Error())
 			core.WriteWarningMsgIf(p, msg, silent)
 		}
-	}()
-
-	// Perform the update.
-	return updateInner(ctx, p, silent, dryRun, network)
+	}
+	return err
 }
 
-func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool, network NetworkConfig) error {
+func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool, network NetworkConfig, markAttempt func()) error {
 	c := client.NewClient(client.ClientConfig{
 		CACerts:          network.CACerts,
 		ConnectTimeout:   network.ConnectTimeout,
@@ -204,6 +205,9 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 	}
 
 	writeMsg(p, silent, "Fetching latest release...\n")
+	if markAttempt != nil {
+		markAttempt()
+	}
 	latest, err := getLatestRelease(ctx, c)
 	if err != nil {
 		return fmt.Errorf("unable to fetch the latest release: %w", err)
@@ -837,13 +841,24 @@ func getUpdateURL() string {
 	return "https://api.github.com"
 }
 
+const (
+	updateMetadataSchemaVersion = 1
+	maxUpdateMetadataBytes      = 16 << 10
+)
+
 type metadata struct {
+	SchemaVersion int       `json:"schema_version"`
 	LastAttemptAt time.Time `json:"last_attempt_at"`
 }
 
-// ShouldAttemptUpdate returns true if the application hasn't checked for an
-// update longer than the provided duration.
+// ShouldAttemptUpdate returns true if the application has not checked for an
+// update within dur. Metadata is advisory state. A corrupt, stale, future, or
+// symlinked metadata file is treated as a due check instead of blocking the
+// requested fetch operation.
 func ShouldAttemptUpdate(ctx context.Context, p *core.Printer, dur time.Duration) (bool, error) {
+	if dur < 0 {
+		return false, nil
+	}
 	dir, err := getCacheDir()
 	if err != nil {
 		return false, err
@@ -860,22 +875,60 @@ func ShouldAttemptUpdate(ctx context.Context, p *core.Printer, dur time.Duration
 	defer unlock()
 
 	path := filepath.Join(dir, "metadata.json")
-	data, err := os.ReadFile(path)
+	m, err := readMetadata(path)
 	if os.IsNotExist(err) {
-		// File doesn't exist, assume update is needed.
 		return true, nil
 	}
 	if err != nil {
-		return false, err
-	}
-
-	var m metadata
-	if err = json.Unmarshal(data, &m); err != nil {
-		// Invalid data, assume update is needed.
+		// Metadata is not part of the request's correctness. If it cannot be
+		// read, make the next check eligible and let the caller continue.
 		return true, nil
 	}
+	if m.SchemaVersion != updateMetadataSchemaVersion || m.LastAttemptAt.IsZero() {
+		return true, nil
+	}
+	now := time.Now()
+	// A clock jump into the future must not suppress update checks for an
+	// arbitrary length of time. Treat timestamps outside a small skew window
+	// as invalid metadata.
+	if m.LastAttemptAt.Before(time.Unix(0, 0)) || m.LastAttemptAt.After(now) {
+		return true, nil
+	}
+	return now.Sub(m.LastAttemptAt) >= dur, nil
+}
 
-	return time.Since(m.LastAttemptAt) > dur, nil
+func readMetadata(path string) (metadata, error) {
+	var m metadata
+	info, err := os.Lstat(path)
+	if err != nil {
+		return m, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return m, errors.New("update metadata is not a regular file")
+	}
+	if info.Size() > maxUpdateMetadataBytes {
+		return m, core.LimitError{Subsystem: "update metadata", Limit: maxUpdateMetadataBytes}
+	}
+	f, err := openUpdateMetadata(path)
+	if err != nil {
+		return m, err
+	}
+	defer f.Close()
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return m, err
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return m, errors.New("update metadata is not a regular file")
+	}
+	data, err := core.ReadAllLimited(f, maxUpdateMetadataBytes, "update metadata")
+	if err != nil {
+		return m, err
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return m, err
+	}
+	return m, nil
 }
 
 func getCacheDir() (string, error) {
@@ -885,16 +938,24 @@ func getCacheDir() (string, error) {
 	}
 
 	path := filepath.Join(dir, "fetch")
-	err = os.MkdirAll(path, 0700)
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return "", err
 	}
-
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", errors.New("update cache directory is not a real directory")
+	}
+	if err := os.Chmod(path, 0700); err != nil {
+		return "", err
+	}
 	return path, nil
 }
 
 func updateLastAttemptTime(dir string, now time.Time) error {
-	data, err := json.Marshal(metadata{LastAttemptAt: now.UTC()})
+	data, err := json.Marshal(metadata{SchemaVersion: updateMetadataSchemaVersion, LastAttemptAt: now.UTC()})
 	if err != nil {
 		return err
 	}
@@ -912,15 +973,23 @@ func updateLastAttemptTime(dir string, now time.Time) error {
 		}
 	}()
 	_, err = f.Write(data)
-	if err2 := f.Close(); err == nil {
-		err = err2
+	if syncErr := f.Sync(); err == nil {
+		err = syncErr
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
 	}
 	if err != nil {
 		return err
 	}
 
-	err = fileutil.AtomicReplaceFile(tempPath, path)
-	return err
+	if err = fileutil.AtomicReplaceFileNoSymlink(tempPath, path); err != nil {
+		return err
+	}
+	// Directory sync is best effort. The atomic rename is the correctness
+	// boundary, while durability depends on the platform and filesystem.
+	_ = fileutil.SyncDir(dir)
+	return nil
 }
 
 func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool, silent bool) (func(), error) {

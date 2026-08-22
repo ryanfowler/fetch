@@ -6,7 +6,6 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -92,17 +91,6 @@ func main() {
 		os.Exit(1)
 	}
 	printConfigDebug(app, handle.Stderr(), configPath)
-
-	// Start async update, if necessary.
-	if !app.Update && !app.CheckUpdate && !core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
-		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate, getValue(app.Cfg.Silent), update.NetworkConfig{
-			CACerts:          app.Cfg.CACerts,
-			ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
-			ResolverEndpoint: app.Cfg.DNSEndpoint,
-			DNSServer:        app.Cfg.DNSServer,
-			Proxy:            app.Cfg.Proxy,
-		})
-	}
 
 	// Check for an update without replacing the current executable.
 	verbosity := getVerbosity(app)
@@ -253,6 +241,23 @@ func main() {
 		WSMessageMode:    app.WSMessageMode,
 		SchemelessURL:    app.SchemelessURL,
 	}
+	// Start the detached automatic updater only after all metadata, config,
+	// and request-mode validation above has succeeded. Dry runs must remain
+	// side-effect free, and skill commands are metadata operations too.
+	if app.URL != nil && !app.DryRun && !app.Update && !app.CheckUpdate &&
+		!app.Skill && app.InstallSkill == "" && app.UninstallSkill == "" &&
+		os.Getenv("FETCH_INTERNAL_AUTO_UPDATE") != "1" &&
+		automaticUpdateNetworkSafe(app, configPath) &&
+		!core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
+		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate, getValue(app.Cfg.Silent), configPath, update.NetworkConfig{
+			CACerts:          app.Cfg.CACerts,
+			ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
+			ResolverEndpoint: app.Cfg.DNSEndpoint,
+			DNSServer:        app.Cfg.DNSServer,
+			Proxy:            app.Cfg.Proxy,
+		})
+	}
+
 	if app.HasGRPCDiscovery() {
 		status := fetch.DiscoverGRPC(ctx, &req)
 		os.Exit(statusForContext(ctx, status))
@@ -519,13 +524,36 @@ func getVerbosity(app *cli.App) core.Verbosity {
 	}
 }
 
-func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration, silent bool, network update.NetworkConfig) {
-	// A custom CA is represented as parsed certificates rather than reusable
-	// paths. Do not silently start a background updater that would lose that
-	// trust policy; explicit --update still carries the certificates directly.
-	if len(network.CACerts) > 0 || (network.Proxy != nil && network.Proxy.User != nil) {
-		// Parsed certificates and proxy credentials are intentionally not
-		// copied into a detached child through argv or the environment.
+func automaticUpdateNetworkSafe(app *cli.App, configPath string) bool {
+	// A detached child can reload global settings from an explicit config
+	// path, but it has no URL and therefore cannot reproduce host-specific
+	// settings. CLI CA files are already parsed into certificates and cannot
+	// be reconstructed safely from the child argument list.
+	if configPath == "" {
+		return len(app.Cfg.CACerts) == 0 && (app.Cfg.Proxy == nil || app.Cfg.Proxy.User == nil)
+	}
+	if app.OptionWasExplicit("ca-cert") || app.OptionProvenance("ca-cert").Has(cli.SourceHostConfig) {
+		return false
+	}
+	if app.OptionProvenance("proxy").Has(cli.SourceHostConfig) {
+		return false
+	}
+	if app.OptionWasExplicit("proxy") && app.Cfg.Proxy != nil && app.Cfg.Proxy.User != nil {
+		return false
+	}
+	return true
+}
+
+func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration, silent bool, configPath string, network update.NetworkConfig) {
+	// A custom CA can be carried safely through an explicitly selected config
+	// file. Without that path, do not start a child that would silently lose
+	// the caller's trust policy. Proxy credentials are likewise never placed
+	// in process arguments; a config file may carry them without exposing them
+	// in the detached command line.
+	if len(network.CACerts) > 0 && configPath == "" {
+		return
+	}
+	if network.Proxy != nil && network.Proxy.User != nil && configPath == "" {
 		return
 	}
 	// Check the metadata file to see if we should start an async update.
@@ -546,23 +574,39 @@ func checkForUpdate(ctx context.Context, p *core.Printer, dur time.Duration, sil
 		return
 	}
 	args := []string{"--update", "--timeout=300", "--silent"}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
 	if network.ResolverEndpoint != nil {
 		if endpointURL := network.ResolverEndpoint.URL(); endpointURL != nil {
 			args = append(args, "--dns-server", endpointURL.String())
 		}
 	}
-	if network.Proxy != nil {
+	if network.Proxy != nil && network.Proxy.User == nil {
 		args = append(args, "--proxy", network.Proxy.String())
 	}
 	if network.ConnectTimeout > 0 {
 		args = append(args, "--connect-timeout", strconv.FormatFloat(network.ConnectTimeout.Seconds(), 'f', -1, 64))
 	}
 	cmd := exec.Command(path, args...)
-	cmd.Stdin = nil
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+	configureDetachedProcess(cmd)
 	cmd.Env = append(os.Environ(), "FETCH_INTERNAL_AUTO_UPDATE=1")
-	_ = cmd.Start()
+	// Use real null-device handles instead of os/exec's pipe-backed adapters.
+	// This prevents the child from inheriting terminal input and lets the
+	// parent release every OS handle immediately after Start.
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return
+	}
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+	if err := cmd.Start(); err != nil {
+		_ = devNull.Close()
+		return
+	}
+	_ = devNull.Close()
+	_ = cmd.Process.Release()
 }
 
 // writeCLIErr writes the provided CLI error to the Printer.
