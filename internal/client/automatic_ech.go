@@ -76,16 +76,14 @@ func (t *automaticHTTP3Transport) dialAutomaticECHTCP(ctx context.Context, origi
 	if service.TargetName.String() != "" && service.TargetName.String() != "." {
 		host = service.TargetName.String()
 	}
-	got, err := t.dialer.Dial(ctx, DialRequest{
+	got, err := dialResolverWithECH(ctx, t.dialer, DialRequest{
 		Network:    "tcp",
 		Host:       host,
 		Port:       port,
 		OriginHost: origin.Hostname(),
 		Resolver:   t.resolver,
 		Candidates: addresses,
-		TLSConfig:  cfg,
-		ALPN:       cfg.NextProtos,
-	})
+	}, cfg, t.ech)
 	if err != nil {
 		return nil, err
 	}

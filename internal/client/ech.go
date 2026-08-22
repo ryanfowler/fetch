@@ -26,6 +26,7 @@ type echConnectionConfig struct {
 	targetPort string
 	addresses  []net.IPAddr
 	configured bool
+	grease     bool
 }
 
 // discoverECHForConnection applies the discovery policy to a connection-
@@ -50,7 +51,7 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 		if mode == core.ECHOn {
 			return nil, ErrECHConfigUnavailable
 		}
-		return fallback, nil
+		return configureECHGREASE(fallback)
 	}
 
 	discovery, err := res.DiscoverHTTPS(ctx, host, uint16(parsedPort), nil)
@@ -62,7 +63,7 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 		if mode == core.ECHOn || resolver.IsAuthenticatedDiscoveryFailure(err) || !resolver.MayDowngrade(err) {
 			return nil, err
 		}
-		return fallback, nil
+		return configureECHGREASE(fallback)
 	}
 
 	candidate := selectECHCandidate(discovery, version)
@@ -70,7 +71,7 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 		if mode == core.ECHOn {
 			return nil, ErrECHConfigUnavailable
 		}
-		return fallback, nil
+		return configureECHGREASE(fallback)
 	}
 	configList, err := resolver.SupportedECHConfigList(candidate.ECH)
 	if err != nil {
@@ -151,11 +152,10 @@ func newECHHTTPDialTLS(base func(context.Context, string, string) (net.Conn, err
 		if !connection.configured {
 			return dialAndHandshake(connectCtx, base, network, address, connection.tlsConfig)
 		}
-		got, err := NewResolverDialer(res, timeout).Dial(connectCtx, DialRequest{
+		got, err := dialResolverWithECH(connectCtx, NewResolverDialer(res, timeout), DialRequest{
 			Network: "tcp", Host: connection.targetHost, Port: connection.targetPort,
 			OriginHost: host, Candidates: connection.addresses,
-			TLSConfig: connection.tlsConfig, ALPN: connection.tlsConfig.NextProtos,
-		})
+		}, connection.tlsConfig, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -175,18 +175,27 @@ func echALPN(version core.HTTPVersion) []string {
 }
 
 func dialAndHandshake(ctx context.Context, base func(context.Context, string, string) (net.Conn, error), network, address string, cfg *tls.Config) (net.Conn, error) {
-	conn, err := base(ctx, network, address)
+	return dialTLSWithECHPolicy(ctx, func(rawCtx context.Context) (net.Conn, error) {
+		return base(rawCtx, network, address)
+	}, cfg, core.ECHOff)
+}
+
+func configureECHGREASE(fallback *echConnectionConfig) (*echConnectionConfig, error) {
+	configList, err := GenerateGREASEECHConfigList()
 	if err != nil {
 		return nil, err
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
+	cfg := fallback.tlsConfig.Clone()
+	cfg.MinVersion = tls.VersionTLS13
+	cfg.EncryptedClientHelloConfigList = configList
+	if cfg.ServerName == "" {
+		cfg.ServerName = core.TLSVerificationName(fallback.targetHost)
 	}
-	tlsConn := tls.Client(conn, cfg)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	_ = tlsConn.SetDeadline(time.Time{})
-	return tlsConn, nil
+	return &echConnectionConfig{
+		tlsConfig:  cfg,
+		targetHost: fallback.targetHost,
+		targetPort: fallback.targetPort,
+		configured: true,
+		grease:     true,
+	}, nil
 }

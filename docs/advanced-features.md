@@ -235,8 +235,9 @@ Authenticated discovery failures are fatal; authenticated no-data results may
 fall back. `--ech on` requires an advertised usable configuration, requires
 TLS 1.3, rejects explicit HTTP/3, and uses TCP during automatic version
 selection. Explicit TLS 1.2 bounds are rejected. ECH is not available through
-proxies or cleartext HTTP/2. The TLS handshake and GREASE fallback are
-implemented separately from this discovery and policy layer.
+proxies or cleartext HTTP/2. Real ECH uses Go's `crypto/tls`; auto mode sends a
+fresh randomized GREASE configuration when discovery has no usable config and
+falls back to ordinary TLS after a verified rejection.
 
 ### TLS Version Bounds
 
