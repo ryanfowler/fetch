@@ -40,7 +40,7 @@ func TestReflectionClientFallsBackToV1Alpha(t *testing.T) {
 	rc := &reflectionClient{
 		invoke: func(_ context.Context, path string, _ []byte) ([][]byte, error) {
 			if path == reflectionV1Path {
-				return nil, &fetchgrpc.Status{Code: fetchgrpc.Unimplemented}
+				return [][]byte{buildReflectionErrorResponse(int32(fetchgrpc.Unimplemented), "v1 unavailable")}, nil
 			}
 			if path == reflectionV1AlphaPath {
 				return [][]byte{payload}, nil
@@ -56,6 +56,122 @@ func TestReflectionClientFallsBackToV1Alpha(t *testing.T) {
 	}
 	if got, want := strings.Join(names, ","), "alpha.Service,zeta.Service"; got != want {
 		t.Fatalf("ListServices() = %q, want %q", got, want)
+	}
+}
+
+func TestReflectionClientFallsBackForProtocolErrorResponse(t *testing.T) {
+	var paths []string
+	rc := &reflectionClient{
+		invoke: func(_ context.Context, path string, _ []byte) ([][]byte, error) {
+			paths = append(paths, path)
+			if path == reflectionV1Path {
+				return [][]byte{buildReflectionErrorResponse(int32(fetchgrpc.Unimplemented), "v1 is unavailable")}, nil
+			}
+			return [][]byte{buildListResponse("legacy.Service")}, nil
+		},
+	}
+
+	names, err := rc.ListServices(context.Background())
+	if err != nil {
+		t.Fatalf("ListServices() error = %v", err)
+	}
+	if got := strings.Join(names, ","); got != "legacy.Service" {
+		t.Fatalf("ListServices() = %q, want legacy.Service", got)
+	}
+	if got, want := strings.Join(paths, ","), reflectionV1Path+","+reflectionV1AlphaPath; got != want {
+		t.Fatalf("reflection paths = %q, want %q", got, want)
+	}
+}
+
+func TestReflectionClientDoesNotFallbackForNonUnimplementedProtocolError(t *testing.T) {
+	calledAlpha := false
+	rc := &reflectionClient{
+		invoke: func(_ context.Context, path string, _ []byte) ([][]byte, error) {
+			if path == reflectionV1AlphaPath {
+				calledAlpha = true
+			}
+			return [][]byte{buildReflectionErrorResponse(7, "permission denied")}, nil
+		},
+	}
+
+	_, err := rc.ListServices(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("ListServices() error = %v, want permission error", err)
+	}
+	if calledAlpha {
+		t.Fatal("v1alpha was attempted after a non-UNIMPLEMENTED reflection error")
+	}
+}
+
+func TestReflectionListAcceptsAnEmptyServiceList(t *testing.T) {
+	var response []byte
+	response = protowire.AppendTag(response, 6, protowire.BytesType)
+	response = protowire.AppendBytes(response, nil)
+	if names, err := parseReflectionListResponse(response); err != nil || len(names) != 0 {
+		t.Fatalf("parseReflectionListResponse() = %v, %v; want an empty list", names, err)
+	}
+}
+
+func TestReflectionClientDoesNotFallbackForMalformedProtocolError(t *testing.T) {
+	calledAlpha := false
+	rc := &reflectionClient{
+		invoke: func(_ context.Context, path string, _ []byte) ([][]byte, error) {
+			if path == reflectionV1Path {
+				return [][]byte{buildMalformedReflectionErrorResponse()}, nil
+			}
+			calledAlpha = true
+			return [][]byte{buildListResponse("unexpected.Service")}, nil
+		},
+	}
+
+	_, err := rc.ListServices(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "missing an error code") {
+		t.Fatalf("ListServices() error = %v, want malformed response error", err)
+	}
+	if calledAlpha {
+		t.Fatal("v1alpha was attempted after a malformed reflection response")
+	}
+}
+
+func TestReflectionSymbolRequestNormalizesLeadingDot(t *testing.T) {
+	request := buildReflectionSymbolRequest(".test.Service/Method")
+	num, typ, n := protowire.ConsumeTag(request)
+	if n < 0 || num != 4 || typ != protowire.BytesType {
+		t.Fatalf("unexpected symbol request tag: num=%d type=%v n=%d", num, typ, n)
+	}
+	symbol, m := protowire.ConsumeString(request[n:])
+	if m < 0 {
+		t.Fatalf("ConsumeString() error = %v", protowire.ParseError(m))
+	}
+	if symbol != "test.Service.Method" {
+		t.Fatalf("symbol = %q, want test.Service.Method", symbol)
+	}
+}
+
+func buildReflectionErrorResponse(code int32, message string) []byte {
+	var response []byte
+	response = protowire.AppendTag(response, 1, protowire.VarintType)
+	response = protowire.AppendVarint(response, uint64(uint32(code)))
+	response = protowire.AppendTag(response, 2, protowire.BytesType)
+	response = protowire.AppendString(response, message)
+	var outer []byte
+	outer = protowire.AppendTag(outer, 7, protowire.BytesType)
+	return protowire.AppendBytes(outer, response)
+}
+
+func buildMalformedReflectionErrorResponse() []byte {
+	var outer []byte
+	outer = protowire.AppendTag(outer, 7, protowire.BytesType)
+	return protowire.AppendBytes(outer, []byte{0x12, 0x01, 'x'})
+}
+
+func TestReflectionErrorValidatesTrailingResponseFields(t *testing.T) {
+	response := buildReflectionErrorResponse(int32(fetchgrpc.Unimplemented), "not implemented")
+	response = append(response, 0x80) // truncated trailing field
+	if _, err := parseReflectionListResponse(response); err == nil {
+		t.Fatal("parseReflectionListResponse() accepted malformed trailing data")
+	} else if isReflectionUnimplemented(err) {
+		t.Fatalf("malformed response was classified as UNIMPLEMENTED: %v", err)
 	}
 }
 
@@ -92,6 +208,21 @@ func TestDescriptorSetBuilderDedupesFiles(t *testing.T) {
 	if _, err := builder.Build(); err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
+
+	inconsistent := gproto.Clone(fd).(*descriptorpb.FileDescriptorProto)
+	inconsistent.Package = ptr("different")
+	if err := builder.Add([][]byte{mustMarshalDescriptor(t, inconsistent)}); err == nil || !strings.Contains(err.Error(), "inconsistent definitions") {
+		t.Fatalf("Add() error = %v, want inconsistent descriptor error", err)
+	}
+}
+
+func mustMarshalDescriptor(t *testing.T, fd *descriptorpb.FileDescriptorProto) []byte {
+	t.Helper()
+	raw, err := gproto.Marshal(fd)
+	if err != nil {
+		t.Fatalf("marshal descriptor: %v", err)
+	}
+	return raw
 }
 
 func TestRenderDescribeMessage(t *testing.T) {

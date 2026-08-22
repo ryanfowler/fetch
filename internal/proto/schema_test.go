@@ -1,6 +1,7 @@
 package proto
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/types/descriptorpb"
@@ -296,6 +297,27 @@ func TestListServices(t *testing.T) {
 	}
 	if len(services) > 0 && services[0] != "testpkg.TestService" {
 		t.Errorf("expected testpkg.TestService, got %s", services[0])
+	}
+}
+
+func TestLoadFromDescriptorSetRejectsCyclicDependencies(t *testing.T) {
+	fds := &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{
+		{Name: new("a.proto"), Dependency: []string{"b.proto"}},
+		{Name: new("b.proto"), Dependency: []string{"a.proto"}},
+	}}
+	_, err := LoadFromDescriptorSet(fds)
+	if err == nil || !strings.Contains(err.Error(), "descriptor dependency cycle") {
+		t.Fatalf("LoadFromDescriptorSet() error = %v, want dependency cycle", err)
+	}
+}
+
+func TestLoadFromDescriptorSetRejectsMissingDependency(t *testing.T) {
+	fds := &descriptorpb.FileDescriptorSet{File: []*descriptorpb.FileDescriptorProto{
+		{Name: new("a.proto"), Dependency: []string{"missing.proto"}},
+	}}
+	_, err := LoadFromDescriptorSet(fds)
+	if err == nil || !strings.Contains(err.Error(), "depends on missing file") {
+		t.Fatalf("LoadFromDescriptorSet() error = %v, want missing dependency", err)
 	}
 }
 

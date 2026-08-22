@@ -2,8 +2,10 @@ package proto
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -28,6 +30,9 @@ func NewSchema() *Schema {
 
 // LoadFromDescriptorSet loads schema from a FileDescriptorSet.
 func LoadFromDescriptorSet(fds *descriptorpb.FileDescriptorSet) (*Schema, error) {
+	if err := validateDescriptorSet(fds); err != nil {
+		return nil, err
+	}
 	schema := NewSchema()
 
 	// Build file descriptors.
@@ -44,6 +49,69 @@ func LoadFromDescriptorSet(fds *descriptorpb.FileDescriptorSet) (*Schema, error)
 	})
 
 	return schema, nil
+}
+
+// validateDescriptorSet performs deterministic checks before protodesc.NewFiles
+// builds its resolver. NewFiles can discover several invalid dependency graphs
+// through map-backed registries, which otherwise makes the first reported error
+// depend on iteration order.
+func validateDescriptorSet(fds *descriptorpb.FileDescriptorSet) error {
+	if fds == nil {
+		return fmt.Errorf("descriptor set is nil")
+	}
+
+	files := make(map[string]*descriptorpb.FileDescriptorProto, len(fds.File))
+	for i, fd := range fds.File {
+		if fd == nil || fd.GetName() == "" {
+			return fmt.Errorf("descriptor file %d is missing a file name", i)
+		}
+		name := fd.GetName()
+		if existing, ok := files[name]; ok {
+			if !proto.Equal(existing, fd) {
+				return fmt.Errorf("descriptor file %q has inconsistent definitions", name)
+			}
+			return fmt.Errorf("descriptor file %q is duplicated", name)
+		}
+		files[name] = fd
+	}
+
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	state := make(map[string]uint8, len(files))
+	var visit func(string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case 1:
+			return fmt.Errorf("descriptor dependency cycle includes %q", name)
+		case 2:
+			return nil
+		}
+		state[name] = 1
+		dependencies := append([]string(nil), files[name].Dependency...)
+		sort.Strings(dependencies)
+		for _, dependency := range dependencies {
+			if _, ok := files[dependency]; ok {
+				if err := visit(dependency); err != nil {
+					return err
+				}
+				continue
+			}
+			if _, err := protoregistry.GlobalFiles.FindFileByPath(dependency); err != nil {
+				return fmt.Errorf("descriptor %q depends on missing file %q", name, dependency)
+			}
+		}
+		state[name] = 2
+		return nil
+	}
+	for _, name := range names {
+		if err := visit(name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // indexFile indexes all messages and services in a file descriptor.

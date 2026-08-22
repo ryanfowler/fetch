@@ -53,7 +53,20 @@ func FrameChecked(data []byte, compressed bool) ([]byte, error) {
 // Decompression is bounded so a small compressed payload cannot expand beyond
 // the gRPC message limit.
 func DecodeMessage(data []byte, compressed bool, encoding string) ([]byte, error) {
+	return DecodeMessageLimited(data, compressed, encoding, MaxMessageSize)
+}
+
+// DecodeMessageLimited is DecodeMessage with a caller-supplied decoded-size
+// limit. Reflection uses this to enforce its aggregate limit before retaining
+// another decompressed response.
+func DecodeMessageLimited(data []byte, compressed bool, encoding string, max int64) ([]byte, error) {
+	if max < 0 {
+		return nil, fmt.Errorf("gRPC message exceeds invalid limit: %d bytes", max)
+	}
 	if !compressed {
+		if int64(len(data)) > max {
+			return nil, fmt.Errorf("gRPC message too large: %d bytes", len(data))
+		}
 		return data, nil
 	}
 
@@ -63,7 +76,7 @@ func DecodeMessage(data []byte, compressed bool, encoding string) ([]byte, error
 		if err != nil {
 			return nil, fmt.Errorf("invalid gzip gRPC message: %w", err)
 		}
-		decoded, readErr := core.ReadAllLimited(reader, MaxMessageSize, "decompressed gRPC message")
+		decoded, readErr := core.ReadAllLimited(reader, max, "decompressed gRPC message")
 		closeErr := reader.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("invalid gzip gRPC message: %w", readErr)
@@ -79,45 +92,63 @@ func DecodeMessage(data []byte, compressed bool, encoding string) ([]byte, error
 	}
 }
 
+// ReadFrameHeader reads and validates the five-byte gRPC frame header.
+// It returns io.EOF when the reader has no more data. The payload is not read,
+// which lets callers enforce an aggregate limit before allocating it.
+func ReadFrameHeader(r io.Reader) (uint32, bool, error) {
+	var header [5]byte
+	_, err := io.ReadFull(r, header[:])
+	if err != nil {
+		if err == io.EOF {
+			return 0, false, io.EOF
+		}
+		if err == io.ErrUnexpectedEOF {
+			return 0, false, fmt.Errorf("failed to read gRPC frame header: incomplete header")
+		}
+		return 0, false, err
+	}
+
+	switch header[0] {
+	case 0, 1:
+	default:
+		return 0, false, fmt.Errorf("invalid gRPC compressed flag: %d", header[0])
+	}
+	return binary.BigEndian.Uint32(header[1:5]), header[0] == 1, nil
+}
+
+// ReadFrameBody reads a frame payload after ReadFrameHeader. max is checked
+// before allocation so callers can enforce an operation-wide limit without
+// briefly allocating an over-limit message.
+func ReadFrameBody(r io.Reader, length uint32, max int64) ([]byte, error) {
+	if max < 0 || uint64(length) > uint64(max) {
+		return nil, fmt.Errorf("gRPC message too large: %d bytes", length)
+	}
+	data := make([]byte, int(length))
+	if length == 0 {
+		return data, nil
+	}
+	_, err := io.ReadFull(r, data)
+	if err != nil {
+		if err == io.ErrUnexpectedEOF {
+			return nil, fmt.Errorf("failed to read gRPC message: incomplete data")
+		}
+		return nil, err
+	}
+	return data, nil
+}
+
 // ReadFrame reads a single gRPC length-prefixed frame from the reader.
 // Returns the message data, whether it was compressed, and any error.
 // Returns io.EOF when the reader has no more data.
 func ReadFrame(r io.Reader) ([]byte, bool, error) {
-	var header [5]byte
-	_, err := io.ReadFull(r, header[:])
+	length, compressed, err := ReadFrameHeader(r)
 	if err != nil {
-		if err == io.ErrUnexpectedEOF {
-			return nil, false, fmt.Errorf("failed to read gRPC frame header: incomplete header")
-		}
 		return nil, false, err
 	}
-
-	switch header[0] {
-	case 0:
-		// uncompressed
-	case 1:
-		// compressed
-	default:
-		return nil, false, fmt.Errorf("invalid gRPC compressed flag: %d", header[0])
+	data, err := ReadFrameBody(r, length, maxMessageSize)
+	if err != nil {
+		return nil, false, err
 	}
-	compressed := header[0] == 1
-	length := binary.BigEndian.Uint32(header[1:5])
-
-	if uint64(length) > uint64(maxMessageSize) {
-		return nil, false, fmt.Errorf("gRPC message too large: %d bytes", length)
-	}
-
-	data := make([]byte, length)
-	if length > 0 {
-		_, err = io.ReadFull(r, data)
-		if err != nil {
-			if err == io.ErrUnexpectedEOF {
-				return nil, false, fmt.Errorf("failed to read gRPC message: incomplete data")
-			}
-			return nil, false, err
-		}
-	}
-
 	return data, compressed, nil
 }
 
