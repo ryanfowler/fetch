@@ -1957,6 +1957,11 @@ func TestMain(t *testing.T) {
 		// Copy the binary to a test-specific directory so the update
 		// test doesn't modify the shared fetchPath.
 		updateDir := t.TempDir()
+		// Self-update intentionally rejects group/world-writable replacement
+		// directories, so make the test fixture match the production preflight.
+		if err := os.Chmod(updateDir, 0700); err != nil {
+			t.Fatal(err)
+		}
 		updateFetchPath := filepath.Join(updateDir, getExeName())
 		copyFile(t, fetchPath, updateFetchPath)
 

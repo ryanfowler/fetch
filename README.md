@@ -22,8 +22,9 @@ A modern HTTP(S) client for the command line.
 #### Install
 
 ```sh
-# Install fetch from the shell script (macOS or Linux)
+# Install fetch from the verified Go release archive (macOS or Linux)
 curl -fsSL https://raw.githubusercontent.com/ryanfowler/fetch/main/install.sh | bash
+# The installer verifies the SHA-256 sidecar and atomically replaces fetch.
 
 # Or install fetch with homebrew (macOS or Linux)
 brew install ryanfowler/tap/fetch
