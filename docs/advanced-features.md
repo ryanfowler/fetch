@@ -237,7 +237,10 @@ TLS 1.3, rejects explicit HTTP/3, and uses TCP during automatic version
 selection. Explicit TLS 1.2 bounds are rejected. ECH is not available through
 proxies or cleartext HTTP/2. Real ECH uses Go's `crypto/tls`; auto mode sends a
 fresh randomized GREASE configuration when discovery has no usable config and
-falls back to ordinary TLS after a verified rejection.
+falls back to ordinary TLS after a verified rejection. WSS and `--inspect-tls`
+use the same host-scoped discovery and report whether real ECH was accepted,
+rejected, or followed by fallback. At `-vvv`, fetch warns once when discovery
+uses system/plaintext DNS or encrypted DNS without certificate verification.
 
 ### TLS Version Bounds
 

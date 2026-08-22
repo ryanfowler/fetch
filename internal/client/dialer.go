@@ -77,18 +77,24 @@ type DialRequest struct {
 	TLSConfig *tls.Config
 	ALPN      []string
 	Attempt   func(context.Context, string, net.IPAddr) (net.Conn, error)
-	Recorder  DialTimingRecorder
+	// AttemptWithInfo associates protocol negotiation metadata with the
+	// connection that wins the address race.
+	AttemptWithInfo func(context.Context, string, net.IPAddr) (net.Conn, any, error)
+	Recorder        DialTimingRecorder
 }
 
 // DialResult is the successful connection and the metadata selected during
 // setup. The caller owns Conn and must close it.
 type DialResult struct {
-	Conn             net.Conn
-	RemoteIP         net.IP
-	ResolvedAddrs    []net.IPAddr
-	Resolver         string
-	Timing           DialTiming
-	TLSState         *tls.ConnectionState
+	Conn          net.Conn
+	RemoteIP      net.IP
+	ResolvedAddrs []net.IPAddr
+	Resolver      string
+	Timing        DialTiming
+	TLSState      *tls.ConnectionState
+	// ECHInfo is populated by ECH-aware attempts and is intentionally typed as
+	// any here so the generic dialer does not depend on the ECH policy model.
+	ECHInfo          any
 	ResolverScope    string
 	EffectiveAddress string
 }
@@ -146,7 +152,7 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 	switch req.Mode {
 	case DialDirect, DialUnix:
 	case DialHTTPProxy, DialHTTPSProxy, DialSOCKS5, DialSOCKS5H:
-		if req.Attempt == nil {
+		if req.Attempt == nil && req.AttemptWithInfo == nil {
 			return DialResult{}, fmt.Errorf("%s mode requires a connection attempt strategy", req.Mode)
 		}
 	default:
@@ -219,6 +225,7 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 		conn  net.Conn
 		ip    net.IP
 		state *tls.ConnectionState
+		info  any
 		time  DialTiming
 	}
 	attempt := func(attemptCtx context.Context, ip net.IPAddr) (connection, error) {
@@ -228,13 +235,16 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 			req.Recorder.ConnectionStarted(req.Network, address)
 		}
 		var conn net.Conn
+		var info any
 		var err error
 		trace := httptrace.ContextClientTrace(attemptCtx)
-		manualConnectTrace := req.Attempt != nil || d.BaseDial != nil
+		manualConnectTrace := req.Attempt != nil || req.AttemptWithInfo != nil || d.BaseDial != nil
 		if manualConnectTrace && trace != nil && trace.ConnectStart != nil {
 			trace.ConnectStart(req.Network, address)
 		}
-		if req.Attempt != nil {
+		if req.AttemptWithInfo != nil {
+			conn, info, err = req.AttemptWithInfo(attemptCtx, req.Network, ip)
+		} else if req.Attempt != nil {
 			conn, err = req.Attempt(attemptCtx, req.Network, ip)
 		} else if d.BaseDial != nil {
 			conn, err = d.BaseDial(attemptCtx, req.Network, address)
@@ -310,7 +320,7 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 		} else {
 			_ = conn.SetDeadline(time.Time{})
 		}
-		return connection{conn: conn, ip: append(net.IP(nil), ip.IP...), state: state, time: timing}, nil
+		return connection{conn: conn, ip: append(net.IP(nil), ip.IP...), state: state, info: info, time: timing}, nil
 	}
 
 	winner, err := resolver.RaceCandidates(connectCtx, candidates, attempt, func(loser connection) {
@@ -324,6 +334,7 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 	result.Conn = winner.conn
 	result.RemoteIP = winner.ip
 	result.TLSState = winner.state
+	result.ECHInfo = winner.info
 	result.Timing.ConnectStart = winner.time.ConnectStart
 	result.Timing.ConnectDone = winner.time.ConnectDone
 	result.Timing.ConnectDuration = winner.time.ConnectDuration

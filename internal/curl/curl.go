@@ -37,6 +37,7 @@ type Result struct {
 	UploadFile        string
 	Head              bool
 	Insecure          bool
+	ECH               string
 	Output            string
 	RemoteName        bool
 	RemoteHeaderName  bool

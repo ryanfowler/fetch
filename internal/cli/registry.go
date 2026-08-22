@@ -344,7 +344,7 @@ var fromCurlOptions = map[string]bool{
 	"aws-sigv4": true, "output": true, "remote-name": true, "remote-header-name": true,
 	"range": true, "unix": true, "timeout": true, "connect-timeout": true,
 	"redirects": true, "proxy": true, "insecure": true, "max-tls": true, "min-tls": true,
-	"http": true, "cert": true, "key": true, "ca-cert": true, "dns-server": true,
+	"http": true, "ech": true, "cert": true, "key": true, "ca-cert": true, "dns-server": true,
 	"retry": true, "retry-delay": true, "grpc": true, "grpc-describe": true,
 	"grpc-list": true, "query": true,
 }

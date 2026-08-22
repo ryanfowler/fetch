@@ -760,6 +760,47 @@ func SupportedECHConfigList(value []byte) ([]byte, error) {
 	return info.Supported, nil
 }
 
+// ECHPublicName returns the public name from the first supported ECH config.
+// The list is validated before the name is extracted, so callers never parse
+// attacker-controlled offsets without the same framing checks used by TLS.
+func ECHPublicName(value []byte) (string, error) {
+	supported, err := SupportedECHConfigList(value)
+	if err != nil {
+		return "", err
+	}
+	if len(supported) < 6 {
+		return "", errors.New("ECHConfig is truncated")
+	}
+	length := int(binary.BigEndian.Uint16(supported[4:6]))
+	if length > len(supported)-6 {
+		return "", errors.New("ECHConfig contents are truncated")
+	}
+	contents := supported[6 : 6+length]
+	offset := 0
+	if len(contents) < 1+2+2 {
+		return "", errors.New("ECHConfig public name is truncated")
+	}
+	offset++    // config_id
+	offset += 2 // kem_id
+	publicKeyLength := int(binary.BigEndian.Uint16(contents[offset:]))
+	offset += 2 + publicKeyLength
+	if offset+2 > len(contents) {
+		return "", errors.New("ECHConfig public name is truncated")
+	}
+	suitesLength := int(binary.BigEndian.Uint16(contents[offset:]))
+	offset += 2 + suitesLength
+	if offset+2 > len(contents) {
+		return "", errors.New("ECHConfig public name is truncated")
+	}
+	offset++ // maximum_name_length
+	nameLength := int(contents[offset])
+	offset++
+	if nameLength == 0 || offset+nameLength > len(contents) {
+		return "", errors.New("ECHConfig public name is truncated")
+	}
+	return string(contents[offset : offset+nameLength]), nil
+}
+
 func validateECHConfigList(value []byte) error {
 	if len(value) < 2 {
 		return fmt.Errorf("SVCB ech ECHConfigList is shorter than its length prefix")

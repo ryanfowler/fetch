@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -20,20 +22,61 @@ var (
 	ErrECHConfigUnavailable = errors.New("ECH is required but no usable ECH configuration was discovered")
 )
 
-type echConnectionConfig struct {
+// ECHDiscoveryNeedsWarning reports whether ECH configuration discovery uses
+// a resolver whose transport is not authenticated. Discovery can protect the
+// TLS handshake while still exposing or permitting modification of the
+// hostname's HTTPS records. The caller decides whether the warning is shown
+// (the CLI shows it only at -vvv and above).
+func ECHDiscoveryNeedsWarning(mode core.ECHMode, target *url.URL, endpoint *resolver.Endpoint, insecure bool, explicitProxy *url.URL) bool {
+	if target == nil {
+		return false
+	}
+	if explicitProxy != nil {
+		return false
+	}
+	if selected, err := ProxyForURL(nil, target); err == nil && selected != nil {
+		return false
+	}
+	return echDiscoveryNeedsWarning(mode, target, endpoint, insecure)
+}
+
+// ECHDiscoveryNeedsResolverWarning is used by inspection modes that ignore
+// proxy options. It deliberately does not consult proxy environment settings.
+func ECHDiscoveryNeedsResolverWarning(mode core.ECHMode, target *url.URL, endpoint *resolver.Endpoint, insecure bool) bool {
+	return echDiscoveryNeedsWarning(mode, target, endpoint, insecure)
+}
+
+func echDiscoveryNeedsWarning(mode core.ECHMode, target *url.URL, endpoint *resolver.Endpoint, insecure bool) bool {
+	if target == nil || (mode != core.ECHAuto && mode != core.ECHOn) || !(strings.EqualFold(target.Scheme, "https") || strings.EqualFold(target.Scheme, "wss")) {
+		return false
+	}
+	if net.ParseIP(target.Hostname()) != nil {
+		return false
+	}
+	if endpoint == nil {
+		return true // the platform resolver has no authenticated DNS guarantee
+	}
+	if insecure {
+		return true
+	}
+	return endpoint.Security != resolver.SecurityVerifiedEncrypted
+}
+
+type ECHConnectionConfig struct {
 	tlsConfig  *tls.Config
 	targetHost string
 	targetPort string
 	addresses  []net.IPAddr
 	configured bool
 	grease     bool
+	outerName  string
 }
 
 // discoverECHForConnection applies the discovery policy to a connection-
 // specific TLS configuration. It also returns the effective SVCB target. The
 // origin remains the TLS public name and HTTP authority; only the first hop
 // uses targetHost/targetPort.
-func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host, port string, base *tls.Config, mode core.ECHMode, version core.HTTPVersion) (*echConnectionConfig, error) {
+func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host, port string, base *tls.Config, mode core.ECHMode, version core.HTTPVersion) (*ECHConnectionConfig, error) {
 	parsedPort, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || parsedPort == 0 {
 		return nil, fmt.Errorf("invalid HTTPS port %q", port)
@@ -43,7 +86,7 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 		cfg = &tls.Config{}
 	}
 	cfg = cfg.Clone()
-	fallback := &echConnectionConfig{tlsConfig: cfg, targetHost: host, targetPort: port}
+	fallback := &ECHConnectionConfig{tlsConfig: cfg, targetHost: host, targetPort: port}
 	if mode == core.ECHUnknown || mode == core.ECHOff {
 		return fallback, nil
 	}
@@ -82,12 +125,17 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 	if cfg.ServerName == "" {
 		cfg.ServerName = core.TLSVerificationName(host)
 	}
-	result := &echConnectionConfig{
+	outerName, nameErr := resolver.ECHPublicName(configList)
+	if nameErr != nil {
+		return nil, nameErr
+	}
+	result := &ECHConnectionConfig{
 		tlsConfig:  cfg,
 		targetHost: host,
 		targetPort: port,
 		addresses:  append([]net.IPAddr(nil), candidate.Addresses...),
 		configured: true,
+		outerName:  outerName,
 	}
 	if target := candidate.TargetName.String(); target != "" && target != "." {
 		result.targetHost = target
@@ -96,6 +144,52 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 		result.targetPort = strconv.Itoa(int(candidate.Port))
 	}
 	return result, nil
+}
+
+// DiscoverECHForConnection performs host-scoped HTTPS/SVCB discovery and
+// prepares the TLS configuration for an inspection or application dial.
+func DiscoverECHForConnection(ctx context.Context, res *resolver.Resolver, host, port string, base *tls.Config, mode core.ECHMode, version core.HTTPVersion) (*ECHConnectionConfig, error) {
+	return discoverECHForConnection(ctx, res, host, port, base, mode, version)
+}
+
+// TLSConfig returns the cloned, connection-specific TLS configuration.
+func (c *ECHConnectionConfig) TLSConfig() *tls.Config {
+	if c == nil || c.tlsConfig == nil {
+		return nil
+	}
+	return c.tlsConfig.Clone()
+}
+
+// Target returns the effective SVCB service target and port.
+func (c *ECHConnectionConfig) Target() (string, string) {
+	if c == nil {
+		return "", ""
+	}
+	return c.targetHost, c.targetPort
+}
+
+// Addresses returns the validated service addresses, if discovery supplied
+// them. The returned slice is independent of the connection configuration.
+func (c *ECHConnectionConfig) Addresses() []net.IPAddr {
+	if c == nil {
+		return nil
+	}
+	return append([]net.IPAddr(nil), c.addresses...)
+}
+
+// Real reports whether the TLS configuration came from an advertised ECH
+// configuration rather than generated GREASE.
+func (c *ECHConnectionConfig) Real() bool { return c != nil && c.configured && !c.grease }
+
+// Offered reports whether this connection will send an ECH extension.
+func (c *ECHConnectionConfig) Offered() bool { return c != nil && c.configured }
+
+// OuterServerName returns the public SNI used for the outer ClientHello.
+func (c *ECHConnectionConfig) OuterServerName() string {
+	if c == nil {
+		return ""
+	}
+	return c.outerName
 }
 
 func selectECHCandidate(discovery resolver.HTTPSDiscovery, version core.HTTPVersion) *resolver.ServiceCandidate {
@@ -122,6 +216,10 @@ func serviceSupportsECHProtocol(candidate resolver.ServiceCandidate, version cor
 			}
 		case core.HTTP2:
 			if value == "h2" {
+				return true
+			}
+		case core.HTTP3:
+			if value == "h3" {
 				return true
 			}
 		default:
@@ -180,7 +278,7 @@ func dialAndHandshake(ctx context.Context, base func(context.Context, string, st
 	}, cfg, core.ECHOff)
 }
 
-func configureECHGREASE(fallback *echConnectionConfig) (*echConnectionConfig, error) {
+func configureECHGREASE(fallback *ECHConnectionConfig) (*ECHConnectionConfig, error) {
 	configList, err := GenerateGREASEECHConfigList()
 	if err != nil {
 		return nil, err
@@ -191,11 +289,12 @@ func configureECHGREASE(fallback *echConnectionConfig) (*echConnectionConfig, er
 	if cfg.ServerName == "" {
 		cfg.ServerName = core.TLSVerificationName(fallback.targetHost)
 	}
-	return &echConnectionConfig{
+	return &ECHConnectionConfig{
 		tlsConfig:  cfg,
 		targetHost: fallback.targetHost,
 		targetPort: fallback.targetPort,
 		configured: true,
 		grease:     true,
+		outerName:  string(greaseECHPublicName),
 	}, nil
 }

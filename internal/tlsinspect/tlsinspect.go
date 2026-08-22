@@ -41,16 +41,16 @@ type Config struct {
 // Inspect performs a TLS handshake and renders the certificate chain to the
 // printer. It returns a non-zero exit code on failure.
 func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
-	if cfg.ECH == core.ECHAuto || cfg.ECH == core.ECHOn {
-		writeTLSError(p, errors.New("ECH is not available for TLS inspection yet"))
-		return 1
-	}
 	if err := core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax); err != nil {
 		writeTLSError(p, err)
 		return 1
 	}
 	if cfg.HTTP == core.HTTP3 && cfg.TLSMax != 0 && cfg.TLSMax < tls.VersionTLS13 {
 		writeTLSError(p, errors.New("HTTP/3 requires max-tls 1.3 or higher"))
+		return 1
+	}
+	if err := core.ValidateECHPolicy(cfg.ECH, cfg.HTTP, cfg.TLSMin, cfg.TLSMax); err != nil {
+		writeTLSError(p, err)
 		return 1
 	}
 	tlsDialCfg := &client.TLSDialConfig{
@@ -81,20 +81,52 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	addr := net.JoinHostPort(host, port)
 	tlsConfig.ServerName = core.TLSVerificationName(host)
 
-	// Apply timeout to context so it covers both code paths uniformly.
+	// Apply timeout before discovery so DNS, ECH setup, and the eventual
+	// handshake consume one inspection deadline.
 	if cfg.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
 		defer cancel()
 	}
 
-	if cfg.HTTP == core.HTTP3 {
-		cs, err := inspectQUIC(ctx, res, addr, tlsConfig)
+	// ECH discovery is host-scoped and shares the inspection deadline with
+	// address resolution and the TLS handshake. The returned target may differ
+	// from the origin for an HTTPS/SVCB ServiceMode record.
+	var echConfig *client.ECHConnectionConfig
+	var err error
+	if cfg.ECH == core.ECHAuto || cfg.ECH == core.ECHOn {
+		echConfig, err = client.DiscoverECHForConnection(ctx, res, host, port, tlsConfig, cfg.ECH, cfg.HTTP)
 		if err != nil {
 			writeTLSError(p, err)
 			return 1
 		}
-		render(p, cs)
+		tlsConfig = echConfig.TLSConfig()
+	}
+
+	if cfg.HTTP == core.HTTP3 {
+		quicAddr := addr
+		var quicCandidates []net.IPAddr
+		if echConfig != nil {
+			targetHost, targetPort := echConfig.Target()
+			quicAddr = net.JoinHostPort(targetHost, targetPort)
+			quicCandidates = echConfig.Addresses()
+		}
+		var fallbackTLS *tls.Config
+		if cfg.ECH == core.ECHAuto && echConfig != nil && echConfig.Offered() {
+			fallbackTLS = tlsConfig.Clone()
+			fallbackTLS.EncryptedClientHelloConfigList = nil
+		}
+		cs, err := inspectQUICWithECHFallback(ctx, res, quicAddr, quicCandidates, tlsConfig, fallbackTLS)
+		if err != nil {
+			writeTLSError(p, err)
+			return 1
+		}
+		var info *client.ECHHandshakeInfo
+		if echConfig != nil {
+			state := cs != nil && cs.ECHAccepted
+			info = &client.ECHHandshakeInfo{Offered: echConfig.Offered(), Real: echConfig.Real(), Accepted: state, Rejected: echConfig.Offered() && !state, Fallback: echConfig.Offered() && !state, OuterServerName: echConfig.OuterServerName()}
+		}
+		renderWithECH(p, cs, info)
 		p.Flush()
 		return 0
 	}
@@ -103,13 +135,27 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	// belongs to the connection setup budget so DNS, TCP, and the handshake
 	// cannot each consume the full timeout.
 	dialer := client.NewResolverDialer(res, cfg.Timeout)
-	result, err := dialer.Dial(ctx, client.DialRequest{
+	dialRequest := client.DialRequest{
 		Network:    "tcp",
 		Address:    addr,
 		OriginHost: host,
+		Resolver:   res,
 		TLSConfig:  tlsConfig,
 		ALPN:       tlsConfig.NextProtos,
-	})
+	}
+	if echConfig != nil {
+		targetHost, targetPort := echConfig.Target()
+		dialRequest.Address = ""
+		dialRequest.Host = targetHost
+		dialRequest.Port = targetPort
+		dialRequest.Candidates = echConfig.Addresses()
+	}
+	var result client.DialResult
+	if echConfig != nil {
+		result, err = client.DialResolverWithECH(ctx, dialer, dialRequest, tlsConfig, cfg.ECH, echConfig.Real())
+	} else {
+		result, err = dialer.Dial(ctx, dialRequest)
+	}
 	if err != nil {
 		writeTLSError(p, err)
 		return 1
@@ -119,15 +165,60 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		writeTLSError(p, errors.New("TLS dial completed without connection state"))
 		return 1
 	}
-	render(p, result.TLSState)
+	var echInfo *client.ECHHandshakeInfo
+	if value, ok := result.ECHInfo.(client.ECHHandshakeInfo); ok {
+		echInfo = &value
+		if echConfig != nil {
+			echInfo.OuterServerName = echConfig.OuterServerName()
+		}
+	}
+	renderWithECH(p, result.TLSState, echInfo)
 	p.Flush()
 	return 0
 }
 
-func inspectQUIC(ctx context.Context, res *resolver.Resolver, addr string, tlsConfig *tls.Config) (*tls.ConnectionState, error) {
-	endpoint, err := res.ResolveAddress(ctx, "udp", addr)
+func inspectQUICWithECHFallback(ctx context.Context, res *resolver.Resolver, addr string, candidates []net.IPAddr, tlsConfig, fallbackTLS *tls.Config) (*tls.ConnectionState, error) {
+	state, err := inspectQUICAttempt(ctx, res, addr, candidates, tlsConfig)
+	if fallbackTLS == nil {
+		return state, err
+	}
+	if err == nil && state != nil && state.ECHAccepted {
+		return state, nil
+	}
 	if err != nil {
-		return nil, err
+		var rejection *tls.ECHRejectionError
+		if !errors.As(err, &rejection) && !looksLikeECHRejection(err) {
+			return nil, err
+		}
+	}
+	// A server may reject ECH with an explicit TLS error, or complete the
+	// outer handshake without accepting a GREASE offer. Auto mode retries the
+	// same inspection target without ECH, while preserving the shared context.
+	return inspectQUICAttempt(ctx, res, addr, candidates, fallbackTLS)
+}
+
+func looksLikeECHRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "ech") && (strings.Contains(text, "reject") || strings.Contains(text, "retry"))
+}
+
+func inspectQUICAttempt(ctx context.Context, res *resolver.Resolver, addr string, candidates []net.IPAddr, tlsConfig *tls.Config) (*tls.ConnectionState, error) {
+	var endpoint resolver.ResolvedEndpoint
+	var err error
+	if len(candidates) > 0 {
+		host, port, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			return nil, splitErr
+		}
+		endpoint = resolver.ResolvedEndpoint{Host: host, Port: port, Addrs: candidates}
+	} else {
+		endpoint, err = res.ResolveAddress(ctx, "udp", addr)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	port, err := net.LookupPort("udp", endpoint.Port)
@@ -199,6 +290,10 @@ func writeTLSError(p *core.Printer, err error) {
 
 // render displays TLS certificate chain inspection output to the printer.
 func render(p *core.Printer, cs *tls.ConnectionState) {
+	renderWithECH(p, cs, nil)
+}
+
+func renderWithECH(p *core.Printer, cs *tls.ConnectionState, info *client.ECHHandshakeInfo) {
 	if cs == nil {
 		p.WriteInfoPrefix()
 		p.Set(core.Yellow)
@@ -226,6 +321,38 @@ func render(p *core.Printer, cs *tls.ConnectionState) {
 		p.Set(core.Italic)
 		p.WriteString(core.TerminalSafeText(cs.NegotiatedProtocol))
 		p.Reset()
+		p.WriteString("\n")
+	}
+
+	if info != nil && info.Offered {
+		p.WriteInfoPrefix()
+		p.WriteString("ECH: ")
+		switch {
+		case info.Accepted && info.Real:
+			p.Set(core.Green)
+			p.WriteString("accepted (real)")
+		case info.Accepted:
+			p.Set(core.Yellow)
+			p.WriteString("accepted (GREASE)")
+		case info.Fallback && info.Real:
+			p.Set(core.Yellow)
+			p.WriteString("rejected (real/fallback)")
+		case info.Fallback:
+			p.Set(core.Yellow)
+			p.WriteString("rejected (GREASE/fallback)")
+		case info.Rejected:
+			p.Set(core.Yellow)
+			p.WriteString("rejected")
+		default:
+			p.WriteString("offered")
+		}
+		p.Reset()
+		p.WriteString("\n")
+	}
+	if info != nil && info.OuterServerName != "" {
+		p.WriteInfoPrefix()
+		p.WriteString("Outer SNI: ")
+		p.WriteString(core.TerminalSafeText(info.OuterServerName))
 		p.WriteString("\n")
 	}
 
