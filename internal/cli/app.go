@@ -62,6 +62,7 @@ type App struct {
 	RemoteName       bool
 	UnixSocket       string
 	Update           bool
+	CheckUpdate      bool
 	Version          bool
 	WSInteractive    core.WSInteractiveMode
 	WSMessageMode    core.WSMessageMode
@@ -170,6 +171,9 @@ func (a *App) CLI() *CLI {
 				IsSet:       func() bool { return a.Cfg.CertPath != "" },
 				Fn:          a.parseCertFlag,
 			},
+
+			boolFlag(&a.CheckUpdate, "check-update", "", "Check for a newer fetch release").
+				WithHidden(core.NoSelfUpdate),
 
 			boolFlag(&a.Clobber, "clobber", "", "Overwrite existing output file"),
 

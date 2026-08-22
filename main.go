@@ -94,7 +94,7 @@ func main() {
 	printConfigDebug(app, handle.Stderr(), configPath)
 
 	// Start async update, if necessary.
-	if !app.Update && !core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
+	if !app.Update && !app.CheckUpdate && !core.NoSelfUpdate && app.Cfg.AutoUpdate != nil && *app.Cfg.AutoUpdate >= 0 {
 		checkForUpdate(ctx, handle.Stderr(), *app.Cfg.AutoUpdate, getValue(app.Cfg.Silent), update.NetworkConfig{
 			CACerts:          app.Cfg.CACerts,
 			ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
@@ -104,8 +104,27 @@ func main() {
 		})
 	}
 
-	// Attempt to update the current executable.
+	// Check for an update without replacing the current executable.
 	verbosity := getVerbosity(app)
+	if app.CheckUpdate {
+		if core.NoSelfUpdate {
+			p := handle.Stderr()
+			core.WriteErrorMsg(p, errSelfUpdateDisabled(core.PackageManager))
+			os.Exit(1)
+		}
+		p := handle.Stderr()
+		timeout := getValue(app.Cfg.Timeout)
+		status := update.CheckWithConfig(ctx, p, timeout, verbosity == core.VSilent, update.NetworkConfig{
+			CACerts:          app.Cfg.CACerts,
+			ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
+			ResolverEndpoint: app.Cfg.DNSEndpoint,
+			DNSServer:        app.Cfg.DNSServer,
+			Proxy:            app.Cfg.Proxy,
+		})
+		os.Exit(statusForContext(ctx, status))
+	}
+
+	// Attempt to update the current executable.
 	if app.Update {
 		if core.NoSelfUpdate {
 			p := handle.Stderr()

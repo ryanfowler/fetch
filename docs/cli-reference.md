@@ -777,9 +777,18 @@ version, target operating system and architecture, and build settings. Add
 configuration on a best-effort basis; an invalid config does not prevent help,
 version, or build information output.
 
+### `--check-update`
+
+Check the latest GitHub release without downloading or replacing the executable.
+The command uses bounded HTTPS requests and carries only operational proxy, DNS,
+CA, and timeout settings.
+
 ### `--update`
 
-Update fetch binary in place. Use with `--dry-run` to check for updates without installing.
+Update fetch binary in place. The selected archive must have a matching SHA-256
+sidecar. Metadata is limited to 1 MiB, checksums to 1 KiB, and archives to 128
+MiB. The archive is streamed to a temporary file and verified before extraction.
+Use with `--dry-run` to validate the release and checksum without installing.
 
 ### `--complete SHELL`
 

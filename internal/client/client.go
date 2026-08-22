@@ -53,6 +53,11 @@ type RedirectHop struct {
 // RedirectCallback is called when a redirect occurs.
 type RedirectCallback func(hop RedirectHop)
 
+// RedirectValidator can reject a redirect before the next request is sent.
+// It is useful for narrow clients, such as the updater, that need a stricter
+// redirect policy than ordinary fetch requests.
+type RedirectValidator func(hop RedirectHop) error
+
 // RequestObserver is called immediately before a request is sent and for
 // every request created by a redirect. Observers may replace the request body
 // and mutate the request context.
@@ -62,16 +67,26 @@ type RequestObserver func(req *http.Request)
 type ctxRedirectCallbackKeyType int
 
 const (
-	ctxRedirectCallbackKey ctxRedirectCallbackKeyType = 1
-	ctxRequestObserverKey  ctxRedirectCallbackKeyType = 2
-	ctxRedirectCrossedKey  ctxRedirectCallbackKeyType = 3
-	ctxOriginCookiesKey    ctxRedirectCallbackKeyType = 4
-	ctxConnectBudgetKey    ctxRedirectCallbackKeyType = 5
+	ctxRedirectCallbackKey  ctxRedirectCallbackKeyType = 1
+	ctxRequestObserverKey   ctxRedirectCallbackKeyType = 2
+	ctxRedirectCrossedKey   ctxRedirectCallbackKeyType = 3
+	ctxOriginCookiesKey     ctxRedirectCallbackKeyType = 4
+	ctxConnectBudgetKey     ctxRedirectCallbackKeyType = 5
+	ctxRedirectValidatorKey ctxRedirectCallbackKeyType = 6
 )
 
 // WithRedirectCallback returns a context with a redirect callback.
 func WithRedirectCallback(ctx context.Context, cb RedirectCallback) context.Context {
 	return context.WithValue(ctx, ctxRedirectCallbackKey, cb)
+}
+
+// WithRedirectValidator returns a context that validates each redirect before
+// the client sends the redirected request.
+func WithRedirectValidator(ctx context.Context, validator RedirectValidator) context.Context {
+	if validator == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxRedirectValidatorKey, validator)
 }
 
 // WithRequestObserver attaches an observer to a request context. The
@@ -332,24 +347,50 @@ func NewClient(cfg ClientConfig) *Client {
 		// origin boundary.
 		applyRedirectCredentialPolicy(req, via)
 
+		// A redirect can change the TLS, resolver, proxy, or ECH scope. Rebuild
+		// the transport before a cross-origin request so those settings are
+		// evaluated for the destination rather than retained from the source.
+		if len(via) > 0 && via[len(via)-1].URL != nil && req.URL != nil &&
+			!SameOrigin(via[len(via)-1].URL, req.URL) {
+			rebuilt := NewClient(cfg)
+			if rebuilt.initErr != nil {
+				return rebuilt.initErr
+			}
+			wrappedRedirectCredentials := false
+			if _, ok := client.Transport.(*redirectCredentialTransport); ok {
+				wrappedRedirectCredentials = true
+			}
+			if closer, ok := client.Transport.(interface{ CloseIdleConnections() }); ok {
+				closer.CloseIdleConnections()
+			}
+			client.Transport = rebuilt.c.Transport
+			if wrappedRedirectCredentials {
+				client.Transport = &redirectCredentialTransport{base: client.Transport}
+			}
+			res = rebuilt.resolver
+		}
+
 		// Call request observers after redirect normalization and credential
 		// filtering. At this point net/http has already created the replay body
 		// for the new request.
 		if observer := requestObserver(req.Context()); observer != nil {
 			observer(req)
 		}
-		// Call redirect callback if set.
-		// req is the new request about to be made.
-		// req.Response contains the redirect response that triggered this redirect.
-		// via contains the previous requests, with via[len(via)-1] being the request
-		// that received the redirect response.
-		if cb, ok := req.Context().Value(ctxRedirectCallbackKey).(RedirectCallback); ok && cb != nil {
-			if len(via) > 0 && req.Response != nil {
-				cb(RedirectHop{
-					Request:     via[len(via)-1],
-					Response:    req.Response,
-					NextRequest: req,
-				})
+		// Build the redirect event after normalization and credential filtering.
+		// Validators run before observers and before the next request is sent.
+		if len(via) > 0 && req.Response != nil {
+			hop := RedirectHop{
+				Request:     via[len(via)-1],
+				Response:    req.Response,
+				NextRequest: req,
+			}
+			if validator, ok := req.Context().Value(ctxRedirectValidatorKey).(RedirectValidator); ok && validator != nil {
+				if err := validator(hop); err != nil {
+					return err
+				}
+			}
+			if cb, ok := req.Context().Value(ctxRedirectCallbackKey).(RedirectCallback); ok && cb != nil {
+				cb(hop)
 			}
 		}
 		if len(via) > 0 && req.Response != nil &&
