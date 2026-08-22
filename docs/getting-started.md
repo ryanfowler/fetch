@@ -28,8 +28,8 @@ If you have Go 1.27 or newer installed:
 go install github.com/ryanfowler/fetch@latest
 ```
 
-The project is implemented in Go. The source build does not require Rust or
-Cargo. Release artifacts are built with `CGO_ENABLED=0` for supported targets.
+The project is implemented in Go. Release artifacts are built with
+`CGO_ENABLED=0` for supported targets.
 
 ### Pre-built Binaries
 
