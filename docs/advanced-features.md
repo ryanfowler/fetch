@@ -226,6 +226,18 @@ block a request.
 
 ## TLS Configuration
 
+### Encrypted ClientHello
+
+`--ech off` is the default and does not perform ECH discovery. `--ech auto`
+performs HTTPS/SVCB discovery with address resolution and uses a validated
+advertised ECH configuration when a TCP-compatible candidate is available.
+Authenticated discovery failures are fatal; authenticated no-data results may
+fall back. `--ech on` requires an advertised usable configuration, requires
+TLS 1.3, rejects explicit HTTP/3, and uses TCP during automatic version
+selection. Explicit TLS 1.2 bounds are rejected. ECH is not available through
+proxies or cleartext HTTP/2. The TLS handshake and GREASE fallback are
+implemented separately from this discovery and policy layer.
+
 ### TLS Version Bounds
 
 `--min-tls VERSION` sets the minimum acceptable TLS version. `--tls VERSION` is kept as an alias for `--min-tls`:

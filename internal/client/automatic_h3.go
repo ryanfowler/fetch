@@ -47,6 +47,7 @@ type automaticHTTP3Transport struct {
 	h3Transports          map[string]*http3.Transport
 	h3TransportCandidates map[string]automaticH3Candidate
 	h3Packets             map[string]net.PacketConn
+	tcpECHCandidates      map[string][]resolver.ServiceCandidate
 	altSvcSlots           chan struct{}
 }
 
@@ -65,6 +66,7 @@ func newAutomaticHTTP3Transport(fallback *http.Transport, res *resolver.Resolver
 		h3Transports:          make(map[string]*http3.Transport),
 		h3TransportCandidates: make(map[string]automaticH3Candidate),
 		h3Packets:             make(map[string]net.PacketConn),
+		tcpECHCandidates:      make(map[string][]resolver.ServiceCandidate),
 		altSvcSlots:           make(chan struct{}, 8),
 	}
 }
@@ -465,8 +467,20 @@ func (t *automaticHTTP3Transport) RoundTrip(req *http.Request) (*http.Response, 
 		}
 		return t.RoundTrip(retryReq)
 	}
-	if tcpTransport != nil {
+	if tcpTransport != nil && (t.ech == core.ECHUnknown || t.ech == core.ECHOff) {
 		return tcpTransport.RoundTrip(req)
+	}
+	if tcpTransport != nil {
+		// ECH configurations are DNS-scoped and may change between
+		// connections. Do not let a long-lived automatic TCP transport reuse
+		// a stale decision for a later request.
+		t.mu.Lock()
+		if t.tcpTransports[key] == tcpTransport {
+			delete(t.tcpTransports, key)
+			delete(t.tcpECHCandidates, key)
+		}
+		t.mu.Unlock()
+		tcpTransport.CloseIdleConnections()
 	}
 	prepared, err := t.prepare(req.Context(), req.URL, key)
 	if err != nil {
@@ -479,10 +493,11 @@ func (t *automaticHTTP3Transport) RoundTrip(req *http.Request) (*http.Response, 
 }
 
 type preparedAutomaticConnection struct {
-	tcp       net.Conn
-	h3        *quic.Conn
-	packet    net.PacketConn
-	candidate automaticH3Candidate
+	tcp           net.Conn
+	h3            *quic.Conn
+	packet        net.PacketConn
+	candidate     automaticH3Candidate
+	echCandidates []resolver.ServiceCandidate
 }
 
 func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, key string) (preparedAutomaticConnection, error) {
@@ -493,13 +508,16 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 	defer cancel()
 
 	type result struct {
-		kind       string
-		tcp        net.Conn
-		h3         *quic.Conn
-		packet     net.PacketConn
-		candidate  automaticH3Candidate
-		candidates []automaticH3Candidate
-		err        error
+		kind          string
+		tcp           net.Conn
+		h3            *quic.Conn
+		packet        net.PacketConn
+		candidate     automaticH3Candidate
+		candidates    []automaticH3Candidate
+		tcpAddrs      []net.IPAddr
+		tcpPort       string
+		echCandidates []resolver.ServiceCandidate
+		err           error
 	}
 	results := make(chan result, automaticH3CacheLimit+4)
 	raceCtx, stop := context.WithCancel(connectCtx)
@@ -529,7 +547,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 			return
 		}
 		select {
-		case results <- result{kind: "tcp", tcp: got.Conn}:
+		case results <- result{kind: "tcp", tcp: got.Conn, tcpAddrs: endpoint.Addrs, tcpPort: originPort(origin)}:
 		case <-raceCtx.Done():
 			_ = got.Conn.Close()
 		}
@@ -559,7 +577,11 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 			return
 		}
 		values := make([]automaticH3Candidate, 0, len(discovery.Candidates))
+		echCandidates := make([]resolver.ServiceCandidate, 0, len(discovery.Candidates))
 		for _, service := range discovery.Candidates {
+			if len(service.ECH) > 0 && serviceAdvertisesTCP(service) {
+				echCandidates = append(echCandidates, service)
+			}
 			if !serviceAdvertisesH3(service) || len(service.Addresses) == 0 {
 				continue
 			}
@@ -577,17 +599,27 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 		// A successful fresh RRset replaces old DNS candidates, including an
 		// authenticated NODATA result represented by an empty list.
 		t.cache.replaceDNS(key, values)
-		results <- result{kind: "discovery", candidates: values}
+		results <- result{kind: "discovery", candidates: values, echCandidates: echCandidates}
 	}()
 
 	pending := 3 // TCP, persistent-cache load, and discovery.
 	var lastErr error
+	var tcpPending result
+	var haveTCP bool
+	discoveryDone := false
+	var discoveredECH []resolver.ServiceCandidate
+	echEnabled := t.ech != core.ECHUnknown && t.ech != core.ECHOff
 	for pending > 0 {
 		select {
 		case got := <-results:
 			pending--
 			switch got.kind {
 			case "cached":
+				// ECH=on must use a fresh, validated configuration. Cached
+				// HTTP/3 alternatives are not sufficient policy evidence.
+				if t.ech == core.ECHOn {
+					continue
+				}
 				for _, candidate := range got.candidates {
 					candidate := candidate
 					pending++
@@ -606,16 +638,43 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 					}()
 				}
 			case "tcp":
-				if got.err == nil && got.tcp != nil {
+				if got.err == nil && got.tcp != nil && echEnabled && discoveryDone {
+					if len(discoveredECH) > 0 {
+						_ = got.tcp.Close()
+						conn, dialErr := t.dialAutomaticECHTCP(raceCtx, origin, got.tcpAddrs, got.tcpPort, discoveredECH)
+						if dialErr != nil {
+							return preparedAutomaticConnection{}, dialErr
+						}
+						return preparedAutomaticConnection{tcp: conn, echCandidates: cloneServiceCandidates(discoveredECH)}, nil
+					}
 					if t.ech == core.ECHOn {
 						_ = got.tcp.Close()
-						lastErr = errors.New("ECH is required but the TCP connection did not use ECH")
-						continue
+						return preparedAutomaticConnection{}, ErrECHConfigUnavailable
 					}
+					return preparedAutomaticConnection{tcp: got.tcp}, nil
+				}
+				if got.err == nil && got.tcp != nil && echEnabled && !discoveryDone {
+					// Keep the speculative connection until HTTPS discovery
+					// completes. If a real config is found, redial with ECH;
+					// otherwise auto mode may use this connection.
+					tcpPending = got
+					haveTCP = true
+					continue
+				}
+				if got.err == nil && got.tcp != nil {
 					return preparedAutomaticConnection{tcp: got.tcp}, nil
 				}
 				lastErr = got.err
 			case "h3":
+				if t.ech == core.ECHOn {
+					if got.h3 != nil {
+						_ = got.h3.CloseWithError(0, "ECH=on requires TCP")
+					}
+					if got.packet != nil {
+						_ = got.packet.Close()
+					}
+					continue
+				}
 				if got.err == nil && got.h3 != nil {
 					return preparedAutomaticConnection{h3: got.h3, packet: got.packet, candidate: got.candidate}, nil
 				}
@@ -624,11 +683,41 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 					t.cache.remove(got.candidate, key)
 				}
 			case "discovery":
+				discoveryDone = true
+				discoveredECH = append([]resolver.ServiceCandidate(nil), got.echCandidates...)
 				if got.err != nil {
 					if !resolver.MayDowngrade(got.err) {
+						if haveTCP {
+							_ = tcpPending.tcp.Close()
+						}
 						return preparedAutomaticConnection{}, got.err
 					}
 					lastErr = got.err
+					if echEnabled && haveTCP {
+						if t.ech == core.ECHOn {
+							_ = tcpPending.tcp.Close()
+							return preparedAutomaticConnection{}, ErrECHConfigUnavailable
+						}
+						return preparedAutomaticConnection{tcp: tcpPending.tcp}, nil
+					}
+					continue
+				}
+				if echEnabled && haveTCP {
+					if len(got.echCandidates) > 0 {
+						_ = tcpPending.tcp.Close()
+						conn, dialErr := t.dialAutomaticECHTCP(raceCtx, origin, tcpPending.tcpAddrs, tcpPending.tcpPort, got.echCandidates)
+						if dialErr != nil {
+							return preparedAutomaticConnection{}, dialErr
+						}
+						return preparedAutomaticConnection{tcp: conn, echCandidates: cloneServiceCandidates(got.echCandidates)}, nil
+					}
+					if t.ech == core.ECHOn {
+						_ = tcpPending.tcp.Close()
+						return preparedAutomaticConnection{}, ErrECHConfigUnavailable
+					}
+					return preparedAutomaticConnection{tcp: tcpPending.tcp}, nil
+				}
+				if t.ech == core.ECHOn {
 					continue
 				}
 				for _, candidate := range got.candidates {
@@ -768,6 +857,8 @@ func (t *automaticHTTP3Transport) roundTripTCP(req *http.Request, prepared prepa
 	if rt == nil {
 		rt = t.fallback.Clone()
 		first := prepared.tcp
+		echCandidates := cloneServiceCandidates(prepared.echCandidates)
+		tcpECH := len(echCandidates) > 0 && t.ech != core.ECHUnknown && t.ech != core.ECHOff
 		var firstMu sync.Mutex
 		rt.DialContext = nil
 		rt.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -782,6 +873,9 @@ func (t *automaticHTTP3Transport) roundTripTCP(req *http.Request, prepared prepa
 			if err != nil {
 				return nil, err
 			}
+			if tcpECH {
+				return t.dialAutomaticECHTCP(ctx, req.URL, nil, port, echCandidates)
+			}
 			cfg := t.tlsConfig.Clone()
 			cfg.NextProtos = []string{"h2", "http/1.1"}
 			got, err := t.dialer.Dial(ctx, DialRequest{
@@ -794,6 +888,7 @@ func (t *automaticHTTP3Transport) roundTripTCP(req *http.Request, prepared prepa
 			return got.Conn, nil
 		}
 		t.tcpTransports[key] = rt
+		t.tcpECHCandidates[key] = echCandidates
 		t.evictTransportOriginLocked(key)
 	} else {
 		_ = prepared.tcp.Close()
@@ -923,6 +1018,7 @@ func (t *automaticHTTP3Transport) evictTransportOriginLocked(exclude string) {
 			continue
 		}
 		delete(t.tcpTransports, key)
+		delete(t.tcpECHCandidates, key)
 		transport.CloseIdleConnections()
 		return
 	}

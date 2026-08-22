@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/resolver"
 )
 
@@ -19,12 +20,41 @@ import (
 // Unlike http.Transport, x/net/http2.Transport has no Proxy field, so the
 // CONNECT/SOCKS operation is kept here and the origin TLS configuration is
 // applied only after the proxy tunnel is ready.
-func newHTTP2DialTLS(base func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, explicit *url.URL, targetScheme string, originTLS *tls.Config, timeout time.Duration) func(context.Context, string, string, *tls.Config) (net.Conn, error) {
+func newHTTP2DialTLS(base func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, explicit *url.URL, targetScheme string, originTLS *tls.Config, timeout time.Duration, echMode core.ECHMode) func(context.Context, string, string, *tls.Config) (net.Conn, error) {
 	return func(ctx context.Context, network, address string, negotiated *tls.Config) (net.Conn, error) {
 		target := &url.URL{Scheme: targetScheme, Host: address}
 		selected, err := ProxyForURL(explicit, target)
 		if err != nil {
 			return nil, err
+		}
+
+		// ECH is supported only on a direct TLS connection in this task.
+		// Discover the service target before dialing it; the origin name is
+		// retained for SNI and HTTP authority.
+		if echMode != core.ECHUnknown && echMode != core.ECHOff && selected == nil && targetScheme == "https" {
+			host, port, splitErr := net.SplitHostPort(address)
+			if splitErr != nil {
+				return nil, splitErr
+			}
+			cfg := originTLS
+			if negotiated != nil {
+				cfg = negotiated
+			}
+			connection, discoveryErr := discoverECHForConnection(ctx, res, host, port, cfg, echMode, core.HTTP2)
+			if discoveryErr != nil {
+				return nil, discoveryErr
+			}
+			if connection.configured {
+				got, dialErr := NewResolverDialer(res, timeout).Dial(ctx, DialRequest{
+					Network: "tcp", Host: connection.targetHost, Port: connection.targetPort,
+					OriginHost: host, Candidates: connection.addresses,
+					TLSConfig: connection.tlsConfig, ALPN: []string{"h2"},
+				})
+				if dialErr != nil {
+					return nil, dialErr
+				}
+				return got.Conn, nil
+			}
 		}
 
 		var conn net.Conn

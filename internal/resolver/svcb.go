@@ -709,6 +709,57 @@ func parseSVCBName(raw []byte, offset int) (Name, int, error) {
 	}
 }
 
+// ECHConfigListInfo describes the framed ECH configurations advertised in
+// an HTTPS/SVCB record. Configurations with an unknown version are preserved
+// for diagnostics but are not usable by the current Go TLS client.
+type ECHConfigListInfo struct {
+	Raw                []byte
+	Supported          []byte
+	ConfigurationCount int
+	UnsupportedCount   int
+}
+
+// ValidateECHConfigList validates the complete ECHConfigList framing and
+// returns a copy of the list containing only configurations understood by the
+// current client. A malformed known configuration invalidates the whole list;
+// an unknown-version configuration is skipped only when another usable
+// configuration remains.
+func ValidateECHConfigList(value []byte) (ECHConfigListInfo, error) {
+	if err := validateECHConfigList(value); err != nil {
+		return ECHConfigListInfo{}, err
+	}
+	info := ECHConfigListInfo{Raw: append([]byte(nil), value...)}
+	supported := make([]byte, 2, len(value))
+	for offset := 2; offset < len(value); {
+		version := binary.BigEndian.Uint16(value[offset:])
+		length := int(binary.BigEndian.Uint16(value[offset+2:]))
+		end := offset + 4 + length
+		info.ConfigurationCount++
+		if version == 0xfe0d {
+			supported = append(supported, value[offset:end]...)
+		} else {
+			info.UnsupportedCount++
+		}
+		offset = end
+	}
+	if len(supported) == 2 {
+		return ECHConfigListInfo{}, errors.New("ECHConfigList contains no supported ECH configuration")
+	}
+	binary.BigEndian.PutUint16(supported, uint16(len(supported)-2))
+	info.Supported = supported
+	return info, nil
+}
+
+// SupportedECHConfigList returns a TLS-ready ECHConfigList after strict
+// validation and unsupported-version filtering.
+func SupportedECHConfigList(value []byte) ([]byte, error) {
+	info, err := ValidateECHConfigList(value)
+	if err != nil {
+		return nil, err
+	}
+	return info.Supported, nil
+}
+
 func validateECHConfigList(value []byte) error {
 	if len(value) < 2 {
 		return fmt.Errorf("SVCB ech ECHConfigList is shorter than its length prefix")
