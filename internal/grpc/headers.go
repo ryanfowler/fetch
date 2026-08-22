@@ -10,6 +10,7 @@ func Headers() []core.KeyVal[string] {
 	return []core.KeyVal[string]{
 		{Key: "Content-Type", Val: ContentType},
 		{Key: "Te", Val: "trailers"},
+		{Key: "grpc-accept-encoding", Val: "gzip"},
 	}
 }
 

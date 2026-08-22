@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"bytes"
+	"compress/gzip"
 	"io"
 	"testing"
 )
@@ -93,6 +94,11 @@ func TestUnframe(t *testing.T) {
 			input:   []byte{},
 			wantErr: true,
 		},
+		{
+			name:    "invalid compressed flag",
+			input:   []byte{0x02, 0x00, 0x00, 0x00, 0x00},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -148,6 +154,45 @@ func TestUnframeLargeMessageRejected(t *testing.T) {
 	}
 }
 
+func TestDecodeMessageGzip(t *testing.T) {
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write([]byte("hello gRPC")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := DecodeMessage(compressed.Bytes(), true, "gzip")
+	if err != nil {
+		t.Fatalf("DecodeMessage() error = %v", err)
+	}
+	if string(got) != "hello gRPC" {
+		t.Fatalf("DecodeMessage() = %q", got)
+	}
+
+	for _, encoding := range []string{"", "deflate"} {
+		if _, err := DecodeMessage(compressed.Bytes(), true, encoding); err == nil {
+			t.Fatalf("DecodeMessage(%q) unexpectedly succeeded", encoding)
+		}
+	}
+}
+
+func TestDecodeMessageLimit(t *testing.T) {
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(bytes.Repeat([]byte{'x'}, int(MaxMessageSize)+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeMessage(compressed.Bytes(), true, "gzip"); err == nil {
+		t.Fatal("expected decompressed message limit error")
+	}
+}
+
 func TestReadFrame(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -183,6 +228,11 @@ func TestReadFrame(t *testing.T) {
 		{
 			name:    "truncated header",
 			input:   []byte{0x00, 0x00, 0x00},
+			wantErr: true,
+		},
+		{
+			name:    "invalid compressed flag",
+			input:   []byte{0x02, 0x00, 0x00, 0x00, 0x00},
 			wantErr: true,
 		},
 		{

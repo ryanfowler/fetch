@@ -634,8 +634,9 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 	// gRPC streaming needs the response descriptor — handle inline, but keep
 	// the formatted stream pageable and backpressure-aware.
 	if contentType == format.TypeGRPC {
+		grpcEncoding := resp.Header.Get("grpc-encoding")
 		reader := newFormattedStream(resp.Body, p, func(input io.Reader, output *core.Printer) error {
-			return format.FormatGRPCStream(input, r.responseDescriptor, output)
+			return format.FormatGRPCStreamWithEncoding(input, r.responseDescriptor, output, grpcEncoding)
 		}, resp.Body)
 		return reader, nil
 	}

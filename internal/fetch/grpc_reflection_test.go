@@ -1,6 +1,7 @@
 package fetch
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"net/http"
@@ -18,6 +19,20 @@ import (
 	gproto "google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
+
+func TestReadGRPCFramesEnforcesReflectionMessageLimit(t *testing.T) {
+	var wire bytes.Buffer
+	for range core.MaxReflectionMessages + 1 {
+		frame, err := fetchgrpc.FrameChecked(nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire.Write(frame)
+	}
+	if _, err := readGRPCFrames(&wire, ""); err == nil || !strings.Contains(err.Error(), "reflection response exceeds 128 messages") {
+		t.Fatalf("readGRPCFrames() error = %v, want reflection message limit", err)
+	}
+}
 
 func TestReflectionClientFallsBackToV1Alpha(t *testing.T) {
 	payload := buildListResponse("zeta.Service", "alpha.Service")

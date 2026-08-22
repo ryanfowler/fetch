@@ -10,10 +10,17 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// FormatGRPCStream formats a gRPC response stream by reading and formatting
-// each length-prefixed frame as it arrives. This handles both unary (single
-// frame) and server-streaming (multiple frames) responses.
+// FormatGRPCStream formats an uncompressed gRPC response stream by reading
+// and formatting each length-prefixed frame as it arrives. It is retained for
+// callers that do not have response metadata; compressed frames are rejected
+// with an actionable missing-encoding error.
 func FormatGRPCStream(r io.Reader, md protoreflect.MessageDescriptor, p *core.Printer) error {
+	return FormatGRPCStreamWithEncoding(r, md, p, "")
+}
+
+// FormatGRPCStreamWithEncoding formats a gRPC response stream incrementally.
+// The grpc-encoding value applies to frames whose compressed flag is set.
+func FormatGRPCStreamWithEncoding(r io.Reader, md protoreflect.MessageDescriptor, p *core.Printer, encoding string) error {
 	var written bool
 	for {
 		data, compressed, err := grpc.ReadFrame(r)
@@ -24,9 +31,10 @@ func FormatGRPCStream(r io.Reader, md protoreflect.MessageDescriptor, p *core.Pr
 			p.Discard()
 			return err
 		}
-		if compressed {
+		data, err = grpc.DecodeMessage(data, compressed, encoding)
+		if err != nil {
 			p.Discard()
-			return errors.New("compressed gRPC messages are not supported")
+			return err
 		}
 
 		if written {

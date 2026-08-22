@@ -376,12 +376,16 @@ func (rc *reflectionClient) invokeHTTP(ctx context.Context, path string, payload
 	if err != nil {
 		return nil, err
 	}
+	framedPayload, err := fetchgrpc.FrameChecked(payload, false)
+	if err != nil {
+		return nil, err
+	}
 	headers := grpcHeaders(rc.request.Headers)
 	req, err := rc.client.NewRequest(ctx, client.RequestConfig{
 		Basic:       rc.request.Basic,
 		Bearer:      rc.request.Bearer,
 		ContentType: fetchgrpc.ContentType,
-		Data:        bytes.NewReader(fetchgrpc.Frame(payload, false)),
+		Data:        bytes.NewReader(framedPayload),
 		Headers:     headers,
 		HTTP:        rc.request.HTTP,
 		Method:      "POST",
@@ -436,7 +440,7 @@ func (rc *reflectionClient) invokeHTTP(ctx context.Context, path string, payload
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected HTTP status: %s", resp.Status)
 	}
-	frames, err := readGRPCFrames(resp.Body)
+	frames, err := readGRPCFrames(resp.Body, resp.Header.Get("grpc-encoding"))
 	if err != nil {
 		return nil, err
 	}
@@ -641,8 +645,9 @@ func reflectionURL(base *url.URL, path string) (*url.URL, error) {
 	return &u, nil
 }
 
-func readGRPCFrames(r io.Reader) ([][]byte, error) {
-	var frames [][]byte
+func readGRPCFrames(r io.Reader, encoding string) ([][]byte, error) {
+	frames := make([][]byte, 0, min(core.MaxReflectionMessages, 8))
+	var totalBytes int64
 	for {
 		frame, compressed, err := fetchgrpc.ReadFrame(r)
 		if err == io.EOF {
@@ -651,9 +656,17 @@ func readGRPCFrames(r io.Reader) ([][]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if compressed {
-			return nil, errors.New("compressed gRPC messages are not supported")
+		frame, err = fetchgrpc.DecodeMessage(frame, compressed, encoding)
+		if err != nil {
+			return nil, err
 		}
+		if len(frames) >= core.MaxReflectionMessages {
+			return nil, fmt.Errorf("gRPC reflection response exceeds %d messages", core.MaxReflectionMessages)
+		}
+		if int64(len(frame)) > core.MaxReflectionBytes-totalBytes {
+			return nil, fmt.Errorf("gRPC reflection response exceeds %d bytes", core.MaxReflectionBytes)
+		}
+		totalBytes += int64(len(frame))
 		frames = append(frames, frame)
 	}
 }
