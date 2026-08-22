@@ -14,7 +14,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -2045,7 +2045,8 @@ func TestMain(t *testing.T) {
 					Asset{Name: name, URL: *urlStr.Load() + "/artifact"},
 					Asset{Name: name + ".sha256", URL: *urlStr.Load() + "/artifact.sha256"},
 				)
-				json.NewEncoder(w).Encode(rel)
+				data, _ := json.Marshal(rel)
+				_, _ = w.Write(append(data, '\n'))
 				return
 			}
 

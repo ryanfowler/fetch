@@ -6,7 +6,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -353,14 +354,14 @@ func (c *DOHClient) LookupType(ctx context.Context, host, dnsType string, answer
 }
 
 type dohJSONAnswer struct {
-	Name string          `json:"name"`
-	Type json.RawMessage `json:"type"`
-	Data string          `json:"data"`
-	TTL  json.RawMessage `json:"TTL"`
+	Name string         `json:"name"`
+	Type jsontext.Value `json:"type"`
+	Data string         `json:"data"`
+	TTL  jsontext.Value `json:"TTL"`
 }
 
 type dohJSONResponse struct {
-	Status json.RawMessage `json:"Status"`
+	Status jsontext.Value  `json:"Status"`
 	Answer []dohJSONAnswer `json:"Answer"`
 }
 
@@ -619,7 +620,7 @@ func parseJSONGenericRDATA(value string, typ uint16) ([]byte, bool, error) {
 	return raw, true, nil
 }
 
-func parseJSONUint(raw json.RawMessage, bits int, field string) (uint64, error) {
+func parseJSONUint(raw jsontext.Value, bits int, field string) (uint64, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return 0, fmt.Errorf("DoH JSON %s is missing", field)
 	}
@@ -632,7 +633,7 @@ func parseJSONUint(raw json.RawMessage, bits int, field string) (uint64, error) 
 	return value, nil
 }
 
-func parseJSONTTL(raw json.RawMessage, index int) (uint32, bool, error) {
+func parseJSONTTL(raw jsontext.Value, index int) (uint32, bool, error) {
 	if len(raw) == 0 {
 		return 0, false, nil
 	}

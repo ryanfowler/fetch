@@ -3,7 +3,7 @@ package client
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net"
@@ -61,7 +61,7 @@ type persistentH3Entry struct {
 	Host      string    `json:"host"`
 	Port      uint16    `json:"port"`
 	Addresses []string  `json:"addresses,omitempty"`
-	Priority  uint16    `json:"priority,omitempty"`
+	Priority  uint16    `json:"priority,omitzero"`
 	Source    uint8     `json:"source"`
 	Learned   time.Time `json:"learned"`
 	Expires   time.Time `json:"expires"`

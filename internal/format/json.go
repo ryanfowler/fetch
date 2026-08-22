@@ -2,11 +2,10 @@ package format
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -21,15 +20,13 @@ func FormatJSON(buf []byte, p *core.Printer) error {
 }
 
 func formatJSON(r io.Reader, p *core.Printer) error {
-	dec := json.NewDecoder(r)
-	dec.UseNumber()
-	err := formatJSONValue(dec, p, 0)
-	if err != nil {
+	dec := jsontext.NewDecoder(r)
+	if err := formatJSONValue(dec, p, 0); err != nil {
 		return err
 	}
 
 	// Ensure that there are no more tokens left.
-	tok, err := dec.Token()
+	tok, err := dec.ReadToken()
 	if !errors.Is(err, io.EOF) {
 		return fmt.Errorf("unexpected token: %v", tok)
 	}
@@ -38,91 +35,79 @@ func formatJSON(r io.Reader, p *core.Printer) error {
 	return nil
 }
 
-func formatJSONValue(dec *json.Decoder, p *core.Printer, indent int) error {
-	token, err := dec.Token()
+func formatJSONValue(dec *jsontext.Decoder, p *core.Printer, indent int) error {
+	token, err := dec.ReadToken()
 	if err != nil {
 		return err
 	}
-
 	return formatJSONValueToken(dec, p, indent, token)
 }
 
-func formatJSONValueToken(dec *json.Decoder, p *core.Printer, indent int, token any) error {
-	switch t := token.(type) {
-	case json.Delim:
-		switch t {
-		case '{':
-			return formatJSONObject(dec, p, indent)
-		case '[':
-			return formatJSONArray(dec, p, indent)
-		case ']', '}':
-			return fmt.Errorf("unexpected token: %q", t)
-		}
-		p.WriteString(string(t))
-	case bool:
-		p.WriteString(strconv.FormatBool(t))
-	case string:
-		writeJSONString(p, t)
-	case json.Number:
-		p.WriteString(string(t))
-	case nil:
-		p.WriteString("null")
+func formatJSONValueToken(dec *jsontext.Decoder, p *core.Printer, indent int, token jsontext.Token) error {
+	switch token.Kind() {
+	case jsontext.KindBeginObject:
+		return formatJSONObject(dec, p, indent)
+	case jsontext.KindBeginArray:
+		return formatJSONArray(dec, p, indent)
+	case jsontext.KindEndObject, jsontext.KindEndArray:
+		return fmt.Errorf("unexpected token: %q", token.String())
+	case jsontext.KindTrue, jsontext.KindFalse, jsontext.KindNull, jsontext.KindNumber:
+		p.WriteString(token.String())
+	case jsontext.KindString:
+		writeJSONString(p, token.String())
+	default:
+		return fmt.Errorf("unexpected token: %q", token.String())
 	}
-
 	return nil
 }
 
-func formatJSONObject(dec *json.Decoder, p *core.Printer, indent int) error {
+func formatJSONObject(dec *jsontext.Decoder, p *core.Printer, indent int) error {
 	p.WriteString("{")
 
 	var hasFields bool
 	for {
-		tok, err := dec.Token()
+		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
 
-		switch t := tok.(type) {
-		case json.Delim:
-			if t != '}' {
-				return fmt.Errorf("unexpected token: %q", string(t))
-			}
+		switch tok.Kind() {
+		case jsontext.KindEndObject:
 			if hasFields {
 				p.WriteString("\n")
 				writeIndent(p, indent)
 			}
 			p.WriteString("}")
 			return nil
-		case string:
+		case jsontext.KindString:
 			if hasFields {
 				p.WriteString(",")
 			}
 			p.WriteString("\n")
 			writeIndent(p, indent+1)
 			hasFields = true
-			writeJSONKey(p, t)
+			writeJSONKey(p, tok.String())
 
-			err = formatJSONValue(dec, p, indent+1)
-			if err != nil {
+			if err := formatJSONValue(dec, p, indent+1); err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("unexpected token: %q", t)
+			return fmt.Errorf("unexpected token: %q", tok.String())
 		}
 	}
 }
 
-func formatJSONArray(dec *json.Decoder, p *core.Printer, indent int) error {
+func formatJSONArray(dec *jsontext.Decoder, p *core.Printer, indent int) error {
 	p.WriteString("[")
 
 	var hasFields bool
 	for {
-		tok, err := dec.Token()
+		tok, err := dec.ReadToken()
 		if err != nil {
 			return err
 		}
 
-		if t, ok := tok.(json.Delim); ok && t == ']' {
+		if tok.Kind() == jsontext.KindEndArray {
 			if hasFields {
 				p.WriteString("\n")
 				writeIndent(p, indent)
@@ -138,8 +123,7 @@ func formatJSONArray(dec *json.Decoder, p *core.Printer, indent int) error {
 		writeIndent(p, indent+1)
 		hasFields = true
 
-		err = formatJSONValueToken(dec, p, indent+1, tok)
-		if err != nil {
+		if err := formatJSONValueToken(dec, p, indent+1, tok); err != nil {
 			return err
 		}
 	}

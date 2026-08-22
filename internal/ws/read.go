@@ -2,7 +2,7 @@ package ws
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
@@ -52,7 +52,7 @@ func writeTextMessage(data []byte, p *core.Printer, f core.Format) error {
 	if core.IsStdoutTerm {
 		data = []byte(core.TerminalSafeText(string(data)))
 	}
-	if shouldFormat(f) && json.Valid(data) && format.FormatJSONLine(data, p) == nil {
+	if shouldFormat(f) && jsontext.Value(data).IsValid() && format.FormatJSONLine(data, p) == nil {
 		return p.Flush()
 	}
 

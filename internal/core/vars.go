@@ -1,7 +1,7 @@
 package core
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"os"
 	"runtime/debug"
 )
@@ -103,6 +103,6 @@ func GetBuildInfo(verbose ...bool) []byte {
 		}
 	}
 
-	out, _ := json.Marshal(bi)
+	out, _ := json.Marshal(bi, json.Deterministic(true))
 	return out
 }

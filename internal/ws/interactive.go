@@ -2,7 +2,7 @@ package ws
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
@@ -572,7 +572,7 @@ func (im *interactiveMode) writeBinaryLocked(arrow string, n int) {
 }
 
 func (im *interactiveMode) formatMessage(data []byte) string {
-	if shouldFormat(im.cfg.Format) && json.Valid(data) {
+	if shouldFormat(im.cfg.Format) && jsontext.Value(data).IsValid() {
 		p := core.TestPrinter(false)
 		if format.FormatJSONLine(data, p) == nil {
 			_ = p.Flush()
