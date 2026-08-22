@@ -45,11 +45,10 @@ func newHTTP2DialTLS(base func(context.Context, string, string) (net.Conn, error
 				return nil, discoveryErr
 			}
 			if connection.configured {
-				got, dialErr := NewResolverDialer(res, timeout).Dial(ctx, DialRequest{
+				got, dialErr := dialResolverWithECH(ctx, NewResolverDialer(res, timeout), DialRequest{
 					Network: "tcp", Host: connection.targetHost, Port: connection.targetPort,
 					OriginHost: host, Candidates: connection.addresses,
-					TLSConfig: connection.tlsConfig, ALPN: []string{"h2"},
-				})
+				}, connection.tlsConfig, echMode)
 				if dialErr != nil {
 					return nil, dialErr
 				}

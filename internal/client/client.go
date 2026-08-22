@@ -570,6 +570,15 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 				return nil, errors.New("ECH is required but no HTTPS service configuration supports HTTP/3")
 			}
 		}
+		if echMode == core.ECHAuto && len(tlsCfg.EncryptedClientHelloConfigList) == 0 {
+			configList, greaseErr := GenerateGREASEECHConfigList()
+			if greaseErr != nil {
+				return nil, greaseErr
+			}
+			tlsCfg = tlsCfg.Clone()
+			tlsCfg.MinVersion = tls.VersionTLS13
+			tlsCfg.EncryptedClientHelloConfigList = configList
+		}
 
 		port, err := net.LookupPort("udp", endpoint.Port)
 		if err != nil {
