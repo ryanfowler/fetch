@@ -1,6 +1,11 @@
 # CLI Reference
 
-Complete reference for all `fetch` command-line options.
+Complete reference for all `fetch` command-line options. This file is embedded
+in the Go binary and is displayed by `fetch -v --help`.
+
+See also [the documentation index](index.md), [limits and safety](limits.md),
+and the dedicated [article](article.md), [HAR](har.md), [updates](updates.md),
+and [Agent Skill](agent-skill.md) guides.
 
 ## Usage
 
@@ -283,6 +288,7 @@ advertised configuration, rejects explicit HTTP/3, and uses TCP with automatic
 HTTP version selection. ECH requires TLS 1.3; explicit TLS 1.2 bounds are a
 configuration error. WSS and TLS inspection use the same ECH discovery and
 handshake reporting. ECH is not available through proxies or cleartext HTTP/2.
+See [Encrypted ClientHello](ech.md) for discovery and downgrade rules.
 
 ### `--har PATH`
 
@@ -291,9 +297,10 @@ Record the final HTTP exchange in a HAR 1.2 sidecar at `PATH`. Standard output
 cookies, credentials, and captured bodies. Protect it as sensitive data.
 
 Request and response bodies are captured up to 16 MiB each. UTF-8 text is stored
-as text. Binary data is stored as base64. Larger bodies omit their text and add
-the comment `Body omitted by fetch because it exceeds the 16 MiB HAR capture
-limit`. HAR records the final exchange after redirects and retries. It is not
+as text and binary data as base64 while within the limit. For larger bodies,
+the captured payload is omitted entirely and the HAR adds the comment `Body
+omitted by fetch because it exceeds the 16 MiB HAR capture limit`. HAR records
+the final exchange after redirects and retries. It is not
 available for WebSocket sessions, DNS/TLS inspection, gRPC discovery, or
 `--dry-run`, and it cannot use the response output path.
 
@@ -336,7 +343,9 @@ alphabetical header rendering, so this option is currently a no-op.
 ### `--ws-message-mode MODE`
 
 Set WebSocket input handling to `auto`, `text`, or `binary`. This option is
-valid only with a `ws://` or `wss://` URL.
+valid only with a `ws://` or `wss://` URL. Text lines, interactive entries, and
+incoming messages are bounded to 16 MiB; binary stdin is streamed in bounded
+chunks. See [WebSocket](websocket.md).
 
 ## Agent Skill Options
 
@@ -544,7 +553,7 @@ fetch --ca-cert ca-cert.pem example.com
 Force specific HTTP version. Values: `1`, `2`, `3`.
 
 - `1` - HTTP/1.1
-- `2` - HTTP/2 (default preference)
+- `2` - Force HTTP/2; direct HTTPS may otherwise try automatic HTTP/3 first
 - `3` - HTTP/3 (QUIC)
 
 When `--http 2` is used with an `http://` URL for gRPC requests, `fetch` automatically uses h2c (HTTP/2 over cleartext) to connect without TLS.
@@ -632,7 +641,9 @@ fetch wss://echo.websocket.events -d "hello"
 
 Use `--ws-interactive auto|on|off` to control the terminal prompt.
 
-See [WebSocket documentation](websocket.md) for details.
+Use `--ws-message-mode auto|text|binary` to select message types. See
+[WebSocket documentation](websocket.md) for message limits, close handling,
+proxy/TLS behavior, and unsupported options.
 
 ## gRPC Options
 
@@ -795,12 +806,15 @@ Update fetch binary in place. The selected archive must have a matching SHA-256
 sidecar. Metadata is limited to 1 MiB, checksums to 1 KiB, and archives to 128
 MiB. The archive is streamed to a temporary file and verified before extraction.
 Use with `--dry-run` to validate release metadata, asset selection, checksum
-availability, and executable preflight without downloading or replacing the
-binary. Dry-run does not update the automatic-check timestamp.
+availability, and executable preflight. Dry-run downloads bounded release
+metadata and the checksum sidecar, but does not download the executable archive
+or replace the binary. It does not update the automatic-check timestamp.
 
 ### `--complete SHELL`
 
-Output shell completion scripts. Values: `bash`, `fish`, `zsh`.
+Output shell completion scripts. Values: `bash`, `fish`, `powershell`, `zsh`.
+The scripts and dynamic candidates are generated from the same option registry
+as CLI help. See [Shell completion](completions.md).
 
 ```sh
 echo 'eval "$(fetch --complete bash)"' >> ~/.bashrc
@@ -810,12 +824,38 @@ fetch --complete fish > ~/.config/fish/completions/fetch.fish
 
 ### `--dry-run`
 
-Print request information without sending. When used with `--update`, checks for the latest version without installing.
+Print request information without sending. The normalized absolute URL, method,
+redacted headers, and at most 1,024 body bytes are shown. A preview never
+consumes stdin or changes sessions, output files, HAR files, updater metadata,
+or skill installations. When used with `--update`, checks release metadata and
+destination preflight without downloading or installing.
 
 ```sh
 fetch --dry-run -m POST -j '{"test": true}' example.com
 fetch --update --dry-run
 ```
+
+## Unsupported combinations and safety notes
+
+- `--article` cannot be combined with WebSockets, gRPC, DNS/TLS inspection,
+  `--discard`, `--remote-name`, or `--remote-header-name`.
+- `--har` cannot be used with WebSockets, DNS/TLS inspection, gRPC discovery,
+  dry-run, standard output, or the response output path. It supports unary gRPC
+  only.
+- WebSockets require HTTP/1.1. They reject HTTP/2 and HTTP/3 forcing, Digest,
+  retries, retry delays, redirects, output, remote names, clipboard, clobber,
+  discard, range, compression controls (`--compress` and `--no-encode`),
+  `--ignore-status`, article, gRPC, and gRPC discovery options before connecting.
+- Explicit HTTP/3 cannot use a proxy or Unix socket. Forced HTTP/3 never falls
+  back to TCP.
+- `--ech on` cannot use explicit HTTP/3 or TLS 1.2 bounds. ECH is not used
+  through proxies or cleartext HTTP/2.
+- `--sort-headers` is accepted as a compatibility no-op. Go's normal HTTP
+  stack uses deterministic header serialization and does not preserve input wire
+  order.
+
+See [Limits and safety](limits.md) for all body, protocol, archive, and
+subprocess caps.
 
 ## Environment Variables
 

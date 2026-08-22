@@ -14,9 +14,10 @@ fetch --grpc -j @request.json \
   https://api.example.com/package.Service/Method
 ```
 
-Use `--proto` or `--proto-desc` when reflection is unavailable; consult
+Use `--proto-file` or `--proto-desc` when reflection is unavailable; consult
 `fetch --help` and the repository gRPC documentation for schema flags and
-streaming details. Plaintext local gRPC may use an `http://` URL; do not downgrade
+streaming details. Binary calls can remain usable when reflection fails, but
+JSON-to-protobuf conversion requires a descriptor. Plaintext local gRPC may use an `http://` URL; do not downgrade
 a remote TLS endpoint merely to bypass certificate errors.
 
 Keep request data in a protected file when it contains secrets. Inspect uncertain

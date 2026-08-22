@@ -1,6 +1,8 @@
 # Configuration Guide
 
-This guide provides comprehensive documentation for configuring `fetch` using a configuration file.
+This guide provides comprehensive documentation for configuring the Go
+implementation of `fetch` using a configuration file. The public option
+registry, CLI reference, and completion generator use the same option names.
 
 ## Configuration File Format
 
@@ -17,12 +19,18 @@ This guide provides comprehensive documentation for configuring `fetch` using a 
 
 ### Configuration Precedence
 
-Settings are applied in the following order of precedence (highest to lowest):
+Settings are applied in the following order (lowest to highest precedence):
 
-1. **Command line flags** - Override all other settings
-2. **Domain-specific configuration** - Host-specific settings in config file
-3. **Global configuration** - Global settings in config file
-4. **Default values** - Built-in application defaults
+1. **Default values** - Built-in application defaults
+2. **Global configuration** - Global settings in config file
+3. **Domain-specific configuration** - Matching host section
+4. **Command line flags** - Override all other settings
+
+Scalar values replace lower-precedence values. Repeatable headers, query
+parameters, and CA certificate paths are merged in global, host, then CLI
+order. CLI options remain distinguishable from configuration defaults, so an
+inspection-mode warning is emitted only for an explicitly supplied request
+option.
 
 This allows you to set global defaults and override them per-domain or per-command as needed.
 
@@ -57,10 +65,9 @@ auto-update = true
 # Disable auto-update
 auto-update = false
 
-# Custom update interval
+# Custom update interval (fractional values, + prefix, and days are supported)
 auto-update = 4h
-auto-update = 30m
-auto-update = 1d
+auto-update = +1.5d
 ```
 
 Automatic-update state is stored in the platform user cache, not beside the
@@ -170,8 +177,9 @@ remains supported and disables paging when true.
 
 **Type**: Boolean
 
-Compatibility no-op; Go output remains deterministic and alphabetically
-rendered.
+Compatibility no-op. Go's `net/http` uses its normal deterministic header
+serialization and does not preserve user-specified wire order. Header names and
+duplicate values remain deterministic in CLI output.
 
 #### `no-pager`
 
@@ -245,6 +253,7 @@ verbosity = 3
 #### `ca-cert`
 
 **Type**: CA certificate path
+**Repeatable**: Yes
 **Default**: System default
 
 Use a custom CA cert pool.
@@ -399,7 +408,7 @@ Specify the highest allowed HTTP version.
 # Force HTTP/1.1
 http = 1
 
-# Allow HTTP/2 (default)
+# Cap requests at HTTP/2; direct HTTPS may otherwise try automatic HTTP/3
 http = 2
 ```
 
@@ -657,7 +666,8 @@ header = X-API-Key: admin-key
 - Section names should be the exact hostname (without protocol or path), or a wildcard pattern like `*.domain.com`
 - Host-specific settings override global settings
 - Command-line flags override both global and host-specific settings
-- Multiple headers and query parameters are merged (host-specific first, then global)
+- Multiple headers and query parameters are merged in global, host-specific,
+  then CLI order.
 
 ## Configuration Examples
 
@@ -744,6 +754,8 @@ Validation errors may include:
 
 ## See Also
 
+- [Documentation index](index.md) - Complete user and maintainer guide index
 - [CLI Reference](cli-reference.md) - All command-line options
 - [Authentication](authentication.md) - Detailed authentication setup
-- [Advanced Features](advanced-features.md) - DNS, proxies, and TLS configuration
+- [Advanced Features](advanced-features.md) - DNS, proxies, HTTP versions, and TLS/ECH
+- [Limits and safety](limits.md) - Shared caps and security invariants

@@ -236,6 +236,10 @@ The editor is selected in this order:
 2. `EDITOR` environment variable
 3. Well-known editors (`vim`, `nano`, etc.)
 
+Editor values may contain arguments. Executable paths that contain spaces are
+preserved without invoking a shell. The temporary input file is private on
+Unix and is removed after the editor exits.
+
 ```sh
 EDITOR=code fetch --edit -m POST example.com/api
 ```
@@ -286,6 +290,13 @@ For large file uploads, consider:
 1. **Streaming**: `fetch` streams file content rather than loading it all into memory
 2. **Timeout**: Set appropriate timeouts with `--timeout`
 3. **Progress**: Use `-v` to see request/response headers
+
+Regular files are checked before opening and on replay. A replacement, size
+change, premature EOF, or special-file type is an error. Stdin is one-shot and
+cannot be replayed for a retry, Digest challenge, or redirect that needs the
+body again. Multipart uses a stable boundary and replays identical bytes.
+Materialization for signing, protocol conversion, or composite curl data is
+capped at 16 MiB.
 
 ```sh
 fetch -F "large=@bigfile.zip" --timeout 300 -v -m POST example.com/upload

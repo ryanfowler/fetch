@@ -30,6 +30,9 @@ jobs:
       - name: Mod verify
         run: go mod verify
 
+      - name: Documentation checks
+        run: python3 scripts/check-docs.py
+
       - name: Lint
         uses: dominikh/staticcheck-action@v1.4.1
         with:

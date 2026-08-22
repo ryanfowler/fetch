@@ -22,11 +22,14 @@ brew install ryanfowler/tap/fetch
 
 ### Building from Source
 
-If you have Go installed:
+If you have Go 1.27 or newer installed:
 
 ```sh
 go install github.com/ryanfowler/fetch@latest
 ```
+
+The project is implemented in Go. The source build does not require Rust or
+Cargo. Release artifacts are built with `CGO_ENABLED=0` for supported targets.
 
 ### Pre-built Binaries
 
@@ -321,13 +324,17 @@ fetch -S myapi httpbin.org/cookies
 
 ## Updating
 
-Update `fetch` to the latest version:
+Check or update the installed Go binary with verified release artifacts:
 
 ```sh
+fetch --check-update
 fetch --update
+fetch --update --dry-run
 ```
 
-Or enable automatic updates in your [configuration file](configuration.md):
+The updater requires a SHA-256 sidecar and verifies it before extraction. See
+[Updates and installation](updates.md) for limits and replacement behavior. Or
+enable automatic checks in your [configuration file](configuration.md):
 
 ```ini
 auto-update = true
@@ -346,7 +353,12 @@ fetch --complete zsh > ~/.zshrc.d/fetch-completion.zsh
 
 # Fish
 fetch --complete fish > ~/.config/fish/completions/fetch.fish
+
+# PowerShell (append the registration script to your profile)
+fetch --complete powershell >> $PROFILE
 ```
+
+See [Shell completion](completions.md) for installation details.
 
 ## Next Steps
 
@@ -356,3 +368,4 @@ fetch --complete fish > ~/.config/fish/completions/fetch.fish
 - **[Request Bodies](request-bodies.md)** - Send JSON, XML, forms, and files
 - **[Output Formatting](output-formatting.md)** - Formatting and syntax highlighting details
 - **[Image Rendering](image-rendering.md)** - Rendering images in the terminal
+- **[Documentation index](index.md)** - Complete feature and maintainer guide index

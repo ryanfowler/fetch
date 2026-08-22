@@ -141,6 +141,7 @@ func TestCLI002TargetFlags(t *testing.T) {
 		{"--install-skill", "codex"},
 		{"--uninstall-skill=all"},
 		{"--skill"},
+		{"--complete", "powershell"},
 	} {
 		if _, err := Parse(args); err != nil {
 			t.Errorf("Parse(%v) error = %v", args, err)

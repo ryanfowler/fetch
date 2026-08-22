@@ -1,6 +1,7 @@
 # Advanced Features
 
-This guide covers advanced networking, protocol, and TLS options in `fetch`.
+This guide covers advanced networking, protocol, and TLS options in the Go
+implementation of `fetch`. For shared caps, see [Limits and safety](limits.md).
 
 ## Custom DNS Resolution
 
@@ -186,7 +187,7 @@ fetch --http 1 example.com
 fetch --http 2 example.com
 ```
 
-- Default behavior (HTTP/2 preferred with fallback)
+- Used after automatic HTTP/3 does not win, unless a version is forced
 - Multiplexed streams
 - Header compression (HPACK)
 - Required for gRPC
@@ -614,7 +615,11 @@ fetch --min-tls 1.3 -vvv example.com
 
 ## See Also
 
+- [Documentation index](index.md) - Complete user and maintainer guide index
 - [CLI Reference](cli-reference.md) - Complete option reference
 - [Authentication](authentication.md) - mTLS and other auth methods
 - [Configuration](configuration.md) - Configuration file options
+- [Article extraction](article.md) - Readable Markdown output
+- [HAR recording](har.md) - Final-exchange capture
+- [Updates and installation](updates.md) - Verified release artifacts
 - [Troubleshooting](troubleshooting.md) - Network debugging

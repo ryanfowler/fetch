@@ -299,7 +299,8 @@ fetch --grpc --proto-file service.proto \
 
 **Symptom**: Response appears cut off
 
-**Info**: Formatting is limited to 16MB of data
+**Info**: Complete formatted responses are limited to 1 MiB. Raw output and
+streaming formats use their documented bounded paths instead.
 
 **Solutions**:
 

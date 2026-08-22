@@ -1,6 +1,8 @@
 # Output Formatting
 
-`fetch` automatically formats and syntax-highlights response bodies based on content type.
+`fetch` automatically formats and syntax-highlights response bodies based on
+content type. Raw output and streaming formats avoid whole-body buffering; all
+bounded transformations use the caps in [Limits and safety](limits.md).
 
 ## Format Control
 
@@ -422,13 +424,13 @@ fetch --format off example.com/api | jq '.users[0]'
 ### Save Pretty JSON
 
 ```sh
-fetch example.com/api | tee response.json
+fetch --format on --pager off example.com/api | tee response.json
 ```
 
 ### Force Colors in Pipe
 
 ```sh
-fetch --color on example.com/api | less -R
+fetch --format on --color on --pager off example.com/api | less -R
 ```
 
 ### Raw Binary Download
@@ -442,3 +444,6 @@ fetch -o archive.zip example.com/download.zip
 - [CLI Reference](cli-reference.md) - All formatting options
 - [Image Rendering](image-rendering.md) - Terminal image display
 - [Configuration](configuration.md) - Default settings
+- [Article extraction](article.md) - Readable Markdown output
+- [HAR recording](har.md) - Sidecar capture
+- [Limits and safety](limits.md) - Shared resource caps

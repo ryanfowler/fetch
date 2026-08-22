@@ -87,7 +87,9 @@ fetch -vv ws://echo.websocket.events -d "hello"
 
 ## Authentication
 
-All authentication options work with WebSocket connections — headers are sent during the HTTP upgrade handshake:
+Basic, Bearer, AWS SigV4, mTLS, session cookies, and custom headers can apply
+to the HTTP upgrade handshake. Digest authentication is not supported for
+WebSockets:
 
 ```sh
 fetch --bearer mytoken ws://api.example.com/ws
@@ -105,7 +107,10 @@ fetch -H "Sec-WebSocket-Protocol: graphql-ws" wss://api.example.com/graphql
 
 ## Timeout
 
-The `--timeout` flag applies to the WebSocket handshake only. The connection stays open until the server closes or the operation is canceled:
+The connect timeout covers DNS, proxy, TCP, and TLS setup. The request
+`--timeout` applies to the WebSocket handshake only. After a successful
+handshake, the connection stays open until the server closes or the operation
+is canceled:
 
 ```sh
 fetch --timeout 5 ws://api.example.com/ws
@@ -115,7 +120,14 @@ fetch --timeout 5 ws://api.example.com/ws
 
 - WebSocket requires HTTP/1.1 for the upgrade handshake. Forcing HTTP/2 or HTTP/3 is rejected; HTTP/1.1 remains supported.
 - WebSocket uses the normal proxy, DNS, TLS, ECH, and session-cookie configuration.
-- WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`, `--form`, `--multipart`, `--xml`, `--edit`, output-file/clipboard flags, Digest authentication, redirects, ranges, compression flags, or retry flags.
+  WSS uses the same ECH policy and connect budget as HTTPS.
+- WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`,
+  `--grpc-list`, `--grpc-describe`, `--form`, `--multipart`, `--xml`, `--edit`,
+  `--output`, `--remote-name`, `--remote-header-name`, `--copy`, `--clobber`,
+  `--discard`, Digest authentication, redirects, ranges, `--compress`,
+  `--no-encode`, `--ignore-status`, or retry/retry-delay flags.
 - Incoming WebSocket messages are limited to 16 MiB.
 - Binary messages are written byte-for-byte to a pipe or redirected stdout. A terminal receives only a safe size indicator.
 - The pager and image rendering do not apply to WebSocket output; fetch warns when these options are selected.
+- `--har`, `--article`, `--copy`, `--discard`, `--remote-name`,
+  `--remote-header-name`, and `--output` are rejected before connecting.
