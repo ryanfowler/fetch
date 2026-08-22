@@ -32,6 +32,33 @@ func CheckedAddInt(a, b int) (int, bool) {
 	return a + b, true
 }
 
+// CheckedMulInt returns false when a*b would overflow int. Negative values
+// are accepted so callers can use this helper for general size arithmetic.
+func CheckedMulInt(a, b int) (int, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a == -1 && b == minInt || b == -1 && a == minInt {
+		return 0, false
+	}
+	if a > 0 {
+		if b > 0 {
+			if a > maxInt/b {
+				return 0, false
+			}
+		} else if b < minInt/a {
+			return 0, false
+		}
+	} else if b > 0 {
+		if a < minInt/b {
+			return 0, false
+		}
+	} else if a < maxInt/b {
+		return 0, false
+	}
+	return a * b, true
+}
+
 // CheckedUint64ToInt converts v only when it is representable as int.
 func CheckedUint64ToInt(v uint64) (int, bool) {
 	if v > uint64(maxInt) {
