@@ -33,11 +33,16 @@ jobs:
       - name: Documentation checks
         run: python3 scripts/check-docs.py
 
+      - name: Install Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: Lint
-        uses: dominikh/staticcheck-action@v1.4.1
-        with:
-          version: "2026.2.1"
-          install-go: false
+        run: |
+          while IFS= read -r package; do
+            GOMAXPROCS=1 staticcheck "$package"
+          done < <(go list ./...)
 
   test:
     runs-on: ${{ matrix.os }}
@@ -56,6 +61,42 @@ jobs:
 
       - name: Test
         run: go test -v -parallel 8 ./...
+
+  qualification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build pinned Rust oracle
+        env:
+          ORACLE_REVISION: ea39416950cc89496b891fcc8bc75b0b68f0d0fe
+        run: |
+          rm -rf "$RUNNER_TEMP/fetch-rust-oracle"
+          git init "$RUNNER_TEMP/fetch-rust-oracle"
+          git -C "$RUNNER_TEMP/fetch-rust-oracle" remote add origin "${{ github.server_url }}/${{ github.repository }}"
+          git -C "$RUNNER_TEMP/fetch-rust-oracle" fetch --depth 1 origin "$ORACLE_REVISION"
+          git -C "$RUNNER_TEMP/fetch-rust-oracle" checkout --detach FETCH_HEAD
+          cargo build --release --locked --manifest-path "$RUNNER_TEMP/fetch-rust-oracle/Cargo.toml"
+
+      - name: Install qualification tools
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run release qualification and pinned parity
+        env:
+          FETCH_PARITY_RUST_BINARY: ${{ runner.temp }}/fetch-rust-oracle/target/release/fetch
+          FETCH_PARITY_RUST_REVISION: ea39416950cc89496b891fcc8bc75b0b68f0d0fe
+        run: scripts/qualify-release.sh --require-parity
 
   build:
     runs-on: ubuntu-latest

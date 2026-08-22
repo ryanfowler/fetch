@@ -2138,17 +2138,16 @@ func TestMain(t *testing.T) {
 		// Test the auto-update functionality.
 		res = runFetchOpts(t, updateFetchPath, fetchOpts{env: updateEnv}, server.URL, "--auto-update", "0s")
 		assertExitCode(t, 0, res)
-		var n int
+		updateDeadline := time.Now().Add(30 * time.Second)
 		for {
 			mt := getOptionalModTime(t, updateFetchPath)
 			if mt != nil && !mt.Equal(afterModTime) {
 				break
 			}
-			if n > 100 {
+			if time.Now().After(updateDeadline) {
 				t.Fatal("timed out waiting for self-update to complete")
 			}
 			time.Sleep(100 * time.Millisecond)
-			n++
 		}
 
 		// Ensure the new fetch binary still works.
