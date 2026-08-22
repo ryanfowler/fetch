@@ -105,10 +105,10 @@ func TestMetadataPresentationFlags(t *testing.T) {
 	}
 }
 
-func TestBuildInfoIncludesTargetSettingsAndOptionalDependencies(t *testing.T) {
+func TestBuildInfoIncludesOptionalDependencies(t *testing.T) {
 	compact := string(core.GetBuildInfo())
-	if !strings.Contains(compact, `"target_os"`) || !strings.Contains(compact, `"target_arch"`) {
-		t.Fatalf("compact build info lacks target settings: %s", compact)
+	if strings.Contains(compact, `"target_os"`) || strings.Contains(compact, `"target_arch"`) {
+		t.Fatalf("compact build info unexpectedly includes target settings: %s", compact)
 	}
 	if strings.Contains(compact, `"deps"`) {
 		t.Fatalf("compact build info unexpectedly includes dependencies: %s", compact)

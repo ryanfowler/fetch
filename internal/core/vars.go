@@ -3,7 +3,6 @@ package core
 import (
 	"encoding/json"
 	"os"
-	"runtime"
 	"runtime/debug"
 )
 
@@ -82,11 +81,8 @@ func GetBuildInfo(verbose ...bool) []byte {
 	}
 
 	bi := BuildInfo{
-		Fetch: Version,
-		Settings: map[string]string{
-			"target_arch": runtime.GOARCH,
-			"target_os":   runtime.GOOS,
-		},
+		Fetch:    Version,
+		Settings: map[string]string{},
 	}
 	if buildInfo != nil {
 		bi.Go = buildInfo.GoVersion
@@ -107,9 +103,6 @@ func GetBuildInfo(verbose ...bool) []byte {
 		}
 	}
 
-	if !includeDeps {
-		bi.Deps = nil
-	}
 	out, _ := json.Marshal(bi)
 	return out
 }
