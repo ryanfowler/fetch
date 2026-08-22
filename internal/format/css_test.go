@@ -1,6 +1,7 @@
 package format
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -213,6 +214,54 @@ func TestFormatCSS(t *testing.T) {
 				t.Errorf("FormatCSS() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestFormatCSSLimitsNestingDepth(t *testing.T) {
+	input := strings.Repeat("@media all {", core.MaxFormatterNestingDepth+1) +
+		strings.Repeat("}", core.MaxFormatterNestingDepth+1)
+	p := core.TestPrinter(false)
+
+	err := FormatCSS([]byte(input), p)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatCSS() error = %v, want nesting limit error", err)
+	}
+	if got := len(p.Bytes()); got != 0 {
+		t.Fatalf("FormatCSS() wrote %d bytes after nesting limit", got)
+	}
+}
+
+func TestFormatCSSLimitsOutput(t *testing.T) {
+	input := strings.Repeat("a", core.MaxFormattedBodyBytes+1) + " {}"
+	p := core.TestPrinter(false)
+
+	err := FormatCSS([]byte(input), p)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatCSS() error = %v, want output limit error", err)
+	}
+	if got := len(p.Bytes()); got != 0 {
+		t.Fatalf("FormatCSS() wrote %d bytes after output limit", got)
+	}
+}
+
+func TestFormatCSSLimitsFunctionNestingDepth(t *testing.T) {
+	input := "a { color: " + strings.Repeat("f(", core.MaxFormatterNestingDepth+1) +
+		"x" + strings.Repeat(")", core.MaxFormatterNestingDepth+1) + "; }"
+	p := core.TestPrinter(false)
+
+	err := FormatCSS([]byte(input), p)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatCSS() error = %v, want function nesting limit error", err)
+	}
+	if got := len(p.Bytes()); got != 0 {
+		t.Fatalf("FormatCSS() wrote %d bytes after function nesting limit", got)
+	}
+}
+
+func TestFormatCSSRejectsNegativeBaseIndent(t *testing.T) {
+	err := FormatCSSIndented([]byte("a {}"), core.TestPrinter(false), -1)
+	if err == nil {
+		t.Fatal("FormatCSSIndented() error = nil, want negative base indentation error")
 	}
 }
 

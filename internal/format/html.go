@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"strings"
 
@@ -123,6 +124,23 @@ type htmlStackEntry struct {
 
 // FormatHTML formats the provided HTML to the Printer.
 func FormatHTML(buf []byte, w *core.Printer) error {
+	out := w.NewBoundedWriter(io.Discard, core.MaxFormattedBodyBytes, "HTML formatted output")
+	err := formatHTML(buf, out)
+	if err == nil {
+		err = out.Err()
+	}
+	if err != nil {
+		w.Discard()
+		return err
+	}
+	_, err = w.Write(out.Bytes())
+	if err != nil {
+		w.Discard()
+	}
+	return err
+}
+
+func formatHTML(buf []byte, w *core.Printer) error {
 	tokenizer := html.NewTokenizer(bytes.NewReader(buf))
 
 	var stack []htmlStackEntry
@@ -152,6 +170,9 @@ func FormatHTML(buf []byte, w *core.Printer) error {
 
 			isBlock := blockElements[tagNameLower]
 			isVoid := voidElements[tagNameLower]
+			if !isVoid && len(stack) >= core.MaxFormatterNestingDepth {
+				return core.LimitError{Subsystem: "HTML nesting depth", Limit: core.MaxFormatterNestingDepth}
+			}
 
 			// Mark parent as having a block child if this is a block element.
 			if isBlock && len(stack) > 0 {
@@ -258,7 +279,10 @@ func FormatHTML(buf []byte, w *core.Printer) error {
 					w.WriteString("\n")
 					trimmedText := bytes.TrimSpace(text)
 					if len(trimmedText) > 0 {
-						if FormatCSSIndented(trimmedText, w, len(stack)) != nil {
+						if err := FormatCSSIndented(trimmedText, w, len(stack)); err != nil {
+							if errors.Is(err, core.ErrLimitExceeded) {
+								return err
+							}
 							// Fallback to raw output on error.
 							w.Set(core.Green)
 							w.Write(text)

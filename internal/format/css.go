@@ -1,6 +1,11 @@
 package format
 
-import "github.com/ryanfowler/fetch/internal/core"
+import (
+	"errors"
+	"io"
+
+	"github.com/ryanfowler/fetch/internal/core"
+)
 
 // CSS token types
 type cssTokenType int
@@ -279,6 +284,7 @@ type cssFormatter struct {
 	current   cssToken
 	atNewline bool
 	wroteRule bool // tracks if we've written any top-level rules (for blank line separation)
+	err       error
 }
 
 // FormatCSS formats the provided CSS to the Printer.
@@ -289,8 +295,32 @@ func FormatCSS(buf []byte, p *core.Printer) error {
 // FormatCSSIndented formats CSS with a base indentation level.
 // Used for formatting CSS embedded in HTML <style> tags.
 func FormatCSSIndented(buf []byte, p *core.Printer, baseIndent int) error {
+	if baseIndent < 0 {
+		return errors.New("CSS base indentation must be non-negative")
+	}
 	if len(buf) == 0 {
 		return nil
+	}
+
+	out := p.NewBoundedWriter(io.Discard, core.MaxFormattedBodyBytes, "CSS formatted output")
+	err := formatCSSIndented(buf, out, baseIndent)
+	if err == nil {
+		err = out.Err()
+	}
+	if err != nil {
+		p.Discard()
+		return err
+	}
+	_, err = p.Write(out.Bytes())
+	if err != nil {
+		p.Discard()
+	}
+	return err
+}
+
+func formatCSSIndented(buf []byte, p *core.Printer, baseIndent int) error {
+	if baseIndent < 0 || baseIndent > core.MaxFormatterNestingDepth {
+		return core.LimitError{Subsystem: "CSS nesting depth", Limit: core.MaxFormatterNestingDepth}
 	}
 
 	f := &cssFormatter{
@@ -313,8 +343,17 @@ func (f *cssFormatter) skipWhitespace() {
 	}
 }
 
+func (f *cssFormatter) enterBlock() bool {
+	if f.indent >= core.MaxFormatterNestingDepth {
+		f.err = core.LimitError{Subsystem: "CSS nesting depth", Limit: core.MaxFormatterNestingDepth}
+		return false
+	}
+	f.indent++
+	return true
+}
+
 func (f *cssFormatter) format() error {
-	for f.current.typ != cssTokenEOF {
+	for f.current.typ != cssTokenEOF && f.err == nil {
 		f.skipWhitespace()
 		if f.current.typ == cssTokenEOF {
 			break
@@ -347,7 +386,7 @@ func (f *cssFormatter) format() error {
 		f.formatQualifiedRule()
 	}
 
-	return nil
+	return f.err
 }
 
 func (f *cssFormatter) formatComment() {
@@ -372,15 +411,20 @@ func (f *cssFormatter) formatAtRule() {
 
 	// Collect the prelude (everything until { or ;)
 	f.formatAtRulePrelude()
+	if f.err != nil {
+		return
+	}
 
 	f.skipWhitespace()
 
 	if f.current.typ == cssTokenDelim && f.current.value == "{" {
 		// Block at-rule (e.g., @media, @keyframes)
+		if !f.enterBlock() {
+			return
+		}
 		f.printer.WriteString(" {\n")
 		f.atNewline = true
 		f.advance()
-		f.indent++
 
 		// Parse contents
 		f.formatAtRuleBody()
@@ -466,7 +510,7 @@ func (f *cssFormatter) formatAtRulePrelude() {
 }
 
 func (f *cssFormatter) formatAtRuleBody() {
-	for f.current.typ != cssTokenEOF {
+	for f.current.typ != cssTokenEOF && f.err == nil {
 		f.skipWhitespace()
 		if f.current.typ == cssTokenEOF {
 			break
@@ -497,14 +541,19 @@ func (f *cssFormatter) formatQualifiedRule() {
 
 	// Format selector
 	f.formatSelector()
+	if f.err != nil {
+		return
+	}
 
 	f.skipWhitespace()
 
 	if f.current.typ == cssTokenDelim && f.current.value == "{" {
+		if !f.enterBlock() {
+			return
+		}
 		f.printer.WriteString(" {\n")
 		f.atNewline = true
 		f.advance()
-		f.indent++
 
 		f.formatDeclarationBlock()
 
@@ -720,7 +769,7 @@ func (f *cssFormatter) formatValue() {
 	needSpace := false
 	parenDepth := 0
 
-	for f.current.typ != cssTokenEOF {
+	for f.current.typ != cssTokenEOF && f.err == nil {
 		if f.current.typ == cssTokenDelim {
 			if f.current.value == ";" || f.current.value == "}" {
 				break
@@ -802,7 +851,7 @@ func (f *cssFormatter) formatValueToken() {
 		f.printer.WriteString(f.current.value)
 		f.printer.Reset()
 		f.advance()
-		f.formatFunctionArgsValue()
+		f.formatFunctionArgsValue(0)
 	case cssTokenDelim:
 		if f.current.value == "!" {
 			f.printer.Set(core.Green)
@@ -871,20 +920,25 @@ func (f *cssFormatter) formatFunctionArgs() {
 	}
 }
 
-func (f *cssFormatter) formatFunctionArgsValue() {
-	depth := 1
+func (f *cssFormatter) formatFunctionArgsValue(functionDepth int) {
+	if functionDepth >= core.MaxFormatterNestingDepth {
+		f.err = core.LimitError{Subsystem: "CSS function nesting depth", Limit: core.MaxFormatterNestingDepth}
+		return
+	}
+
+	parenDepth := 1
 	needSpace := false
 
-	for f.current.typ != cssTokenEOF && depth > 0 {
+	for f.current.typ != cssTokenEOF && parenDepth > 0 && f.err == nil {
 		if f.current.typ == cssTokenDelim && f.current.value == "(" {
-			depth++
+			parenDepth++
 			f.printer.WriteString("(")
 			f.advance()
 			needSpace = false
 			continue
 		}
 		if f.current.typ == cssTokenDelim && f.current.value == ")" {
-			depth--
+			parenDepth--
 			f.printer.WriteString(")")
 			f.advance()
 			needSpace = true
@@ -926,7 +980,7 @@ func (f *cssFormatter) formatFunctionArgsValue() {
 		case cssTokenFunction:
 			f.printer.WriteString(f.current.value)
 			f.advance()
-			f.formatFunctionArgsValue()
+			f.formatFunctionArgsValue(functionDepth + 1)
 		default:
 			f.advance()
 		}

@@ -12,6 +12,23 @@ import (
 
 // FormatXML formats the provided XML to the Printer.
 func FormatXML(buf []byte, w *core.Printer) error {
+	out := w.NewBoundedWriter(io.Discard, core.MaxFormattedBodyBytes, "XML formatted output")
+	err := formatXML(buf, out)
+	if err == nil {
+		err = out.Err()
+	}
+	if err != nil {
+		w.Discard()
+		return err
+	}
+	_, err = w.Write(out.Bytes())
+	if err != nil {
+		w.Discard()
+	}
+	return err
+}
+
+func formatXML(buf []byte, w *core.Printer) error {
 	dec := xml.NewDecoder(bytes.NewReader(buf))
 
 	var stack []bool
@@ -27,6 +44,9 @@ func FormatXML(buf []byte, w *core.Printer) error {
 
 		switch t := tok.(type) {
 		case xml.StartElement:
+			if len(stack) >= core.MaxFormatterNestingDepth {
+				return core.LimitError{Subsystem: "XML nesting depth", Limit: core.MaxFormatterNestingDepth}
+			}
 			if len(stack) > 0 && !stack[len(stack)-1] {
 				w.WriteString("\n")
 			}

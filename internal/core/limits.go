@@ -25,6 +25,7 @@ const (
 	MaxReflectionBytes           int64 = 64 << 20
 	MaxNestingDepth                    = 128
 	MaxClipboardBytes            int64 = 1 << 20
+	MaxFormatterNestingDepth           = 1024
 	MaxDOHWireResponseBytes      int64 = 65_535
 	MaxDOHJSONResponseBytes      int64 = 1 << 20
 	MaxUpdaterReleaseMetadata    int64 = 1 << 20

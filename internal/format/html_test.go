@@ -1,6 +1,7 @@
 package format
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -176,6 +177,33 @@ func TestFormatHTMLDoctype(t *testing.T) {
 	output := string(p.Bytes())
 	if !strings.Contains(output, "<!DOCTYPE html>") {
 		t.Errorf("output should contain <!DOCTYPE html>, got: %s", output)
+	}
+}
+
+func TestFormatHTMLLimitsNestingDepth(t *testing.T) {
+	input := strings.Repeat("<div>", core.MaxFormatterNestingDepth+1) +
+		strings.Repeat("</div>", core.MaxFormatterNestingDepth+1)
+	p := core.TestPrinter(false)
+
+	err := FormatHTML([]byte(input), p)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatHTML() error = %v, want nesting limit error", err)
+	}
+	if got := len(p.Bytes()); got != 0 {
+		t.Fatalf("FormatHTML() wrote %d bytes after nesting limit", got)
+	}
+}
+
+func TestFormatHTMLLimitsOutput(t *testing.T) {
+	input := "<div>" + strings.Repeat("x", core.MaxFormattedBodyBytes+1) + "</div>"
+	p := core.TestPrinter(false)
+
+	err := FormatHTML([]byte(input), p)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatHTML() error = %v, want output limit error", err)
+	}
+	if got := len(p.Bytes()); got != 0 {
+		t.Fatalf("FormatHTML() wrote %d bytes after output limit", got)
 	}
 }
 

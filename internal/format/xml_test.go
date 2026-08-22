@@ -1,6 +1,7 @@
 package format
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -73,6 +74,33 @@ func TestFormatXMLOutput(t *testing.T) {
 	}
 	if !strings.Contains(output, "text") {
 		t.Errorf("output should contain text, got: %s", output)
+	}
+}
+
+func TestFormatXMLLimitsNestingDepth(t *testing.T) {
+	input := strings.Repeat("<a>", core.MaxFormatterNestingDepth+1) +
+		strings.Repeat("</a>", core.MaxFormatterNestingDepth+1)
+	p := core.TestPrinter(false)
+
+	err := FormatXML([]byte(input), p)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatXML() error = %v, want nesting limit error", err)
+	}
+	if got := len(p.Bytes()); got != 0 {
+		t.Fatalf("FormatXML() wrote %d bytes after nesting limit", got)
+	}
+}
+
+func TestFormatXMLLimitsOutput(t *testing.T) {
+	input := "<root>" + strings.Repeat("x", core.MaxFormattedBodyBytes+1) + "</root>"
+	p := core.TestPrinter(false)
+
+	err := FormatXML([]byte(input), p)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatXML() error = %v, want output limit error", err)
+	}
+	if got := len(p.Bytes()); got != 0 {
+		t.Fatalf("FormatXML() wrote %d bytes after output limit", got)
 	}
 }
 
