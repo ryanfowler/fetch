@@ -14,10 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/crypto/ocsp"
 )
 
 func newTestPrinter() *core.Printer {
@@ -174,6 +176,15 @@ func TestInspectHTTP3UsesQUICAndH3ALPN(t *testing.T) {
 	out := string(p.Bytes())
 	if !strings.Contains(out, "ALPN: h3") {
 		t.Fatalf("expected h3 ALPN in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "TLS_AES_128_GCM_SHA256") {
+		t.Fatalf("expected negotiated QUIC cipher suite in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Remote IP: 127.0.0.1") {
+		t.Fatalf("expected remote IP in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Resolver: system") {
+		t.Fatalf("expected resolver provenance in output, got:\n%s", out)
 	}
 	if !strings.Contains(out, "quic-server") {
 		t.Fatalf("expected certificate chain in output, got:\n%s", out)
@@ -406,6 +417,71 @@ func generateTestCert(t *testing.T, caCert *x509.Certificate, caKey *rsa.Private
 		t.Fatalf("x509.ParseCertificate() error = %v", err)
 	}
 	return cert, key
+}
+
+func TestRenderConnectionMetadata(t *testing.T) {
+	fixedNow := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	origNow := tlsInspectNow
+	tlsInspectNow = func() time.Time { return fixedNow }
+	t.Cleanup(func() { tlsInspectNow = origNow })
+
+	state := &tls.ConnectionState{
+		Version:            tls.VersionTLS13,
+		CipherSuite:        0,
+		NegotiatedProtocol: http3.NextProtoH3,
+		PeerCertificates: []*x509.Certificate{{
+			Subject:  pkix.Name{CommonName: "quic.example"},
+			NotAfter: fixedNow.Add(30 * 24 * time.Hour),
+		}},
+	}
+	p := newTestPrinter()
+	renderConnection(p, state, nil, connectionInfo{
+		RemoteIP: net.ParseIP("2001:db8::1"),
+		Resolver: "tls://resolver.example:853",
+		QUIC:     true,
+		Timing: client.DialTiming{
+			DNSDuration:     2 * time.Millisecond,
+			ConnectDuration: 3 * time.Millisecond,
+		},
+	})
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"TLS 1.3: cipher suite unavailable",
+		"ALPN: h3",
+		"Remote IP: 2001:db8::1",
+		"Resolver: tls://resolver.example:853",
+		"Timing: DNS 2.0ms, QUIC 3.0ms",
+		"Verification: not verified",
+		"Trust anchor: not available",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestOCSPStapleRequiresMatchingCertificate(t *testing.T) {
+	caCert, caKey := generateTestCACert(t)
+	leaf, _ := generateTestCert(t, caCert, caKey, "ocsp.example")
+	other, _ := generateTestCert(t, caCert, caKey, "other.example")
+	staple, err := ocsp.CreateResponse(caCert, caCert, ocsp.Response{
+		Status:       ocsp.Good,
+		SerialNumber: leaf.SerialNumber,
+		ThisUpdate:   time.Now().Add(-time.Minute),
+		NextUpdate:   time.Now().Add(time.Hour),
+	}, caKey)
+	if err != nil {
+		t.Fatalf("ocsp.CreateResponse() error = %v", err)
+	}
+
+	status, _ := inspectOCSPStaple(staple, []*x509.Certificate{leaf, caCert})
+	if !strings.Contains(status, "good") || !strings.Contains(status, "unverified") {
+		t.Fatalf("matching staple status = %q", status)
+	}
+	status, _ = inspectOCSPStaple(staple, []*x509.Certificate{other, caCert})
+	if status != "staple present, unverified" {
+		t.Fatalf("mismatched staple status = %q", status)
+	}
 }
 
 func TestRender(t *testing.T) {
