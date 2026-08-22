@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -143,9 +142,15 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	if err != nil {
 		return fmt.Errorf("update setup: %w", err)
 	}
-	unlock, err := acquireLock(ctx, p, cacheDir, true, silent)
+	background := os.Getenv("FETCH_INTERNAL_AUTO_UPDATE") == "1"
+	unlock, err := acquireLock(ctx, p, cacheDir, !background, silent)
 	if err != nil {
 		return fmt.Errorf("update lock: %w", err)
+	}
+	if unlock == nil {
+		// Another automatic updater owns the lock. This is a successful,
+		// nonblocking no-op and must not update the last-attempt timestamp.
+		return nil
 	}
 	defer unlock()
 
@@ -177,6 +182,14 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 	exePath, err := getExecutablePath()
 	if err != nil {
 		return fmt.Errorf("preflight: resolve executable: %w", err)
+	}
+	if info, statErr := os.Lstat(exePath); statErr != nil {
+		return fmt.Errorf("preflight: inspect executable: %w", statErr)
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("preflight: executable destination is not a regular file")
+	}
+	if err := validateReplacementDirectory(exePath); err != nil {
+		return fmt.Errorf("preflight: %w", err)
 	}
 	if !canReplaceFile(exePath) {
 		return fmt.Errorf("preflight: %w", errNoWritePermission(exePath))
@@ -252,6 +265,10 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 	if err != nil {
 		return fmt.Errorf("extraction: create temporary directory: %w", err)
 	}
+	if err := os.Chmod(tempDir, 0700); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return fmt.Errorf("extraction: secure temporary directory: %w", err)
+	}
 	defer os.RemoveAll(tempDir)
 
 	archivePath, actualDigest, contentLength, err := downloadArtifact(ctx, c, artifact.URL, tempDir, p, silent)
@@ -279,9 +296,17 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 
 	// Replace the current executable in-place.
 	src := filepath.Join(tempDir, getFetchFilename())
+	if err := validateStagedExecutable(ctx, src); err != nil {
+		return fmt.Errorf("extraction: validate staged executable: %w", err)
+	}
 	err = selfReplace(exePath, src)
 	if err != nil {
-		return fmt.Errorf("replacement: %w", err)
+		var committed *fileutil.CommittedError
+		if errors.As(err, &committed) {
+			core.WriteWarningMsgIf(p, "replacement committed, but cleanup did not finish: "+committed.Error(), silent)
+		} else {
+			return fmt.Errorf("replacement: %w", err)
+		}
 	}
 
 	writeUpdateSuccess(p, silent, version, latest.TagName)
@@ -298,6 +323,133 @@ func getExeVersion(ctx context.Context, path string) (string, error) {
 
 	_, version, _ := strings.Cut(buf.String(), " ")
 	return strings.TrimSpace(version), nil
+}
+
+// validateStagedExecutable checks the candidate before it can replace the
+// running binary. The command receives no stdin and its output is bounded so
+// a malicious or broken candidate cannot hang or exhaust the updater.
+func validateStagedExecutable(parent context.Context, path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("staged executable is not a regular file")
+	}
+	if info.Size() == 0 {
+		return errors.New("staged executable is empty")
+	}
+	if err := os.Chmod(path, 0755); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	stdout := core.NewBoundedBuffer(4<<10, "staged executable output")
+	stderr := core.NewBoundedBuffer(4<<10, "staged executable error output")
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		return err
+	}
+	cmd := exec.Command(path, "--version")
+	cmd.Stdin = nil
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+	if err := configureValidationProcess(cmd); err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		_ = stderrReader.Close()
+		_ = stderrWriter.Close()
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		releaseValidationProcess(cmd)
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		_ = stderrReader.Close()
+		_ = stderrWriter.Close()
+		return fmt.Errorf("start --version: %w", err)
+	}
+	// os/exec does not copy output when *os.File values are supplied. Close
+	// the parent write ends immediately so descendants cannot keep the updater
+	// waiting on an os/exec pipe-copy goroutine.
+	_ = stdoutWriter.Close()
+	_ = stderrWriter.Close()
+	stdoutDone := make(chan struct{})
+	stderrDone := make(chan struct{})
+	go func() { drainValidationOutput(stdoutReader, stdout); close(stdoutDone) }()
+	go func() { drainValidationOutput(stderrReader, stderr); close(stderrDone) }()
+
+	if err := attachValidationProcess(cmd); err != nil {
+		terminateValidationProcess(cmd)
+		_ = cmd.Wait()
+		_ = stdoutReader.Close()
+		_ = stderrReader.Close()
+		<-stdoutDone
+		<-stderrDone
+		releaseValidationProcess(cmd)
+		return err
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	var runErr error
+	select {
+	case runErr = <-waitCh:
+		// Let ordinary output drain, but do not let a descendant holding a
+		// descriptor open extend validation.
+		select {
+		case <-stdoutDone:
+		case <-time.After(100 * time.Millisecond):
+		}
+		select {
+		case <-stderrDone:
+		case <-time.After(100 * time.Millisecond):
+		}
+	case <-ctx.Done():
+		terminateValidationProcess(cmd)
+		runErr = <-waitCh
+	}
+	// The candidate may have created children after it reported its version.
+	// Tear down the containment group/job on both success and failure.
+	terminateValidationProcess(cmd)
+	_ = stdoutReader.Close()
+	_ = stderrReader.Close()
+	<-stdoutDone
+	<-stderrDone
+	releaseValidationProcess(cmd)
+	if runErr != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("--version timed out: %w", ctx.Err())
+		}
+		return fmt.Errorf("--version failed: %w", runErr)
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("--version timed out: %w", ctx.Err())
+	}
+	fields := strings.Fields(string(stdout.Bytes()))
+	if len(fields) < 2 || fields[0] != "fetch" || fields[1] == "" {
+		return fmt.Errorf("--version reported an unexpected program identity")
+	}
+	return nil
+}
+
+func drainValidationOutput(r io.Reader, dst *core.BoundedBuffer) {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			_, _ = dst.Write(buf[:n])
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 type Asset struct {
@@ -675,20 +827,6 @@ func isVersionTag(s string) bool {
 	return dots == 2
 }
 
-// randomString returns a random string of lower-case letters of length "n".
-func randomString(n int) string {
-	var sb strings.Builder
-	sb.Grow(n)
-
-	const letters = "abcdefghijklmnopqrstuvwxyz"
-	for range n {
-		b := letters[rand.IntN(len(letters))]
-		sb.WriteByte(b)
-	}
-
-	return sb.String()
-}
-
 // getUpdateURL returns the URL to use to obtain the latest fetch version info.
 // If the FETCH_INTERNAL_UPDATE_URL environment variable is set, it uses that
 // value.
@@ -697,41 +835,6 @@ func getUpdateURL() string {
 		return env
 	}
 	return "https://api.github.com"
-}
-
-// createTempFilePath returns a path name in the format:
-// "{dir}/.fetch.{16_rand_letters}{suffix}"
-func createTempFilePath(dir, suffix string) string {
-	name := ".fetch." + randomString(16) + suffix
-	return filepath.Join(dir, name)
-}
-
-// copyFile copies the data from dst to src, creating the destination file with
-// the same file mode if necessary.
-func copyFile(dst, src string) error {
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	info, err := srcFile.Stat()
-	if err != nil {
-		return err
-	}
-
-	dstFile, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode())
-	if err != nil {
-		return err
-	}
-	defer dstFile.Close()
-
-	_, err = io.Copy(dstFile, srcFile)
-	if err != nil {
-		return err
-	}
-
-	return dstFile.Sync()
 }
 
 type metadata struct {
@@ -821,6 +924,13 @@ func updateLastAttemptTime(dir string, now time.Time) error {
 }
 
 func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool, silent bool) (func(), error) {
+	if block {
+		// Explicit updates may wait, but never indefinitely. Automatic updates
+		// use block=false and remain nonblocking.
+		lockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		ctx = lockCtx
+	}
 	path := filepath.Join(dir, ".update-lock")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
@@ -852,6 +962,9 @@ func acquireLock(ctx context.Context, p *core.Printer, dir string, block bool, s
 		select {
 		case <-ctx.Done():
 			f.Close()
+			if block {
+				return nil, fmt.Errorf("timed out waiting for update lock: %w", ctx.Err())
+			}
 			return nil, ctx.Err()
 		case <-time.After(mult * 50 * time.Millisecond):
 		}
