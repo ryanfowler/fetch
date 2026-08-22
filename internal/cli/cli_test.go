@@ -698,7 +698,14 @@ func TestFromCurlDataFileClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
+	closer, ok := app.Data.(io.Closer)
+	if !ok {
+		t.Fatalf("Data type = %T, want an io.Closer", app.Data)
+	}
 	body, _ := io.ReadAll(app.Data)
+	if err := closer.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 	got := string(body)
 	if got != "file content" {
 		t.Fatalf("body = %q, want %q", got, "file content")
