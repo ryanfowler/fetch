@@ -24,12 +24,25 @@ fetch ws://echo.websocket.events -j '{"type": "subscribe", "channel": "updates"}
 
 ### Piped Input
 
-Pipe lines from stdin — each line is sent as a separate text message:
+Pipe lines from stdin — each line is sent as a separate text message. Empty lines are preserved, and both LF and CRLF endings are accepted:
 
 ```sh
 echo "hello" | fetch ws://echo.websocket.events
 printf "msg1\nmsg2\n" | fetch ws://echo.websocket.events
 ```
+
+Use `--ws-message-mode` to select the message type:
+
+```sh
+# Auto-detect the initial payload; piped input remains line-delimited text
+fetch --ws-message-mode auto ws://api.example.com/ws -d "hello"
+# Require UTF-8 text for the initial payload and piped input
+fetch --ws-message-mode text ws://api.example.com/ws
+# Stream stdin as bounded binary WebSocket messages, preserving newlines
+cat payload.bin | fetch --ws-message-mode binary ws://api.example.com/ws
+```
+
+The initial payload and each text line are limited to 16 MiB. Binary stdin uses bounded reusable chunks. After stdin reaches EOF, receiving continues until the peer closes or the operation is canceled.
 
 When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Use Ctrl+C or Ctrl+D to exit.
 
@@ -92,7 +105,7 @@ fetch -H "Sec-WebSocket-Protocol: graphql-ws" wss://api.example.com/graphql
 
 ## Timeout
 
-The `--timeout` flag applies to the WebSocket handshake only. The connection stays open until the server closes or stdin EOF:
+The `--timeout` flag applies to the WebSocket handshake only. The connection stays open until the server closes or the operation is canceled:
 
 ```sh
 fetch --timeout 5 ws://api.example.com/ws
@@ -102,5 +115,6 @@ fetch --timeout 5 ws://api.example.com/ws
 
 - WebSocket requires HTTP/1.1 for the upgrade handshake. Using `--http 3` with WebSocket is not supported.
 - WebSocket (`ws://` / `wss://`) cannot be combined with `--grpc`, `--form`, `--multipart`, `--xml`, `--edit`, output-file/clipboard flags, or retry flags.
+- Incoming WebSocket messages are limited to 16 MiB.
 - Binary message content is not displayed; only a size indicator is shown.
 - The pager is disabled for WebSocket output.

@@ -36,17 +36,21 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	// Prepare the initial message from -d or -j flags. It is sent after the
 	// handshake and is not part of the signed WebSocket upgrade request.
 	var initialMsg []byte
+	var initialReader io.Reader
+	var initialMsgSet bool
 	var dryRunBody *body.Body
-	if req.Body != nil {
+	if source, ok := body.SourceFromContext(req.Context()); ok {
+		initialMsgSet = true
 		if r.DryRun {
-			dryRunBody, _ = body.SourceFromContext(req.Context())
-		} else {
-			var err error
-			initialMsg, err = io.ReadAll(req.Body)
-			req.Body.Close()
-			if err != nil {
-				return 1, err
-			}
+			dryRunBody = source
+		}
+	}
+	if req.Body != nil {
+		if !r.DryRun {
+			// Keep the body unopened until after the WebSocket handshake. This
+			// is important for -d @- and other one-shot sources: connecting
+			// must not wait for stdin or consume it before the peer accepts.
+			initialReader = req.Body
 		}
 		req.Body = http.NoBody
 		req.GetBody = nil
@@ -84,6 +88,10 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		}
 		errPrinter.Flush()
 		if r.DryRun {
+			errPrinter.WriteString("WebSocket message mode: ")
+			errPrinter.WriteString(r.WSMessageMode.String())
+			errPrinter.WriteString("\n")
+			errPrinter.Flush()
 			if dryRunBody != nil {
 				if r.Verbosity < core.VExtraVerbose {
 					errPrinter.WriteString("\n")
@@ -167,6 +175,9 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 		Format:        r.Format,
 		Verbosity:     r.Verbosity,
 		InitialMsg:    initialMsg,
+		InitialMsgSet: initialMsgSet,
+		InitialReader: initialReader,
+		MessageMode:   r.WSMessageMode,
 		IsInteractive: interactive,
 	}
 

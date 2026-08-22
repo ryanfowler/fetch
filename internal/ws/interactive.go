@@ -41,7 +41,7 @@ func runInteractive(ctx context.Context, cfg Config) error {
 	if rows < minRows {
 		// Terminal too small; fall back to read-only.
 		t.restore()
-		if err := sendInitialMessage(ctx, cfg); err != nil {
+		if err := sendInitialMessage(ctx, &cfg); err != nil {
 			return err
 		}
 		return readLoop(ctx, cfg)
@@ -113,12 +113,17 @@ func runInteractive(ctx context.Context, cfg Config) error {
 	go t.watchResize(ctx, resizeCh)
 
 	// Send initial message from -d / -j flag.
-	if err := sendInitialMessage(ctx, cfg); err != nil {
+	if err := sendInitialMessage(ctx, &cfg); err != nil {
 		im.teardownScreen()
 		return err
 	}
-	if len(cfg.InitialMsg) > 0 {
-		im.renderSentMessage(cfg.InitialMsg)
+	if cfg.InitialMsgSet {
+		typ, _ := initialMessageType(cfg.MessageMode, cfg.InitialMsg)
+		if typ == websocket.MessageBinary {
+			im.renderSentBinaryIndicator(len(cfg.InitialMsg))
+		} else {
+			im.renderSentMessage(cfg.InitialMsg)
+		}
 	}
 
 	for {
@@ -316,7 +321,7 @@ func (im *interactiveMode) replayMessagesLocked() {
 		if msg.data != nil {
 			im.writeMessageLocked(msg.arrow, msg.data)
 		} else {
-			im.writeBinaryLocked(msg.binN)
+			im.writeBinaryLocked(msg.arrow, msg.binN)
 		}
 	}
 }
@@ -447,16 +452,24 @@ func (im *interactiveMode) renderMessage(arrow string, data []byte) {
 	im.drawInputLineLocked()
 }
 
-// renderBinaryIndicator displays a binary message indicator.
+// renderBinaryIndicator displays a received binary message indicator.
 func (im *interactiveMode) renderBinaryIndicator(n int) {
+	im.renderBinaryIndicatorWithArrow("←", n)
+}
+
+func (im *interactiveMode) renderSentBinaryIndicator(n int) {
+	im.renderBinaryIndicatorWithArrow("→", n)
+}
+
+func (im *interactiveMode) renderBinaryIndicatorWithArrow(arrow string, n int) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 
-	im.messages = append(im.messages, messageEntry{binN: n})
+	im.messages = append(im.messages, messageEntry{arrow: arrow, binN: n})
 	if len(im.messages) > maxMessages {
 		im.messages = im.messages[len(im.messages)-maxMessages:]
 	}
-	im.writeBinaryLocked(n)
+	im.writeBinaryLocked(arrow, n)
 	im.drawInputLineLocked()
 }
 
@@ -477,9 +490,12 @@ func (im *interactiveMode) writeMessageLocked(arrow string, data []byte) {
 	im.writeMessageSpacer()
 }
 
-func (im *interactiveMode) writeBinaryLocked(n int) {
+func (im *interactiveMode) writeBinaryLocked(arrow string, n int) {
+	if arrow == "" {
+		arrow = "←"
+	}
 	im.writePhysicalLine()
-	fmt.Fprintf(os.Stdout, "\x1b[2m← [binary %d bytes]\x1b[0m", n)
+	fmt.Fprintf(os.Stdout, "\x1b[2m%s [binary %d bytes]\x1b[0m", arrow, n)
 	im.writeMessageSpacer()
 }
 
@@ -638,8 +654,14 @@ func (im *interactiveMode) handleInput(ctx context.Context, buf []byte) []byte {
 				continue
 			}
 			im.mu.Lock()
-			im.editor.insert(r)
-			im.drawInputLineLocked()
+			if int64(im.editor.byteLen)+int64(utf8.RuneLen(r)) > core.MaxWebSocketInteractiveEntry {
+				im.editor.limitReached = true
+				im.status = "message exceeds 16 MiB limit"
+				im.drawStatusLocked()
+			} else {
+				im.editor.insert(r)
+				im.drawInputLineLocked()
+			}
 			im.mu.Unlock()
 			i += size
 			continue
@@ -714,9 +736,16 @@ func (im *interactiveMode) handleEscape(buf []byte) int {
 	return 0
 }
 
-// sendMessage sends the current editor contents as a WebSocket text message.
+// sendMessage sends the current editor contents using the configured message
+// mode. Interactive input is always valid UTF-8 because it comes from runes.
 func (im *interactiveMode) sendMessage(ctx context.Context) {
 	im.mu.Lock()
+	if im.editor.limitReached {
+		im.status = "message exceeds 16 MiB limit"
+		im.drawStatusLocked()
+		im.mu.Unlock()
+		return
+	}
 	text := im.editor.submit()
 	im.drawInputLineLocked()
 	im.mu.Unlock()
@@ -726,7 +755,17 @@ func (im *interactiveMode) sendMessage(ctx context.Context) {
 	}
 
 	data := []byte(text)
-	err := im.cfg.Conn.Write(ctx, websocket.MessageText, data)
+	typ, typeErr := initialMessageType(im.cfg.MessageMode, data)
+	if typeErr != nil {
+		im.mu.Lock()
+		im.status = "send failed: " + typeErr.Error()
+		im.editor.setText(text)
+		im.drawStatusLocked()
+		im.drawInputLineLocked()
+		im.mu.Unlock()
+		return
+	}
+	err := im.cfg.Conn.Write(ctx, typ, data)
 	if err != nil {
 		// Restore the text so the user doesn't lose their input.
 		im.mu.Lock()
@@ -741,5 +780,9 @@ func (im *interactiveMode) sendMessage(ctx context.Context) {
 	im.status = fmt.Sprintf("sent %d bytes", len(data))
 	im.drawStatusLocked()
 	im.mu.Unlock()
-	im.renderSentMessage(data)
+	if typ == websocket.MessageBinary {
+		im.renderSentBinaryIndicator(len(data))
+	} else {
+		im.renderSentMessage(data)
+	}
 }

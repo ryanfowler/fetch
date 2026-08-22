@@ -1,11 +1,13 @@
 package ws
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +214,153 @@ type errReader struct {
 
 func (r errReader) Read([]byte) (int, error) {
 	return 0, r.err
+}
+
+func TestInitialMessageMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    core.WSMessageMode
+		data    []byte
+		want    websocket.MessageType
+		wantErr bool
+	}{
+		{name: "auto text", mode: core.WSMessageAuto, data: []byte("hello"), want: websocket.MessageText},
+		{name: "auto binary", mode: core.WSMessageAuto, data: []byte{0xff}, want: websocket.MessageBinary},
+		{name: "forced text", mode: core.WSMessageText, data: []byte("hello"), want: websocket.MessageText},
+		{name: "forced text rejects invalid UTF-8", mode: core.WSMessageText, data: []byte{0xff}, wantErr: true},
+		{name: "forced binary", mode: core.WSMessageBinary, data: []byte("hello"), want: websocket.MessageBinary},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := initialMessageType(tt.mode, tt.data)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("initialMessageType() error = %v, want error %v", err, tt.wantErr)
+			}
+			if err == nil && got != tt.want {
+				t.Fatalf("initialMessageType() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReadBoundedLinePreservesEmptyAndCRLF(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("one\n\r\ntwo\r\nfour"))
+	var got []string
+	for {
+		line, ok, err := readBoundedLine(reader, 16)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			break
+		}
+		got = append(got, string(line))
+	}
+	want := []string{"one", "", "two", "four"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("lines = %#v, want %#v", got, want)
+	}
+}
+
+func TestReadBoundedLineRejectsOverflow(t *testing.T) {
+	_, _, err := readBoundedLine(bufio.NewReader(strings.NewReader(strings.Repeat("x", int(core.MaxWebSocketPipedTextLine)+1))), core.MaxWebSocketPipedTextLine)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("error = %v, want limit error", err)
+	}
+}
+
+func TestServerReceivesBinaryPipedInput(t *testing.T) {
+	received := make(chan struct {
+		typ  websocket.MessageType
+		data []byte
+	}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		typ, data, err := conn.Read(r.Context())
+		if err == nil {
+			received <- struct {
+				typ  websocket.MessageType
+				data []byte
+			}{typ, append([]byte(nil), data...)}
+		}
+		conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Conn:        conn,
+		Stdin:       strings.NewReader("a\n\x00b"),
+		MessageMode: core.WSMessageBinary,
+		Stderr:      core.TestPrinter(false),
+		Stdout:      core.TestPrinter(false),
+	}
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-received:
+		if got.typ != websocket.MessageBinary || string(got.data) != "a\n\x00b" {
+			t.Fatalf("received = (%v, %q), want binary payload", got.typ, got.data)
+		}
+	default:
+		t.Fatal("server did not receive binary input")
+	}
+}
+
+func TestServerReceivesEmptyTextLine(t *testing.T) {
+	received := make(chan [][]byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		messages := make([][]byte, 0, 2)
+		for range 2 {
+			_, data, readErr := conn.Read(r.Context())
+			if readErr != nil {
+				return
+			}
+			messages = append(messages, append([]byte(nil), data...))
+		}
+		received <- messages
+		conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		Conn:   conn,
+		Stdin:  strings.NewReader("first\n\n"),
+		Stderr: core.TestPrinter(false),
+		Stdout: core.TestPrinter(false),
+	}
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case messages := <-received:
+		if len(messages) != 2 || string(messages[0]) != "first" || len(messages[1]) != 0 {
+			t.Fatalf("messages = %#v, want first and empty", messages)
+		}
+	default:
+		t.Fatal("server did not receive both text lines")
+	}
 }
 
 func TestServerCloseNormal(t *testing.T) {

@@ -3,8 +3,9 @@ package ws
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
-	"time"
+	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
 
@@ -20,6 +21,9 @@ type Config struct {
 	Format        core.Format
 	Verbosity     core.Verbosity
 	InitialMsg    []byte
+	InitialMsgSet bool
+	InitialReader io.Reader
+	MessageMode   core.WSMessageMode
 	IsInteractive bool
 }
 
@@ -28,15 +32,19 @@ type Config struct {
 // When stdin is nil (no pipe, just -d), it sends any initial message, then
 // reads from the server until close or Ctrl+C.
 //
-// When stdin is provided (piped input), it sends lines concurrently while
+// When stdin is provided (piped input), it sends messages concurrently while
 // reading responses.
 func Run(ctx context.Context, cfg Config) error {
+	// Bound complete incoming WebSocket messages before the library allocates
+	// their payload. This applies to both the terminal and piped paths.
+	cfg.Conn.SetReadLimit(core.MaxWebSocketMessageBytes)
+
 	if cfg.IsInteractive {
 		return runInteractive(ctx, cfg)
 	}
 
 	// Send initial message from -d / -j flag.
-	if err := sendInitialMessage(ctx, cfg); err != nil {
+	if err := sendInitialMessage(ctx, &cfg); err != nil {
 		return err
 	}
 
@@ -49,15 +57,52 @@ func Run(ctx context.Context, cfg Config) error {
 	return readLoop(ctx, cfg)
 }
 
-func sendInitialMessage(ctx context.Context, cfg Config) error {
-	if len(cfg.InitialMsg) == 0 {
+func sendInitialMessage(ctx context.Context, cfg *Config) error {
+	if !cfg.InitialMsgSet && len(cfg.InitialMsg) == 0 && cfg.InitialReader == nil {
 		return nil
 	}
-	err := cfg.Conn.Write(ctx, websocket.MessageText, cfg.InitialMsg)
-	if err != nil && !errors.Is(err, context.Canceled) {
+
+	if cfg.InitialReader != nil {
+		data, err := core.ReadAllLimited(cfg.InitialReader, core.MaxWebSocketMessageBytes, "WebSocket initial message")
+		if closer, ok := cfg.InitialReader.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if err != nil {
+			return err
+		}
+		cfg.InitialMsg = data
+		cfg.InitialReader = nil
+		cfg.InitialMsgSet = true
+	}
+
+	typ, err := initialMessageType(cfg.MessageMode, cfg.InitialMsg)
+	if err != nil {
 		return err
 	}
+	if err := cfg.Conn.Write(ctx, typ, cfg.InitialMsg); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return fmt.Errorf("write initial WebSocket message: %w", err)
+	}
 	return nil
+}
+
+func initialMessageType(mode core.WSMessageMode, data []byte) (websocket.MessageType, error) {
+	switch mode {
+	case core.WSMessageText:
+		if !utf8.Valid(data) {
+			return 0, errors.New("initial WebSocket message is not valid UTF-8")
+		}
+		return websocket.MessageText, nil
+	case core.WSMessageBinary:
+		return websocket.MessageBinary, nil
+	default:
+		if utf8.Valid(data) {
+			return websocket.MessageText, nil
+		}
+		return websocket.MessageBinary, nil
+	}
 }
 
 // runBidirectional handles the case where we have both stdin and server
@@ -93,17 +138,10 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 			return err
 		}
 
-		// Piped stdin EOF. Give the server a brief window to send
-		// remaining messages (e.g. echo responses), then shut down.
-		drainCtx, drainCancel := context.WithTimeout(ctx, 2*time.Second)
-		defer drainCancel()
-
-		select {
-		case err := <-readDone:
-			return err
-		case <-drainCtx.Done():
-			cancel()
-			return nil
-		}
+		// Piped input is finished, but the receive side remains active until
+		// the peer closes or the caller cancels the operation. This preserves
+		// delayed responses instead of discarding them after an arbitrary
+		// drain window.
+		return <-readDone
 	}
 }
