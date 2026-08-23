@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"net"
 	"net/url"
 	"testing"
@@ -8,6 +9,43 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/resolver"
 )
+
+func TestAutomaticPrepareRaceClosesUnselectedResults(t *testing.T) {
+	race := newAutomaticPrepareRace(context.Background())
+	winnerClosed := 0
+	loserClosed := 0
+	winner := race.result("tcp")
+	winner.cleanup = &automaticPrepareCleanup{fn: func() { winnerClosed++ }}
+	loser := race.result("h3")
+	loser.cleanup = &automaticPrepareCleanup{fn: func() { loserClosed++ }}
+
+	race.send(winner)
+	got := <-race.results
+	race.send(loser) // The loser is buffered before the outcome is recorded.
+	race.selectResult(got)
+	race.finish()
+
+	if winnerClosed != 0 {
+		t.Fatalf("selected result closed %d times, want 0", winnerClosed)
+	}
+	if loserClosed != 1 {
+		t.Fatalf("buffered loser closed %d times, want 1", loserClosed)
+	}
+}
+
+func TestAutomaticPrepareRaceClosesLateResult(t *testing.T) {
+	race := newAutomaticPrepareRace(context.Background())
+	closed := 0
+	late := race.result("tcp")
+	late.cleanup = &automaticPrepareCleanup{fn: func() { closed++ }}
+
+	race.finish()
+	race.send(late)
+
+	if closed != 1 {
+		t.Fatalf("late result closed %d times, want 1", closed)
+	}
+}
 
 func TestSplitAltSvc(t *testing.T) {
 	values := splitAltSvc(`h3=":443"; ma=60, h3-29="edge.example:8443";ma="2", h2=":443", clear`)

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -508,6 +509,103 @@ type preparedAutomaticConnection struct {
 	echCandidates []resolver.ServiceCandidate
 }
 
+type automaticPrepareResult struct {
+	id            int64
+	kind          string
+	tcp           net.Conn
+	h3            *quic.Conn
+	packet        net.PacketConn
+	candidate     automaticH3Candidate
+	candidates    []automaticH3Candidate
+	tcpAddrs      []net.IPAddr
+	tcpPort       string
+	echCandidates []resolver.ServiceCandidate
+	timing        DialTiming
+	err           error
+	cleanup       *automaticPrepareCleanup
+}
+
+type automaticPrepareCleanup struct {
+	once sync.Once
+	fn   func()
+}
+
+func (c *automaticPrepareCleanup) close() {
+	if c != nil {
+		c.once.Do(c.fn)
+	}
+}
+
+type automaticPrepareRace struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	results chan automaticPrepareResult
+	nextID  atomic.Int64
+	winner  atomic.Int64
+}
+
+func newAutomaticPrepareRace(parent context.Context) *automaticPrepareRace {
+	ctx, cancel := context.WithCancel(parent)
+	r := &automaticPrepareRace{
+		ctx:     ctx,
+		cancel:  cancel,
+		results: make(chan automaticPrepareResult, automaticH3CacheLimit+4),
+	}
+	r.winner.Store(-1)
+	return r
+}
+
+func (r *automaticPrepareRace) result(kind string) automaticPrepareResult {
+	return automaticPrepareResult{id: r.nextID.Add(1), kind: kind}
+}
+
+func (r *automaticPrepareRace) send(got automaticPrepareResult) {
+	select {
+	case r.results <- got:
+		// Cancellation and a buffered send can both be ready. Check the race
+		// outcome after the send so a late successful loser closes itself.
+		if winner := r.winner.Load(); winner != -1 && winner != got.id {
+			got.cleanup.close()
+		}
+	case <-r.ctx.Done():
+		got.cleanup.close()
+	}
+}
+
+func (r *automaticPrepareRace) selectResult(got automaticPrepareResult) {
+	r.winner.Store(got.id)
+}
+
+func (r *automaticPrepareRace) finish() {
+	r.winner.CompareAndSwap(-1, -2)
+	r.cancel()
+	winner := r.winner.Load()
+	for {
+		select {
+		case got := <-r.results:
+			if got.id != winner {
+				got.cleanup.close()
+			}
+		default:
+			return
+		}
+	}
+}
+
+func closeAutomaticH3Result(conn *quic.Conn, packet net.PacketConn) *automaticPrepareCleanup {
+	if conn == nil && packet == nil {
+		return nil
+	}
+	return &automaticPrepareCleanup{fn: func() {
+		if conn != nil {
+			_ = conn.CloseWithError(0, "HTTP/3 race cancelled")
+		}
+		if packet != nil {
+			_ = packet.Close()
+		}
+	}}
+}
+
 func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, key string) (preparedAutomaticConnection, error) {
 	if t == nil || t.resolver == nil || t.dialer == nil {
 		return preparedAutomaticConnection{}, errors.New("automatic HTTP/3 transport is not initialized")
@@ -515,22 +613,9 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 	connectCtx, cancel := connectContext(ctx, t.connectLimit, "automatic HTTP/3 connection")
 	defer cancel()
 
-	type result struct {
-		kind          string
-		tcp           net.Conn
-		h3            *quic.Conn
-		packet        net.PacketConn
-		candidate     automaticH3Candidate
-		candidates    []automaticH3Candidate
-		tcpAddrs      []net.IPAddr
-		tcpPort       string
-		echCandidates []resolver.ServiceCandidate
-		timing        DialTiming
-		err           error
-	}
-	results := make(chan result, automaticH3CacheLimit+4)
-	raceCtx, stop := context.WithCancel(connectCtx)
-	defer stop()
+	race := newAutomaticPrepareRace(connectCtx)
+	defer race.finish()
+	raceCtx := race.ctx
 	innerCtx := WithoutDialTimingSelector(raceCtx)
 	selectTiming := func(timing DialTiming) {
 		if selector := dialTimingSelector(ctx); selector != nil {
@@ -539,9 +624,11 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 	}
 
 	go func() {
+		result := race.result("tcp")
 		endpoint, err := t.resolver.ResolveAddress(raceCtx, "tcp", net.JoinHostPort(origin.Hostname(), originPort(origin)))
 		if err != nil {
-			results <- result{kind: "tcp", err: err}
+			result.err = err
+			race.send(result)
 			return
 		}
 		cfg := t.tlsConfig.Clone()
@@ -558,28 +645,29 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 			Timeout:    t.connectLimit,
 		})
 		if err != nil {
-			results <- result{kind: "tcp", err: err}
+			result.err = err
+			race.send(result)
 			return
 		}
-		select {
-		case results <- result{kind: "tcp", tcp: got.Conn, tcpAddrs: endpoint.Addrs, tcpPort: originPort(origin), timing: got.Timing}:
-		case <-raceCtx.Done():
-			_ = got.Conn.Close()
-		}
+		result.tcp = got.Conn
+		result.tcpAddrs = endpoint.Addrs
+		result.tcpPort = originPort(origin)
+		result.timing = got.Timing
+		result.cleanup = &automaticPrepareCleanup{fn: func() { _ = got.Conn.Close() }}
+		race.send(result)
 	}()
 
 	// Loading persistent candidates is deliberately outside the request
 	// goroutine. It races normal TCP and fresh discovery instead of making
 	// cache I/O part of the connection hot path.
 	go func() {
-		cached := t.cache.get(key, time.Now())
-		select {
-		case results <- result{kind: "cached", candidates: cached}:
-		case <-raceCtx.Done():
-		}
+		result := race.result("cached")
+		result.candidates = t.cache.get(key, time.Now())
+		race.send(result)
 	}()
 
 	go func() {
+		result := race.result("discovery")
 		discovery, err := t.resolver.DiscoverHTTPS(raceCtx, origin.Hostname(), uint16(parsePort(originPort(origin))), nil)
 		if err != nil {
 			kind := resolver.DiscoveryFailure(err)
@@ -588,7 +676,8 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 				// replacement of the DNS RRset, not a transient failure.
 				t.cache.replaceDNS(key, nil)
 			}
-			results <- result{kind: "discovery", err: err}
+			result.err = err
+			race.send(result)
 			return
 		}
 		values := make([]automaticH3Candidate, 0, len(discovery.Candidates))
@@ -614,19 +703,21 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 		// A successful fresh RRset replaces old DNS candidates, including an
 		// authenticated NODATA result represented by an empty list.
 		t.cache.replaceDNS(key, values)
-		results <- result{kind: "discovery", candidates: values, echCandidates: echCandidates}
+		result.candidates = values
+		result.echCandidates = echCandidates
+		race.send(result)
 	}()
 
 	pending := 3 // TCP, persistent-cache load, and discovery.
 	var lastErr error
-	var tcpPending result
+	var tcpPending automaticPrepareResult
 	var haveTCP bool
 	discoveryDone := false
 	var discoveredECH []resolver.ServiceCandidate
 	echEnabled := t.ech != core.ECHUnknown && t.ech != core.ECHOff
 	for pending > 0 {
 		select {
-		case got := <-results:
+		case got := <-race.results:
 			pending--
 			switch got.kind {
 			case "cached":
@@ -639,23 +730,21 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 					candidate := candidate
 					pending++
 					go func() {
+						result := race.result("h3")
 						got, packet, timing, err := t.dialH3(innerCtx, origin, candidate)
-						select {
-						case results <- result{kind: "h3", h3: got, packet: packet, candidate: candidate, timing: timing, err: err}:
-						case <-raceCtx.Done():
-							if got != nil {
-								_ = got.CloseWithError(0, "HTTP/3 race cancelled")
-							}
-							if packet != nil {
-								_ = packet.Close()
-							}
-						}
+						result.h3 = got
+						result.packet = packet
+						result.candidate = candidate
+						result.timing = timing
+						result.err = err
+						result.cleanup = closeAutomaticH3Result(got, packet)
+						race.send(result)
 					}()
 				}
 			case "tcp":
 				if got.err == nil && got.tcp != nil && echEnabled && discoveryDone {
 					if len(discoveredECH) > 0 {
-						_ = got.tcp.Close()
+						got.cleanup.close()
 						conn, dialErr := t.dialAutomaticECHTCP(raceCtx, origin, got.tcpAddrs, got.tcpPort, discoveredECH)
 						if dialErr != nil {
 							return preparedAutomaticConnection{}, dialErr
@@ -663,10 +752,11 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 						return preparedAutomaticConnection{tcp: conn, echCandidates: cloneServiceCandidates(discoveredECH)}, nil
 					}
 					if t.ech == core.ECHOn {
-						_ = got.tcp.Close()
+						got.cleanup.close()
 						return preparedAutomaticConnection{}, ErrECHConfigUnavailable
 					}
 					selectTiming(got.timing)
+					race.selectResult(got)
 					return preparedAutomaticConnection{tcp: got.tcp}, nil
 				}
 				if got.err == nil && got.tcp != nil && echEnabled && !discoveryDone {
@@ -679,21 +769,18 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 				}
 				if got.err == nil && got.tcp != nil {
 					selectTiming(got.timing)
+					race.selectResult(got)
 					return preparedAutomaticConnection{tcp: got.tcp}, nil
 				}
 				lastErr = got.err
 			case "h3":
 				if t.ech == core.ECHOn {
-					if got.h3 != nil {
-						_ = got.h3.CloseWithError(0, "ECH=on requires TCP")
-					}
-					if got.packet != nil {
-						_ = got.packet.Close()
-					}
+					got.cleanup.close()
 					continue
 				}
 				if got.err == nil && got.h3 != nil {
 					selectTiming(got.timing)
+					race.selectResult(got)
 					return preparedAutomaticConnection{h3: got.h3, packet: got.packet, candidate: got.candidate}, nil
 				}
 				lastErr = got.err
@@ -706,24 +793,25 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 				if got.err != nil {
 					if !resolver.MayDowngrade(got.err) {
 						if haveTCP {
-							_ = tcpPending.tcp.Close()
+							tcpPending.cleanup.close()
 						}
 						return preparedAutomaticConnection{}, got.err
 					}
 					lastErr = got.err
 					if echEnabled && haveTCP {
 						if t.ech == core.ECHOn {
-							_ = tcpPending.tcp.Close()
+							tcpPending.cleanup.close()
 							return preparedAutomaticConnection{}, ErrECHConfigUnavailable
 						}
 						selectTiming(tcpPending.timing)
+						race.selectResult(tcpPending)
 						return preparedAutomaticConnection{tcp: tcpPending.tcp}, nil
 					}
 					continue
 				}
 				if echEnabled && haveTCP {
 					if len(got.echCandidates) > 0 {
-						_ = tcpPending.tcp.Close()
+						tcpPending.cleanup.close()
 						conn, dialErr := t.dialAutomaticECHTCP(raceCtx, origin, tcpPending.tcpAddrs, tcpPending.tcpPort, got.echCandidates)
 						if dialErr != nil {
 							return preparedAutomaticConnection{}, dialErr
@@ -731,10 +819,11 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 						return preparedAutomaticConnection{tcp: conn, echCandidates: cloneServiceCandidates(got.echCandidates)}, nil
 					}
 					if t.ech == core.ECHOn {
-						_ = tcpPending.tcp.Close()
+						tcpPending.cleanup.close()
 						return preparedAutomaticConnection{}, ErrECHConfigUnavailable
 					}
 					selectTiming(tcpPending.timing)
+					race.selectResult(tcpPending)
 					return preparedAutomaticConnection{tcp: tcpPending.tcp}, nil
 				}
 				if t.ech == core.ECHOn {
@@ -744,6 +833,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 					candidate := candidate
 					pending++
 					go func() {
+						result := race.result("h3")
 						// Fresh DNS candidates get a small opportunity to win over
 						// an older Alt-Svc candidate without waiting for discovery.
 						timer := time.NewTimer(cachedH3Grace)
@@ -759,16 +849,13 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 							return
 						}
 						got, packet, timing, dialErr := t.dialH3(innerCtx, origin, candidate)
-						select {
-						case results <- result{kind: "h3", h3: got, packet: packet, candidate: candidate, timing: timing, err: dialErr}:
-						case <-raceCtx.Done():
-							if got != nil {
-								_ = got.CloseWithError(0, "HTTP/3 race cancelled")
-							}
-							if packet != nil {
-								_ = packet.Close()
-							}
-						}
+						result.h3 = got
+						result.packet = packet
+						result.candidate = candidate
+						result.timing = timing
+						result.err = dialErr
+						result.cleanup = closeAutomaticH3Result(got, packet)
+						race.send(result)
 					}()
 				}
 			}
