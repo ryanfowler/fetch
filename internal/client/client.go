@@ -1654,6 +1654,10 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	if c.c.Jar != nil {
 		req = withOriginCookies(req, c.c.Jar)
 	}
+	// Preserve credential provenance from the caller's context before the
+	// initial observer can replace it. The redirect security state survives
+	// context replacement and must retain markers for unclassified headers.
+	mergeCredentialHeaders(initialSecurity, req)
 	if observer := requestObserver(req.Context()); observer != nil {
 		observer(req)
 	}

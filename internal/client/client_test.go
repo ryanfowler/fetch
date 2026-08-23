@@ -795,6 +795,40 @@ func TestRedirectCredentialHeaderProvenanceAndClassification(t *testing.T) {
 	}
 }
 
+func TestInitialObserverContextReplacementPreservesCredentialProvenance(t *testing.T) {
+	var got http.Header
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Account-Value", "origin-secret")
+	req = req.WithContext(WithCredentialHeaders(req.Context(), "X-Account-Value"))
+	req = req.WithContext(WithRequestObserver(req.Context(), func(next *http.Request) {
+		if next.Response == nil {
+			*next = *next.WithContext(context.Background())
+		}
+	}))
+
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got.Get("X-Account-Value") != "" {
+		t.Fatalf("unclassified credential header = %q, want empty", got.Get("X-Account-Value"))
+	}
+}
+
 func TestNewRequestMarksCompoundCredentialHeaderProvenance(t *testing.T) {
 	client := NewClient(ClientConfig{})
 	defer client.Close()
