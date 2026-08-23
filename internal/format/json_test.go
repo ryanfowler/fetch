@@ -112,6 +112,11 @@ func TestEscapeJSONString(t *testing.T) {
 			input: "\x01\x02\x03",
 			want:  `\u0001\u0002\u0003`,
 		},
+		{
+			name:  "C1 control character",
+			input: "\u0085",
+			want:  `\u0085`,
+		},
 	}
 
 	for _, tt := range tests {

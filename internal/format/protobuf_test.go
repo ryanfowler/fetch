@@ -334,6 +334,11 @@ func TestWriteProtobufString(t *testing.T) {
 			input: "hello\rworld",
 			want:  `"hello\rworld"`,
 		},
+		{
+			name:  "with C1 control",
+			input: "hello\u0085world",
+			want:  `"hello\u0085world"`,
+		},
 	}
 
 	for _, tt := range tests {

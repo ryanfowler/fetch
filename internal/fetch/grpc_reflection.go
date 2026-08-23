@@ -683,7 +683,7 @@ func discoverGRPC(ctx context.Context, r *Request) (int, error) {
 			}
 		}
 		for _, name := range names {
-			p.WriteString(name)
+			p.WriteStringUntrusted(name)
 			p.WriteString("\n")
 		}
 		if err := p.Flush(); err != nil && core.IsBrokenPipe(err) {
@@ -1014,52 +1014,52 @@ func renderDescribe(p *core.Printer, target *describeTarget) {
 
 func renderServiceDescription(p *core.Printer, svc protoreflect.ServiceDescriptor) {
 	p.WriteString("service ")
-	p.WriteString(string(svc.FullName()))
+	p.WriteStringUntrusted(string(svc.FullName()))
 	p.WriteString("\n")
 	methods := svc.Methods()
 	for i := 0; i < methods.Len(); i++ {
 		method := methods.Get(i)
 		p.WriteString("\n")
-		p.WriteString(string(method.Name()))
+		p.WriteStringUntrusted(string(method.Name()))
 		p.WriteString("\n")
 		p.WriteString("  rpc: ")
 		p.WriteString(rpcType(method))
 		p.WriteString("\n")
 		p.WriteString("  request: ")
-		p.WriteString(string(method.Input().FullName()))
+		p.WriteStringUntrusted(string(method.Input().FullName()))
 		p.WriteString("\n")
 		p.WriteString("  response: ")
-		p.WriteString(string(method.Output().FullName()))
+		p.WriteStringUntrusted(string(method.Output().FullName()))
 		p.WriteString("\n")
 	}
 }
 
 func renderMethodDescription(p *core.Printer, method protoreflect.MethodDescriptor) {
 	p.WriteString("method ")
-	p.WriteString(string(method.Parent().FullName()))
+	p.WriteStringUntrusted(string(method.Parent().FullName()))
 	p.WriteString("/")
-	p.WriteString(string(method.Name()))
+	p.WriteStringUntrusted(string(method.Name()))
 	p.WriteString("\n")
 	p.WriteString("rpc: ")
 	p.WriteString(rpcType(method))
 	p.WriteString("\n")
 	p.WriteString("request: ")
-	p.WriteString(string(method.Input().FullName()))
+	p.WriteStringUntrusted(string(method.Input().FullName()))
 	p.WriteString("\n")
 	p.WriteString("response: ")
-	p.WriteString(string(method.Output().FullName()))
+	p.WriteStringUntrusted(string(method.Output().FullName()))
 	p.WriteString("\n")
 }
 
 func renderMessageDescription(p *core.Printer, msg protoreflect.MessageDescriptor) {
 	p.WriteString("message ")
-	p.WriteString(string(msg.FullName()))
+	p.WriteStringUntrusted(string(msg.FullName()))
 	p.WriteString("\n")
 	fields := msg.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		field := fields.Get(i)
 		p.WriteString("\n")
-		p.WriteString(fmt.Sprintf("%d  %s  %s  %s", field.Number(), field.Name(), fieldLabel(field), fieldType(field)))
+		p.WriteStringUntrusted(fmt.Sprintf("%d  %s  %s  %s", field.Number(), field.Name(), fieldLabel(field), fieldType(field)))
 		p.WriteString("\n")
 	}
 }

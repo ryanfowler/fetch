@@ -301,7 +301,7 @@ func writeProtobufString(p protobufOutput, s string) {
 		case '\\':
 			p.WriteString(`\\`)
 		default:
-			if c < 0x20 || c == 0x7f {
+			if c < 0x20 || (c >= 0x7f && c <= 0x9f) {
 				p.WriteString(fmt.Sprintf("\\u%04x", c))
 			} else {
 				p.WriteRune(c)

@@ -712,7 +712,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 		}
 		contentType = format.SniffContentType(prefix)
 		if contentType == format.TypeUnknown || (contentType == format.TypeImage && r.Image == core.ImageOff) {
-			return newReaderWithCloser(io.MultiReader(bytes.NewReader(prefix), resp.Body), resp.Body), nil
+			return newUntrustedResponseReader(newReaderWithCloser(io.MultiReader(bytes.NewReader(prefix), resp.Body), resp.Body)), nil
 		}
 	}
 
@@ -726,7 +726,7 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 	}
 	if len(buf) > maxBodyBytes {
 		// We've read past the in-memory formatting limit, skip formatting.
-		return newReaderWithCloser(io.MultiReader(bytes.NewReader(buf), resp.Body), resp.Body), nil
+		return newUntrustedResponseReader(newReaderWithCloser(io.MultiReader(bytes.NewReader(buf), resp.Body), resp.Body)), nil
 	}
 
 	// Transcode non-UTF-8 text to UTF-8, skipping binary formats.
@@ -745,6 +745,8 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 			return format.FormatProtobufWithDescriptor(buf, r.responseDescriptor, out)
 		}); err == nil {
 			buf = formatted
+		} else {
+			return newUntrustedResponseReader(bytes.NewReader(buf)), nil
 		}
 		return bytes.NewReader(buf), nil
 	}
@@ -752,15 +754,22 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 	// Dispatch registered buffered formatters through a bounded private printer.
 	// This keeps the output limit at the response boundary instead of requiring
 	// every formatter to implement the same buffering policy.
+	formattedResponse := false
 	if fn := format.GetBuffered(contentType); fn != nil {
 		if formatted, err := formatWithBoundedOutput(p, "formatted response", func(out *core.Printer) error {
 			return fn(buf, out)
 		}); err == nil {
 			buf = formatted
+			formattedResponse = true
+		} else {
+			return newUntrustedResponseReader(bytes.NewReader(buf)), nil
 		}
 	}
 
-	return bytes.NewReader(buf), nil
+	if formattedResponse {
+		return bytes.NewReader(buf), nil
+	}
+	return newUntrustedResponseReader(bytes.NewReader(buf)), nil
 }
 
 func rejectHAROutputPath(r *Request, output string) error {
@@ -888,6 +897,14 @@ func streamToStdoutWithPagerContent(ctx context.Context, r io.Reader, p *core.Pr
 	}
 	imageOutput := isImageContentType(contentType)
 
+	// Buffered formatting fallbacks are still untrusted response data. Escape
+	// terminal controls before sending them to a terminal, but leave explicit
+	// raw output and formatted ANSI output unchanged.
+	sanitizeTerminal := false
+	if _, ok := r.(interface{ untrustedResponse() }); ok && core.IsStdoutTerm && !forceOutput && !imageOutput {
+		sanitizeTerminal = true
+	}
+
 	// A terminal must not receive a response chunk until that chunk has
 	// passed the binary classifier. The guard continues checking later chunks,
 	// so a binary response cannot hide behind an initial text prefix.
@@ -914,6 +931,9 @@ func streamToStdoutWithPagerContent(ctx context.Context, r io.Reader, p *core.Pr
 		}
 
 		r = newReaderWithCloser(io.MultiReader(bytes.NewReader(first[:n]), guard), guard)
+		if sanitizeTerminal {
+			r = newTerminalSafeReader(r)
+		}
 		err = pager.StreamContext(ctx, r, pagerMode, core.IsStdoutTerm, imageOutput, os.Stdout)
 		stopClosing()
 		if err != nil {

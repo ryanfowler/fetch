@@ -40,6 +40,14 @@ func formatCSV(buf []byte, p *core.Printer) error {
 		return nil
 	}
 
+	// Measure the text that will be displayed. Terminal escaping expands
+	// control characters and must be included in alignment calculations.
+	for i, row := range records {
+		for j, cell := range row {
+			records[i][j] = core.TerminalSafeText(cell)
+		}
+	}
+
 	// Calculate column widths
 	colWidths := calculateColumnWidths(records)
 	totalWidth := calculateTotalWidth(colWidths)
@@ -142,7 +150,7 @@ func writeRow(p *core.Printer, row []string, colWidths []int, isHeader bool) {
 			p.Set(core.Green)
 		}
 
-		p.WriteString(cell)
+		p.WriteStringUntrusted(cell)
 		p.Reset()
 
 		// Add padding for alignment (except for the last column)
@@ -193,13 +201,13 @@ func writeVertical(p *core.Printer, records [][]string) error {
 			// Header in blue+bold
 			p.Set(core.Blue)
 			p.Set(core.Bold)
-			p.WriteString(header)
+			p.WriteStringUntrusted(header)
 			p.Reset()
 			p.WriteString(": ")
 
 			// Value in green
 			p.Set(core.Green)
-			p.WriteString(cell)
+			p.WriteStringUntrusted(cell)
 			p.Reset()
 			p.WriteString("\n")
 		}

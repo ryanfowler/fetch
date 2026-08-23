@@ -20,6 +20,25 @@ func TestTerminalSafeText(t *testing.T) {
 	}
 }
 
+func TestPrinterWriteUntrustedEscapesTerminalControls(t *testing.T) {
+	p := TestPrinter(false)
+	if _, err := p.WriteStringUntrusted("title\x1b]0;pwned\x07\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(p.Bytes()), `title\x1b]0;pwned\x07
+`; got != want {
+		t.Fatalf("untrusted output = %q, want %q", got, want)
+	}
+
+	p = TestPrinter(false)
+	if _, err := p.WriteUntrusted([]byte("bad\xff")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(p.Bytes()), `bad\xff`; got != want {
+		t.Fatalf("untrusted bytes = %q, want %q", got, want)
+	}
+}
+
 func TestTerminalSafeTextCommonCaseDoesNotAllocate(t *testing.T) {
 	input := "ordinary diagnostic text with UTF-8: café\n"
 	allocs := testing.AllocsPerRun(100, func() {

@@ -41,7 +41,7 @@ func FormatEventStream(r io.Reader, p *core.Printer) error {
 func writeEventStreamType(t string, p *core.Printer) error {
 	p.WriteString("[")
 	p.Set(core.Bold)
-	p.WriteString(t)
+	p.WriteStringUntrusted(t)
 	p.Reset()
 	p.WriteString("]\n")
 	return p.Flush()
@@ -59,7 +59,7 @@ func writeEventStreamData(d string, p *core.Printer) error {
 	}
 
 	p.Discard()
-	p.WriteString(d)
+	p.WriteStringUntrusted(d)
 	p.WriteString("\n")
 	return p.Flush()
 }

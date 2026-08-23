@@ -38,37 +38,37 @@ func writeYAMLToken(p *core.Printer, tok *token.Token) {
 		if isYAMLKey(tok) {
 			p.Set(core.Blue)
 			p.Set(core.Bold)
-			p.WriteString(tok.Origin)
+			p.WriteStringUntrusted(tok.Origin)
 			p.Reset()
 		} else {
 			p.Set(core.Green)
-			p.WriteString(tok.Origin)
+			p.WriteStringUntrusted(tok.Origin)
 			p.Reset()
 		}
 
 	case token.MergeKeyType:
 		p.Set(core.Blue)
 		p.Set(core.Bold)
-		p.WriteString(tok.Origin)
+		p.WriteStringUntrusted(tok.Origin)
 		p.Reset()
 
 	case token.CommentType:
 		p.Set(core.Dim)
-		p.WriteString(tok.Origin)
+		p.WriteStringUntrusted(tok.Origin)
 		p.Reset()
 
 	case token.TagType, token.AnchorType, token.AliasType, token.DirectiveType:
 		p.Set(core.Cyan)
-		p.WriteString(tok.Origin)
+		p.WriteStringUntrusted(tok.Origin)
 		p.Reset()
 
 	case token.DocumentHeaderType, token.DocumentEndType:
 		p.Set(core.Dim)
-		p.WriteString(tok.Origin)
+		p.WriteStringUntrusted(tok.Origin)
 		p.Reset()
 
 	default:
-		p.WriteString(tok.Origin)
+		p.WriteStringUntrusted(tok.Origin)
 	}
 }
 

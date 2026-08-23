@@ -285,7 +285,7 @@ func formatHTML(buf []byte, w *core.Printer) error {
 							}
 							// Fallback to raw output on error.
 							w.Set(core.Green)
-							w.Write(text)
+							w.WriteUntrusted(text)
 							w.Reset()
 						}
 					}
@@ -294,7 +294,7 @@ func formatHTML(buf []byte, w *core.Printer) error {
 				} else {
 					// Preserve content exactly (script tags, etc.).
 					w.Set(core.Green)
-					w.Write(text)
+					w.WriteUntrusted(text)
 					w.Reset()
 				}
 			} else {
@@ -337,13 +337,13 @@ func formatHTML(buf []byte, w *core.Printer) error {
 func writeHTMLTagName(p *core.Printer, s string) {
 	p.Set(core.Bold)
 	p.Set(core.Blue)
-	p.WriteString(s)
+	p.WriteStringUntrusted(s)
 	p.Reset()
 }
 
 func writeHTMLAttrName(p *core.Printer, s string) {
 	p.Set(core.Cyan)
-	p.WriteString(s)
+	p.WriteStringUntrusted(s)
 	p.Reset()
 }
 
@@ -355,20 +355,20 @@ func writeHTMLAttrVal(p *core.Printer, s string) {
 
 func writeHTMLText(p *core.Printer, t []byte) {
 	p.Set(core.Green)
-	p.Write(t)
+	p.WriteUntrusted(t)
 	p.Reset()
 }
 
 func writeHTMLDoctype(p *core.Printer, t html.Token) {
 	p.Set(core.Cyan)
 	p.WriteString("DOCTYPE ")
-	p.WriteString(t.Data)
+	p.WriteStringUntrusted(t.Data)
 	p.Reset()
 }
 
 func writeHTMLComment(p *core.Printer, s string) {
 	p.Set(core.Dim)
-	p.WriteString(s)
+	p.WriteStringUntrusted(s)
 	p.Reset()
 }
 
@@ -410,9 +410,9 @@ func escapeHTMLAttrValue(p *core.Printer, s string) {
 		default:
 			continue
 		}
-		p.WriteString(s[last:i])
+		p.WriteStringUntrusted(s[last:i])
 		p.WriteString(esc)
 		last = i + 1
 	}
-	p.WriteString(s[last:])
+	p.WriteStringUntrusted(s[last:])
 }
