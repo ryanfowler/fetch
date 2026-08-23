@@ -93,6 +93,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		TLSMin:     cfg.TLSMin,
 		TLSMax:     cfg.TLSMax,
 	})
+	defer res.Close()
 
 	// Resolve host:port.
 	host := cfg.URL.Hostname()

@@ -458,7 +458,10 @@ func NewClient(cfg ClientConfig) *Client {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, network, address)
 		}
-		initErr = res.SetRoundTripper(dohTransport)
+		if setErr := res.SetOwnedRoundTripper(dohTransport); setErr != nil {
+			_ = dohTransport.Close()
+			initErr = setErr
+		}
 	}
 	if cfg.HTTP == core.HTTP3 && cfg.Proxy != nil {
 		initErr = errors.New("HTTP/3 cannot be used with a proxy")

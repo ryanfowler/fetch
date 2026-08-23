@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1835,6 +1836,128 @@ func TestCloseClosesResolverDOHConnections(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Client.Close did not release the resolver's DoH connection")
 	}
+}
+
+func TestNewClientCloseClosesOwnedUnifiedProxyDOHTransport(t *testing.T) {
+	doh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-json")
+		if r.URL.Query().Get("type") == "AAAA" {
+			_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":28,"data":"::1"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"data":"127.0.0.1"}]}`)
+	}))
+	defer doh.Close()
+
+	proxyListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyClosed := make(chan struct{}, 1)
+	go serveOneSOCKS5Connection(proxyListener, proxyClosed)
+	defer proxyListener.Close()
+
+	dohURL, err := url.Parse(doh.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL := &url.URL{Scheme: "socks5h", Host: proxyListener.Addr().String()}
+	c := NewClient(ClientConfig{DNSServer: dohURL, Proxy: proxyURL, HTTP: core.HTTP1})
+	if _, err := c.resolver.LookupIPAddr(context.Background(), "example.com"); err != nil {
+		_ = c.Close()
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-proxyClosed:
+	case <-time.After(time.Second):
+		t.Fatal("Client.Close did not close the resolver-owned unified DoH transport")
+	}
+}
+
+func serveOneSOCKS5Connection(listener net.Listener, closed chan<- struct{}) {
+	conn, err := listener.Accept()
+	if err != nil {
+		return
+	}
+	defer func() {
+		_ = conn.Close()
+		select {
+		case closed <- struct{}{}:
+		default:
+		}
+	}()
+
+	var greeting [2]byte
+	if _, err := io.ReadFull(conn, greeting[:]); err != nil {
+		return
+	}
+	methods := make([]byte, int(greeting[1]))
+	if _, err := io.ReadFull(conn, methods); err != nil {
+		return
+	}
+	if _, err := conn.Write([]byte{5, 0}); err != nil {
+		return
+	}
+
+	var header [4]byte
+	if _, err := io.ReadFull(conn, header[:]); err != nil || header[0] != 5 || header[1] != 1 {
+		return
+	}
+	var host string
+	switch header[3] {
+	case 1:
+		addr := make([]byte, 4)
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			return
+		}
+		host = net.IP(addr).String()
+	case 3:
+		var length [1]byte
+		if _, err := io.ReadFull(conn, length[:]); err != nil {
+			return
+		}
+		addr := make([]byte, int(length[0]))
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			return
+		}
+		host = string(addr)
+	case 4:
+		addr := make([]byte, 16)
+		if _, err := io.ReadFull(conn, addr); err != nil {
+			return
+		}
+		host = net.IP(addr).String()
+	default:
+		return
+	}
+	var portBytes [2]byte
+	if _, err := io.ReadFull(conn, portBytes[:]); err != nil {
+		return
+	}
+	port := int(portBytes[0])<<8 | int(portBytes[1])
+	target, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		_, _ = conn.Write([]byte{5, 5, 0, 1, 0, 0, 0, 0, 0, 0})
+		return
+	}
+	defer target.Close()
+	if _, err := conn.Write([]byte{5, 0, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
+		return
+	}
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(target, conn); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(conn, target); done <- struct{}{} }()
+	<-done
+	_ = conn.Close()
+	_ = target.Close()
 }
 
 func TestDecodeResponseBodyClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
