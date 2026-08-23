@@ -682,6 +682,47 @@ func TestRedirectCrossOriginStripsCredentialsAndHost(t *testing.T) {
 	}
 }
 
+func TestCrossOriginRedirectsKeepSharedTransport(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	c := NewClient(ClientConfig{})
+	defer c.Close()
+	transport := c.HTTPClient().Transport
+
+	const requests = 32
+	errs := make(chan error, requests)
+	var wg sync.WaitGroup
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := c.HTTPClient().Get(source.URL + "/start")
+			if err == nil {
+				err = resp.Body.Close()
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := c.HTTPClient().Transport; got != transport {
+		t.Fatalf("transport changed across redirects: got %T %p, want %T %p", got, got, transport, transport)
+	}
+}
+
 func TestRedirectBodylessMethodSurvivesLaterRedirect(t *testing.T) {
 	var gotMethod string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

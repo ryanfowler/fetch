@@ -354,29 +354,6 @@ func NewClient(cfg ClientConfig) *Client {
 		// origin boundary.
 		applyRedirectCredentialPolicy(req, via)
 
-		// A redirect can change the TLS, resolver, proxy, or ECH scope. Rebuild
-		// the transport before a cross-origin request so those settings are
-		// evaluated for the destination rather than retained from the source.
-		if len(via) > 0 && via[len(via)-1].URL != nil && req.URL != nil &&
-			!SameOrigin(via[len(via)-1].URL, req.URL) {
-			rebuilt := NewClient(cfg)
-			if rebuilt.initErr != nil {
-				return rebuilt.initErr
-			}
-			wrappedRedirectCredentials := false
-			if _, ok := client.Transport.(*redirectCredentialTransport); ok {
-				wrappedRedirectCredentials = true
-			}
-			if closer, ok := client.Transport.(interface{ CloseIdleConnections() }); ok {
-				closer.CloseIdleConnections()
-			}
-			client.Transport = rebuilt.c.Transport
-			if wrappedRedirectCredentials {
-				client.Transport = &redirectCredentialTransport{base: client.Transport}
-			}
-			res = rebuilt.resolver
-		}
-
 		// Call request observers after redirect normalization and credential
 		// filtering. At this point net/http has already created the replay body
 		// for the new request.
