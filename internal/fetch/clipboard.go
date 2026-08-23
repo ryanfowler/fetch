@@ -2,10 +2,13 @@ package fetch
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os/exec"
 	"runtime"
+	"time"
 
 	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/core"
@@ -48,6 +51,8 @@ type clipboardCopier struct {
 	buf    *limitedBuffer
 	silent bool
 }
+
+const clipboardCommandTimeout = 5 * time.Second
 
 // newClipboardCopier sets up clipboard copying for the response. If copying
 // is not enabled or not possible, it returns nil and resp is left unchanged.
@@ -97,7 +102,7 @@ func (cc *clipboardCopier) setBytes(data []byte) {
 
 // finish copies the captured bytes to the system clipboard. It writes a
 // warning to stderr on failure but never returns an error.
-func (cc *clipboardCopier) finish(p *core.Printer) {
+func (cc *clipboardCopier) finish(ctx context.Context, p *core.Printer) {
 	if cc == nil {
 		return
 	}
@@ -105,7 +110,7 @@ func (cc *clipboardCopier) finish(p *core.Printer) {
 		core.WriteWarningMsgIf(p, "--copy: response body too large to copy to clipboard", cc.silent)
 		return
 	}
-	if err := copyToClipboard(cc.cmd, cc.buf.buf.Bytes()); err != nil {
+	if err := copyToClipboard(ctx, cc.cmd, cc.buf.buf.Bytes()); err != nil {
 		core.WriteWarningMsgIf(p, "unable to copy to clipboard: "+err.Error(), cc.silent)
 	}
 }
@@ -142,10 +147,23 @@ func findClipboard() *clipboardCmd {
 	return nil
 }
 
-func copyToClipboard(clip *clipboardCmd, data []byte) error {
-	cmd := exec.Command(clip.path, clip.args...)
+func copyToClipboard(ctx context.Context, clip *clipboardCmd, data []byte) error {
+	return copyToClipboardWithTimeout(ctx, clip, data, clipboardCommandTimeout)
+}
+
+func copyToClipboardWithTimeout(ctx context.Context, clip *clipboardCmd, data []byte, timeout time.Duration) error {
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(commandCtx, clip.path, clip.args...)
 	cmd.Stdin = bytes.NewReader(data)
 	if err := cmd.Run(); err != nil {
+		if ctxErr := commandCtx.Err(); ctxErr != nil {
+			if errors.Is(ctxErr, context.DeadlineExceeded) && ctx.Err() == nil {
+				return fmt.Errorf("clipboard command timed out after %s", timeout)
+			}
+			return fmt.Errorf("clipboard command canceled: %w", ctxErr)
+		}
 		return fmt.Errorf("clipboard command failed: %w", err)
 	}
 	return nil

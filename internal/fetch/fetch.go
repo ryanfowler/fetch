@@ -632,7 +632,7 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 	}
 
 	// Copy captured bytes to clipboard.
-	cc.finish(r.PrinterHandle.Stderr())
+	cc.finish(ctx, r.PrinterHandle.Stderr())
 
 	// Render timing waterfall after body is fully consumed.
 	if r.Timing && bodyTimer != nil {
