@@ -12,10 +12,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var validationJobs sync.Map // map[*exec.Cmd]windows.Handle
-var validationResumeProcess = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtResumeProcess")
+var probeJobs sync.Map // map[*exec.Cmd]windows.Handle
+var probeResumeProcess = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtResumeProcess")
 
-func configureValidationProcess(cmd *exec.Cmd) error {
+func configureProbeProcess(cmd *exec.Cmd) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
@@ -28,14 +28,14 @@ func configureValidationProcess(cmd *exec.Cmd) error {
 		_ = windows.CloseHandle(job)
 		return fmt.Errorf("configure validation job: %w", err)
 	}
-	validationJobs.Store(cmd, job)
+	probeJobs.Store(cmd, job)
 	return nil
 }
 
-func attachValidationProcess(cmd *exec.Cmd) error {
-	value, ok := validationJobs.Load(cmd)
+func attachProbeProcess(cmd *exec.Cmd) error {
+	value, ok := probeJobs.Load(cmd)
 	if !ok {
-		return fmt.Errorf("validation job is unavailable")
+		return fmt.Errorf("probe job is unavailable")
 	}
 	job := value.(windows.Handle)
 	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.PROCESS_SUSPEND_RESUME, false, uint32(cmd.Process.Pid))
@@ -44,19 +44,19 @@ func attachValidationProcess(cmd *exec.Cmd) error {
 	}
 	defer windows.CloseHandle(process)
 	if err := windows.AssignProcessToJobObject(job, process); err != nil {
-		return fmt.Errorf("attach validation process: %w", err)
+		return fmt.Errorf("attach probe process: %w", err)
 	}
-	if status, _, callErr := validationResumeProcess.Call(uintptr(process)); status != 0 {
+	if status, _, callErr := probeResumeProcess.Call(uintptr(process)); status != 0 {
 		if callErr != nil {
-			return fmt.Errorf("resume validation process: %w", callErr)
+			return fmt.Errorf("resume probe process: %w", callErr)
 		}
-		return fmt.Errorf("resume validation process: NTSTATUS 0x%x", status)
+		return fmt.Errorf("resume probe process: NTSTATUS 0x%x", status)
 	}
 	return nil
 }
 
-func terminateValidationProcess(cmd *exec.Cmd) {
-	if value, ok := validationJobs.Load(cmd); ok {
+func terminateProbeProcess(cmd *exec.Cmd) {
+	if value, ok := probeJobs.Load(cmd); ok {
 		_ = windows.TerminateJobObject(value.(windows.Handle), 1)
 	}
 	if cmd.Process != nil {
@@ -64,8 +64,8 @@ func terminateValidationProcess(cmd *exec.Cmd) {
 	}
 }
 
-func releaseValidationProcess(cmd *exec.Cmd) {
-	if value, ok := validationJobs.LoadAndDelete(cmd); ok {
+func releaseProbeProcess(cmd *exec.Cmd) {
+	if value, ok := probeJobs.LoadAndDelete(cmd); ok {
 		_ = windows.CloseHandle(value.(windows.Handle))
 	}
 }

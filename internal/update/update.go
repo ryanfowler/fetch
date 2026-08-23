@@ -318,15 +318,7 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 }
 
 func getExeVersion(ctx context.Context, path string) (string, error) {
-	var buf strings.Builder
-	cmd := exec.CommandContext(ctx, path, "--version")
-	cmd.Stdout = &buf
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-
-	_, version, _ := strings.Cut(buf.String(), " ")
-	return strings.TrimSpace(version), nil
+	return probeExecutableVersion(ctx, path)
 }
 
 // validateStagedExecutable checks the candidate before it can replace the
@@ -346,39 +338,52 @@ func validateStagedExecutable(parent context.Context, path string) error {
 	if err := os.Chmod(path, 0755); err != nil {
 		return err
 	}
+	_, err = probeExecutableVersion(parent, path)
+	return err
+}
 
-	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+const (
+	executableProbeTimeout     = 5 * time.Second
+	executableProbeOutputLimit = 4 << 10
+)
+
+// probeExecutableVersion runs an executable's --version command in a bounded,
+// contained process environment. It is used for both the current executable
+// and update candidates, so neither preflight path can hang or retain
+// unbounded output from an untrusted binary.
+func probeExecutableVersion(parent context.Context, path string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, executableProbeTimeout)
 	defer cancel()
-	stdout := core.NewBoundedBuffer(4<<10, "staged executable output")
-	stderr := core.NewBoundedBuffer(4<<10, "staged executable error output")
+	stdout := core.NewBoundedBuffer(executableProbeOutputLimit, "executable output")
+	stderr := core.NewBoundedBuffer(executableProbeOutputLimit, "executable error output")
 	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
-		return err
+		return "", err
 	}
 	stderrReader, stderrWriter, err := os.Pipe()
 	if err != nil {
 		_ = stdoutReader.Close()
 		_ = stdoutWriter.Close()
-		return err
+		return "", err
 	}
 	cmd := exec.Command(path, "--version")
 	cmd.Stdin = nil
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrWriter
-	if err := configureValidationProcess(cmd); err != nil {
+	if err := configureProbeProcess(cmd); err != nil {
 		_ = stdoutReader.Close()
 		_ = stdoutWriter.Close()
 		_ = stderrReader.Close()
 		_ = stderrWriter.Close()
-		return err
+		return "", err
 	}
 	if err := cmd.Start(); err != nil {
-		releaseValidationProcess(cmd)
+		releaseProbeProcess(cmd)
 		_ = stdoutReader.Close()
 		_ = stdoutWriter.Close()
 		_ = stderrReader.Close()
 		_ = stderrWriter.Close()
-		return fmt.Errorf("start --version: %w", err)
+		return "", fmt.Errorf("start --version: %w", err)
 	}
 	// os/exec does not copy output when *os.File values are supplied. Close
 	// the parent write ends immediately so descendants cannot keep the updater
@@ -386,19 +391,29 @@ func validateStagedExecutable(parent context.Context, path string) error {
 	_ = stdoutWriter.Close()
 	_ = stderrWriter.Close()
 	stdoutDone := make(chan struct{})
+	stdoutErrCh := make(chan error, 1)
 	stderrDone := make(chan struct{})
-	go func() { drainValidationOutput(stdoutReader, stdout); close(stdoutDone) }()
-	go func() { drainValidationOutput(stderrReader, stderr); close(stderrDone) }()
+	stderrErrCh := make(chan error, 1)
+	go func() {
+		stdoutErrCh <- drainProbeOutput(stdoutReader, stdout)
+		close(stdoutDone)
+	}()
+	go func() {
+		stderrErrCh <- drainProbeOutput(stderrReader, stderr)
+		close(stderrDone)
+	}()
 
-	if err := attachValidationProcess(cmd); err != nil {
-		terminateValidationProcess(cmd)
+	if err := attachProbeProcess(cmd); err != nil {
+		terminateProbeProcess(cmd)
 		_ = cmd.Wait()
 		_ = stdoutReader.Close()
 		_ = stderrReader.Close()
 		<-stdoutDone
 		<-stderrDone
-		releaseValidationProcess(cmd)
-		return err
+		<-stdoutErrCh
+		<-stderrErrCh
+		releaseProbeProcess(cmd)
+		return "", err
 	}
 	waitCh := make(chan error, 1)
 	go func() { waitCh <- cmd.Wait() }()
@@ -416,42 +431,51 @@ func validateStagedExecutable(parent context.Context, path string) error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	case <-ctx.Done():
-		terminateValidationProcess(cmd)
+		terminateProbeProcess(cmd)
 		runErr = <-waitCh
 	}
 	// The candidate may have created children after it reported its version.
 	// Tear down the containment group/job on both success and failure.
-	terminateValidationProcess(cmd)
+	terminateProbeProcess(cmd)
 	_ = stdoutReader.Close()
 	_ = stderrReader.Close()
-	<-stdoutDone
-	<-stderrDone
-	releaseValidationProcess(cmd)
+	stdoutErr := <-stdoutErrCh
+	stderrErr := <-stderrErrCh
+	releaseProbeProcess(cmd)
 	if runErr != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("--version timed out: %w", ctx.Err())
+			return "", fmt.Errorf("--version timed out: %w", ctx.Err())
 		}
-		return fmt.Errorf("--version failed: %w", runErr)
+		return "", fmt.Errorf("--version failed: %w", runErr)
 	}
 	if ctx.Err() != nil {
-		return fmt.Errorf("--version timed out: %w", ctx.Err())
+		return "", fmt.Errorf("--version timed out: %w", ctx.Err())
+	}
+	if stdoutErr != nil {
+		return "", fmt.Errorf("--version output exceeded limit: %w", stdoutErr)
+	}
+	if stderrErr != nil {
+		return "", fmt.Errorf("--version error output exceeded limit: %w", stderrErr)
 	}
 	fields := strings.Fields(string(stdout.Bytes()))
-	if len(fields) < 2 || fields[0] != "fetch" || fields[1] == "" {
-		return fmt.Errorf("--version reported an unexpected program identity")
+	if len(fields) != 2 || fields[0] != "fetch" || fields[1] == "" {
+		return "", fmt.Errorf("--version reported an unexpected program identity")
 	}
-	return nil
+	return fields[1], nil
 }
 
-func drainValidationOutput(r io.Reader, dst *core.BoundedBuffer) {
+func drainProbeOutput(r io.Reader, dst *core.BoundedBuffer) error {
 	buf := make([]byte, 32<<10)
+	var writeErr error
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			_, _ = dst.Write(buf[:n])
+			if _, dstErr := dst.Write(buf[:n]); dstErr != nil && writeErr == nil {
+				writeErr = dstErr
+			}
 		}
 		if err != nil {
-			return
+			return writeErr
 		}
 	}
 }
