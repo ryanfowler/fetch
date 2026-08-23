@@ -129,6 +129,7 @@ func TestEchoRoundTrip(t *testing.T) {
 func TestPipedStdinDrainsMessagesBeforeClose(t *testing.T) {
 	ready := make(chan struct{})
 	pingSeen := make(chan struct{})
+	serverClose := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 			OnPingReceived: func(context.Context, []byte) bool {
@@ -152,10 +153,13 @@ func TestPipedStdinDrainsMessagesBeforeClose(t *testing.T) {
 			}
 		}
 		close(ready)
-		// Keep a reader active so the client's ping can complete. This
-		// makes the drain barrier observable instead of relying on timing.
+		// Keep a reader active so the drain ping can complete. Send the
+		// responses first, then use a second ping/pong exchange as an
+		// explicit barrier proving the client processed those responses.
+		controlDone := make(chan error, 1)
 		go func() {
-			_, _, _ = conn.Read(r.Context())
+			_, _, err := conn.Read(r.Context())
+			controlDone <- err
 		}()
 		select {
 		case <-pingSeen:
@@ -167,7 +171,10 @@ func TestPipedStdinDrainsMessagesBeforeClose(t *testing.T) {
 				return
 			}
 		}
-		_ = conn.Close(websocket.StatusNormalClosure, "done")
+		if err := conn.Ping(r.Context()); err != nil {
+			return
+		}
+		serverClose <- <-controlDone
 	}))
 	defer server.Close()
 
@@ -195,13 +202,22 @@ func TestPipedStdinDrainsMessagesBeforeClose(t *testing.T) {
 		t.Fatal("server did not receive piped messages")
 	}
 	select {
-	case <-pingSeen:
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("client did not finish after draining piped messages")
+	}
+	select {
+	case err := <-serverClose:
+		if websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+			t.Fatalf("server close error = %v, want normal close", err)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("client did not drain messages with a WebSocket ping")
+		t.Fatal("server did not receive the normal close handshake")
 	}
-	if err := <-runDone; err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+
 	if got := string(stdout.Bytes()); got != "line1\nline2\n" {
 		t.Fatalf("stdout = %q, want both echoed messages", got)
 	}

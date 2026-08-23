@@ -163,38 +163,37 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 
 			// Drain messages sent before EOF before starting the close
 			// handshake. coder/websocket documents that Conn.Close discards
-			// data frames received during its handshake, so use a ping as a
-			// barrier: the reader must process all earlier frames before it
-			// can observe the pong.
-			drainCtx, cancelDrain := context.WithTimeout(ctx, time.Second)
-			pingErr := cfg.Conn.Ping(drainCtx)
+			// data frames received during its handshake. A ping gives the
+			// peer a protocol-level chance to flush earlier responses, and
+			// the reader remains active for the bounded drain interval after
+			// the pong. If the peer does not answer the ping, use the close
+			// handshake as the fallback.
+			drainDeadline := time.Now().Add(time.Second)
+			drainCtx, cancelDrain := context.WithDeadline(ctx, drainDeadline)
+			// A failed ping does not mean that in-flight data is absent. The
+			// reader still gets the remainder of the same bounded drain window.
+			_ = cfg.Conn.Ping(drainCtx)
 			cancelDrain()
-			if pingErr != nil {
-				// A peer can close while the barrier ping is in flight. Give
-				// the reader priority; otherwise use the bounded fallback
-				// delay before starting a close that may discard data.
+			if remaining := time.Until(drainDeadline); remaining > 0 {
+				drainTimer := time.NewTimer(remaining)
 				select {
 				case err := <-readDone:
+					drainTimer.Stop()
 					cancel()
+					_ = cfg.Conn.CloseNow()
 					if ctx.Err() != nil {
 						return contextTerminationError(ctx)
 					}
 					return err
 				case <-ctx.Done():
+					if !drainTimer.Stop() {
+						<-drainTimer.C
+					}
 					cancel()
 					_ = cfg.Conn.CloseNow()
 					return contextTerminationError(ctx)
-				case <-time.After(localCloseDrainDelay):
+				case <-drainTimer.C:
 				}
-			}
-			select {
-			case err := <-readDone:
-				cancel()
-				if ctx.Err() != nil {
-					return contextTerminationError(ctx)
-				}
-				return err
-			default:
 			}
 			if ctx.Err() != nil {
 				cancel()
@@ -229,8 +228,11 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 						cancel()
 						return nil
 					case <-ctx.Done():
+						// Conn.Close has no cancellation mechanism and owns the
+						// connection once started. Wait for it instead of calling
+						// CloseNow concurrently, which would block on the same close.
 						cancel()
-						_ = cfg.Conn.CloseNow()
+						<-closeDone
 						return contextTerminationError(ctx)
 					}
 				case closeErr := <-closeDone:
@@ -252,13 +254,15 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 						return normalizeCloseError(closeErr)
 					case <-ctx.Done():
 						cancel()
-						_ = cfg.Conn.CloseNow()
 						return contextTerminationError(ctx)
 					}
 				case <-ctx.Done():
 					closeInput(cfg.Stdin)
+					// Conn.Close has no cancellation mechanism and owns the
+					// connection once started. Wait for it instead of calling
+					// CloseNow concurrently, which would block on the same close.
 					cancel()
-					_ = cfg.Conn.CloseNow()
+					<-closeDone
 					return contextTerminationError(ctx)
 				}
 			}
