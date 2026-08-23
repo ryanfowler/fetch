@@ -519,15 +519,16 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 		defer func() {
 			timings := har.Timings{TransferSize: -1}
 			if metrics != nil {
-				timings.DNS = metrics.dnsDur
-				timings.Connect = metrics.tcpDur
-				timings.TLS = metrics.tlsDur
-				timings.Wait = metrics.ttfbDur
-				timings.RemoteIP = metrics.remoteIP
-				timings.DNSKnown = !metrics.dnsStart.IsZero()
-				timings.ConnectKnown = !metrics.tcpStart.IsZero()
-				timings.TLSKnown = !metrics.tlsStart.IsZero()
-				timings.WaitKnown = !metrics.ttfbStart.IsZero()
+				t := metrics.snapshot()
+				timings.DNS = t.dnsDur
+				timings.Connect = t.tcpDur
+				timings.TLS = t.tlsDur
+				timings.Wait = t.ttfbDur
+				timings.RemoteIP = t.remoteIP
+				timings.DNSKnown = !t.dnsStart.IsZero()
+				timings.ConnectKnown = !t.tcpStart.IsZero()
+				timings.TLSKnown = !t.tlsStart.IsZero()
+				timings.WaitKnown = !t.ttfbStart.IsZero()
 			}
 			if bodyTimer != nil {
 				timings.Receive = bodyTimer.wallTime()

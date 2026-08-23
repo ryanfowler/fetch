@@ -95,7 +95,8 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 			}
 			var trace *httptrace.ClientTrace
 			trace, metrics = newDebugTrace(p)
-			attemptReq = attemptReq.WithContext(httptrace.WithClientTrace(attemptReq.Context(), trace))
+			traceCtx := httptrace.WithClientTrace(attemptReq.Context(), trace)
+			attemptReq = attemptReq.WithContext(client.WithDialTimingSelector(traceCtx, metrics))
 		}
 
 		if r.Verbosity >= core.VVerbose {

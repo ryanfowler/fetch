@@ -66,20 +66,21 @@ type phase struct {
 // A phase is included if its start time is non-zero, even when its
 // measured duration rounds to 0.
 func buildPhases(m *connectionMetrics, body *timedReader) []phase {
+	t := m.snapshot()
 	var phases []phase
-	if !m.reused {
-		if !m.dnsStart.IsZero() {
-			phases = append(phases, phase{"DNS", core.Cyan, m.dnsDur})
+	if !t.reused {
+		if !t.dnsStart.IsZero() {
+			phases = append(phases, phase{"DNS", core.Cyan, t.dnsDur})
 		}
-		if !m.tcpStart.IsZero() {
-			phases = append(phases, phase{"TCP", core.Green, m.tcpDur})
+		if !t.tcpStart.IsZero() {
+			phases = append(phases, phase{"TCP", core.Green, t.tcpDur})
 		}
-		if !m.tlsStart.IsZero() {
-			phases = append(phases, phase{"TLS", core.Yellow, m.tlsDur})
+		if !t.tlsStart.IsZero() {
+			phases = append(phases, phase{"TLS", core.Yellow, t.tlsDur})
 		}
 	}
-	if !m.ttfbStart.IsZero() {
-		phases = append(phases, phase{"TTFB", core.Magenta, m.ttfbDur})
+	if !t.ttfbStart.IsZero() {
+		phases = append(phases, phase{"TTFB", core.Magenta, t.ttfbDur})
 	}
 	if body != nil && !body.firstRead.IsZero() {
 		phases = append(phases, phase{"Body", core.Blue, body.wallTime()})

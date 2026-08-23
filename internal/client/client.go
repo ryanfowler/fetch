@@ -641,9 +641,11 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 		type quicResult struct {
 			conn       *quic.Conn
 			packetConn net.PacketConn
+			timing     DialTiming
 		}
 		result, err := resolver.RaceCandidates(ctx, endpoint.Addrs, func(attemptCtx context.Context, ip net.IPAddr) (quicResult, error) {
 			address := core.JoinIPHostPort(ip, strconv.Itoa(port))
+			connectStart := time.Now()
 			if trace != nil && trace.ConnectStart != nil {
 				trace.ConnectStart("udp", address)
 			}
@@ -659,6 +661,7 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 			if config != nil {
 				config = config.Clone()
 			}
+			tlsStart := time.Now()
 			if trace != nil && trace.TLSHandshakeStart != nil {
 				trace.TLSHandshakeStart()
 			}
@@ -672,6 +675,7 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 					dialErr = context.Cause(attemptCtx)
 				}
 			}
+			tlsDone := time.Now()
 			if trace != nil && trace.TLSHandshakeDone != nil {
 				var state tls.ConnectionState
 				if conn != nil && dialErr == nil {
@@ -692,7 +696,19 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 			if trace != nil && trace.ConnectDone != nil {
 				trace.ConnectDone("udp", address, nil)
 			}
-			return quicResult{conn: conn, packetConn: packetConn}, nil
+			connectDone := time.Now()
+			return quicResult{
+				conn:       conn,
+				packetConn: packetConn,
+				timing: DialTiming{
+					ConnectStart:    connectStart,
+					ConnectDone:     connectDone,
+					ConnectDuration: connectDone.Sub(connectStart),
+					TLSStart:        tlsStart,
+					TLSDone:         tlsDone,
+					TLSDuration:     tlsDone.Sub(tlsStart),
+				},
+			}, nil
 		}, func(result quicResult) {
 			if result.conn != nil {
 				_ = result.conn.CloseWithError(0, "QUIC address race lost")
@@ -703,6 +719,9 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 		})
 		if err != nil {
 			return nil, err
+		}
+		if selector := dialTimingSelector(ctx); selector != nil {
+			selector.ConnectionSelected(result.timing)
 		}
 		if trace != nil && trace.GotConn != nil {
 			trace.GotConn(httptrace.GotConnInfo{Conn: traceAddrConn{remote: result.conn.RemoteAddr()}})

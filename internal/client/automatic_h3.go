@@ -525,11 +525,18 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 		tcpAddrs      []net.IPAddr
 		tcpPort       string
 		echCandidates []resolver.ServiceCandidate
+		timing        DialTiming
 		err           error
 	}
 	results := make(chan result, automaticH3CacheLimit+4)
 	raceCtx, stop := context.WithCancel(connectCtx)
 	defer stop()
+	innerCtx := WithoutDialTimingSelector(raceCtx)
+	selectTiming := func(timing DialTiming) {
+		if selector := dialTimingSelector(ctx); selector != nil {
+			selector.ConnectionSelected(timing)
+		}
+	}
 
 	go func() {
 		endpoint, err := t.resolver.ResolveAddress(raceCtx, "tcp", net.JoinHostPort(origin.Hostname(), originPort(origin)))
@@ -539,7 +546,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 		}
 		cfg := t.tlsConfig.Clone()
 		cfg.NextProtos = []string{"h2", "http/1.1"}
-		got, err := t.dialer.Dial(raceCtx, DialRequest{
+		got, err := t.dialer.Dial(innerCtx, DialRequest{
 			Network:    "tcp",
 			Host:       origin.Hostname(),
 			Port:       originPort(origin),
@@ -555,7 +562,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 			return
 		}
 		select {
-		case results <- result{kind: "tcp", tcp: got.Conn, tcpAddrs: endpoint.Addrs, tcpPort: originPort(origin)}:
+		case results <- result{kind: "tcp", tcp: got.Conn, tcpAddrs: endpoint.Addrs, tcpPort: originPort(origin), timing: got.Timing}:
 		case <-raceCtx.Done():
 			_ = got.Conn.Close()
 		}
@@ -632,9 +639,9 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 					candidate := candidate
 					pending++
 					go func() {
-						got, packet, err := t.dialH3(raceCtx, origin, candidate)
+						got, packet, timing, err := t.dialH3(innerCtx, origin, candidate)
 						select {
-						case results <- result{kind: "h3", h3: got, packet: packet, candidate: candidate, err: err}:
+						case results <- result{kind: "h3", h3: got, packet: packet, candidate: candidate, timing: timing, err: err}:
 						case <-raceCtx.Done():
 							if got != nil {
 								_ = got.CloseWithError(0, "HTTP/3 race cancelled")
@@ -659,6 +666,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 						_ = got.tcp.Close()
 						return preparedAutomaticConnection{}, ErrECHConfigUnavailable
 					}
+					selectTiming(got.timing)
 					return preparedAutomaticConnection{tcp: got.tcp}, nil
 				}
 				if got.err == nil && got.tcp != nil && echEnabled && !discoveryDone {
@@ -670,6 +678,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 					continue
 				}
 				if got.err == nil && got.tcp != nil {
+					selectTiming(got.timing)
 					return preparedAutomaticConnection{tcp: got.tcp}, nil
 				}
 				lastErr = got.err
@@ -684,6 +693,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 					continue
 				}
 				if got.err == nil && got.h3 != nil {
+					selectTiming(got.timing)
 					return preparedAutomaticConnection{h3: got.h3, packet: got.packet, candidate: got.candidate}, nil
 				}
 				lastErr = got.err
@@ -706,6 +716,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 							_ = tcpPending.tcp.Close()
 							return preparedAutomaticConnection{}, ErrECHConfigUnavailable
 						}
+						selectTiming(tcpPending.timing)
 						return preparedAutomaticConnection{tcp: tcpPending.tcp}, nil
 					}
 					continue
@@ -723,6 +734,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 						_ = tcpPending.tcp.Close()
 						return preparedAutomaticConnection{}, ErrECHConfigUnavailable
 					}
+					selectTiming(tcpPending.timing)
 					return preparedAutomaticConnection{tcp: tcpPending.tcp}, nil
 				}
 				if t.ech == core.ECHOn {
@@ -746,9 +758,9 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 							}
 							return
 						}
-						got, packet, dialErr := t.dialH3(raceCtx, origin, candidate)
+						got, packet, timing, dialErr := t.dialH3(innerCtx, origin, candidate)
 						select {
-						case results <- result{kind: "h3", h3: got, packet: packet, candidate: candidate, err: dialErr}:
+						case results <- result{kind: "h3", h3: got, packet: packet, candidate: candidate, timing: timing, err: dialErr}:
 						case <-raceCtx.Done():
 							if got != nil {
 								_ = got.CloseWithError(0, "HTTP/3 race cancelled")
@@ -772,12 +784,12 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 	return preparedAutomaticConnection{}, lastErr
 }
 
-func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, candidate automaticH3Candidate) (*quic.Conn, net.PacketConn, error) {
+func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, candidate automaticH3Candidate) (*quic.Conn, net.PacketConn, DialTiming, error) {
 	if candidate.port == 0 || len(candidate.addresses) == 0 {
-		return nil, nil, errors.New("HTTP/3 candidate has no address")
+		return nil, nil, DialTiming{}, errors.New("HTTP/3 candidate has no address")
 	}
 	if t.ech == core.ECHOn && len(candidate.ech) == 0 {
-		return nil, nil, errors.New("ECH is required but the HTTP/3 candidate has no ECH configuration")
+		return nil, nil, DialTiming{}, errors.New("ECH is required but the HTTP/3 candidate has no ECH configuration")
 	}
 	baseTLSConfig := t.tlsConfig.Clone()
 	if len(candidate.ech) > 0 && (t.ech == core.ECHAuto || t.ech == core.ECHOn) {
@@ -786,7 +798,7 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 	} else if t.ech == core.ECHAuto {
 		configList, greaseErr := GenerateGREASEECHConfigList()
 		if greaseErr != nil {
-			return nil, nil, greaseErr
+			return nil, nil, DialTiming{}, greaseErr
 		}
 		baseTLSConfig.MinVersion = tls.VersionTLS13
 		baseTLSConfig.EncryptedClientHelloConfigList = configList
@@ -799,10 +811,12 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 	type result struct {
 		conn   *quic.Conn
 		packet net.PacketConn
+		timing DialTiming
 	}
 	trace := httptrace.ContextClientTrace(ctx)
 	winner, err := resolver.RaceCandidates(ctx, candidate.addresses, func(attemptCtx context.Context, ip net.IPAddr) (result, error) {
 		address := core.JoinIPHostPort(ip, strconv.Itoa(int(candidate.port)))
+		connectStart := time.Now()
 		if trace != nil && trace.ConnectStart != nil {
 			trace.ConnectStart("udp", address)
 		}
@@ -814,6 +828,7 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 			}
 			return result{}, err
 		}
+		tlsStart := time.Now()
 		if trace != nil && trace.TLSHandshakeStart != nil {
 			trace.TLSHandshakeStart()
 		}
@@ -828,6 +843,7 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 				err = context.Cause(attemptCtx)
 			}
 		}
+		tlsDone := time.Now()
 		if trace != nil && trace.TLSHandshakeDone != nil {
 			var state tls.ConnectionState
 			if conn != nil && err == nil {
@@ -848,7 +864,19 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 		if trace != nil && trace.ConnectDone != nil {
 			trace.ConnectDone("udp", address, nil)
 		}
-		return result{conn: conn, packet: packet}, nil
+		connectDone := time.Now()
+		return result{
+			conn:   conn,
+			packet: packet,
+			timing: DialTiming{
+				ConnectStart:    connectStart,
+				ConnectDone:     connectDone,
+				ConnectDuration: connectDone.Sub(connectStart),
+				TLSStart:        tlsStart,
+				TLSDone:         tlsDone,
+				TLSDuration:     tlsDone.Sub(tlsStart),
+			},
+		}, nil
 	}, func(loser result) {
 		if loser.conn != nil {
 			_ = loser.conn.CloseWithError(0, "HTTP/3 address race lost")
@@ -858,12 +886,15 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 		}
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, DialTiming{}, err
+	}
+	if selector := dialTimingSelector(ctx); selector != nil {
+		selector.ConnectionSelected(winner.timing)
 	}
 	if trace != nil && trace.GotConn != nil {
 		trace.GotConn(httptrace.GotConnInfo{Conn: traceAddrConn{remote: winner.conn.RemoteAddr()}})
 	}
-	return winner.conn, winner.packet, nil
+	return winner.conn, winner.packet, winner.timing, nil
 }
 
 func (t *automaticHTTP3Transport) roundTripTCP(req *http.Request, prepared preparedAutomaticConnection, key string) (*http.Response, error) {
@@ -934,7 +965,7 @@ func (t *automaticHTTP3Transport) roundTripH3(req *http.Request, prepared prepar
 				if conn != nil {
 					return conn, nil
 				}
-				conn, packet, err := t.dialH3(ctx, req.URL, candidate)
+				conn, packet, _, err := t.dialH3(ctx, req.URL, candidate)
 				if err != nil {
 					return nil, err
 				}
