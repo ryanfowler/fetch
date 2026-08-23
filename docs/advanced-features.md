@@ -422,7 +422,7 @@ fetch -v --redirects 5 example.com
 
 Shows each redirect hop with status codes.
 
-Redirects preserve non-POST methods and replayable bodies for 301 and 302. A 301 or 302 changes POST to GET. A 303 changes requests to GET except HEAD. A 307 or 308 preserves the method and body. Requests with one-shot bodies fail when a redirect needs a replay. Credentials and an explicit Host value are retained only on the same origin; destination names are resolved again with the configured DNS server.
+Redirects preserve non-POST methods and replayable bodies for 301 and 302. A 301 or 302 changes POST to GET. A 303 changes requests to GET except HEAD. A 307 or 308 preserves the method and body. Requests with one-shot bodies fail when a redirect needs a replay. Credentials, credential-like custom headers (including names containing `auth`, `token`, `key`, `secret`, `password`, `credential`, or `signature`), and an explicit Host value are retained only on the same origin. Once a redirect crosses an origin boundary, those values are not restored even if a later redirect returns to the original origin. Destination names are resolved again with the configured DNS server.
 
 ## Request Timeout
 

@@ -360,6 +360,13 @@ func NewClient(cfg ClientConfig) *Client {
 		if observer := requestObserver(req.Context()); observer != nil {
 			observer(req)
 		}
+		// An observer may generate authentication headers. Re-apply the
+		// crossed-origin header policy after it runs so those values are removed
+		// before the transport sends the request as well as before the observer
+		// first sees it.
+		if RedirectCrossedOrigin(req) {
+			stripRedirectCredentialHeaders(req)
+		}
 		// Build the redirect event after normalization and credential filtering.
 		// Validators run before observers and before the next request is sent.
 		if len(via) > 0 && req.Response != nil {
@@ -1293,11 +1300,24 @@ func (t *redirectCredentialTransport) RoundTrip(req *http.Request) (*http.Respon
 	if !RedirectCrossedOrigin(req) {
 		return t.base.RoundTrip(req)
 	}
+	var clone *http.Request
+	for name := range req.Header {
+		if isRedirectCredentialHeader(name) {
+			clone = req.Clone(req.Context())
+			stripRedirectCredentialHeaders(clone)
+			break
+		}
+	}
 	cookies, _ := req.Context().Value(ctxOriginCookiesKey).(originCookieSet)
 	if len(cookies) == 0 || req.Header.Get("Cookie") == "" {
+		if clone != nil {
+			return t.base.RoundTrip(clone)
+		}
 		return t.base.RoundTrip(req)
 	}
-	clone := req.Clone(req.Context())
+	if clone == nil {
+		clone = req.Clone(req.Context())
+	}
 	var kept []string
 	for _, header := range req.Header.Values("Cookie") {
 		for pair := range strings.SplitSeq(header, ";") {
@@ -1331,6 +1351,37 @@ func (t *redirectCredentialTransport) Close() error {
 	return nil
 }
 
+// isRedirectCredentialHeader reports whether a header can carry credentials
+// or proof of authentication. Custom authentication headers are intentionally
+// classified by name so user-defined and generated headers receive the same
+// redirect protection as the built-in authentication headers.
+func isRedirectCredentialHeader(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case "authorization", "cookie", "cookie2", "proxy-authorization",
+		"www-authenticate", "proxy-authenticate", "set-cookie",
+		"x-amz-date", "x-amz-content-sha256", "x-amz-security-token",
+		"x-amz-session-token":
+		return true
+	}
+	for _, term := range []string{
+		"auth", "credential", "token", "key", "secret", "password", "signature",
+	} {
+		if strings.Contains(name, term) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripRedirectCredentialHeaders(req *http.Request) {
+	for name := range req.Header {
+		if isRedirectCredentialHeader(name) {
+			delete(req.Header, name)
+		}
+	}
+}
+
 func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request) {
 	if req == nil || len(via) == 0 || req.URL == nil {
 		return
@@ -1361,13 +1412,7 @@ func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request) {
 		ctx := context.WithValue(req.Context(), ctxRedirectCrossedKey, true)
 		ctx = context.WithValue(ctx, ctxOriginCookiesKey, cookies)
 		*req = *req.WithContext(ctx)
-		for _, name := range []string{
-			"Authorization", "Cookie", "Cookie2", "Proxy-Authorization",
-			"Www-Authenticate", "Proxy-Authenticate", "X-Amz-Date",
-			"X-Amz-Content-Sha256", "X-Amz-Security-Token", "X-Amz-Session-Token",
-		} {
-			deleteHeaderInsensitive(req.Header, name)
-		}
+		stripRedirectCredentialHeaders(req)
 		req.Host = ""
 		// Host can also be represented in Header on requests built outside
 		// NewRequest. The transport uses Request.Host, but remove both forms.

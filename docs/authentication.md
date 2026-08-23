@@ -227,6 +227,12 @@ header = X-API-Key: your-api-key
 header = X-Client-ID: client123
 ```
 
+Credential-bearing custom headers are removed before a redirected request is
+sent to a different scheme, host, or port. This includes the examples above
+and generated headers whose names identify authentication material. They are
+not restored if a later redirect returns to the original origin; ordinary
+non-credential headers continue to follow redirects.
+
 ## Authentication Precedence
 
 Authentication options are mutually exclusive. You cannot combine:

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -680,6 +681,153 @@ func TestRedirectCrossOriginStripsCredentialsAndHost(t *testing.T) {
 	if gotHost == "virtual-origin.invalid" {
 		t.Fatalf("cross-origin Host was preserved: %q", gotHost)
 	}
+}
+
+func TestRedirectCustomCredentialHeadersByOriginAndStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		sourceTLS  bool
+		targetTLS  bool
+		hostChange bool
+	}{
+		{name: "HTTP to HTTP port change"},
+		{name: "HTTP to HTTPS", targetTLS: true},
+		{name: "HTTPS to HTTP", sourceTLS: true},
+		{name: "HTTP host change", hostChange: true},
+	}
+	statuses := []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	}
+
+	for _, test := range tests {
+		for _, status := range statuses {
+			t.Run(fmt.Sprintf("%s/%d", test.name, status), func(t *testing.T) {
+				var got http.Header
+				target := newRedirectTestServer(t, test.targetTLS, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					got = r.Header.Clone()
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				targetURL := target.URL + "/final"
+				if test.hostChange {
+					targetURL = strings.Replace(targetURL, "127.0.0.1", "localhost", 1)
+				}
+				source := newRedirectTestServer(t, test.sourceTLS, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, targetURL, status)
+				}))
+
+				req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Header.Set("X-API-Key", "user-api-key")
+				req.Header.Set("X-Auth-Token", "user-auth-token")
+				req.Header.Set("X-Client-Secret", "user-client-secret")
+				req.Header.Set("X-Request-Signature", "user-signature")
+				req.Header.Set("X-Trace-ID", "trace-id")
+
+				var observedRedirectHeaders []http.Header
+				ctx := WithRequestObserver(req.Context(), func(next *http.Request) {
+					if next.Response == nil {
+						next.Header.Set("X-Generated-Token", "generated-token")
+						return
+					}
+					observedRedirectHeaders = append(observedRedirectHeaders, next.Header.Clone())
+					// Simulate a request signer that generates the header after the
+					// redirect policy has run. The transport must still strip it.
+					next.Header.Set("X-Generated-Token", "generated-token")
+				})
+				req = req.WithContext(ctx)
+
+				client := NewClient(ClientConfig{Insecure: true})
+				defer client.Close()
+				resp, err := client.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+
+				for _, name := range []string{
+					"X-API-Key", "X-Auth-Token", "X-Client-Secret", "X-Request-Signature", "X-Generated-Token",
+				} {
+					if value := got.Get(name); value != "" {
+						t.Errorf("cross-origin %s = %q, want empty", name, value)
+					}
+				}
+				if got.Get("X-Trace-ID") != "trace-id" {
+					t.Errorf("non-credential custom header = %q, want trace-id", got.Get("X-Trace-ID"))
+				}
+				if len(observedRedirectHeaders) != 1 {
+					t.Fatalf("redirect observer calls = %d, want 1", len(observedRedirectHeaders))
+				}
+				for _, name := range []string{
+					"X-API-Key", "X-Auth-Token", "X-Client-Secret", "X-Request-Signature", "X-Generated-Token",
+				} {
+					if value := observedRedirectHeaders[0].Get(name); value != "" {
+						t.Errorf("observer saw cross-origin %s = %q, want empty", name, value)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRedirectCustomCredentialHeadersAreNotRestored(t *testing.T) {
+	var final http.Header
+	var source *httptest.Server
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, source.URL+"/final", http.StatusFound)
+	}))
+	defer target.Close()
+	source = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, target.URL+"/middle", http.StatusFound)
+			return
+		}
+		final = r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer source.Close()
+
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-API-Key", "user-api-key")
+	req.Header.Set("X-Trace-ID", "trace-id")
+	req = req.WithContext(WithRequestObserver(req.Context(), func(next *http.Request) {
+		if next.Response == nil {
+			next.Header.Set("X-Generated-Token", "generated-token")
+		}
+	}))
+
+	client := NewClient(ClientConfig{Insecure: true})
+	defer client.Close()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	for _, name := range []string{"X-API-Key", "X-Generated-Token"} {
+		if value := final.Get(name); value != "" {
+			t.Errorf("credential %s was restored after returning to the original origin: %q", name, value)
+		}
+	}
+	if final.Get("X-Trace-ID") != "trace-id" {
+		t.Fatalf("non-credential custom header = %q, want trace-id", final.Get("X-Trace-ID"))
+	}
+}
+
+func newRedirectTestServer(t *testing.T, tlsEnabled bool, handler http.Handler) *httptest.Server {
+	t.Helper()
+	if tlsEnabled {
+		return httptest.NewTLSServer(handler)
+	}
+	return httptest.NewServer(handler)
 }
 
 func TestCrossOriginRedirectsKeepSharedTransport(t *testing.T) {
