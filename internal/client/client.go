@@ -347,9 +347,10 @@ func NewClient(cfg ClientConfig) *Client {
 		}
 	}
 
-	// Set up the redirect handler. Cookie filtering is installed when a jar is
-	// attached, because net/http adds jar cookies after CheckRedirect runs.
-	client := &http.Client{Transport: transport}
+	// Set up the redirect handler. The filtering transport must be present even
+	// without a jar: net/http otherwise forwards manually supplied Cookie
+	// headers after CheckRedirect returns.
+	client := &http.Client{Transport: &redirectCredentialTransport{base: transport}}
 	maxRedirects := 10
 	if cfg.Redirects != nil {
 		maxRedirects = *cfg.Redirects
@@ -400,7 +401,7 @@ func NewClient(cfg ClientConfig) *Client {
 		// origin also includes scheme and port; credentials must not cross any
 		// origin boundary. The returned state is kept outside the mutable
 		// request context until every request hook has run.
-		security := applyRedirectCredentialPolicy(req, via)
+		security := applyRedirectCredentialPolicy(req, via, client.Jar)
 
 		// Call request observers after redirect normalization and credential
 		// filtering. At this point net/http has already created the replay body
@@ -882,12 +883,11 @@ func (c *Client) ResolverProvenance() string {
 
 // SetJar sets the cookie jar on the HTTP client.
 func (c *Client) SetJar(jar http.CookieJar) {
-	c.c.Jar = jar
-	if jar != nil {
-		if _, wrapped := c.c.Transport.(*redirectCredentialTransport); !wrapped {
-			c.c.Transport = &redirectCredentialTransport{base: c.c.Transport}
-		}
+	if jar == nil {
+		c.c.Jar = nil
+		return
 	}
+	c.c.Jar = &trackingCookieJar{base: jar, accepted: make(map[responseCookieKey]int)}
 }
 
 // ApplyJarCookies adds the same cookie-jar values that net/http will add
@@ -1347,10 +1347,149 @@ func deleteHeaderInsensitive(headers http.Header, name string) {
 	}
 }
 
+type cookieScope struct {
+	origin   *url.URL
+	domain   string
+	hostOnly bool
+	path     string
+	secure   bool
+}
+
+type cookieProvenance uint8
+
+const (
+	cookieManual cookieProvenance = iota + 1
+	cookieJar
+	cookieResponse
+)
+
+type originCookie struct {
+	name       string
+	value      string
+	scope      cookieScope
+	scopeKnown bool
+	provenance cookieProvenance
+	count      int
+}
+
+type originCookieSet []originCookie
+
+type responseCookieKey struct {
+	url    string
+	name   string
+	value  string
+	domain string
+	path   string
+	secure bool
+}
+
+// trackingCookieJar records only cookies that changed the wrapped jar. The
+// net/http client calls SetCookies before CheckRedirect, so this is the point
+// at which response-cookie provenance can be tied to actual jar acceptance.
+type trackingCookieJar struct {
+	base     http.CookieJar
+	mu       sync.Mutex
+	accepted map[responseCookieKey]int
+}
+
+func (j *trackingCookieJar) Cookies(u *url.URL) []*http.Cookie {
+	return j.base.Cookies(u)
+}
+
+func (j *trackingCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	if u == nil {
+		return
+	}
+	before := make([]bool, len(cookies))
+	for i, cookie := range cookies {
+		if cookie != nil {
+			before[i] = cookieValuePresent(j.base.Cookies(cookieAcceptanceURL(u, cookie)), cookie)
+		}
+	}
+	j.base.SetCookies(u, cookies)
+	for i, cookie := range cookies {
+		if cookie == nil || before[i] {
+			continue
+		}
+		if !cookieValuePresent(j.base.Cookies(cookieAcceptanceURL(u, cookie)), cookie) {
+			continue
+		}
+		key := responseCookieKeyFor(u, cookie)
+		j.mu.Lock()
+		j.accepted[key]++
+		j.mu.Unlock()
+	}
+}
+
+func (j *trackingCookieJar) responseCookieAccepted(u *url.URL, cookie *http.Cookie) bool {
+	if u == nil || cookie == nil {
+		return false
+	}
+	key := responseCookieKeyFor(u, cookie)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.accepted[key] == 0 {
+		return false
+	}
+	j.accepted[key]--
+	if j.accepted[key] == 0 {
+		delete(j.accepted, key)
+	}
+	return true
+}
+
+func responseCookieAccepted(jar http.CookieJar, u *url.URL, cookie *http.Cookie) bool {
+	tracker, ok := jar.(*trackingCookieJar)
+	return ok && tracker.responseCookieAccepted(u, cookie)
+}
+
+func responseCookieKeyFor(u *url.URL, cookie *http.Cookie) responseCookieKey {
+	return responseCookieKey{
+		url:    u.String(),
+		name:   cookie.Name,
+		value:  cookie.Value,
+		domain: cookie.Domain,
+		path:   cookie.Path,
+		secure: cookie.Secure,
+	}
+}
+
+func cookieAcceptanceURL(responseURL *url.URL, cookie *http.Cookie) *url.URL {
+	acceptedURL := *responseURL
+	acceptedURL.Scheme = responseURL.Scheme
+	if cookie.Secure {
+		acceptedURL.Scheme = "https"
+	}
+	if cookie.Domain != "" {
+		acceptedURL.Host = strings.TrimPrefix(cookie.Domain, ".")
+	}
+	if cookie.Path == "" || cookie.Path[0] != '/' {
+		acceptedURL.Path = defaultCookiePath(responseURL)
+	} else {
+		acceptedURL.Path = cookie.Path
+	}
+	acceptedURL.RawQuery = ""
+	acceptedURL.Fragment = ""
+	return &acceptedURL
+}
+
+func cookieValuePresent(cookies []*http.Cookie, want *http.Cookie) bool {
+	for _, cookie := range cookies {
+		if cookie != nil && cookie.Name == want.Name && cookie.Value == want.Value {
+			return true
+		}
+	}
+	return false
+}
+
 func cloneOriginCookieSet(cookies originCookieSet) originCookieSet {
 	clone := make(originCookieSet, len(cookies))
-	for name := range cookies {
-		clone[name] = struct{}{}
+	for i, cookie := range cookies {
+		clone[i] = cookie
+		if cookie.scope.origin != nil {
+			origin := *cookie.scope.origin
+			clone[i].scope.origin = &origin
+		}
 	}
 	return clone
 }
@@ -1365,15 +1504,23 @@ func clearRedirectBody(req *http.Request) {
 	}
 }
 
-type originCookieSet map[string]struct{}
-
 func withOriginCookies(req *http.Request, jar http.CookieJar) *http.Request {
-	cookies := make(originCookieSet)
-	for _, value := range req.Header.Values("Cookie") {
-		addCookieNames(cookies, value)
+	if req == nil {
+		return nil
 	}
-	for _, cookie := range jar.Cookies(cookieRequestURL(req)) {
-		cookies[cookie.Name] = struct{}{}
+	cookies, _ := req.Context().Value(ctxOriginCookiesKey).(originCookieSet)
+	cookies = cloneOriginCookieSet(cookies)
+	for _, cookie := range req.Cookies() {
+		addOriginCookie(&cookies, cookie.Name, cookie.Value, cookieScopeForOrigin(cookieRequestURL(req)), false, cookieManual)
+	}
+	if jar != nil {
+		if cookieURL := cookieRequestURL(req); cookieURL != nil {
+			for _, cookie := range jar.Cookies(cookieURL) {
+				// CookieJar.Cookies intentionally returns only the values to
+				// send. Do not invent host-only or default-path metadata here.
+				addOriginCookie(&cookies, cookie.Name, cookie.Value, cookieScopeForOrigin(cookieURL), false, cookieJar)
+			}
+		}
 	}
 	return req.WithContext(context.WithValue(req.Context(), ctxOriginCookiesKey, cookies))
 }
@@ -1390,12 +1537,76 @@ func cookieRequestURL(req *http.Request) *url.URL {
 	return &clone
 }
 
-func addCookieNames(set originCookieSet, header string) {
-	for pair := range strings.SplitSeq(header, ";") {
-		name, _, ok := strings.Cut(strings.TrimSpace(pair), "=")
-		if ok && name != "" {
-			set[name] = struct{}{}
+func addOriginCookie(set *originCookieSet, name, value string, scope cookieScope, scopeKnown bool, provenance cookieProvenance) {
+	if name == "" {
+		return
+	}
+	for i, existing := range *set {
+		if existing.name == name && existing.value == value && existing.scopeKnown == scopeKnown &&
+			existing.provenance == provenance && sameCookieScope(existing.scope, scope) {
+			if !scopeKnown {
+				(*set)[i].count++
+			}
+			return
 		}
+	}
+	*set = append(*set, originCookie{name: name, value: value, scope: scope, scopeKnown: scopeKnown, provenance: provenance, count: 1})
+}
+
+func cookieScopeForOrigin(u *url.URL) cookieScope {
+	return cookieScope{origin: cloneURLWithoutUserinfo(u)}
+}
+
+func cookieScopeForRequest(u *url.URL) cookieScope {
+	scope := cookieScope{hostOnly: true, path: defaultCookiePath(u)}
+	if u == nil {
+		return scope
+	}
+	scope.origin = cloneURLWithoutUserinfo(u)
+	scope.domain = strings.ToLower(u.Hostname())
+	return scope
+}
+
+func cookieScopeForSetCookie(u *url.URL, cookie *http.Cookie) cookieScope {
+	scope := cookieScopeForRequest(u)
+	if cookie == nil {
+		return scope
+	}
+	if cookie.Domain != "" {
+		scope.domain = strings.ToLower(strings.TrimPrefix(cookie.Domain, "."))
+		scope.hostOnly = false
+	}
+	if strings.HasPrefix(cookie.Path, "/") {
+		scope.path = cookie.Path
+	}
+	scope.secure = cookie.Secure
+	return scope
+}
+
+func sameCookieScope(a, b cookieScope) bool {
+	if a.domain != b.domain || a.hostOnly != b.hostOnly || a.path != b.path || a.secure != b.secure {
+		return false
+	}
+	return SameOrigin(a.origin, b.origin)
+}
+
+func cloneURLWithoutUserinfo(u *url.URL) *url.URL {
+	if u == nil {
+		return nil
+	}
+	clone := *u
+	clone.User = nil
+	return &clone
+}
+
+func defaultCookiePath(u *url.URL) string {
+	if u == nil || u.Path == "" || u.Path[0] != '/' {
+		return "/"
+	}
+	if slash := strings.LastIndexByte(u.Path, '/'); slash <= 0 {
+		return "/"
+	} else {
+		return u.Path[:slash]
 	}
 }
 
@@ -1476,6 +1687,9 @@ func (t *redirectCredentialTransport) RoundTrip(req *http.Request) (*http.Respon
 		deleteHeaderInsensitive(clone.Header, "Host")
 	}
 	for name := range req.Header {
+		if strings.EqualFold(name, "Cookie") {
+			continue
+		}
 		if isRedirectCredentialHeaderForRequest(req, name) {
 			if clone == nil {
 				clone = req.Clone(req.Context())
@@ -1495,14 +1709,25 @@ func (t *redirectCredentialTransport) RoundTrip(req *http.Request) (*http.Respon
 		clone = req.Clone(req.Context())
 	}
 	var kept []string
+	remaining := make([]int, len(cookies))
+	for i, cookie := range cookies {
+		remaining[i] = cookie.count
+	}
 	for _, header := range req.Header.Values("Cookie") {
 		for pair := range strings.SplitSeq(header, ";") {
 			pair = strings.TrimSpace(pair)
-			name, _, ok := strings.Cut(pair, "=")
+			name, value, ok := strings.Cut(pair, "=")
 			if !ok || name == "" {
 				continue
 			}
-			if _, forbidden := cookies[name]; !forbidden {
+			name = strings.TrimSpace(name)
+			value = strings.TrimSpace(value)
+			if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+				if unquoted, err := strconv.Unquote(value); err == nil {
+					value = unquoted
+				}
+			}
+			if !originCookieMatches(cookies, remaining, req, name, value) {
 				kept = append(kept, pair)
 			}
 		}
@@ -1512,6 +1737,64 @@ func (t *redirectCredentialTransport) RoundTrip(req *http.Request) (*http.Respon
 		clone.Header.Set("Cookie", strings.Join(kept, "; "))
 	}
 	return t.base.RoundTrip(clone)
+}
+
+func originCookieMatches(cookies originCookieSet, remaining []int, req *http.Request, name, value string) bool {
+	for i, cookie := range cookies {
+		if remaining[i] == 0 || cookie.name != name || cookie.value != value {
+			continue
+		}
+		if cookie.provenance == cookieManual {
+			// Initial manually supplied cookies are removed by
+			// CheckRedirect. A matching value here was reintroduced by a
+			// later hook and must not cross the boundary.
+			remaining[i]--
+			return true
+		}
+		if cookie.provenance == cookieJar {
+			// Jar-selected cookies have no scope metadata. They were selected
+			// for the source request, so remove a matching value at every
+			// cross-origin destination even if net/http selected it again.
+			remaining[i]--
+			return true
+		}
+		if cookie.scopeKnown && cookieScopeMatchesRequest(cookie.scope, cookieRequestURL(req)) &&
+			!SameOrigin(cookie.scope.origin, cookieRequestURL(req)) {
+			remaining[i]--
+			return true
+		}
+	}
+	return false
+}
+
+func cookieScopeMatchesRequest(scope cookieScope, u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	if scope.secure && !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if scope.hostOnly {
+		if host != scope.domain {
+			return false
+		}
+	} else if host != scope.domain && !strings.HasSuffix(host, "."+scope.domain) {
+		return false
+	}
+	path := u.Path
+	if path == "" {
+		path = "/"
+	}
+	cookiePath := scope.path
+	if cookiePath == "" {
+		cookiePath = "/"
+	}
+	if path == cookiePath {
+		return true
+	}
+	return strings.HasPrefix(path, cookiePath) &&
+		(strings.HasSuffix(cookiePath, "/") || (len(path) > len(cookiePath) && path[len(cookiePath)] == '/'))
 }
 
 func (t *redirectCredentialTransport) CloseIdleConnections() {
@@ -1568,7 +1851,7 @@ func hasHeaderInsensitive(headers http.Header, name string) bool {
 	return false
 }
 
-func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request) *redirectSecurityState {
+func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request, jar http.CookieJar) *redirectSecurityState {
 	if req == nil || len(via) == 0 || req.URL == nil {
 		return redirectSecurityStateFrom(req)
 	}
@@ -1580,22 +1863,25 @@ func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request) *redi
 	if state.initialOrigin != nil && !SameOrigin(state.initialOrigin, req.URL) {
 		state.crossed = true
 	}
-	if state.crossed {
-		cookies, _ := req.Context().Value(ctxOriginCookiesKey).(originCookieSet)
-		if cookies == nil {
-			cookies = make(originCookieSet)
-		} else {
-			cookies = cloneOriginCookieSet(cookies)
+	cookies, _ := req.Context().Value(ctxOriginCookiesKey).(originCookieSet)
+	cookies = cloneOriginCookieSet(cookies)
+	if req.Response != nil {
+		responseURL := (*url.URL)(nil)
+		if len(via) > 0 {
+			responseURL = via[len(via)-1].URL
 		}
-		if req.Response != nil {
-			for _, cookie := range req.Response.Cookies() {
-				cookies[cookie.Name] = struct{}{}
+		for _, cookie := range req.Response.Cookies() {
+			if responseCookieAccepted(jar, responseURL, cookie) {
+				addOriginCookie(&cookies, cookie.Name, cookie.Value, cookieScopeForSetCookie(responseURL, cookie), true, cookieResponse)
 			}
 		}
-		ctx := context.WithValue(req.Context(), ctxOriginCookiesKey, cookies)
-		*req = *req.WithContext(ctx)
+	}
+	ctx := context.WithValue(req.Context(), ctxOriginCookiesKey, cookies)
+	*req = *req.WithContext(ctx)
+	if state.crossed {
 		setRedirectSecurityState(req, state)
 		stripRedirectCredentialHeaders(req)
+		discardForwardedManualCookies(req)
 		req.Host = ""
 		// Host can also be represented in Header on requests built outside
 		// NewRequest. The transport uses Request.Host, but remove both forms.
@@ -1615,6 +1901,23 @@ func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request) *redi
 	}
 	setRedirectSecurityState(req, state)
 	return state
+}
+
+func discardForwardedManualCookies(req *http.Request) {
+	if req == nil {
+		return
+	}
+	cookies, _ := req.Context().Value(ctxOriginCookiesKey).(originCookieSet)
+	if len(cookies) == 0 {
+		return
+	}
+	cookies = cloneOriginCookieSet(cookies)
+	for i := range cookies {
+		if cookies[i].provenance == cookieManual {
+			cookies[i].count = 0
+		}
+	}
+	*req = *req.WithContext(context.WithValue(req.Context(), ctxOriginCookiesKey, cookies))
 }
 
 func finalizeRedirectCredentialPolicy(req *http.Request, state *redirectSecurityState) {
@@ -1701,9 +2004,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	// or context. Redirect security must remain anchored to this value.
 	initialSecurity := newRedirectSecurityState(req.URL)
 	setRedirectSecurityState(req, initialSecurity)
-	if c.c.Jar != nil {
-		req = withOriginCookies(req, c.c.Jar)
-	}
+	req = withOriginCookies(req, c.c.Jar)
 	// Preserve credential provenance from the caller's context before the
 	// initial observer can replace it. The redirect security state survives
 	// context replacement and must retain markers for unclassified headers.
