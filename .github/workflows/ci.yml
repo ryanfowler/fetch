@@ -52,7 +52,45 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Test
+        if: runner.os != 'Windows'
         run: go test -v -parallel 8 ./...
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Linking is unusually slow on Windows runners, so overlap the CLI
+          # build with unit tests and reuse the result for integration tests.
+          $repo = $PWD.Path
+          $fetchPath = Join-Path $env:RUNNER_TEMP 'fetch.exe'
+          $build = Start-Job -ScriptBlock {
+            Set-Location $using:repo
+            go build -trimpath '-ldflags=-s -w' -o $using:fetchPath .
+            if ($LASTEXITCODE -ne 0) {
+              throw "go build failed with exit code $LASTEXITCODE"
+            }
+          }
+
+          go test -v -parallel 8 . ./internal/...
+          $testExit = $LASTEXITCODE
+
+          Wait-Job $build | Out-Null
+          Receive-Job $build
+          $buildFailed = $build.State -ne 'Completed'
+          Remove-Job $build
+
+          if ($testExit -ne 0) {
+            exit $testExit
+          }
+          if ($buildFailed) {
+            exit 1
+          }
+
+          $env:FETCH_INTEGRATION_BINARY = $fetchPath
+          go test -v -parallel 16 ./integration
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
   build:
     runs-on: ubuntu-latest
