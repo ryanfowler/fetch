@@ -225,16 +225,8 @@ func TestMain(t *testing.T) {
 	})
 
 	t.Run("stripped buildinfo", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), getExeName())
-		workingDir, err := os.Getwd()
-		if err != nil {
-			t.Fatal(err)
-		}
-		cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", path, filepath.Dir(workingDir))
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("stripped build failed: %v: %s", err, output)
-		}
-		res := runFetch(t, path, "--buildinfo")
+		t.Parallel()
+		res := runFetch(t, fetchPath, "--buildinfo")
 		assertExitCode(t, 0, res)
 		assertBufNotContains(t, res.stdout, `"target_os"`)
 		assertBufNotContains(t, res.stdout, `"target_arch"`)
@@ -2021,6 +2013,8 @@ func TestMain(t *testing.T) {
 			}
 			return buf.Bytes()
 		}
+		artifact := buildArtifact()
+		artifactDigest := sha256.Sum256(artifact)
 
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			updateRequests.Add(1)
@@ -2050,10 +2044,8 @@ func TestMain(t *testing.T) {
 				return
 			}
 
-			artifact := buildArtifact()
 			if r.URL.Path == "/artifact.sha256" {
-				digest := sha256.Sum256(artifact)
-				fmt.Fprintf(w, "%x  fetch.%s\n", digest, runtime.GOOS)
+				fmt.Fprintf(w, "%x  fetch.%s\n", artifactDigest, runtime.GOOS)
 				return
 			}
 			w.WriteHeader(200)
@@ -3787,6 +3779,7 @@ func goBuild(t *testing.T, dir string) string {
 		"build",
 		"-o", path,
 		"-trimpath",
+		"-ldflags=-s -w",
 		mainPath,
 	)
 	stderr := new(bytes.Buffer)
