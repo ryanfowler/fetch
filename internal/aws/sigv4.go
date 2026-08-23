@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -78,7 +79,7 @@ func Sign(req *http.Request, cfg Config, now time.Time) error {
 
 	// Build the signature.
 	signedHeaders := getSignedHeaders(req)
-	canonicalRequest := buildCanonicalRequest(req, signedHeaders, payload)
+	canonicalRequest := buildCanonicalRequest(req, signedHeaders, payload, cfg.Service)
 	stringToSign := buildStringToSign(datetime, cfg.Region, cfg.Service, canonicalRequest)
 	signingKey := createSigningKey(datetime[:8], cfg.Region, cfg.Service, cfg.SecretKey)
 	signature := hex.EncodeToString(hmacSha256(signingKey, stringToSign))
@@ -237,6 +238,7 @@ func getSignedHeaders(req *http.Request) []core.KeyVal[string] {
 	if req.Host != "" {
 		host = req.Host
 	}
+	host = sanitizeHostForHeader(host, req.URL.Scheme)
 	if host != "" {
 		out = append(out, core.KeyVal[string]{Key: "host", Val: host})
 	}
@@ -279,6 +281,27 @@ func getSignedHeaders(req *http.Request) []core.KeyVal[string] {
 		return strings.Compare(a.Key, b.Key)
 	})
 	return out
+}
+
+func sanitizeHostForHeader(host, scheme string) string {
+	var defaultPort string
+	switch strings.ToLower(scheme) {
+	case "http":
+		defaultPort = "80"
+	case "https":
+		defaultPort = "443"
+	default:
+		return host
+	}
+
+	hostname, port, err := net.SplitHostPort(host)
+	if err != nil || port != defaultPort {
+		return host
+	}
+	if strings.HasPrefix(host, "[") {
+		return "[" + hostname + "]"
+	}
+	return hostname
 }
 
 func canonicalHeaderValue(vals []string) string {
@@ -337,14 +360,14 @@ func writeCanonicalHeaderValue(buf *strings.Builder, val string) {
 	}
 }
 
-func buildCanonicalRequest(req *http.Request, headers []core.KeyVal[string], payload string) []byte {
+func buildCanonicalRequest(req *http.Request, headers []core.KeyVal[string], payload, service string) []byte {
 	var buf bytes.Buffer
 	buf.Grow(512)
 
 	buf.WriteString(req.Method)
 	buf.WriteByte('\n')
 
-	writeCanonicalURIPath(&buf, req.URL)
+	writeCanonicalURIPath(&buf, req.URL, service != "s3")
 	buf.WriteByte('\n')
 
 	buf.WriteString(canonicalQuery(req.URL))
@@ -451,7 +474,7 @@ func awsPercentEncode(value []byte) string {
 	return out.String()
 }
 
-func writeCanonicalURIPath(buf *bytes.Buffer, u *url.URL) {
+func writeCanonicalURIPath(buf *bytes.Buffer, u *url.URL, doubleEncode bool) {
 	path := u.EscapedPath()
 	if path == "" {
 		path = "/"
@@ -462,7 +485,11 @@ func writeCanonicalURIPath(buf *bytes.Buffer, u *url.URL) {
 	for i := 0; i < len(path); i++ {
 		b := path[i]
 		if b == '%' && i+2 < len(path) && isHex(path[i+1]) && isHex(path[i+2]) {
-			buf.WriteByte('%')
+			if doubleEncode {
+				buf.WriteString("%25")
+			} else {
+				buf.WriteByte('%')
+			}
 			buf.WriteByte(toUpperHex(path[i+1]))
 			buf.WriteByte(toUpperHex(path[i+2]))
 			i += 2
