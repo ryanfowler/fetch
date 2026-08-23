@@ -857,6 +857,33 @@ func TestRedirectCrossOriginStripsCredentialsAndHost(t *testing.T) {
 	}
 }
 
+func TestRedirectCrossOriginStripsManualCookieWithoutJar(t *testing.T) {
+	var received string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Cookie", "session=origin-secret")
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if received != "" {
+		t.Fatalf("cross-origin Cookie = %q, want empty", received)
+	}
+}
+
 func TestRedirectObserverCannotRestoreCrossOriginPolicy(t *testing.T) {
 	var got http.Header
 	var gotHost string
@@ -1546,7 +1573,7 @@ func TestRedirectManualCookiePreservesSameNameDestinationCookie(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jar.SetCookies(destinationURL, []*http.Cookie{{Name: "sid", Value: "destination", Path: "/app"}})
+	jar.SetCookies(destinationURL, []*http.Cookie{{Name: "sid", Value: "manual", Path: "/app"}})
 
 	c := NewClient(ClientConfig{})
 	defer c.Close()
@@ -1561,8 +1588,96 @@ func TestRedirectManualCookiePreservesSameNameDestinationCookie(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if received != "sid=destination" {
-		t.Fatalf("redirect Cookie = %q, want destination cookie", received)
+	if received != "sid=manual" {
+		t.Fatalf("redirect Cookie = %q, want same-value destination cookie", received)
+	}
+}
+
+func TestRedirectCookiesPreserveSameValueDestinationPathVariants(t *testing.T) {
+	var received string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	targetURL := target.URL + "/app/final"
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetURL, http.StatusFound)
+	}))
+	defer source.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceURL, err := url.Parse(source.URL + "/start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationURL, err := url.Parse(targetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(sourceURL, []*http.Cookie{{Name: "sid", Value: "shared", Path: "/"}})
+	jar.SetCookies(destinationURL, []*http.Cookie{
+		{Name: "sid", Value: "shared", Path: "/"},
+		{Name: "sid", Value: "shared", Path: "/app"},
+	})
+
+	c := NewClient(ClientConfig{})
+	defer c.Close()
+	c.SetJar(jar)
+	req, err := http.NewRequest(http.MethodGet, sourceURL.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if received != "sid=shared; sid=shared" {
+		t.Fatalf("redirect Cookie = %q, want both destination path variants", received)
+	}
+}
+
+func TestRedirectCookiesRemoveOnlyMatchingSourcePath(t *testing.T) {
+	var received string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "shared", Path: "/"})
+		http.Redirect(w, r, target.URL+"/app/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationURL, err := url.Parse(target.URL + "/app/final")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(destinationURL, []*http.Cookie{{Name: "sid", Value: "shared", Path: "/app"}})
+
+	c := NewClient(ClientConfig{})
+	defer c.Close()
+	c.SetJar(jar)
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if received != "sid=shared" {
+		t.Fatalf("redirect Cookie = %q, want destination /app cookie only", received)
 	}
 }
 
@@ -1581,6 +1696,29 @@ func TestCookieScopeRecordsDomainHostOnlyAndPath(t *testing.T) {
 	})
 	if domain.domain != "example.test" || domain.hostOnly || domain.path != "/account/private" || !SameOrigin(domain.origin, origin) {
 		t.Fatalf("domain scope = %+v", domain)
+	}
+}
+
+func TestCookieScopeMatchesHostDomainAndPath(t *testing.T) {
+	cases := []struct {
+		name  string
+		scope cookieScope
+		url   string
+		want  bool
+	}{
+		{name: "host-only exact host and path", scope: cookieScope{domain: "app.example.test", hostOnly: true, path: "/app"}, url: "https://app.example.test/app/page", want: true},
+		{name: "host-only rejects subdomain", scope: cookieScope{domain: "app.example.test", hostOnly: true, path: "/"}, url: "https://child.app.example.test/", want: false},
+		{name: "domain allows subdomain", scope: cookieScope{domain: "example.test", path: "/"}, url: "https://child.example.test/", want: true},
+		{name: "domain rejects suffix lookalike", scope: cookieScope{domain: "example.test", path: "/"}, url: "https://notexample.test/", want: false},
+		{name: "path boundary", scope: cookieScope{domain: "example.test", path: "/app"}, url: "https://example.test/application", want: false},
+		{name: "nested path", scope: cookieScope{domain: "example.test", path: "/app"}, url: "https://example.test/app/page", want: true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cookieScopeMatchesRequest(tt.scope, mustURL(t, tt.url)); got != tt.want {
+				t.Fatalf("cookieScopeMatchesRequest(%+v, %q) = %v, want %v", tt.scope, tt.url, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1787,7 +1925,11 @@ func TestNewClientUsesDefaultRedirectLimit(t *testing.T) {
 
 func TestNewClientUsesProxyFromEnvironment(t *testing.T) {
 	c := NewClient(ClientConfig{})
-	wrapped, ok := c.HTTPClient().Transport.(*proxyTransport)
+	transport := c.HTTPClient().Transport
+	if wrapped, ok := transport.(*redirectCredentialTransport); ok {
+		transport = wrapped.base
+	}
+	wrapped, ok := transport.(*proxyTransport)
 	if !ok {
 		t.Fatalf("transport = %T, want *proxyTransport", c.HTTPClient().Transport)
 	}
@@ -1873,7 +2015,11 @@ func TestNewClientExplicitProxyOverridesEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewClient(ClientConfig{Proxy: explicitProxy})
-	rt, ok := c.HTTPClient().Transport.(*http.Transport)
+	transport := c.HTTPClient().Transport
+	if wrapped, ok := transport.(*redirectCredentialTransport); ok {
+		transport = wrapped.base
+	}
+	rt, ok := transport.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport = %T, want *http.Transport", c.HTTPClient().Transport)
 	}
