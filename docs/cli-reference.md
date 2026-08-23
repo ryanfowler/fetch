@@ -430,6 +430,10 @@ complete components rather than substrings. They are removed before a
 cross-origin redirected request and are not restored if a later redirect
 returns to the original origin.
 
+When `--cert` configures mTLS, a redirect crossing a scheme, host, or port
+boundary is refused before connecting to the destination. Same-origin
+redirects remain allowed.
+
 ### `--retry NUM`
 
 Maximum number of retries for transient failures. Default: `0` (no retries).
