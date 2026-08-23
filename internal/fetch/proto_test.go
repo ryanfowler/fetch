@@ -228,6 +228,28 @@ func TestFrameGRPCBodySpoolsUnknownLengthWithBound(t *testing.T) {
 	}
 }
 
+func TestFrameGRPCBodySpoolOversizeCallerCleanupDoesNotDoubleCloseSource(t *testing.T) {
+	input := &nonIdempotentCloser{
+		Reader: &patternReader{remaining: fetchgrpc.MaxMessageSize + 1},
+	}
+	source := body.NewReader(input, -1, "")
+	req, err := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.Attach(req, source)
+
+	if _, err := frameGRPCBody(source); !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("frame error = %v, want a limit error", err)
+	}
+	if err := req.Body.Close(); err != nil {
+		t.Fatalf("caller cleanup failed: %v", err)
+	}
+	if input.closes != 1 {
+		t.Fatalf("underlying stream close count = %d, want 1", input.closes)
+	}
+}
+
 func TestFrameGRPCBodySupportsRetryReplayAfterSpooling(t *testing.T) {
 	source := body.NewReader(strings.NewReader("payload"), -1, "")
 	framed, err := frameGRPCBody(source)

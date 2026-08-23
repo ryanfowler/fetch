@@ -256,14 +256,14 @@ func spoolGRPCBody(source *body.Body) (*body.Body, func() error, error) {
 
 	f, err := os.CreateTemp("", "fetch-grpc-*")
 	if err != nil {
-		_ = stream.Close()
+		_ = source.Close()
 		return nil, nil, fmt.Errorf("failed to create gRPC request spool: %w", err)
 	}
 	path := f.Name()
 	remove := func() { _ = os.Remove(path) }
 
 	count, copyErr := io.Copy(f, io.LimitReader(stream, fetchgrpc.MaxMessageSize+1))
-	streamCloseErr := stream.Close()
+	streamCloseErr := source.Close()
 	fileCloseErr := f.Close()
 	if copyErr != nil || streamCloseErr != nil || fileCloseErr != nil {
 		remove()
