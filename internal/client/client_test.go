@@ -982,9 +982,13 @@ func TestNewClientUsesDefaultRedirectLimit(t *testing.T) {
 
 func TestNewClientUsesProxyFromEnvironment(t *testing.T) {
 	c := NewClient(ClientConfig{})
-	rt, ok := c.HTTPClient().Transport.(*http.Transport)
+	wrapped, ok := c.HTTPClient().Transport.(*proxyTransport)
 	if !ok {
-		t.Fatalf("transport = %T, want *http.Transport", c.HTTPClient().Transport)
+		t.Fatalf("transport = %T, want *proxyTransport", c.HTTPClient().Transport)
+	}
+	rt, ok := wrapped.base.(*http.Transport)
+	if !ok {
+		t.Fatalf("proxy transport base = %T, want *http.Transport", wrapped.base)
 	}
 	if rt.Proxy == nil {
 		t.Fatal("Proxy is nil, want http.ProxyFromEnvironment")

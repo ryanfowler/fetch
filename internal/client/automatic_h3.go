@@ -423,12 +423,20 @@ func cloneH3Candidates(values []automaticH3Candidate) []automaticH3Candidate {
 }
 
 func (t *automaticHTTP3Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req == nil || req.URL == nil || !strings.EqualFold(req.URL.Scheme, "https") {
+	if req == nil {
 		return t.fallback.RoundTrip(req)
 	}
 	proxy, err := ProxyForURL(nil, req.URL)
 	if err != nil {
 		return nil, err
+	}
+	// The fallback transport is the same HTTP transport used by the ordinary
+	// environment-proxy path. Annotate its request before any fallback so its
+	// dialer uses this request's proxy selection.
+	ctx := context.WithValue(req.Context(), selectedProxyContextKey{}, proxy)
+	req = req.WithContext(ctx)
+	if req.URL == nil || !strings.EqualFold(req.URL.Scheme, "https") {
+		return t.fallback.RoundTrip(req)
 	}
 	if proxy != nil {
 		return t.fallback.RoundTrip(req)
