@@ -550,6 +550,86 @@ func TestCloseCancellationJoinsReadLoop(t *testing.T) {
 	}
 }
 
+func TestRunWaitsForPendingCloseHandshake(t *testing.T) {
+	readErr := errors.New("stdout failed")
+	output := newBlockingErrorWriter(readErr)
+	serverReady := make(chan struct{})
+	serverStop := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		if _, _, err := conn.Read(r.Context()); err != nil {
+			return
+		}
+		if err := conn.Write(r.Context(), websocket.MessageText, []byte("message")); err != nil {
+			return
+		}
+		close(serverReady)
+		<-serverStop
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stopServer sync.Once
+	defer func() {
+		stopServer.Do(func() { close(serverStop) })
+		conn.CloseNow()
+	}()
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- Run(ctx, Config{
+			Conn:   conn,
+			Stdin:  strings.NewReader("payload\n"),
+			Stderr: core.TestPrinter(false),
+			Stdout: core.TestPrinter(false).NewWriter(output),
+		})
+	}()
+
+	select {
+	case <-output.started:
+	case <-time.After(time.Second):
+		conn.CloseNow()
+		t.Fatal("readLoop did not start writing output")
+	}
+	select {
+	case <-serverReady:
+	case <-time.After(time.Second):
+		conn.CloseNow()
+		t.Fatal("server did not send the pending output")
+	}
+
+	// The drain period is one second and starting Conn.Close has an additional
+	// short delay. Let both complete while readLoop still owns the read lock.
+	time.Sleep(1200 * time.Millisecond)
+	output.unblock()
+
+	select {
+	case err := <-runDone:
+		t.Fatalf("Run() returned before pending Conn.Close completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	stopServer.Do(func() { close(serverStop) })
+	select {
+	case err := <-runDone:
+		if !errors.Is(err, readErr) {
+			t.Fatalf("Run() error = %v, want stdout error", err)
+		}
+	case <-time.After(2 * time.Second):
+		conn.CloseNow()
+		t.Fatal("Run() did not finish after pending close handshake was released")
+	}
+}
+
 type blockedCloseSession struct {
 	cancel context.CancelFunc
 	stop   func()
@@ -700,6 +780,31 @@ func (w *blockingWriter) Close() error {
 }
 
 func (w *blockingWriter) unblock() {
+	w.releaseOne.Do(func() { close(w.release) })
+}
+
+type blockingErrorWriter struct {
+	err        error
+	started    chan struct{}
+	release    chan struct{}
+	releaseOne sync.Once
+}
+
+func newBlockingErrorWriter(err error) *blockingErrorWriter {
+	return &blockingErrorWriter{
+		err:     err,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (w *blockingErrorWriter) Write([]byte) (int, error) {
+	close(w.started)
+	<-w.release
+	return 0, w.err
+}
+
+func (w *blockingErrorWriter) unblock() {
 	w.releaseOne.Do(func() { close(w.release) })
 }
 

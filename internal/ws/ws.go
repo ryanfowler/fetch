@@ -199,10 +199,12 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 				case err := <-readDone:
 					if ctx.Err() != nil {
 						cancel()
+						<-closeDone
 						return contextTerminationError(ctx)
 					}
 					if err != nil {
 						cancel()
+						<-closeDone
 						return err
 					}
 					// A peer close can finish the reader before Conn.Close's
@@ -214,6 +216,7 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 						return normalizeCloseError(closeErr)
 					case <-time.After(time.Second):
 						cancel()
+						<-closeDone
 						return nil
 					case <-ctx.Done():
 						// Conn.Close has no cancellation mechanism and owns the
