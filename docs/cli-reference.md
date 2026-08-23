@@ -424,6 +424,12 @@ fetch --redirects 0 example.com   # Don't follow redirects
 fetch --redirects 10 example.com
 ```
 
+Credential-bearing headers, including custom headers with authentication-like
+names, are sent only within the initial origin. Header-name matching uses
+complete components rather than substrings. They are removed before a
+cross-origin redirected request and are not restored if a later redirect
+returns to the original origin.
+
 ### `--retry NUM`
 
 Maximum number of retries for transient failures. Default: `0` (no retries).
