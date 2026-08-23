@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -41,6 +42,18 @@ func TestClipboardCommandHelper(t *testing.T) {
 	if os.Getenv("FETCH_TEST_CLIPBOARD_HELPER") != "1" {
 		return
 	}
+	if os.Getenv("FETCH_TEST_CLIPBOARD_DESCENDANT") == "1" {
+		select {}
+	}
+	if os.Getenv("FETCH_TEST_CLIPBOARD_FORK") == "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestClipboardCommandHelper$")
+		cmd.Env = append(os.Environ(), "FETCH_TEST_CLIPBOARD_DESCENDANT=1")
+		cmd.Stdin = os.Stdin
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("unable to start clipboard descendant: %v", err)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv("FETCH_TEST_CLIPBOARD_BLOCK") == "1" {
 		select {}
 	}
@@ -56,13 +69,13 @@ func TestClipboardCommandHelper(t *testing.T) {
 
 func TestCopyToClipboardTimeout(t *testing.T) {
 	t.Setenv("FETCH_TEST_CLIPBOARD_HELPER", "1")
-	t.Setenv("FETCH_TEST_CLIPBOARD_BLOCK", "1")
+	t.Setenv("FETCH_TEST_CLIPBOARD_FORK", "1")
 
 	start := time.Now()
 	err := copyToClipboardWithTimeout(context.Background(), &clipboardCmd{
 		path: os.Args[0],
 		args: []string{"-test.run=^TestClipboardCommandHelper$"},
-	}, nil, 50*time.Millisecond)
+	}, bytes.Repeat([]byte("x"), 256<<10), 50*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "clipboard command timed out") {
 		t.Fatalf("copyToClipboardWithTimeout() error = %v, want timeout", err)
 	}

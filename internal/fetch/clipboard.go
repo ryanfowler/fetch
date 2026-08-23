@@ -54,6 +54,8 @@ type clipboardCopier struct {
 
 const clipboardCommandTimeout = 5 * time.Second
 
+const clipboardCommandWaitDelay = 100 * time.Millisecond
+
 // newClipboardCopier sets up clipboard copying for the response. If copying
 // is not enabled or not possible, it returns nil and resp is left unchanged.
 // When non-nil is returned, resp.Body has been wrapped with a TeeReader
@@ -156,8 +158,32 @@ func copyToClipboardWithTimeout(ctx context.Context, clip *clipboardCmd, data []
 	defer cancel()
 
 	cmd := exec.CommandContext(commandCtx, clip.path, clip.args...)
+	cmd.WaitDelay = clipboardCommandWaitDelay
+	if err := configureClipboardProcess(cmd); err != nil {
+		return fmt.Errorf("configure clipboard command: %w", err)
+	}
+	// CommandContext normally kills only the direct process. Route cancellation
+	// through the platform-specific containment helper so descendants cannot
+	// retain the stdin pipe and extend Wait indefinitely.
+	cmd.Cancel = func() error {
+		terminateClipboardProcessTree(cmd)
+		return nil
+	}
 	cmd.Stdin = bytes.NewReader(data)
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		releaseClipboardProcess(cmd)
+		return fmt.Errorf("start clipboard command: %w", err)
+	}
+	if err := attachClipboardProcess(cmd); err != nil {
+		terminateClipboardProcessTree(cmd)
+		_ = cmd.Wait()
+		releaseClipboardProcess(cmd)
+		return fmt.Errorf("attach clipboard command: %w", err)
+	}
+	err := cmd.Wait()
+	terminateClipboardProcessTree(cmd)
+	releaseClipboardProcess(cmd)
+	if err != nil {
 		if ctxErr := commandCtx.Err(); ctxErr != nil {
 			if errors.Is(ctxErr, context.DeadlineExceeded) && ctx.Err() == nil {
 				return fmt.Errorf("clipboard command timed out after %s", timeout)
