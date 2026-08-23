@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1023,6 +1024,7 @@ func TestMTLSRedirectsRejectCrossOriginBeforeDestinationHandshake(t *testing.T) 
 
 	for _, status := range statuses {
 		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			var targetHandshakes atomic.Int64
 			var targetRequests, targetCertificates int
 			target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				targetRequests++
@@ -1031,7 +1033,13 @@ func TestMTLSRedirectsRejectCrossOriginBeforeDestinationHandshake(t *testing.T) 
 				}
 				w.WriteHeader(http.StatusNoContent)
 			}))
-			target.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
+			target.TLS = &tls.Config{
+				ClientAuth: tls.RequireAnyClientCert,
+				GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+					targetHandshakes.Add(1)
+					return nil, nil
+				},
+			}
 			target.StartTLS()
 			defer target.Close()
 
@@ -1060,6 +1068,9 @@ func TestMTLSRedirectsRejectCrossOriginBeforeDestinationHandshake(t *testing.T) 
 			}
 			if !strings.Contains(err.Error(), "cross-origin redirect") {
 				t.Fatalf("error = %q, want cross-origin redirect refusal", err)
+			}
+			if handshakes := targetHandshakes.Load(); handshakes != 0 {
+				t.Fatalf("destination TLS handshakes = %d, want 0", handshakes)
 			}
 			if targetRequests != 0 || targetCertificates != 0 {
 				t.Fatalf("destination requests/certificates = %d/%d, want 0/0", targetRequests, targetCertificates)
