@@ -106,7 +106,7 @@ func TestRedactHeaderValue(t *testing.T) {
 	for _, name := range []string{
 		"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "X-Amz-Security-Token",
 		"X-API-Key", "X-AuthToken", "X-ClientSecret", "X-Request-Signature", "X-PrivateKey", "X-Session-ID",
-		"x-aPiKey", "X-rEqUeStSiGnAtUrE", "x-cLiEnTiD",
+		"x-aPiKey", "X-rEqUeStSiGnAtUrE", "x-cLiEnTiD", "x-accesskey", "X-AccessKey", "x-aCcEsSkEy",
 	} {
 		if got := RedactHeaderValue(name, "secret"); got != "[REDACTED]" {
 			t.Errorf("RedactHeaderValue(%q) = %q", name, got)
@@ -135,6 +135,27 @@ func TestWriteErrorMsgRedactsTransportURL(t *testing.T) {
 	}
 	if want := "https://example.test/request?access_token=%5BREDACTED%5D&safe=ok"; !strings.Contains(got, want) {
 		t.Fatalf("transport error = %q, want redacted URL %q", got, want)
+	}
+}
+
+func TestWriteErrorMsgRedactsMalformedTransportURLUserinfo(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "https://transport-user:transport-password@example.test/request/%zz?access_token=transport-query-secret&safe=ok",
+		Err: errors.New("connection refused"),
+	}
+	p := TestPrinter(false)
+	WriteErrorMsgNoFlush(p, err)
+
+	got := string(p.Bytes())
+	for _, secret := range []string{"transport-user", "transport-password", "transport-query-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("malformed transport error leaked %q: %q", secret, got)
+		}
+	}
+	want := "https://example.test/request/%zz?access_token=%5BREDACTED%5D&safe=ok"
+	if !strings.Contains(got, want) {
+		t.Fatalf("malformed transport error = %q, want redacted URL %q", got, want)
 	}
 }
 

@@ -193,6 +193,25 @@ func TestCLI002Validation(t *testing.T) {
 	}
 }
 
+func TestCLIProxyParseErrorRedactsURLCredentials(t *testing.T) {
+	value := "http://proxy-user:proxy-password@example.test/bad%zz?access_token=proxy-query-secret&safe=ok"
+	_, err := Parse([]string{"--proxy", value, "https://example.com"})
+	if err == nil {
+		t.Fatal("Parse() error = nil, want invalid proxy URL error")
+	}
+
+	got := err.Error()
+	for _, secret := range []string{"proxy-user", "proxy-password", "proxy-query-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("proxy parse error leaked %q: %q", secret, got)
+		}
+	}
+	want := "invalid value 'http://example.test/bad%zz?access_token=%5BREDACTED%5D&safe=ok' for option '--proxy'"
+	if !strings.Contains(got, want) {
+		t.Fatalf("proxy parse error = %q, want redacted value %q", got, want)
+	}
+}
+
 func TestFlagsAlphabeticalOrder(t *testing.T) {
 	app, err := Parse(nil)
 	if err != nil {

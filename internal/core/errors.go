@@ -196,17 +196,24 @@ func (err *ValueError) Error() string {
 	if !err.isFile {
 		option = "--" + option
 	}
-	msg := fmt.Sprintf("invalid value '%s' for option '%s'", err.value, option)
+	msg := fmt.Sprintf("invalid value '%s' for option '%s'", err.displayValue(), option)
 	if err.usage != "" {
 		msg = fmt.Sprintf("%s: %s", msg, err.usage)
 	}
 	return msg
 }
 
+func (err *ValueError) displayValue() string {
+	if strings.EqualFold(err.option, "proxy") {
+		return redactedURLString(err.value)
+	}
+	return err.value
+}
+
 func (err *ValueError) PrintTo(p *Printer) {
 	p.WriteString("invalid value '")
 	p.Set(Yellow)
-	p.WriteString(err.value)
+	p.WriteString(err.displayValue())
 	p.Reset()
 
 	p.WriteString("' for option '")

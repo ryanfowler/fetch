@@ -156,18 +156,50 @@ func redactedURLString(rawURL string) string {
 	}
 
 	// url.Error can carry a URL string that is not parseable because of an
-	// invalid escape in its query. Redact query fields without requiring a
-	// successful URL parse in that case.
+	// invalid escape in its query or path. Redact the authority and query
+	// without requiring a successful URL parse in that case.
 	base, query, hasQuery := strings.Cut(rawURL, "?")
+	base = redactURLAuthority(base)
+	redacted := base
 	if !hasQuery {
-		return TerminalSafeText(rawURL)
+		return TerminalSafeText(redacted)
 	}
+
 	query, fragment, hasFragment := strings.Cut(query, "#")
-	redacted := base + "?" + RedactedQuery(query)
+	redacted += "?" + RedactedQuery(query)
 	if hasFragment {
 		redacted += "#" + fragment
 	}
 	return TerminalSafeText(redacted)
+}
+
+// redactURLAuthority removes userinfo from a URL whose syntax is too malformed
+// for net/url to parse. Transport diagnostics must not fall back to printing
+// an untrusted authority verbatim because it may contain proxy credentials.
+func redactURLAuthority(rawURL string) string {
+	authorityStart := -1
+	switch {
+	case strings.HasPrefix(rawURL, "//"):
+		authorityStart = 2
+	default:
+		schemeSeparator := strings.Index(rawURL, "://")
+		if schemeSeparator >= 0 {
+			authorityStart = schemeSeparator + len("://")
+		}
+	}
+	if authorityStart < 0 {
+		return rawURL
+	}
+
+	authorityEnd := len(rawURL)
+	if end := strings.IndexAny(rawURL[authorityStart:], "/?#"); end >= 0 {
+		authorityEnd = authorityStart + end
+	}
+	authority := rawURL[authorityStart:authorityEnd]
+	if userinfoEnd := strings.LastIndexByte(authority, '@'); userinfoEnd >= 0 {
+		return rawURL[:authorityStart] + authority[userinfoEnd+1:] + rawURL[authorityEnd:]
+	}
+	return rawURL
 }
 
 func urlErrorURLs(err error) []string {
@@ -272,11 +304,11 @@ func isDiagnosticCredentialTerm(term string) bool {
 	switch term {
 	case "auth", "authenticate", "authentication", "authorization", "credential", "credentials",
 		"token", "tokens", "key", "keys", "secret", "secrets", "password", "passwd",
-		"signature", "signing", "private", "session", "sessions", "apikey", "authtoken", "clientid", "clientsecret", "privatekey":
+		"signature", "signing", "private", "session", "sessions", "apikey", "accesskey", "authtoken", "clientid", "clientsecret", "privatekey":
 		return true
 	}
 	for _, sensitive := range []string{
-		"auth", "authenticate", "authorization", "credential", "token", "secret", "password", "passwd",
+		"auth", "authenticate", "authorization", "credential", "token", "secret", "password", "passwd", "accesskey",
 		"signature", "signing", "private", "session",
 	} {
 		if strings.Contains(term, sensitive) {

@@ -881,7 +881,7 @@ func (c *Config) ParsePager(value string) error {
 func (c *Config) ParseProxy(value string) error {
 	proxy, err := url.Parse(value)
 	if err != nil {
-		return core.NewValueError("proxy", value, err.Error(), c.isFile)
+		return core.NewValueError("proxy", value, core.RedactedErrorText(err), c.isFile)
 	}
 	c.Proxy = proxy
 	return nil
