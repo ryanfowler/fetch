@@ -55,6 +55,34 @@ type DialTimingRecorder interface {
 	TLSDone(state tls.ConnectionState, err error)
 }
 
+// DialTimingSelector receives the timing for the connection selected by an
+// address race. It is separate from DialTimingRecorder because trace hooks
+// also report attempts that lose the race.
+type DialTimingSelector interface {
+	ConnectionSelected(DialTiming)
+}
+
+type dialTimingSelectorKey struct{}
+
+// WithDialTimingSelector associates a selected-connection sink with ctx.
+func WithDialTimingSelector(ctx context.Context, selector DialTimingSelector) context.Context {
+	if selector == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, dialTimingSelectorKey{}, selector)
+}
+
+// WithoutDialTimingSelector removes a selector from ctx while an outer race
+// is still choosing among complete connection attempts.
+func WithoutDialTimingSelector(ctx context.Context) context.Context {
+	return context.WithValue(ctx, dialTimingSelectorKey{}, nil)
+}
+
+func dialTimingSelector(ctx context.Context) DialTimingSelector {
+	selector, _ := ctx.Value(dialTimingSelectorKey{}).(DialTimingSelector)
+	return selector
+}
+
 // DialRequest describes one connection setup operation. Host and Port identify
 // the effective service target. OriginHost is used for TLS SNI only when the
 // TLS config does not already provide ServerName; this preserves origin
@@ -81,6 +109,7 @@ type DialRequest struct {
 	// connection that wins the address race.
 	AttemptWithInfo func(context.Context, string, net.IPAddr) (net.Conn, any, error)
 	Recorder        DialTimingRecorder
+	Selector        DialTimingSelector
 }
 
 // DialResult is the successful connection and the metadata selected during
@@ -131,6 +160,9 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 	}
 	if d == nil {
 		return DialResult{}, errors.New("resolver dialer is nil")
+	}
+	if req.Selector == nil {
+		req.Selector = dialTimingSelector(ctx)
 	}
 	if req.Timeout < 0 {
 		return DialResult{}, fmt.Errorf("dial timeout must be non-negative: %s", req.Timeout)
@@ -348,6 +380,9 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 	result.Timing.TLSDone = winner.time.TLSDone
 	result.Timing.TLSDuration = winner.time.TLSDuration
 	result.EffectiveAddress = net.JoinHostPort(winner.ip.String(), req.Port)
+	if req.Selector != nil {
+		req.Selector.ConnectionSelected(result.Timing)
+	}
 	return result, nil
 }
 
