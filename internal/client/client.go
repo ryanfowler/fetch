@@ -401,7 +401,7 @@ func NewClient(cfg ClientConfig) *Client {
 		// origin also includes scheme and port; credentials must not cross any
 		// origin boundary. The returned state is kept outside the mutable
 		// request context until every request hook has run.
-		security := applyRedirectCredentialPolicy(req, via)
+		security := applyRedirectCredentialPolicy(req, via, client.Jar)
 
 		// Call request observers after redirect normalization and credential
 		// filtering. At this point net/http has already created the replay body
@@ -883,7 +883,11 @@ func (c *Client) ResolverProvenance() string {
 
 // SetJar sets the cookie jar on the HTTP client.
 func (c *Client) SetJar(jar http.CookieJar) {
-	c.c.Jar = jar
+	if jar == nil {
+		c.c.Jar = nil
+		return
+	}
+	c.c.Jar = &trackingCookieJar{base: jar, accepted: make(map[responseCookieKey]int)}
 }
 
 // ApplyJarCookies adds the same cookie-jar values that net/http will add
@@ -1348,6 +1352,7 @@ type cookieScope struct {
 	domain   string
 	hostOnly bool
 	path     string
+	secure   bool
 }
 
 type cookieProvenance uint8
@@ -1368,6 +1373,114 @@ type originCookie struct {
 }
 
 type originCookieSet []originCookie
+
+type responseCookieKey struct {
+	url    string
+	name   string
+	value  string
+	domain string
+	path   string
+	secure bool
+}
+
+// trackingCookieJar records only cookies that changed the wrapped jar. The
+// net/http client calls SetCookies before CheckRedirect, so this is the point
+// at which response-cookie provenance can be tied to actual jar acceptance.
+type trackingCookieJar struct {
+	base     http.CookieJar
+	mu       sync.Mutex
+	accepted map[responseCookieKey]int
+}
+
+func (j *trackingCookieJar) Cookies(u *url.URL) []*http.Cookie {
+	return j.base.Cookies(u)
+}
+
+func (j *trackingCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	if u == nil {
+		return
+	}
+	before := make([]bool, len(cookies))
+	for i, cookie := range cookies {
+		if cookie != nil {
+			before[i] = cookieValuePresent(j.base.Cookies(cookieAcceptanceURL(u, cookie)), cookie)
+		}
+	}
+	j.base.SetCookies(u, cookies)
+	for i, cookie := range cookies {
+		if cookie == nil || before[i] {
+			continue
+		}
+		if !cookieValuePresent(j.base.Cookies(cookieAcceptanceURL(u, cookie)), cookie) {
+			continue
+		}
+		key := responseCookieKeyFor(u, cookie)
+		j.mu.Lock()
+		j.accepted[key]++
+		j.mu.Unlock()
+	}
+}
+
+func (j *trackingCookieJar) responseCookieAccepted(u *url.URL, cookie *http.Cookie) bool {
+	if u == nil || cookie == nil {
+		return false
+	}
+	key := responseCookieKeyFor(u, cookie)
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.accepted[key] == 0 {
+		return false
+	}
+	j.accepted[key]--
+	if j.accepted[key] == 0 {
+		delete(j.accepted, key)
+	}
+	return true
+}
+
+func responseCookieAccepted(jar http.CookieJar, u *url.URL, cookie *http.Cookie) bool {
+	tracker, ok := jar.(*trackingCookieJar)
+	return ok && tracker.responseCookieAccepted(u, cookie)
+}
+
+func responseCookieKeyFor(u *url.URL, cookie *http.Cookie) responseCookieKey {
+	return responseCookieKey{
+		url:    u.String(),
+		name:   cookie.Name,
+		value:  cookie.Value,
+		domain: cookie.Domain,
+		path:   cookie.Path,
+		secure: cookie.Secure,
+	}
+}
+
+func cookieAcceptanceURL(responseURL *url.URL, cookie *http.Cookie) *url.URL {
+	acceptedURL := *responseURL
+	acceptedURL.Scheme = responseURL.Scheme
+	if cookie.Secure {
+		acceptedURL.Scheme = "https"
+	}
+	if cookie.Domain != "" {
+		acceptedURL.Host = strings.TrimPrefix(cookie.Domain, ".")
+	}
+	if cookie.Path == "" || cookie.Path[0] != '/' {
+		acceptedURL.Path = defaultCookiePath(responseURL)
+	} else {
+		acceptedURL.Path = cookie.Path
+	}
+	acceptedURL.RawQuery = ""
+	acceptedURL.Fragment = ""
+	return &acceptedURL
+}
+
+func cookieValuePresent(cookies []*http.Cookie, want *http.Cookie) bool {
+	for _, cookie := range cookies {
+		if cookie != nil && cookie.Name == want.Name && cookie.Value == want.Value {
+			return true
+		}
+	}
+	return false
+}
 
 func cloneOriginCookieSet(cookies originCookieSet) originCookieSet {
 	clone := make(originCookieSet, len(cookies))
@@ -1466,11 +1579,12 @@ func cookieScopeForSetCookie(u *url.URL, cookie *http.Cookie) cookieScope {
 	if strings.HasPrefix(cookie.Path, "/") {
 		scope.path = cookie.Path
 	}
+	scope.secure = cookie.Secure
 	return scope
 }
 
 func sameCookieScope(a, b cookieScope) bool {
-	if a.domain != b.domain || a.hostOnly != b.hostOnly || a.path != b.path {
+	if a.domain != b.domain || a.hostOnly != b.hostOnly || a.path != b.path || a.secure != b.secure {
 		return false
 	}
 	return SameOrigin(a.origin, b.origin)
@@ -1573,6 +1687,9 @@ func (t *redirectCredentialTransport) RoundTrip(req *http.Request) (*http.Respon
 		deleteHeaderInsensitive(clone.Header, "Host")
 	}
 	for name := range req.Header {
+		if strings.EqualFold(name, "Cookie") {
+			continue
+		}
 		if isRedirectCredentialHeaderForRequest(req, name) {
 			if clone == nil {
 				clone = req.Clone(req.Context())
@@ -1657,6 +1774,9 @@ func cookieScopeMatchesRequest(scope cookieScope, u *url.URL) bool {
 	if u == nil {
 		return false
 	}
+	if scope.secure && !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
 	host := strings.ToLower(u.Hostname())
 	if scope.hostOnly {
 		if host != scope.domain {
@@ -1734,7 +1854,7 @@ func hasHeaderInsensitive(headers http.Header, name string) bool {
 	return false
 }
 
-func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request) *redirectSecurityState {
+func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request, jar http.CookieJar) *redirectSecurityState {
 	if req == nil || len(via) == 0 || req.URL == nil {
 		return redirectSecurityStateFrom(req)
 	}
@@ -1754,7 +1874,9 @@ func applyRedirectCredentialPolicy(req *http.Request, via []*http.Request) *redi
 			responseURL = via[len(via)-1].URL
 		}
 		for _, cookie := range req.Response.Cookies() {
-			addOriginCookie(&cookies, cookie.Name, cookie.Value, cookieScopeForSetCookie(responseURL, cookie), true, cookieResponse)
+			if responseCookieAccepted(jar, responseURL, cookie) {
+				addOriginCookie(&cookies, cookie.Name, cookie.Value, cookieScopeForSetCookie(responseURL, cookie), true, cookieResponse)
+			}
 		}
 	}
 	ctx := context.WithValue(req.Context(), ctxOriginCookiesKey, cookies)

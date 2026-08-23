@@ -1050,7 +1050,7 @@ func TestNewRequestMarksCompoundCredentialHeaderProvenance(t *testing.T) {
 	}
 	initial := req.Clone(req.Context())
 	req.URL = mustURL(t, "http://target.example/final")
-	applyRedirectCredentialPolicy(req, []*http.Request{initial})
+	applyRedirectCredentialPolicy(req, []*http.Request{initial}, nil)
 
 	if got := req.Header.Get("X-ClientID"); got != "" {
 		t.Fatalf("compound credential header = %q, want empty", got)
@@ -1681,6 +1681,153 @@ func TestRedirectCookiesRemoveOnlyMatchingSourcePath(t *testing.T) {
 	}
 }
 
+func TestRedirectRejectedResponseCookiesDoNotRemoveDestinationCookie(t *testing.T) {
+	tests := []struct {
+		name       string
+		sourceHost string
+		path       string
+		reject     func(*http.Cookie) bool
+	}{
+		{
+			name:       "invalid domain",
+			sourceHost: "127.0.0.1",
+			path:       "/app",
+			reject: func(cookie *http.Cookie) bool {
+				return cookie.Domain == "localhost"
+			},
+		},
+		{
+			name:       "invalid path",
+			sourceHost: "localhost",
+			path:       "/rejected",
+			reject: func(cookie *http.Cookie) bool {
+				return cookie.Path == "/rejected"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var received string
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				received = r.Header.Get("Cookie")
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer target.Close()
+			targetURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				cookie := &http.Cookie{Name: "sid", Value: "shared", Domain: "localhost", Path: tt.path}
+				http.SetCookie(w, cookie)
+				http.Redirect(w, r, targetURL+tt.path+"/final", http.StatusFound)
+			}))
+			defer source.Close()
+
+			base, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			destinationURL, err := url.Parse(targetURL + tt.path + "/final")
+			if err != nil {
+				t.Fatal(err)
+			}
+			base.SetCookies(destinationURL, []*http.Cookie{{Name: "sid", Value: "shared", Path: tt.path}})
+			jar := &rejectingCookieJar{base: base, reject: tt.reject}
+
+			client := NewClient(ClientConfig{})
+			defer client.Close()
+			client.SetJar(jar)
+			sourceURL := source.URL + "/start"
+			if tt.sourceHost == "localhost" {
+				sourceURL = strings.Replace(sourceURL, "127.0.0.1", "localhost", 1)
+			}
+			req, err := http.NewRequest(http.MethodGet, sourceURL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if received != "sid=shared" {
+				t.Fatalf("redirect Cookie = %q, want destination cookie", received)
+			}
+		})
+	}
+}
+
+type rejectingCookieJar struct {
+	base   http.CookieJar
+	reject func(*http.Cookie) bool
+}
+
+func (j *rejectingCookieJar) Cookies(u *url.URL) []*http.Cookie {
+	return j.base.Cookies(u)
+}
+
+func (j *rejectingCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	accepted := make([]*http.Cookie, 0, len(cookies))
+	for _, cookie := range cookies {
+		if cookie != nil && j.reject(cookie) {
+			continue
+		}
+		accepted = append(accepted, cookie)
+	}
+	j.base.SetCookies(u, accepted)
+}
+
+func TestRedirectSecureResponseCookieDoesNotRemoveHTTPDestinationCookie(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("http_proxy", "")
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("https_proxy", "")
+	t.Setenv("ALL_PROXY", "")
+	t.Setenv("all_proxy", "")
+	t.Setenv("NO_PROXY", "*")
+	t.Setenv("no_proxy", "*")
+
+	var received string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "source", Path: "/", Secure: true})
+		http.Redirect(w, r, strings.Replace(target.URL, "127.0.0.1", "cookie.example.test", 1)+"/app/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	sourceURL := strings.Replace(source.URL, "127.0.0.1", "cookie.example.test", 1) + "/start"
+	targetURL := strings.Replace(target.URL, "127.0.0.1", "cookie.example.test", 1) + "/app/final"
+	base, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationURL, err := url.Parse(targetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.SetCookies(destinationURL, []*http.Cookie{{Name: "sid", Value: "destination", Path: "/app"}})
+
+	client := NewClient(ClientConfig{
+		HTTP:     core.HTTP1,
+		Insecure: true,
+		SystemLookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+		},
+	})
+	defer client.Close()
+	client.SetJar(base)
+	resp, err := client.HTTPClient().Get(sourceURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if received != "sid=destination" {
+		t.Fatalf("redirect Cookie = %q, want HTTPS-ineligible source cookie removed without removing destination cookie", received)
+	}
+}
+
 func TestCookieScopeRecordsDomainHostOnlyAndPath(t *testing.T) {
 	origin := mustURL(t, "https://app.example.test/account/login")
 	hostOnly := cookieScopeForSetCookie(origin, &http.Cookie{Name: "host", Value: "one"})
@@ -1693,8 +1840,9 @@ func TestCookieScopeRecordsDomainHostOnlyAndPath(t *testing.T) {
 		Value:  "two",
 		Domain: ".example.test",
 		Path:   "/account/private",
+		Secure: true,
 	})
-	if domain.domain != "example.test" || domain.hostOnly || domain.path != "/account/private" || !SameOrigin(domain.origin, origin) {
+	if domain.domain != "example.test" || domain.hostOnly || domain.path != "/account/private" || !domain.secure || !SameOrigin(domain.origin, origin) {
 		t.Fatalf("domain scope = %+v", domain)
 	}
 }
@@ -1712,6 +1860,8 @@ func TestCookieScopeMatchesHostDomainAndPath(t *testing.T) {
 		{name: "domain rejects suffix lookalike", scope: cookieScope{domain: "example.test", path: "/"}, url: "https://notexample.test/", want: false},
 		{name: "path boundary", scope: cookieScope{domain: "example.test", path: "/app"}, url: "https://example.test/application", want: false},
 		{name: "nested path", scope: cookieScope{domain: "example.test", path: "/app"}, url: "https://example.test/app/page", want: true},
+		{name: "secure requires HTTPS", scope: cookieScope{domain: "example.test", path: "/", secure: true}, url: "http://example.test/", want: false},
+		{name: "secure allows HTTPS", scope: cookieScope{domain: "example.test", path: "/", secure: true}, url: "https://example.test/", want: true},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
