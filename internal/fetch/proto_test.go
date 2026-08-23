@@ -2,11 +2,16 @@ package fetch
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/ryanfowler/fetch/internal/body"
+	"github.com/ryanfowler/fetch/internal/client"
+	"github.com/ryanfowler/fetch/internal/core"
 	fetchgrpc "github.com/ryanfowler/fetch/internal/grpc"
 	"github.com/ryanfowler/fetch/internal/proto"
 
@@ -100,15 +105,220 @@ func TestConvertJSONToProtobufClosesBody(t *testing.T) {
 	}
 }
 
-func TestFrameGRPCRequestClosesBody(t *testing.T) {
-	body := &trackingReadCloser{Reader: strings.NewReader("hello")}
-
-	if _, err := frameGRPCRequest(body); err != nil {
+func TestFrameGRPCBodyClosesSource(t *testing.T) {
+	source := body.NewReader(strings.NewReader("hello"), int64(len("hello")), "")
+	framed, err := frameGRPCBody(source)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !body.closed {
-		t.Fatal("expected frameGRPCRequest to close body")
+	stream, err := framed.Open()
+	if err != nil {
+		t.Fatalf("unexpected open error: %v", err)
 	}
+	if _, err := io.ReadAll(stream); err != nil {
+		t.Fatalf("unexpected read error: %v", err)
+	}
+	if err := framed.Close(); err != nil {
+		t.Fatalf("unexpected close error: %v", err)
+	}
+}
+
+func TestFrameGRPCBodyKnownLengthIsLazyAndReplayable(t *testing.T) {
+	var opened int
+	source := body.NewFactory(func() (io.ReadCloser, error) {
+		opened++
+		return io.NopCloser(strings.NewReader("hello")), nil
+	}, 5, "", true)
+
+	framed, err := frameGRPCBody(source)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opened != 0 {
+		t.Fatalf("source opened during framing: %d opens", opened)
+	}
+
+	first, err := framed.Open()
+	if err != nil {
+		t.Fatalf("unexpected first open error: %v", err)
+	}
+	firstData, err := io.ReadAll(first)
+	if err != nil {
+		t.Fatalf("unexpected first read error: %v", err)
+	}
+	first.Close()
+	if !bytes.Equal(firstData, fetchgrpc.Frame([]byte("hello"), false)) {
+		t.Fatalf("first frame = %x", firstData)
+	}
+
+	replay, err := framed.Replay()
+	if err != nil {
+		t.Fatalf("unexpected replay error: %v", err)
+	}
+	replayData, err := io.ReadAll(replay)
+	if err != nil {
+		t.Fatalf("unexpected replay read error: %v", err)
+	}
+	replay.Close()
+	if !bytes.Equal(replayData, firstData) {
+		t.Fatalf("replay frame differs from first frame")
+	}
+	if opened != 2 {
+		t.Fatalf("source opens = %d, want one per stream", opened)
+	}
+	framed.Close()
+}
+
+func TestFrameGRPCBodyRejectsKnownOversizeBeforeOpen(t *testing.T) {
+	var opened int
+	source := body.NewFactory(func() (io.ReadCloser, error) {
+		opened++
+		return io.NopCloser(strings.NewReader("must not open")), nil
+	}, fetchgrpc.MaxMessageSize+1, "", true)
+
+	_, err := frameGRPCBody(source)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("frame error = %v, want a limit error", err)
+	}
+	if opened != 0 {
+		t.Fatalf("oversized source opened %d times", opened)
+	}
+}
+
+func TestFrameGRPCBodySpoolsUnknownLengthWithBound(t *testing.T) {
+	input := &patternReader{remaining: fetchgrpc.MaxMessageSize + 1}
+	source := body.NewReader(input, -1, "")
+
+	_, err := frameGRPCBody(source)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("frame error = %v, want a limit error", err)
+	}
+	if input.read != fetchgrpc.MaxMessageSize+1 {
+		t.Fatalf("spool read %d bytes, want exactly MaxMessageSize+1", input.read)
+	}
+	if !input.closed {
+		t.Fatal("unknown-length source was not closed after spooling")
+	}
+}
+
+func TestFrameGRPCBodySupportsRetryReplayAfterSpooling(t *testing.T) {
+	source := body.NewReader(strings.NewReader("payload"), -1, "")
+	framed, err := frameGRPCBody(source)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer framed.Close()
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.Attach(req, framed)
+	replayer, err := newReplayableBody(req)
+	if err != nil {
+		t.Fatalf("unexpected replayer error: %v", err)
+	}
+	defer replayer.close()
+
+	first, err := replayer.reset()
+	if err != nil {
+		t.Fatalf("unexpected first reset error: %v", err)
+	}
+	firstData, err := io.ReadAll(first)
+	first.Close()
+	if err != nil {
+		t.Fatalf("unexpected first replay read error: %v", err)
+	}
+	second, err := replayer.reset()
+	if err != nil {
+		t.Fatalf("unexpected second reset error: %v", err)
+	}
+	secondData, err := io.ReadAll(second)
+	second.Close()
+	if err != nil {
+		t.Fatalf("unexpected second replay read error: %v", err)
+	}
+	if !bytes.Equal(firstData, secondData) || !bytes.Equal(firstData, fetchgrpc.Frame([]byte("payload"), false)) {
+		t.Fatalf("replay data did not preserve the framed payload")
+	}
+}
+
+func TestFrameGRPCBodySupportsDigestReplayAfterSpooling(t *testing.T) {
+	var received [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read authenticated body: %v", err)
+		}
+		received = append(received, data)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	framed, err := frameGRPCBody(body.NewReader(strings.NewReader("payload"), -1, ""))
+	if err != nil {
+		t.Fatalf("unexpected framing error: %v", err)
+	}
+	defer framed.Close()
+	req, err := http.NewRequest(http.MethodPost, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body.Attach(req, framed)
+	replayer, err := newReplayableBody(req)
+	if err != nil {
+		t.Fatalf("unexpected replayer error: %v", err)
+	}
+	defer replayer.close()
+	requestBody, err := replayer.reset()
+	if err != nil {
+		t.Fatalf("unexpected request body error: %v", err)
+	}
+	req.Body = requestBody
+
+	c := client.NewClient(client.ClientConfig{})
+	defer c.Close()
+	resp, err := doOnce(&Request{Digest: &core.KeyVal[string]{Key: "user", Val: "pass"}}, c, req, replayer)
+	if err != nil {
+		t.Fatalf("digest request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	want := fetchgrpc.Frame([]byte("payload"), false)
+	if len(received) != 1 || !bytes.Equal(received[0], want) {
+		t.Fatalf("authenticated bodies = %d/%x, want one framed payload %x", len(received), received, want)
+	}
+}
+
+type patternReader struct {
+	remaining int64
+	read      int64
+	closed    bool
+}
+
+func (r *patternReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	for i := range p {
+		p[i] = 'x'
+	}
+	r.remaining -= int64(len(p))
+	r.read += int64(len(p))
+	return len(p), nil
+}
+
+func (r *patternReader) Close() error {
+	r.closed = true
+	return nil
 }
 
 func TestStreamGRPCRequestClosesBody(t *testing.T) {

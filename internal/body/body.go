@@ -46,6 +46,10 @@ type Body struct {
 	started bool
 	active  io.ReadCloser
 	pending *pending
+
+	cleanup     func() error
+	cleanupOnce sync.Once
+	cleanupErr  error
 }
 
 type pending struct {
@@ -222,6 +226,20 @@ func (b *Body) Replay() (io.ReadCloser, error) {
 	open := b.open
 	b.mu.Unlock()
 	return open()
+}
+
+// SetCleanup registers a callback run once when the body is closed. It is
+// intended for sources with resources that are not owned by an individual
+// stream, such as a temporary spool file.
+func (b *Body) SetCleanup(cleanup func() error) {
+	if cleanup == nil {
+		return
+	}
+	b.lifecycle.Lock()
+	defer b.lifecycle.Unlock()
+	b.mu.Lock()
+	b.cleanup = cleanup
+	b.mu.Unlock()
 }
 
 // Preview reads at most max+1 bytes without consuming the stream that Read
@@ -436,6 +454,7 @@ func (b *Body) Close() error {
 	b.mu.Lock()
 	rc := b.active
 	p := b.pending
+	cleanup := b.cleanup
 	b.active = nil
 	b.pending = nil
 	b.mu.Unlock()
@@ -445,6 +464,10 @@ func (b *Body) Close() error {
 	}
 	if p != nil {
 		closeErr = errors.Join(closeErr, p.rest.Close())
+	}
+	if cleanup != nil {
+		b.cleanupOnce.Do(func() { b.cleanupErr = cleanup() })
+		closeErr = errors.Join(closeErr, b.cleanupErr)
 	}
 	return closeErr
 }
@@ -466,6 +489,8 @@ type exactFileReader struct {
 	expected  int64
 	identity  os.FileInfo
 	path      string
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (r *exactFileReader) Read(p []byte) (int, error) {
@@ -490,7 +515,10 @@ func (r *exactFileReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (r *exactFileReader) Close() error { return r.file.Close() }
+func (r *exactFileReader) Close() error {
+	r.closeOnce.Do(func() { r.closeErr = r.file.Close() })
+	return r.closeErr
+}
 
 func minInt64(a, b int64) int {
 	if a < b {
