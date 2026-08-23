@@ -204,6 +204,11 @@ Use with fetch:
 fetch --cert client.crt --key client.key --ca-cert ca.crt https://mtls.example.com
 ```
 
+For safety, automatic redirects with mTLS configured are allowed only within
+the initial HTTP origin. A redirect to a different scheme, host, or port is
+refused before the destination TLS handshake, so the client certificate cannot
+be presented to an unintended service.
+
 ## Custom Headers
 
 For authentication methods not directly supported, use custom headers:

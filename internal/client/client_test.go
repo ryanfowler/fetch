@@ -3,9 +3,16 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -14,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1003,6 +1011,145 @@ func TestRedirectCustomCredentialHeadersAreNotRestored(t *testing.T) {
 	if final.Get("X-Trace-ID") != "trace-id" {
 		t.Fatalf("non-credential custom header = %q, want trace-id", final.Get("X-Trace-ID"))
 	}
+}
+
+func TestMTLSRedirectsRejectCrossOriginBeforeDestinationHandshake(t *testing.T) {
+	statuses := []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	}
+
+	for _, status := range statuses {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			var targetHandshakes atomic.Int64
+			var targetRequests, targetCertificates int
+			target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetRequests++
+				if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+					targetCertificates++
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			target.TLS = &tls.Config{
+				ClientAuth: tls.RequireAnyClientCert,
+				GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+					targetHandshakes.Add(1)
+					return nil, nil
+				},
+			}
+			target.StartTLS()
+			defer target.Close()
+
+			source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL+"/final", status)
+			}))
+			defer source.Close()
+
+			req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := NewClient(ClientConfig{
+				ClientCert: newTestClientCertificate(t),
+				HTTP:       core.HTTP1,
+				Insecure:   true,
+			})
+			defer client.Close()
+
+			resp, err := client.Do(req)
+			if resp != nil {
+				resp.Body.Close()
+			}
+			if err == nil {
+				t.Fatal("cross-origin mTLS redirect succeeded, want refusal")
+			}
+			if !strings.Contains(err.Error(), "cross-origin redirect") {
+				t.Fatalf("error = %q, want cross-origin redirect refusal", err)
+			}
+			if handshakes := targetHandshakes.Load(); handshakes != 0 {
+				t.Fatalf("destination TLS handshakes = %d, want 0", handshakes)
+			}
+			if targetRequests != 0 || targetCertificates != 0 {
+				t.Fatalf("destination requests/certificates = %d/%d, want 0/0", targetRequests, targetCertificates)
+			}
+		})
+	}
+}
+
+func TestMTLSSameOriginRedirectsRemainAllowed(t *testing.T) {
+	statuses := []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	}
+
+	for _, status := range statuses {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			var finalCertificates int
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/start" {
+					http.Redirect(w, r, "/final", status)
+					return
+				}
+				if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+					finalCertificates++
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			server.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
+			server.StartTLS()
+			defer server.Close()
+
+			req, err := http.NewRequest(http.MethodGet, server.URL+"/start", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := NewClient(ClientConfig{
+				ClientCert: newTestClientCertificate(t),
+				HTTP:       core.HTTP1,
+				Insecure:   true,
+			})
+			defer client.Close()
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+			}
+			if finalCertificates != 1 {
+				t.Fatalf("same-origin destination certificates = %d, want 1", finalCertificates)
+			}
+		})
+	}
+}
+
+func newTestClientCertificate(t *testing.T) *tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa.GenerateKey() error = %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "fetch-test-client"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("x509.CreateCertificate() error = %v", err)
+	}
+	return &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
 func newRedirectTestServer(t *testing.T, tlsEnabled bool, handler http.Handler) *httptest.Server {

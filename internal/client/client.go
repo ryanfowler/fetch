@@ -363,6 +363,11 @@ func NewClient(cfg ClientConfig) *Client {
 		if maxRedirects > 0 && len(via) > maxRedirects {
 			return fmt.Errorf("exceeded maximum number of redirects: %d", maxRedirects)
 		}
+		if cfg.ClientCert != nil {
+			if err := rejectClientCertificateCrossOriginRedirect(req, via); err != nil {
+				return err
+			}
+		}
 
 		// HTTP/2 has its own proxy-aware dialer. HTTP/3 still has no
 		// supported proxy path; reject it before any connection attempt.
@@ -423,6 +428,11 @@ func NewClient(cfg ClientConfig) *Client {
 		// Host, or headers. Recompute the effective boundary from the immutable
 		// state captured before those hooks and enforce it as the last step.
 		finalizeRedirectCredentialPolicy(req, security)
+		if cfg.ClientCert != nil {
+			if err := rejectClientCertificateCrossOriginRedirect(req, via); err != nil {
+				return err
+			}
+		}
 		if len(via) > 0 && req.Response != nil &&
 			(req.Response.StatusCode == http.StatusTemporaryRedirect || req.Response.StatusCode == http.StatusPermanentRedirect) &&
 			req.GetBody == nil && req.Body != nil && req.Body != http.NoBody {
@@ -1599,6 +1609,23 @@ func finalizeRedirectCredentialPolicy(req *http.Request, state *redirectSecurity
 	stripRedirectCredentialHeaders(req)
 	req.Host = ""
 	deleteHeaderInsensitive(req.Header, "Host")
+}
+
+func rejectClientCertificateCrossOriginRedirect(req *http.Request, via []*http.Request) error {
+	if req == nil || req.URL == nil || len(via) == 0 {
+		return nil
+	}
+	origin := (*url.URL)(nil)
+	if state := redirectSecurityStateFrom(req); state != nil {
+		origin = state.initialOrigin
+	}
+	if origin == nil {
+		origin = via[0].URL
+	}
+	if origin != nil && !SameOrigin(origin, req.URL) {
+		return errors.New("refusing cross-origin redirect while a client certificate is configured")
+	}
+	return nil
 }
 
 func newSeekableBody(rs io.ReadSeeker, contentType string) *body.Body {
