@@ -2,10 +2,13 @@ package fetch
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os/exec"
 	"runtime"
+	"time"
 
 	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/core"
@@ -48,6 +51,10 @@ type clipboardCopier struct {
 	buf    *limitedBuffer
 	silent bool
 }
+
+const clipboardCommandTimeout = 5 * time.Second
+
+const clipboardCommandWaitDelay = 100 * time.Millisecond
 
 // newClipboardCopier sets up clipboard copying for the response. If copying
 // is not enabled or not possible, it returns nil and resp is left unchanged.
@@ -97,7 +104,7 @@ func (cc *clipboardCopier) setBytes(data []byte) {
 
 // finish copies the captured bytes to the system clipboard. It writes a
 // warning to stderr on failure but never returns an error.
-func (cc *clipboardCopier) finish(p *core.Printer) {
+func (cc *clipboardCopier) finish(ctx context.Context, p *core.Printer) {
 	if cc == nil {
 		return
 	}
@@ -105,7 +112,7 @@ func (cc *clipboardCopier) finish(p *core.Printer) {
 		core.WriteWarningMsgIf(p, "--copy: response body too large to copy to clipboard", cc.silent)
 		return
 	}
-	if err := copyToClipboard(cc.cmd, cc.buf.buf.Bytes()); err != nil {
+	if err := copyToClipboard(ctx, cc.cmd, cc.buf.buf.Bytes()); err != nil {
 		core.WriteWarningMsgIf(p, "unable to copy to clipboard: "+err.Error(), cc.silent)
 	}
 }
@@ -142,10 +149,47 @@ func findClipboard() *clipboardCmd {
 	return nil
 }
 
-func copyToClipboard(clip *clipboardCmd, data []byte) error {
-	cmd := exec.Command(clip.path, clip.args...)
+func copyToClipboard(ctx context.Context, clip *clipboardCmd, data []byte) error {
+	return copyToClipboardWithTimeout(ctx, clip, data, clipboardCommandTimeout)
+}
+
+func copyToClipboardWithTimeout(ctx context.Context, clip *clipboardCmd, data []byte, timeout time.Duration) error {
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(commandCtx, clip.path, clip.args...)
+	cmd.WaitDelay = clipboardCommandWaitDelay
+	if err := configureClipboardProcess(cmd); err != nil {
+		return fmt.Errorf("configure clipboard command: %w", err)
+	}
+	// CommandContext normally kills only the direct process. Route cancellation
+	// through the platform-specific containment helper so descendants cannot
+	// retain the stdin pipe and extend Wait indefinitely.
+	cmd.Cancel = func() error {
+		terminateClipboardProcessTree(cmd)
+		return nil
+	}
 	cmd.Stdin = bytes.NewReader(data)
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		releaseClipboardProcess(cmd)
+		return fmt.Errorf("start clipboard command: %w", err)
+	}
+	if err := attachClipboardProcess(cmd); err != nil {
+		terminateClipboardProcessTree(cmd)
+		_ = cmd.Wait()
+		releaseClipboardProcess(cmd)
+		return fmt.Errorf("attach clipboard command: %w", err)
+	}
+	err := cmd.Wait()
+	terminateClipboardProcessTree(cmd)
+	releaseClipboardProcess(cmd)
+	if err != nil {
+		if ctxErr := commandCtx.Err(); ctxErr != nil {
+			if errors.Is(ctxErr, context.DeadlineExceeded) && ctx.Err() == nil {
+				return fmt.Errorf("clipboard command timed out after %s", timeout)
+			}
+			return fmt.Errorf("clipboard command canceled: %w", ctxErr)
+		}
 		return fmt.Errorf("clipboard command failed: %w", err)
 	}
 	return nil

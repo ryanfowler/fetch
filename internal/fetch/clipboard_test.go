@@ -2,11 +2,14 @@ package fetch
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -24,7 +27,7 @@ func TestClipboardCopierFinishCopiesEmptyBuffer(t *testing.T) {
 		buf: &limitedBuffer{max: maxBodyBytes},
 	}
 
-	cc.finish(newTestPrinter())
+	cc.finish(context.Background(), newTestPrinter())
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -39,6 +42,21 @@ func TestClipboardCommandHelper(t *testing.T) {
 	if os.Getenv("FETCH_TEST_CLIPBOARD_HELPER") != "1" {
 		return
 	}
+	if os.Getenv("FETCH_TEST_CLIPBOARD_DESCENDANT") == "1" {
+		select {}
+	}
+	if os.Getenv("FETCH_TEST_CLIPBOARD_FORK") == "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestClipboardCommandHelper$")
+		cmd.Env = append(os.Environ(), "FETCH_TEST_CLIPBOARD_DESCENDANT=1")
+		cmd.Stdin = os.Stdin
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("unable to start clipboard descendant: %v", err)
+		}
+		os.Exit(0)
+	}
+	if os.Getenv("FETCH_TEST_CLIPBOARD_BLOCK") == "1" {
+		select {}
+	}
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		t.Fatalf("unable to read stdin: %v", err)
@@ -47,6 +65,23 @@ func TestClipboardCommandHelper(t *testing.T) {
 		t.Fatalf("unable to write clipboard output: %v", err)
 	}
 	os.Exit(0)
+}
+
+func TestCopyToClipboardTimeout(t *testing.T) {
+	t.Setenv("FETCH_TEST_CLIPBOARD_HELPER", "1")
+	t.Setenv("FETCH_TEST_CLIPBOARD_FORK", "1")
+
+	start := time.Now()
+	err := copyToClipboardWithTimeout(context.Background(), &clipboardCmd{
+		path: os.Args[0],
+		args: []string{"-test.run=^TestClipboardCommandHelper$"},
+	}, bytes.Repeat([]byte("x"), 256<<10), 50*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "clipboard command timed out") {
+		t.Fatalf("copyToClipboardWithTimeout() error = %v, want timeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("copyToClipboardWithTimeout() took %s, want bounded return", elapsed)
+	}
 }
 
 func TestStreamToStdoutDrainsSuppressedBinaryForClipboard(t *testing.T) {
