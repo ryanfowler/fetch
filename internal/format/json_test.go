@@ -1,10 +1,25 @@
 package format
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
+
+func TestFormatJSONLimitsNestingDepth(t *testing.T) {
+	input := strings.Repeat("[", core.MaxFormatterNestingDepth+1) + "0" + strings.Repeat("]", core.MaxFormatterNestingDepth+1)
+	p := core.TestPrinter(false)
+
+	err := FormatJSON([]byte(input), p)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatJSON() error = %v, want nesting limit error", err)
+	}
+	if got := len(p.Bytes()); got != 0 {
+		t.Fatalf("FormatJSON() wrote %d bytes after nesting limit", got)
+	}
+}
 
 func TestEscapeJSONString(t *testing.T) {
 	tests := []struct {

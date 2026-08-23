@@ -143,6 +143,24 @@ func TestReadAllLimitedAndBoundedBuffer(t *testing.T) {
 	}
 }
 
+func TestBoundedPrinterLimitsTotalOutput(t *testing.T) {
+	p := TestPrinter(false)
+	bounded := p.NewBoundedWriter(io.Discard, 3, "formatted output")
+
+	if _, err := bounded.WriteString("abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := bounded.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bounded.WriteString("d"); !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("bounded write error = %v, want limit error", err)
+	}
+	if !errors.Is(bounded.Err(), ErrLimitExceeded) {
+		t.Fatalf("bounded printer error = %v, want limit error", bounded.Err())
+	}
+}
+
 func TestCheckedArithmetic(t *testing.T) {
 	if _, ok := CheckedAddUint64(^uint64(0), 1); ok {
 		t.Fatal("uint64 overflow was accepted")

@@ -32,18 +32,28 @@ func formatJSON(r io.Reader, p *core.Printer) error {
 	}
 
 	p.WriteString("\n")
-	return nil
+	return p.Err()
 }
 
 func formatJSONValue(dec *jsontext.Decoder, p *core.Printer, indent int) error {
+	if err := p.Err(); err != nil {
+		return err
+	}
 	token, err := dec.ReadToken()
 	if err != nil {
 		return err
 	}
-	return formatJSONValueToken(dec, p, indent, token)
+	if err := formatJSONValueToken(dec, p, indent, token); err != nil {
+		return err
+	}
+	return p.Err()
 }
 
 func formatJSONValueToken(dec *jsontext.Decoder, p *core.Printer, indent int, token jsontext.Token) error {
+	if indent > core.MaxFormatterNestingDepth {
+		return core.LimitError{Subsystem: "JSON nesting depth", Limit: core.MaxFormatterNestingDepth}
+	}
+
 	switch token.Kind() {
 	case jsontext.KindBeginObject:
 		return formatJSONObject(dec, p, indent)
@@ -58,11 +68,14 @@ func formatJSONValueToken(dec *jsontext.Decoder, p *core.Printer, indent int, to
 	default:
 		return fmt.Errorf("unexpected token: %q", token.String())
 	}
-	return nil
+	return p.Err()
 }
 
 func formatJSONObject(dec *jsontext.Decoder, p *core.Printer, indent int) error {
 	p.WriteString("{")
+	if err := p.Err(); err != nil {
+		return err
+	}
 
 	var hasFields bool
 	for {
@@ -78,7 +91,7 @@ func formatJSONObject(dec *jsontext.Decoder, p *core.Printer, indent int) error 
 				writeIndent(p, indent)
 			}
 			p.WriteString("}")
-			return nil
+			return p.Err()
 		case jsontext.KindString:
 			if hasFields {
 				p.WriteString(",")
@@ -99,6 +112,9 @@ func formatJSONObject(dec *jsontext.Decoder, p *core.Printer, indent int) error 
 
 func formatJSONArray(dec *jsontext.Decoder, p *core.Printer, indent int) error {
 	p.WriteString("[")
+	if err := p.Err(); err != nil {
+		return err
+	}
 
 	var hasFields bool
 	for {
@@ -113,7 +129,7 @@ func formatJSONArray(dec *jsontext.Decoder, p *core.Printer, indent int) error {
 				writeIndent(p, indent)
 			}
 			p.WriteString("]")
-			return nil
+			return p.Err()
 		}
 
 		if hasFields {

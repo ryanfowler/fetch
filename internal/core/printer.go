@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // Sequence represents an ANSI escape sequence.
@@ -67,12 +68,31 @@ func (p *Printer) NewWriter(w io.Writer) *Printer {
 	return &Printer{file: w, useColor: p.useColor}
 }
 
+// NewBoundedWriter returns a printer that accepts at most max bytes in total.
+// Writes after the limit are discarded and Err reports the limit error. It is
+// useful for formatters that must materialize output before appending it
+// atomically to another printer.
+func (p *Printer) NewBoundedWriter(w io.Writer, max int64, subsystem string) *Printer {
+	return &Printer{
+		file:      w,
+		useColor:  p.useColor,
+		maxBytes:  max,
+		bounded:   true,
+		limitName: subsystem,
+	}
+}
+
 // Printer allows for writing data with optional ANSI escape sequences based on
 // the color settings for a target.
 type Printer struct {
-	file     io.Writer
-	buf      bytes.Buffer
-	useColor bool
+	file       io.Writer
+	buf        bytes.Buffer
+	useColor   bool
+	maxBytes   int64
+	bounded    bool
+	limitError error
+	limitName  string
+	accepted   int64
 }
 
 func newPrinter(file *os.File, isTerm bool, c Color) *Printer {
@@ -103,6 +123,26 @@ type lockedBuffer struct {
 	buf bytes.Buffer
 }
 
+func (p *Printer) reserve(n int) bool {
+	if p.limitError != nil {
+		return false
+	}
+	if !p.bounded {
+		return true
+	}
+	if n < 0 || int64(n) > p.maxBytes-p.accepted {
+		p.limitError = LimitError{Subsystem: p.limitName, Limit: p.maxBytes}
+		return false
+	}
+	p.accepted += int64(n)
+	return true
+}
+
+// Err returns the first limit error recorded by a bounded printer.
+func (p *Printer) Err() error {
+	return p.limitError
+}
+
 func (lb *lockedBuffer) Write(p []byte) (int, error) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
@@ -111,12 +151,13 @@ func (lb *lockedBuffer) Write(p []byte) (int, error) {
 
 // Set writes the provided Sequence.
 func (p *Printer) Set(s Sequence) {
-	if p.useColor {
-		p.buf.WriteString(escape)
-		p.buf.WriteByte('[')
-		p.buf.WriteString(string(s))
-		p.buf.WriteByte('m')
+	if !p.useColor || !p.reserve(len(string(s))+3) {
+		return
 	}
+	p.buf.WriteString(escape)
+	p.buf.WriteByte('[')
+	p.buf.WriteString(string(s))
+	p.buf.WriteByte('m')
 }
 
 // Reset resets any active escape sequences.
@@ -135,9 +176,14 @@ func (p *Printer) Flush() error {
 	return err
 }
 
-// Discard clears the buffer without writing to the underlying file.
+// Discard clears the buffer without writing to the underlying file. A bounded
+// printer also starts a new bounded transaction.
 func (p *Printer) Discard() {
 	p.buf.Reset()
+	if p.bounded {
+		p.accepted = 0
+		p.limitError = nil
+	}
 }
 
 // Bytes returns the current contents of the buffer. For test printers created
@@ -166,37 +212,50 @@ func (p *Printer) WriteTo(w io.Writer) (int64, error) {
 
 // Write writes the provided data to the buffer.
 func (p *Printer) Write(b []byte) (int, error) {
+	if !p.reserve(len(b)) {
+		return 0, p.limitError
+	}
 	return p.buf.Write(b)
 }
 
 // WriteString writes the provided string to the buffer.
 func (p *Printer) WriteString(s string) (int, error) {
+	if !p.reserve(len(s)) {
+		return 0, p.limitError
+	}
 	return p.buf.WriteString(s)
 }
 
 // WriteRune writes the provided rune to the buffer.
 func (p *Printer) WriteRune(r rune) (int, error) {
+	n := utf8.RuneLen(r)
+	if n < 0 {
+		n = utf8.RuneLen(utf8.RuneError)
+	}
+	if !p.reserve(n) {
+		return 0, p.limitError
+	}
 	return p.buf.WriteRune(r)
 }
 
 // WriteRequestPrefix writes a dim "> " prefix for request lines.
 func (p *Printer) WriteRequestPrefix() {
 	p.Set(Dim)
-	p.buf.WriteString("> ")
+	p.WriteString("> ")
 	p.Reset()
 }
 
 // WriteResponsePrefix writes a dim "< " prefix for response lines.
 func (p *Printer) WriteResponsePrefix() {
 	p.Set(Dim)
-	p.buf.WriteString("< ")
+	p.WriteString("< ")
 	p.Reset()
 }
 
 // WriteInfoPrefix writes a dim "* " prefix for informational lines.
 func (p *Printer) WriteInfoPrefix() {
 	p.Set(Dim)
-	p.buf.WriteString("* ")
+	p.WriteString("* ")
 	p.Reset()
 }
 

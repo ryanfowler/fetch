@@ -626,6 +626,17 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 	return exitCode, nil
 }
 
+func formatWithBoundedOutput(p *core.Printer, subsystem string, fn func(*core.Printer) error) ([]byte, error) {
+	out := p.NewBoundedWriter(io.Discard, maxBodyBytes, subsystem)
+	if err := fn(out); err != nil {
+		return nil, err
+	}
+	if err := out.Err(); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
 func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *clipboardCopier) (io.Reader, error) {
 	// Avoid trying to format the response for HEAD requests.
 	if resp.Request != nil && resp.Request.Method == "HEAD" {
@@ -730,16 +741,22 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 		return nil, image.RenderWithMode(ctx, buf, r.Image)
 	}
 	if contentType == format.TypeProtobuf && r.responseDescriptor != nil {
-		if format.FormatProtobufWithDescriptor(buf, r.responseDescriptor, p) == nil {
-			buf = p.Bytes()
+		if formatted, err := formatWithBoundedOutput(p, "formatted response", func(out *core.Printer) error {
+			return format.FormatProtobufWithDescriptor(buf, r.responseDescriptor, out)
+		}); err == nil {
+			buf = formatted
 		}
 		return bytes.NewReader(buf), nil
 	}
 
-	// Dispatch registered buffered formatters.
+	// Dispatch registered buffered formatters through a bounded private printer.
+	// This keeps the output limit at the response boundary instead of requiring
+	// every formatter to implement the same buffering policy.
 	if fn := format.GetBuffered(contentType); fn != nil {
-		if fn(buf, p) == nil {
-			buf = p.Bytes()
+		if formatted, err := formatWithBoundedOutput(p, "formatted response", func(out *core.Printer) error {
+			return fn(buf, out)
+		}); err == nil {
+			buf = formatted
 		}
 	}
 
