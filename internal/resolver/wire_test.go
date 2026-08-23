@@ -75,6 +75,20 @@ func TestDecodeMessageRejectsMalformedWire(t *testing.T) {
 	}
 }
 
+func TestDecodeMessageAcceptsLongCAATag(t *testing.T) {
+	tag := []byte("customauthoritytag")
+	rdata := append([]byte{0, byte(len(tag))}, tag...)
+	rdata = append(rdata, "ca.example"...)
+
+	message, err := DecodeMessage(recordPacket([]byte{0}, dnsTypeCAA, rdata))
+	if err != nil {
+		t.Fatalf("DecodeMessage rejected a valid CAA tag longer than 15 octets: %v", err)
+	}
+	if len(message.Answers) != 1 || string(message.Answers[0].RData) != string(rdata) {
+		t.Fatalf("unexpected CAA answer: %#v", message.Answers)
+	}
+}
+
 func TestDecodeResponseValidatesTransactionAndQuestion(t *testing.T) {
 	query, id, err := EncodeQueryWithID(0x1234, "Example.COM", dnsTypeA)
 	if err != nil {
