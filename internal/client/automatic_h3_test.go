@@ -2,8 +2,13 @@ package client
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,5 +129,177 @@ func TestAutomaticH3CacheKeyIncludesOriginAndResolver(t *testing.T) {
 	key := automaticH3CacheKey(u, res)
 	if key != "https://example.com:443|system" {
 		t.Fatalf("cache key = %q", key)
+	}
+}
+
+func TestAutomaticH3EvictionDefersCloseForActiveTransport(t *testing.T) {
+	for _, name := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		t.Setenv(name, "")
+	}
+
+	res := resolver.New(resolver.Config{})
+	transport := &automaticHTTP3Transport{
+		fallback:              &http.Transport{},
+		resolver:              res,
+		tcpTransports:         make(map[string]*http.Transport),
+		h3Transports:          make(map[string]automaticH3RoundTripper),
+		h3TransportCandidates: make(map[string]automaticH3Candidate),
+		h3Packets:             make(map[string]net.PacketConn),
+		tcpECHCandidates:      make(map[string][]resolver.ServiceCandidate),
+		h3TransportStates:     make(map[automaticH3RoundTripper]*automaticH3TransportState),
+		transportLastUsed:     make(map[string]time.Time),
+	}
+
+	oldKey := "https://origin-00.example:443|system"
+	old := newBlockingAutomaticH3Transport()
+	for i := 0; i < automaticTransportOriginLimit; i++ {
+		key := fmt.Sprintf("https://origin-%02d.example:443|system", i)
+		candidate := newBlockingAutomaticH3Transport()
+		if i == 0 {
+			key = oldKey
+			candidate = old
+		}
+		transport.h3Transports[key] = candidate
+		active := 1
+		if i == 0 {
+			active = 0
+		}
+		lastUsed := time.Now().Add(time.Duration(i) * time.Second)
+		transport.h3TransportStates[candidate] = &automaticH3TransportState{
+			active:   active,
+			lastUsed: lastUsed,
+		}
+		transport.transportLastUsed[key] = lastUsed
+	}
+
+	requestDone := make(chan struct {
+		resp *http.Response
+		err  error
+	}, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, oldKey[:len(oldKey)-len("|system")]+"/", nil)
+		if err != nil {
+			requestDone <- struct {
+				resp *http.Response
+				err  error
+			}{err: err}
+			return
+		}
+		resp, err := transport.RoundTrip(req)
+		requestDone <- struct {
+			resp *http.Response
+			err  error
+		}{resp: resp, err: err}
+	}()
+
+	select {
+	case <-old.started:
+	case <-time.After(time.Second):
+		t.Fatal("active HTTP/3 request did not start")
+	}
+
+	newKey := "https://new-origin.example:443|system"
+	newTransport := newBlockingAutomaticH3Transport()
+	transport.mu.Lock()
+	transport.h3Transports[newKey] = newTransport
+	transport.h3TransportStates[newTransport] = &automaticH3TransportState{
+		active:   1,
+		lastUsed: time.Now(),
+	}
+	transport.transportLastUsed[newKey] = time.Now()
+	closeH3 := transport.evictTransportOriginLocked(newKey)
+	oldState := transport.h3TransportStates[old]
+	transport.mu.Unlock()
+	closeH3Transports(closeH3)
+
+	if len(closeH3) != 0 {
+		t.Fatalf("eviction closed %d active HTTP/3 transports", len(closeH3))
+	}
+	if oldState == nil || !oldState.evicted || oldState.active == 0 {
+		t.Fatalf("old transport state after eviction = %+v", oldState)
+	}
+	if old.wasClosed() {
+		t.Fatal("active HTTP/3 transport was closed during eviction")
+	}
+
+	close(old.release)
+	var result struct {
+		resp *http.Response
+		err  error
+	}
+	select {
+	case result = <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("first HTTP/3 request did not complete after eviction")
+	}
+	if result.err != nil {
+		t.Fatalf("first HTTP/3 request failed after eviction: %v", result.err)
+	}
+	if result.resp == nil || result.resp.Body == nil {
+		t.Fatal("first HTTP/3 request returned no response body")
+	}
+	if old.wasClosed() {
+		t.Fatal("evicted HTTP/3 transport closed before response body cleanup")
+	}
+	if err := result.resp.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-old.closed:
+	case <-time.After(time.Second):
+		t.Fatal("evicted HTTP/3 transport was not closed after the last user left")
+	}
+
+	transport.mu.Lock()
+	for _, state := range transport.h3TransportStates {
+		state.active = 0
+	}
+	transport.mu.Unlock()
+	_ = transport.Close()
+}
+
+type blockingAutomaticH3Transport struct {
+	started   chan struct{}
+	release   chan struct{}
+	closed    chan struct{}
+	startOnce sync.Once
+	closeOnce sync.Once
+}
+
+func newBlockingAutomaticH3Transport() *blockingAutomaticH3Transport {
+	return &blockingAutomaticH3Transport{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		closed:  make(chan struct{}),
+	}
+}
+
+func (t *blockingAutomaticH3Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.startOnce.Do(func() { close(t.started) })
+	select {
+	case <-t.release:
+	case <-t.closed:
+		return nil, context.Canceled
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("ok")),
+		Request:    req,
+	}, nil
+}
+
+func (t *blockingAutomaticH3Transport) Close() error {
+	t.closeOnce.Do(func() { close(t.closed) })
+	return nil
+}
+
+func (t *blockingAutomaticH3Transport) CloseIdleConnections() {}
+
+func (t *blockingAutomaticH3Transport) wasClosed() bool {
+	select {
+	case <-t.closed:
+		return true
+	default:
+		return false
 	}
 }

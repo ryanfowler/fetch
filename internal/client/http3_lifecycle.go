@@ -138,15 +138,28 @@ type h3RoundTripper interface {
 // reader fails; this wrapper also makes that error observable, cancels the
 // request when the response is abandoned, and stops its watcher at EOF.
 func roundTripHTTP3(rt h3RoundTripper, req *http.Request) (*http.Response, error) {
+	return roundTripHTTP3WithDone(rt, req, nil)
+}
+
+func roundTripHTTP3WithDone(rt h3RoundTripper, req *http.Request, done func()) (*http.Response, error) {
 	if rt == nil {
+		if done != nil {
+			done()
+		}
 		return nil, errors.New("HTTP/3 transport is nil")
 	}
 	if req == nil {
+		if done != nil {
+			done()
+		}
 		return nil, errors.New("HTTP/3 request is nil")
 	}
 	if cause := context.Cause(req.Context()); cause != nil {
 		if req.Body != nil && req.Body != http.NoBody {
 			go func() { _ = req.Body.Close() }()
+		}
+		if done != nil {
+			done()
 		}
 		return nil, cause
 	}
@@ -176,7 +189,13 @@ func roundTripHTTP3(rt h3RoundTripper, req *http.Request) (*http.Response, error
 		state.stop()
 		cancel()
 		if bodyErr := state.err(); bodyErr != nil {
+			if done != nil {
+				done()
+			}
 			return nil, &HTTP3RequestBodyError{Err: bodyErr}
+		}
+		if done != nil {
+			done()
 		}
 		return nil, classifyHTTP3Error(err, true)
 	}
@@ -187,23 +206,32 @@ func roundTripHTTP3(rt h3RoundTripper, req *http.Request) (*http.Response, error
 		state.abort()
 		state.stop()
 		cancel()
+		if done != nil {
+			done()
+		}
 		return nil, &HTTP3RequestBodyError{Err: bodyErr}
 	}
 	if resp == nil {
 		state.abort()
 		state.stop()
 		cancel()
+		if done != nil {
+			done()
+		}
 		return nil, errors.New("HTTP/3 transport returned a nil response")
 	}
 	if resp.Body == nil {
 		state.abort()
 		state.stop()
 		cancel()
+		if done != nil {
+			done()
+		}
 		return resp, nil
 	}
 
 	resp.Request = sent
-	resp.Body = newH3ResponseBody(resp.Body, ctx, cancel, state)
+	resp.Body = newH3ResponseBody(resp.Body, ctx, cancel, state, done)
 	return resp, nil
 }
 
@@ -329,13 +357,14 @@ type h3ResponseBody struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	state  *h3RequestState
+	onDone func()
 
 	once sync.Once
 	done chan struct{}
 }
 
-func newH3ResponseBody(body io.ReadCloser, ctx context.Context, cancel context.CancelFunc, state *h3RequestState) *h3ResponseBody {
-	wrapped := &h3ResponseBody{body: body, ctx: ctx, cancel: cancel, state: state, done: make(chan struct{})}
+func newH3ResponseBody(body io.ReadCloser, ctx context.Context, cancel context.CancelFunc, state *h3RequestState, onDone func()) *h3ResponseBody {
+	wrapped := &h3ResponseBody{body: body, ctx: ctx, cancel: cancel, state: state, onDone: onDone, done: make(chan struct{})}
 	go wrapped.watchContext()
 	return wrapped
 }
@@ -448,6 +477,9 @@ func (b *h3ResponseBody) finish() {
 		b.state.abort()
 		b.state.stop()
 		_ = b.body.Close()
+		if b.onDone != nil {
+			b.onDone()
+		}
 		close(b.done)
 	})
 }
