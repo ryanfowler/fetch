@@ -495,6 +495,7 @@ func (a *App) CLI() *CLI {
 			cfgFlag("retry-delay", "", "SECONDS", "Initial delay between retries",
 				func() bool { return a.Cfg.RetryDelay != nil }, a.Cfg.ParseRetryDelay).
 				WithDefault("1"),
+			ptrBoolFlag(&a.Cfg.RetryUnsafe, "retry-unsafe", "", "Allow retries for non-safe HTTP methods"),
 
 			Flag{
 				Long:        "scope",

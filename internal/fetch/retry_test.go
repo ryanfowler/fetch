@@ -181,7 +181,7 @@ func TestSchemelessPlaintextHint(t *testing.T) {
 func TestShouldRetry(t *testing.T) {
 	t.Run("429 is retryable", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 429, Header: http.Header{}}
-		ok, _ := shouldRetry(resp, nil)
+		ok, _ := shouldRetry(http.MethodGet, false, resp, nil)
 		if !ok {
 			t.Error("expected 429 to be retryable")
 		}
@@ -189,7 +189,7 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("502 is retryable", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 502}
-		ok, _ := shouldRetry(resp, nil)
+		ok, _ := shouldRetry(http.MethodGet, false, resp, nil)
 		if !ok {
 			t.Error("expected 502 to be retryable")
 		}
@@ -197,7 +197,7 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("503 is retryable", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 503}
-		ok, _ := shouldRetry(resp, nil)
+		ok, _ := shouldRetry(http.MethodGet, false, resp, nil)
 		if !ok {
 			t.Error("expected 503 to be retryable")
 		}
@@ -205,7 +205,7 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("504 is retryable", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 504}
-		ok, _ := shouldRetry(resp, nil)
+		ok, _ := shouldRetry(http.MethodGet, false, resp, nil)
 		if !ok {
 			t.Error("expected 504 to be retryable")
 		}
@@ -213,7 +213,7 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("503 honors capped Retry-After", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 503, Header: http.Header{"Retry-After": []string{"60"}}}
-		ok, delay := shouldRetry(resp, nil)
+		ok, delay := shouldRetry(http.MethodGet, false, resp, nil)
 		if !ok || delay != core.MaxRetryAfter {
 			t.Fatalf("shouldRetry = %v, %s; want true, %s", ok, delay, core.MaxRetryAfter)
 		}
@@ -221,7 +221,7 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("200 is not retryable", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 200}
-		ok, _ := shouldRetry(resp, nil)
+		ok, _ := shouldRetry(http.MethodGet, false, resp, nil)
 		if ok {
 			t.Error("expected 200 to not be retryable")
 		}
@@ -229,7 +229,7 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("400 is not retryable", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 400}
-		ok, _ := shouldRetry(resp, nil)
+		ok, _ := shouldRetry(http.MethodGet, false, resp, nil)
 		if ok {
 			t.Error("expected 400 to not be retryable")
 		}
@@ -237,7 +237,7 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("404 is not retryable", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 404}
-		ok, _ := shouldRetry(resp, nil)
+		ok, _ := shouldRetry(http.MethodGet, false, resp, nil)
 		if ok {
 			t.Error("expected 404 to not be retryable")
 		}
@@ -245,14 +245,14 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("connection error is retryable", func(t *testing.T) {
 		err := &net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host"}}
-		ok, _ := shouldRetry(nil, err)
+		ok, _ := shouldRetry(http.MethodGet, false, nil, err)
 		if !ok {
 			t.Error("expected connection error to be retryable")
 		}
 	})
 
 	t.Run("context canceled is not retryable", func(t *testing.T) {
-		ok, _ := shouldRetry(nil, context.Canceled)
+		ok, _ := shouldRetry(http.MethodGet, false, nil, context.Canceled)
 		if ok {
 			t.Error("expected context.Canceled to not be retryable")
 		}
@@ -260,7 +260,7 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("url error wrapping net error is retryable", func(t *testing.T) {
 		err := &url.Error{Op: "Get", URL: "http://example.com", Err: &net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host"}}}
-		ok, _ := shouldRetry(nil, err)
+		ok, _ := shouldRetry(http.MethodGet, false, nil, err)
 		if !ok {
 			t.Error("expected url.Error wrapping net error to be retryable")
 		}
@@ -268,9 +268,36 @@ func TestShouldRetry(t *testing.T) {
 
 	t.Run("url error wrapping non-retryable error is not retryable", func(t *testing.T) {
 		err := &url.Error{Op: "Get", URL: "http://example.com", Err: fmt.Errorf("exceeded maximum number of redirects: 1")}
-		ok, _ := shouldRetry(nil, err)
+		ok, _ := shouldRetry(http.MethodGet, false, nil, err)
 		if ok {
 			t.Error("expected url.Error wrapping redirect limit error to not be retryable")
+		}
+	})
+
+	t.Run("unsafe methods are not retryable by default", func(t *testing.T) {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, "PURGE"} {
+			ok, _ := shouldRetry(method, false, &http.Response{StatusCode: http.StatusServiceUnavailable}, nil)
+			if ok {
+				t.Errorf("%s was retryable without opt-in", method)
+			}
+		}
+	})
+
+	t.Run("unsafe methods require explicit opt-in", func(t *testing.T) {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, "PURGE"} {
+			ok, _ := shouldRetry(method, true, &http.Response{StatusCode: http.StatusServiceUnavailable}, nil)
+			if !ok {
+				t.Errorf("%s was not retryable with opt-in", method)
+			}
+		}
+	})
+
+	t.Run("safe methods remain retryable without opt-in", func(t *testing.T) {
+		for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace} {
+			ok, _ := shouldRetry(method, false, &http.Response{StatusCode: http.StatusServiceUnavailable}, nil)
+			if !ok {
+				t.Errorf("%s was not retryable", method)
+			}
 		}
 	})
 }
@@ -360,6 +387,50 @@ func TestRetryBudgetCoversDelay(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
 		t.Fatalf("shared timeout took too long: %s", elapsed)
+	}
+}
+
+func TestUnsafeRequestWithConfiguredRetriesStillSendsOneShotBody(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		if string(body) != "one-shot" {
+			t.Errorf("body = %q, want one-shot", body)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	r := &Request{
+		Discard:       true,
+		Retry:         2,
+		RetryDelay:    time.Millisecond,
+		PrinterHandle: core.NewHandle(core.ColorOff),
+	}
+	c := client.NewClient(client.ClientConfig{})
+	defer c.Close()
+	req, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader("one-shot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Remove the automatically generated GetBody to model stdin or another
+	// one-shot source. The unsafe default must still send its initial attempt.
+	req.GetBody = nil
+	req.Body = io.NopCloser(strings.NewReader("one-shot"))
+
+	code, err := retryableRequest(context.Background(), r, c, req)
+	if err != nil {
+		t.Fatalf("retryableRequest: %v", err)
+	}
+	if code != 5 {
+		t.Fatalf("exit code = %d, want 5", code)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want one attempt", requests)
 	}
 }
 

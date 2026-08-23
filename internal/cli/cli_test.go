@@ -119,14 +119,14 @@ func TestCLI002TargetFlags(t *testing.T) {
 
 	app, err := Parse([]string{
 		"--har", "capture.har", "--image", "external", "--pager", "on",
-		"--sort-headers",
+		"--sort-headers", "--retry-unsafe",
 		"https://example.com",
 	})
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
 	if app.HAR != "capture.har" || app.Cfg.Image != core.ImageExternal || app.Cfg.Pager != core.PagerOn ||
-		app.Cfg.SortHeaders == nil || !*app.Cfg.SortHeaders {
+		app.Cfg.SortHeaders == nil || !*app.Cfg.SortHeaders || app.Cfg.RetryUnsafe == nil || !*app.Cfg.RetryUnsafe {
 		t.Fatalf("parsed target flags were not retained: %+v", app)
 	}
 	if app, err := Parse([]string{"--ws-message-mode", "binary", "ws://example.com"}); err != nil || app.WSMessageMode != core.WSMessageBinary {

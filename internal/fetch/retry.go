@@ -56,7 +56,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 	// one-shot source before the first network operation instead of buffering it
 	// implicitly.
 	var replayer *replayableBody
-	if maxAttempts > 1 || r.Digest != nil {
+	if (maxAttempts > 1 && retryMethodAllowed(req.Method, r.RetryUnsafe)) || r.Digest != nil {
 		replayer, err = newReplayableBody(req.WithContext(requestCtx))
 		if err != nil {
 			return 0, err
@@ -159,7 +159,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 			}
 		}
 
-		retryable, retryAfter := shouldRetry(resp, doErr)
+		retryable, retryAfter := shouldRetry(attemptReq.Method, r.RetryUnsafe, resp, doErr)
 		isLastAttempt := attempt == maxAttempts-1
 		if !retryable || isLastAttempt {
 			defer cancelAttempt()
@@ -584,10 +584,15 @@ func warnCompressedSSE(r *Request) {
 	core.WriteWarningMsg(r.PrinterHandle.Stderr(), "compressed SSE was not retried without Accept-Encoding because the request method is not safe")
 }
 
-// shouldRetry determines if a request should be retried based on the response
-// or error. It returns whether the request is retryable and any Retry-After
-// duration from the response headers.
-func shouldRetry(resp *http.Response, err error) (retryable bool, retryAfter time.Duration) {
+// shouldRetry determines if a request should be retried based on its method,
+// response, or error. Automatic retries are limited to methods whose standard
+// semantics are safe to repeat unless the caller explicitly opts into
+// retrying unsafe methods. Digest challenge replays are handled separately by
+// doOnce and do not use this policy.
+func shouldRetry(method string, retryUnsafe bool, resp *http.Response, err error) (retryable bool, retryAfter time.Duration) {
+	if !retryMethodAllowed(method, retryUnsafe) {
+		return false, 0
+	}
 	if err != nil {
 		return isRetryableError(err), 0
 	}
@@ -602,6 +607,19 @@ func shouldRetry(resp *http.Response, err error) (retryable bool, retryAfter tim
 		return true, parseRetryAfter(resp.Header)
 	default:
 		return false, 0
+	}
+}
+
+func retryMethodAllowed(method string, retryUnsafe bool) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	default:
+		// PUT and DELETE are idempotent in the HTTP specification, but an
+		// application may still implement them with side effects that are not
+		// safe to replay. Treat them like POST, PATCH, and custom methods and
+		// require the same explicit opt-in.
+		return retryUnsafe
 	}
 }
 

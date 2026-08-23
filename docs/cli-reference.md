@@ -438,7 +438,7 @@ redirects remain allowed.
 
 Maximum number of retries for transient failures. Default: `0` (no retries).
 
-Retries occur on connection errors and retryable status codes (429, 502, 503, 504). Non-retryable errors (4xx, TLS certificate errors) are not retried. Uses exponential backoff with jitter between attempts.
+Retries occur on connection errors and retryable status codes (429, 502, 503, 504) for GET, HEAD, OPTIONS, and TRACE requests. Non-retryable errors (4xx, TLS certificate errors) are not retried. PUT and DELETE are not retried by default: although HTTP describes them as idempotent, individual APIs may implement side effects that are unsafe to repeat. POST, PATCH, PUT, DELETE, and custom methods require the explicit `--retry-unsafe` opt-in. Uses exponential backoff with jitter between attempts.
 
 All attempts, redirects, response reads, bounded drains, and retry delays share one `--timeout` wall-clock budget. A request body must be replayable before a retry starts. Only the final attempt's response body is written to stdout. Retry notifications are printed to stderr (suppressed with `--silent`).
 
@@ -446,6 +446,23 @@ All attempts, redirects, response reads, bounded drains, and retry delays share 
 fetch --retry 3 example.com
 fetch --retry 2 --retry-delay 0.5 example.com
 ```
+
+### `--retry-unsafe`
+
+Opt in to automatic retries for methods other than GET, HEAD, OPTIONS, and
+TRACE. This includes POST, PATCH, PUT, DELETE, and custom methods. Use it only
+when the endpoint is known to tolerate replay, or when the request carries an
+application-level idempotency guarantee such as a validated `Idempotency-Key`.
+The option does not add an idempotency key or otherwise make a request safe.
+
+```sh
+fetch --method POST --data '{"action":"create"}' --retry 2 --retry-unsafe example.com/actions
+```
+
+Digest authentication is a separate challenge-response mechanism. A Digest
+401 challenge can replay the request once (and a stale nonce can cause one
+additional bounded replay) when `--digest` is enabled, including for an unsafe
+method; `--retry-unsafe` does not control those authentication replays.
 
 ### `--retry-delay SECONDS`
 
@@ -763,7 +780,7 @@ fetch --from-curl 'https://example.com'
 | Auth                       | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                 |
 | TLS                        | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`, `--ech hard                                                    | true | auto | false` |
 | Output                     | `-o`, `-O`, `-J`                                                                                                                   |
-| Network                    | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `-r` |
+| Network                    | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `--retry-unsafe`, `-r` |
 | HTTP version               | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                            |
 | Headers                    | `-A`, `-e`, `-b`                                                                                                                   |
 | Verbosity                  | `-v`, `-s`                                                                                                                         |

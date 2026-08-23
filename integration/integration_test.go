@@ -2903,12 +2903,51 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01",
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-unsafe", "--retry-delay", "0.01",
 			"-d", "test-body")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 		if *lastBody.Load() != "test-body" {
 			t.Fatalf("body not replayed correctly: %s", *lastBody.Load())
+		}
+	})
+
+	t.Run("unsafe POST is not retried by default", func(t *testing.T) {
+		t.Parallel()
+		var requests, mutations atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			mutations.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "2", "--retry-delay", "0.01", "-d", "create")
+		assertExitCode(t, 5, res)
+		if requests.Load() != 1 || mutations.Load() != 1 {
+			t.Fatalf("requests = %d, mutations = %d; want one each", requests.Load(), mutations.Load())
+		}
+	})
+
+	t.Run("unsafe POST retries with explicit opt-in", func(t *testing.T) {
+		t.Parallel()
+		var requests, mutations atomic.Int64
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			requests.Add(1)
+			mutations.Add(1)
+			if requests.Load() == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			io.WriteString(w, "retried")
+		})
+		defer server.Close()
+
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-unsafe", "--retry-delay", "0.01", "-d", "create")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "retried")
+		if requests.Load() != 2 || mutations.Load() != 2 {
+			t.Fatalf("requests = %d, mutations = %d; want two each", requests.Load(), mutations.Load())
 		}
 	})
 

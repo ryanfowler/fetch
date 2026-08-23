@@ -91,6 +91,7 @@ type Request struct {
 	RemoteName       bool
 	Retry            int
 	RetryDelay       time.Duration
+	RetryUnsafe      bool
 	Session          string
 	Timeout          time.Duration
 	Timing           bool

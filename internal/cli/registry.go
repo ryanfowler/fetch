@@ -263,7 +263,7 @@ func (r *OptionRegistry) Ignored(mode OptionMode, explicit func(string) bool) []
 	for i, label := range []string{
 		"--data/--json/--xml", "--form", "--multipart", "--grpc", "--grpc-describe", "--grpc-list",
 		"--output", "--remote-name", "--remote-header-name", "--copy", "--method", "--header", "--query",
-		"--edit", "--session", "--retry", "--range", "--timing", "--proxy", "--discard", "--unix",
+		"--edit", "--session", "--retry", "--retry-unsafe", "--range", "--timing", "--proxy", "--discard", "--unix",
 		"--inspect-tls", "--bearer", "--basic", "--digest", "--aws-sigv4", "--ca-cert", "--cert", "--key",
 		"--tls", "--max-tls", "--insecure", "--format", "--dry-run",
 	} {
@@ -335,7 +335,7 @@ var websocketExcluded = map[string][]string{
 	"grpc-describe": {"ws", "wss"}, "grpc-list": {"ws", "wss"}, "ignore-status": {"ws", "wss"}, "multipart": {"ws", "wss"},
 	"redirects": {"ws", "wss"},
 	"output":    {"ws", "wss"}, "range": {"ws", "wss"}, "remote-header-name": {"ws", "wss"}, "remote-name": {"ws", "wss"},
-	"retry": {"ws", "wss"}, "retry-delay": {"ws", "wss"}, "xml": {"ws", "wss"},
+	"retry": {"ws", "wss"}, "retry-delay": {"ws", "wss"}, "retry-unsafe": {"ws", "wss"}, "xml": {"ws", "wss"},
 	"digest": {"ws", "wss"}, "har": {"ws", "wss"},
 }
 
@@ -415,6 +415,7 @@ var flagDefinitions = map[string]Flag{
 	"edit":          {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}, UnsupportedIn: []OptionMode{ModeGRPCDiscovery}},
 	"session":       {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
 	"retry":         {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
+	"retry-unsafe":  {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
 	"range":         {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
 	"timing":        {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
 	"proxy":         {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},

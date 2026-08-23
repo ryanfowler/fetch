@@ -169,6 +169,34 @@ func TestParseRetry(t *testing.T) {
 	})
 }
 
+func TestParseRetryUnsafe(t *testing.T) {
+	t.Run("true", func(t *testing.T) {
+		c := &Config{}
+		if err := c.ParseRetryUnsafe("true"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.RetryUnsafe == nil || !*c.RetryUnsafe {
+			t.Fatalf("retry-unsafe = %v, want true", c.RetryUnsafe)
+		}
+	})
+
+	t.Run("false", func(t *testing.T) {
+		c := &Config{}
+		if err := c.Set("retry-unsafe", "false"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.RetryUnsafe == nil || *c.RetryUnsafe {
+			t.Fatalf("retry-unsafe = %v, want false", c.RetryUnsafe)
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		if err := (&Config{}).ParseRetryUnsafe("maybe"); err == nil {
+			t.Fatal("expected invalid boolean error")
+		}
+	})
+}
+
 func TestParseConnectTimeout(t *testing.T) {
 	t.Run("negative value", func(t *testing.T) {
 		c := &Config{}

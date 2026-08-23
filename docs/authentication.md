@@ -46,7 +46,7 @@ The `--digest` flag performs a two-step handshake:
 Authorization: Digest username="...", realm="...", nonce="...", uri="...", response="..."
 ```
 
-`fetch` supports MD5, MD5-sess, SHA-256, SHA-256-sess, SHA-512-256, and SHA-512-256-sess. It supports challenges with no `qop` and selects `auth` when it appears in a qop list. `auth-int` and unknown-only qop lists are rejected with a clear diagnostic. Quoted UTF-8 values and quoted-pair escapes are preserved. A stale nonce is retried once; one-shot bodies such as stdin cannot be replayed for Digest authentication.
+`fetch` supports MD5, MD5-sess, SHA-256, SHA-256-sess, SHA-512-256, and SHA-512-256-sess. It supports challenges with no `qop` and selects `auth` when it appears in a qop list. `auth-int` and unknown-only qop lists are rejected with a clear diagnostic. Quoted UTF-8 values and quoted-pair escapes are preserved. A challenge response can replay the request body, and a stale nonce is retried once; one-shot bodies such as stdin cannot be replayed for Digest authentication. This authentication replay is separate from transient `--retry` behavior: it can still resend an unsafe method without `--retry-unsafe`.
 
 ### Compatibility with curl
 
