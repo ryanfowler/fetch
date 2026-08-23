@@ -245,6 +245,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		if err != nil {
 			return nil, fmt.Errorf("connect to resolver: %w", err)
 		}
+		defer dohClient.Close()
 	}
 
 	results := make([]queryResult, len(inspectTypes))

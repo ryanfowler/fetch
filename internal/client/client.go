@@ -458,7 +458,10 @@ func NewClient(cfg ClientConfig) *Client {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, network, address)
 		}
-		initErr = res.SetRoundTripper(dohTransport)
+		if setErr := res.SetOwnedRoundTripper(dohTransport); setErr != nil {
+			_ = dohTransport.Close()
+			initErr = setErr
+		}
 	}
 	if cfg.HTTP == core.HTTP3 && cfg.Proxy != nil {
 		initErr = errors.New("HTTP/3 cannot be used with a proxy")
@@ -848,13 +851,17 @@ func (t *http3TimingTransport) Close() error {
 
 // Close closes the underlying transport, releasing any resources.
 func (c *Client) Close() error {
+	var closeErr error
 	if idleCloser, ok := c.c.Transport.(interface{ CloseIdleConnections() }); ok {
 		idleCloser.CloseIdleConnections()
 	}
 	if closer, ok := c.c.Transport.(io.Closer); ok {
-		return closer.Close()
+		closeErr = errors.Join(closeErr, closer.Close())
 	}
-	return nil
+	if c.resolver != nil {
+		closeErr = errors.Join(closeErr, c.resolver.Close())
+	}
+	return closeErr
 }
 
 // HTTPClient returns the underlying *http.Client. Its Transport may be a

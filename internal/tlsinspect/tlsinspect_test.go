@@ -7,9 +7,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"io"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +192,80 @@ func TestInspectHTTP3UsesQUICAndH3ALPN(t *testing.T) {
 	}
 	if !strings.Contains(out, "quic-server") {
 		t.Fatalf("expected certificate chain in output, got:\n%s", out)
+	}
+}
+
+func TestInspectClosesDoHResolver(t *testing.T) {
+	caCert, caKey := generateTestCACert(t)
+	serverCert, serverKey := generateTestCert(t, caCert, caKey, "tls.example")
+	tlsListener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{{
+		Certificate: [][]byte{serverCert.Raw},
+		PrivateKey:  serverKey,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tlsListener.Close() })
+	go func() {
+		conn, acceptErr := tlsListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		if tlsConn, ok := conn.(*tls.Conn); ok {
+			if handshakeErr := tlsConn.Handshake(); handshakeErr != nil {
+				return
+			}
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	dohClosed := make(chan struct{}, 1)
+	doh := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-json")
+		if r.URL.Query().Get("type") == "AAAA" {
+			_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"name":"tls.example","type":28,"data":"::1"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"name":"tls.example","type":1,"data":"127.0.0.1"}]}`)
+	}))
+	doh.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case dohClosed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	doh.Start()
+	t.Cleanup(func() { doh.Close() })
+
+	dohURL, err := url.Parse(doh.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetURL, err := url.Parse("https://tls.example:" + strconv.Itoa(tlsListener.Addr().(*net.TCPAddr).Port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newTestPrinter()
+	if code := Inspect(context.Background(), p, &Config{
+		CACerts:   []*x509.Certificate{caCert},
+		DNSServer: dohURL,
+		Timeout:   5 * time.Second,
+		URL:       targetURL,
+	}); code != 0 {
+		t.Fatalf("Inspect() exit code = %d, output:\n%s", code, string(p.Bytes()))
+	}
+
+	select {
+	case <-dohClosed:
+	case <-time.After(time.Second):
+		t.Fatal("Inspect did not close the DoH resolver connection")
 	}
 }
 
@@ -406,6 +484,7 @@ func generateTestCert(t *testing.T, caCert *x509.Certificate, caKey *rsa.Private
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{name},
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)

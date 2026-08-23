@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -33,24 +34,30 @@ type DOHConfig struct {
 	Endpoint     *Endpoint
 	ServerURL    *url.URL
 	RoundTripper http.RoundTripper
-	Proxy        func(*http.Request) (*url.URL, error)
-	DialContext  DialContextFunc
-	Bootstrap    BootstrapFunc
-	TLSConfig    *tls.Config
-	CACerts      []*x509.Certificate
-	ClientCert   *tls.Certificate
-	Insecure     bool
-	TLSMin       uint16
-	TLSMax       uint16
-	Timeout      time.Duration
+	// RoundTripperOwned transfers responsibility for closing RoundTripper to
+	// the returned client. Callers that inject a shared transport must leave
+	// this false.
+	RoundTripperOwned bool
+	Proxy             func(*http.Request) (*url.URL, error)
+	DialContext       DialContextFunc
+	Bootstrap         BootstrapFunc
+	TLSConfig         *tls.Config
+	CACerts           []*x509.Certificate
+	ClientCert        *tls.Certificate
+	Insecure          bool
+	TLSMin            uint16
+	TLSMax            uint16
+	Timeout           time.Duration
 }
 
 // DOHClient keeps one HTTP client, and therefore its connection pool, for a
 // related set of DNS queries. It is safe for concurrent Lookup calls.
 type DOHClient struct {
-	client    *http.Client
-	serverURL *url.URL
-	timeout   time.Duration
+	client         *http.Client
+	serverURL      *url.URL
+	timeout        time.Duration
+	ownedTransport bool
+	closeOnce      sync.Once
 }
 
 // NewDOHClient creates an operation-scoped DoH client. It does not follow
@@ -78,6 +85,7 @@ func NewDOHClient(cfg DOHConfig) (*DOHClient, error) {
 	serverURL = cloneURL(serverURL)
 
 	transport := cfg.RoundTripper
+	ownedTransport := transport == nil || cfg.RoundTripperOwned
 	if transport == nil {
 		base, ok := http.DefaultTransport.(*http.Transport)
 		if !ok {
@@ -106,9 +114,32 @@ func NewDOHClient(cfg DOHConfig) (*DOHClient, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-		serverURL: serverURL,
-		timeout:   cfg.Timeout,
+		serverURL:      serverURL,
+		timeout:        cfg.Timeout,
+		ownedTransport: ownedTransport,
 	}, nil
+}
+
+// Close releases idle connections from the transport owned by the DoH client.
+// A transport supplied by the caller remains the caller's responsibility.
+// Close is safe to call more than once.
+func (c *DOHClient) Close() error {
+	if c == nil {
+		return nil
+	}
+	var closeErr error
+	c.closeOnce.Do(func() {
+		if !c.ownedTransport || c.client == nil {
+			return
+		}
+		if idleCloser, ok := c.client.Transport.(interface{ CloseIdleConnections() }); ok {
+			idleCloser.CloseIdleConnections()
+		}
+		if closer, ok := c.client.Transport.(io.Closer); ok {
+			closeErr = closer.Close()
+		}
+	})
+	return closeErr
 }
 
 func cloneURL(u *url.URL) *url.URL {
@@ -292,6 +323,7 @@ func lookupDOHWireMessage(ctx context.Context, serverURL *url.URL, host string, 
 	if err != nil {
 		return nil, err
 	}
+	defer client.Close()
 	return client.wireMessage(ctx, host, answerType)
 }
 
@@ -337,6 +369,7 @@ func LookupDOHType(ctx context.Context, serverURL *url.URL, host, dnsType string
 	if err != nil {
 		return nil, err
 	}
+	defer client.Close()
 	return client.LookupType(ctx, host, dnsType, answerType)
 }
 
