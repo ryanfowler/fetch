@@ -210,11 +210,10 @@ func (c *persistentH3Cache) close() {
 	c.mu.Lock()
 	if !c.closed {
 		c.closed = true
-		// Pending state changes are best effort at shutdown. Discard queued
-		// maintenance operations before closing the queue; state-changing
-		// mutations live in pending and are drained by the worker. The queue
-		// must be drained without blocking because the worker may already have
-		// taken its last operation.
+		// Discard queued maintenance operations before closing the queue;
+		// state-changing mutations live in pending and are drained by the worker.
+		// The queue must be drained without blocking because the worker may
+		// already have taken its last operation.
 		for {
 			select {
 			case <-c.ops:
@@ -226,10 +225,11 @@ func (c *persistentH3Cache) close() {
 		}
 	}
 	c.mu.Unlock()
-	select {
-	case <-c.done:
-	case <-time.After(250 * time.Millisecond):
-	}
+	// Closing the cache is the synchronization point for pending mutations.
+	// Do not return while the worker can still be writing a shard: callers may
+	// immediately create another cache for the same directory, and a delayed
+	// mutation could then make that cache observe incomplete state.
+	<-c.done
 }
 
 func (c *persistentH3Cache) load(key string, now time.Time) []automaticH3Candidate {
