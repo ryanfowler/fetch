@@ -2084,6 +2084,12 @@ func TestMain(t *testing.T) {
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stderr, "Updated fetch:")
 		assertBufContains(t, res.stderr, "Changelog:")
+		if runtime.GOOS == "windows" {
+			deadline := time.Now().Add(5 * time.Second)
+			for len(listFiles(t, filepath.Dir(updateFetchPath))) > 1 && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
 		if s := listFiles(t, filepath.Dir(updateFetchPath)); len(s) > 1 {
 			t.Fatalf("unexpected files after updating: %v", s)
 		}
