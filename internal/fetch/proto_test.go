@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -120,6 +122,31 @@ func TestFrameGRPCBodyClosesSource(t *testing.T) {
 	}
 	if err := framed.Close(); err != nil {
 		t.Fatalf("unexpected close error: %v", err)
+	}
+}
+
+func TestFrameGRPCBodyDoesNotDoubleCloseSource(t *testing.T) {
+	input := &nonIdempotentCloser{Reader: strings.NewReader("hello")}
+	framed, err := frameGRPCBody(body.NewReader(input, int64(len("hello")), ""))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	stream, err := framed.Open()
+	if err != nil {
+		t.Fatalf("unexpected open error: %v", err)
+	}
+	if _, err := io.ReadAll(stream); err != nil {
+		t.Fatalf("unexpected read error: %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("unexpected stream close error: %v", err)
+	}
+	if err := framed.Close(); err != nil {
+		t.Fatalf("unexpected framed body close error: %v", err)
+	}
+	if input.closes != 1 {
+		t.Fatalf("underlying stream close count = %d, want 1", input.closes)
 	}
 }
 
@@ -244,6 +271,15 @@ func TestFrameGRPCBodySupportsRetryReplayAfterSpooling(t *testing.T) {
 }
 
 func TestFrameGRPCBodySupportsDigestReplayAfterSpooling(t *testing.T) {
+	before := grpcSpoolFileNames(t)
+	t.Cleanup(func() {
+		for name := range grpcSpoolFileNames(t) {
+			if _, exists := before[name]; !exists {
+				_ = os.Remove(filepath.Join(os.TempDir(), name))
+			}
+		}
+	})
+
 	var received [][]byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
@@ -293,6 +329,37 @@ func TestFrameGRPCBodySupportsDigestReplayAfterSpooling(t *testing.T) {
 	if len(received) != 1 || !bytes.Equal(received[0], want) {
 		t.Fatalf("authenticated bodies = %d/%x, want one framed payload %x", len(received), received, want)
 	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("close response body: %v", err)
+	}
+	if err := replayer.close(); err != nil {
+		t.Fatalf("close replayable body: %v", err)
+	}
+	if err := framed.Close(); err != nil {
+		t.Fatalf("close framed body: %v", err)
+	}
+	after := grpcSpoolFileNames(t)
+	if len(after) != len(before) {
+		t.Fatalf("gRPC spool files after Digest exchange = %v, want unchanged from %v", after, before)
+	}
+	for name := range after {
+		if _, exists := before[name]; !exists {
+			t.Fatalf("gRPC spool file leaked after Digest exchange: %s", name)
+		}
+	}
+}
+
+type nonIdempotentCloser struct {
+	io.Reader
+	closes int
+}
+
+func (r *nonIdempotentCloser) Close() error {
+	r.closes++
+	if r.closes > 1 {
+		return errors.New("underlying stream closed more than once")
+	}
+	return nil
 }
 
 type patternReader struct {

@@ -178,7 +178,7 @@ func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
 		}
 		var header [5]byte
 		binary.BigEndian.PutUint32(header[1:], uint32(length))
-		return newReaderWithCloser(io.MultiReader(bytes.NewReader(header[:]), stream), stream), nil
+		return newGRPCFramedReader(io.MultiReader(bytes.NewReader(header[:]), stream), stream), nil
 	}
 	return body.NewFactory(open, framedLength, fetchgrpc.ContentType, source.Replayable()), nil
 }
@@ -197,17 +197,22 @@ func frameGRPCBody(source *body.Body) (*body.Body, error) {
 		if source != nil {
 			length = source.ContentLength()
 		}
-		return newFramedGRPCBody(source, length)
+		return newFramedGRPCBody(source, length, nil)
 	}
 
-	spooled, err := spoolGRPCBody(source)
+	spooled, cleanup, err := spoolGRPCBody(source)
 	if err != nil {
 		return nil, err
 	}
-	return newFramedGRPCBody(spooled, spooled.ContentLength())
+	framed, err := newFramedGRPCBody(spooled, spooled.ContentLength(), cleanup)
+	if err != nil {
+		_ = cleanup()
+		return nil, err
+	}
+	return framed, nil
 }
 
-func newFramedGRPCBody(source *body.Body, length int64) (*body.Body, error) {
+func newFramedGRPCBody(source *body.Body, length int64, cleanup func() error) (*body.Body, error) {
 	if length > fetchgrpc.MaxMessageSize {
 		return nil, core.LimitError{Subsystem: "gRPC request body", Limit: fetchgrpc.MaxMessageSize}
 	}
@@ -228,32 +233,31 @@ func newFramedGRPCBody(source *body.Body, length int64) (*body.Body, error) {
 		var header [5]byte
 		binary.BigEndian.PutUint32(header[1:], uint32(length))
 		if source == nil {
-			return newReaderWithCloser(bytes.NewReader(header[:]), stream), nil
+			return newGRPCFramedReader(bytes.NewReader(header[:]), stream), nil
 		}
-		return newReaderWithCloser(io.MultiReader(bytes.NewReader(header[:]), stream), stream), nil
+		return newGRPCFramedReader(io.MultiReader(bytes.NewReader(header[:]), stream), stream), nil
 	}
 
 	framed := body.NewFactory(open, frameLength, fetchgrpc.ContentType, source == nil || source.Replayable())
-	if source != nil {
-		// Closing before the first read must still release a spool file. Keep
-		// source cleanup at the body level so closing a replay stream does not
-		// remove the file needed by a later retry.
-		framed.SetCleanup(source.Close)
+	if cleanup != nil {
+		// The framed reader owns the stream returned by source.Open. Keep the
+		// independent spool-file cleanup on the framed body so it survives
+		// replay streams and also runs when the body is closed before opening.
+		framed.SetCleanup(cleanup)
 	}
 	return framed, nil
 }
 
-func spoolGRPCBody(source *body.Body) (*body.Body, error) {
+func spoolGRPCBody(source *body.Body) (*body.Body, func() error, error) {
 	stream, err := source.Open()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer source.Close()
 
 	f, err := os.CreateTemp("", "fetch-grpc-*")
 	if err != nil {
 		_ = stream.Close()
-		return nil, fmt.Errorf("failed to create gRPC request spool: %w", err)
+		return nil, nil, fmt.Errorf("failed to create gRPC request spool: %w", err)
 	}
 	path := f.Name()
 	remove := func() { _ = os.Remove(path) }
@@ -263,7 +267,7 @@ func spoolGRPCBody(source *body.Body) (*body.Body, error) {
 	fileCloseErr := f.Close()
 	if copyErr != nil || streamCloseErr != nil || fileCloseErr != nil {
 		remove()
-		return nil, errors.Join(
+		return nil, nil, errors.Join(
 			wrapGRPCSpoolError("read", copyErr),
 			wrapGRPCSpoolError("close input", streamCloseErr),
 			wrapGRPCSpoolError("close spool", fileCloseErr),
@@ -271,16 +275,19 @@ func spoolGRPCBody(source *body.Body) (*body.Body, error) {
 	}
 	if count > fetchgrpc.MaxMessageSize {
 		remove()
-		return nil, core.LimitError{Subsystem: "gRPC request body", Limit: fetchgrpc.MaxMessageSize}
+		return nil, nil, core.LimitError{Subsystem: "gRPC request body", Limit: fetchgrpc.MaxMessageSize}
 	}
 
 	spooled, err := body.NewFile(path, fetchgrpc.ContentType)
 	if err != nil {
 		remove()
-		return nil, err
+		return nil, nil, err
 	}
-	spooled.SetCleanup(func() error { return os.Remove(path) })
-	return spooled, nil
+	return spooled, func() error { return os.Remove(path) }, nil
+}
+
+func newGRPCFramedReader(reader io.Reader, stream io.ReadCloser) io.ReadCloser {
+	return &closeOnceReadCloser{ReadCloser: newReaderWithCloser(reader, stream)}
 }
 
 func wrapGRPCSpoolError(operation string, err error) error {
