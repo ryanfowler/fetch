@@ -802,7 +802,11 @@ func newReplayableBody(req *http.Request) (*replayableBody, error) {
 		if !source.Replayable() {
 			return nil, body.ErrNotReplayable
 		}
-		return &replayableBody{open: source.Replay}, nil
+		// The request body may be replaced with one of these replay streams
+		// during a retry or Digest challenge. Keep the source lifecycle on the
+		// replayer so cleanup still runs when that replacement hides the
+		// original body from the caller's deferred Close.
+		return &replayableBody{open: source.Replay, cleanup: source.Close}, nil
 	}
 
 	if req.GetBody != nil {

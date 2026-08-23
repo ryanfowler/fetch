@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -432,6 +433,89 @@ func TestUnsafeRequestWithConfiguredRetriesStillSendsOneShotBody(t *testing.T) {
 	if requests != 1 {
 		t.Fatalf("requests = %d, want one attempt", requests)
 	}
+}
+
+func TestRetryableRequestCleansGRPCSpoolAfterRetry(t *testing.T) {
+	before := grpcSpoolFileNames(t)
+	t.Cleanup(func() {
+		for name := range grpcSpoolFileNames(t) {
+			if _, exists := before[name]; !exists {
+				_ = os.Remove(filepath.Join(os.TempDir(), name))
+			}
+		}
+	})
+
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read gRPC request body: %v", err)
+		}
+		want := []byte{0, 0, 0, 0, 7, 'p', 'a', 'y', 'l', 'o', 'a', 'd'}
+		if !bytes.Equal(data, want) {
+			t.Errorf("request %d body = %x, want %x", requests, data, want)
+		}
+		if requests == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	framed, err := frameGRPCBody(requestbody.NewReader(strings.NewReader("payload"), -1, ""))
+	if err != nil {
+		t.Fatalf("frameGRPCBody: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestbody.Attach(req, framed)
+	defer func() { _ = req.Body.Close() }()
+
+	r := &Request{
+		Discard:       true,
+		Retry:         1,
+		RetryDelay:    time.Millisecond,
+		RetryUnsafe:   true,
+		PrinterHandle: core.NewHandle(core.ColorOff),
+		Verbosity:     core.VSilent,
+	}
+	c := client.NewClient(client.ClientConfig{})
+	defer c.Close()
+	if _, err := retryableRequest(context.Background(), r, c, req); err != nil {
+		t.Fatalf("retryableRequest: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+
+	after := grpcSpoolFileNames(t)
+	if len(after) != len(before) {
+		t.Fatalf("gRPC spool files after retry = %v, want unchanged from %v", after, before)
+	}
+	for name := range after {
+		if _, exists := before[name]; !exists {
+			t.Fatalf("gRPC spool file leaked after retry: %s", name)
+		}
+	}
+}
+
+func grpcSpoolFileNames(t *testing.T) map[string]struct{} {
+	t.Helper()
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		t.Fatalf("read temp directory: %v", err)
+	}
+	files := make(map[string]struct{})
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "fetch-grpc-") {
+			files[entry.Name()] = struct{}{}
+		}
+	}
+	return files
 }
 
 func TestRetryDrainHasBoundedTime(t *testing.T) {

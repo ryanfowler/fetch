@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -177,31 +178,123 @@ func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
 		}
 		var header [5]byte
 		binary.BigEndian.PutUint32(header[1:], uint32(length))
-		return newReaderWithCloser(io.MultiReader(bytes.NewReader(header[:]), stream), stream), nil
+		return newGRPCFramedReader(io.MultiReader(bytes.NewReader(header[:]), stream), stream), nil
 	}
 	return body.NewFactory(open, framedLength, fetchgrpc.ContentType, source.Replayable()), nil
 }
 
-// frameGRPCRequest wraps data in gRPC framing.
-// Handles nil/empty body by sending an empty framed message.
-func frameGRPCRequest(data io.ReadCloser) ([]byte, error) {
-	var rawData []byte
-	if data != nil && data != http.NoBody {
-		defer data.Close()
-
-		var err error
-		rawData, err = core.ReadAllLimited(data, fetchgrpc.MaxMessageSize, "gRPC request body")
-		if err != nil {
-			return nil, fmt.Errorf("failed to read request body: %w", err)
+// frameGRPCBody creates a lazy replayable unary gRPC body. Known-length
+// sources are never opened while constructing the frame; the five-byte header
+// is emitted immediately before each source stream.
+//
+// Unknown-length sources are consumed once into a private temporary file. The
+// extra byte distinguishes an exact-limit body from an oversized one without
+// retaining the payload in memory, and the resulting file is replayable for
+// retries and authentication.
+func frameGRPCBody(source *body.Body) (*body.Body, error) {
+	if source == nil || source.ContentLength() >= 0 {
+		length := int64(0)
+		if source != nil {
+			length = source.ContentLength()
 		}
+		return newFramedGRPCBody(source, length, nil)
 	}
 
-	// Frame with gRPC format (works for empty data too).
-	framedData, err := fetchgrpc.FrameChecked(rawData, false)
+	spooled, cleanup, err := spoolGRPCBody(source)
 	if err != nil {
 		return nil, err
 	}
-	return framedData, nil
+	framed, err := newFramedGRPCBody(spooled, spooled.ContentLength(), cleanup)
+	if err != nil {
+		_ = cleanup()
+		return nil, err
+	}
+	return framed, nil
+}
+
+func newFramedGRPCBody(source *body.Body, length int64, cleanup func() error) (*body.Body, error) {
+	if length > fetchgrpc.MaxMessageSize {
+		return nil, core.LimitError{Subsystem: "gRPC request body", Limit: fetchgrpc.MaxMessageSize}
+	}
+	frameLength, err := fetchgrpc.CheckedFrameLength(length)
+	if err != nil {
+		return nil, err
+	}
+
+	open := func() (io.ReadCloser, error) {
+		var stream io.ReadCloser = http.NoBody
+		if source != nil {
+			var openErr error
+			stream, openErr = source.Open()
+			if openErr != nil {
+				return nil, openErr
+			}
+		}
+		var header [5]byte
+		binary.BigEndian.PutUint32(header[1:], uint32(length))
+		if source == nil {
+			return newGRPCFramedReader(bytes.NewReader(header[:]), stream), nil
+		}
+		return newGRPCFramedReader(io.MultiReader(bytes.NewReader(header[:]), stream), stream), nil
+	}
+
+	framed := body.NewFactory(open, frameLength, fetchgrpc.ContentType, source == nil || source.Replayable())
+	if cleanup != nil {
+		// The framed reader owns the stream returned by source.Open. Keep the
+		// independent spool-file cleanup on the framed body so it survives
+		// replay streams and also runs when the body is closed before opening.
+		framed.SetCleanup(cleanup)
+	}
+	return framed, nil
+}
+
+func spoolGRPCBody(source *body.Body) (*body.Body, func() error, error) {
+	stream, err := source.Open()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	f, err := os.CreateTemp("", "fetch-grpc-*")
+	if err != nil {
+		_ = source.Close()
+		return nil, nil, fmt.Errorf("failed to create gRPC request spool: %w", err)
+	}
+	path := f.Name()
+	remove := func() { _ = os.Remove(path) }
+
+	count, copyErr := io.Copy(f, io.LimitReader(stream, fetchgrpc.MaxMessageSize+1))
+	streamCloseErr := source.Close()
+	fileCloseErr := f.Close()
+	if copyErr != nil || streamCloseErr != nil || fileCloseErr != nil {
+		remove()
+		return nil, nil, errors.Join(
+			wrapGRPCSpoolError("read", copyErr),
+			wrapGRPCSpoolError("close input", streamCloseErr),
+			wrapGRPCSpoolError("close spool", fileCloseErr),
+		)
+	}
+	if count > fetchgrpc.MaxMessageSize {
+		remove()
+		return nil, nil, core.LimitError{Subsystem: "gRPC request body", Limit: fetchgrpc.MaxMessageSize}
+	}
+
+	spooled, err := body.NewFile(path, fetchgrpc.ContentType)
+	if err != nil {
+		remove()
+		return nil, nil, err
+	}
+	return spooled, func() error { return os.Remove(path) }, nil
+}
+
+func newGRPCFramedReader(reader io.Reader, stream io.ReadCloser) io.ReadCloser {
+	return &closeOnceReadCloser{ReadCloser: newReaderWithCloser(reader, stream)}
+}
+
+func wrapGRPCSpoolError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("failed to %s gRPC request spool: %w", operation, err)
 }
 
 // streamGRPCRequest reads JSON values from data, converts each to protobuf,

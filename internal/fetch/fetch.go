@@ -42,6 +42,15 @@ func setReplayableBody(req *http.Request, data []byte) {
 	body.Attach(req, body.NewBytes(data, req.Header.Get("Content-Type")))
 }
 
+// setOwnedReplayableBody attaches bytes whose ownership is transferred to the
+// request body. Protocol conversion already produced a private buffer, so a
+// second defensive body.NewBytes clone would only increase peak memory.
+func setOwnedReplayableBody(req *http.Request, data []byte) {
+	body.Attach(req, body.NewFactory(func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}, int64(len(data)), req.Header.Get("Content-Type"), true))
+}
+
 type Request struct {
 	AWSSigv4         *aws.Config
 	Basic            *core.KeyVal[string]
@@ -332,7 +341,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 				if err != nil {
 					return 0, err
 				}
-				setReplayableBody(req, converted)
+				setOwnedReplayableBody(req, converted)
 			}
 			if r.DryRun {
 				source, _ := body.SourceFromContext(req.Context())
@@ -342,11 +351,12 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 				}
 				body.Attach(req, framed)
 			} else {
-				framed, err := frameGRPCRequest(req.Body)
+				source, _ := body.SourceFromContext(req.Context())
+				framed, err := frameGRPCBody(source)
 				if err != nil {
 					return 0, err
 				}
-				setReplayableBody(req, framed)
+				body.Attach(req, framed)
 			}
 		}
 	}
