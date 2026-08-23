@@ -743,9 +743,14 @@ func TestRedirectCredentialHeaderProvenanceAndClassification(t *testing.T) {
 		"Authorization":       true,
 		"X-Authentication":    true,
 		"X-API-Key":           true,
+		"X-ApiKey":            true,
+		"X-AuthToken":         true,
+		"X-ClientSecret":      true,
 		"X-Client-ID":         true,
+		"X-PrivateKey":        true,
 		"X-Private-Value":     true,
 		"X-Keyboard-Layout":   false,
+		"X-KeyboardLayout":    false,
 		"X-Client-Identifier": false,
 		"X-Trace-ID":          false,
 	}
@@ -790,6 +795,33 @@ func TestRedirectCredentialHeaderProvenanceAndClassification(t *testing.T) {
 	}
 }
 
+func TestNewRequestMarksCompoundCredentialHeaderProvenance(t *testing.T) {
+	client := NewClient(ClientConfig{})
+	defer client.Close()
+
+	initialURL := mustURL(t, "http://origin.example/start")
+	req, err := client.NewRequest(context.Background(), RequestConfig{
+		URL: initialURL,
+		Headers: []core.KeyVal[string]{
+			{Key: "X-ClientID", Val: "client-id"},
+			{Key: "X-KeyboardLayout", Val: "keyboard-layout"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := req.Clone(req.Context())
+	req.URL = mustURL(t, "http://target.example/final")
+	applyRedirectCredentialPolicy(req, []*http.Request{initial})
+
+	if got := req.Header.Get("X-ClientID"); got != "" {
+		t.Fatalf("compound credential header = %q, want empty", got)
+	}
+	if got := req.Header.Get("X-KeyboardLayout"); got != "keyboard-layout" {
+		t.Fatalf("ordinary compound header = %q, want keyboard-layout", got)
+	}
+}
+
 func TestRedirectCustomCredentialHeadersByOriginAndStatus(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -831,10 +863,15 @@ func TestRedirectCustomCredentialHeadersByOriginAndStatus(t *testing.T) {
 					t.Fatal(err)
 				}
 				req.Header.Set("X-API-Key", "user-api-key")
+				req.Header.Set("X-ApiKey", "user-api-key-compound")
 				req.Header.Set("X-Auth-Token", "user-auth-token")
+				req.Header.Set("X-AuthToken", "user-auth-token-compound")
 				req.Header.Set("X-Client-Secret", "user-client-secret")
+				req.Header.Set("X-ClientSecret", "user-client-secret-compound")
 				req.Header.Set("X-Request-Signature", "user-signature")
+				req.Header.Set("X-PrivateKey", "user-private-key")
 				req.Header.Set("X-Trace-ID", "trace-id")
+				req.Header.Set("X-KeyboardLayout", "keyboard-layout")
 
 				var observedRedirectHeaders []http.Header
 				ctx := WithRequestObserver(req.Context(), func(next *http.Request) {
@@ -858,7 +895,8 @@ func TestRedirectCustomCredentialHeadersByOriginAndStatus(t *testing.T) {
 				resp.Body.Close()
 
 				for _, name := range []string{
-					"X-API-Key", "X-Auth-Token", "X-Client-Secret", "X-Request-Signature", "X-Generated-Token",
+					"X-API-Key", "X-ApiKey", "X-Auth-Token", "X-AuthToken", "X-Client-Secret", "X-ClientSecret",
+					"X-Request-Signature", "X-PrivateKey", "X-Generated-Token",
 				} {
 					if value := got.Get(name); value != "" {
 						t.Errorf("cross-origin %s = %q, want empty", name, value)
@@ -867,11 +905,15 @@ func TestRedirectCustomCredentialHeadersByOriginAndStatus(t *testing.T) {
 				if got.Get("X-Trace-ID") != "trace-id" {
 					t.Errorf("non-credential custom header = %q, want trace-id", got.Get("X-Trace-ID"))
 				}
+				if got.Get("X-KeyboardLayout") != "keyboard-layout" {
+					t.Errorf("ordinary compound header = %q, want keyboard-layout", got.Get("X-KeyboardLayout"))
+				}
 				if len(observedRedirectHeaders) != 1 {
 					t.Fatalf("redirect observer calls = %d, want 1", len(observedRedirectHeaders))
 				}
 				for _, name := range []string{
-					"X-API-Key", "X-Auth-Token", "X-Client-Secret", "X-Request-Signature", "X-Generated-Token",
+					"X-API-Key", "X-ApiKey", "X-Auth-Token", "X-AuthToken", "X-Client-Secret", "X-ClientSecret",
+					"X-Request-Signature", "X-PrivateKey", "X-Generated-Token",
 				} {
 					if value := observedRedirectHeaders[0].Get(name); value != "" {
 						t.Errorf("observer saw cross-origin %s = %q, want empty", name, value)

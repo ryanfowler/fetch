@@ -1020,6 +1020,12 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 			req.Host = kv.Val
 			continue
 		}
+		// net/http canonicalizes header names when they are added below. Keep
+		// the original spelling as provenance so compound CLI names such as
+		// X-ApiKey cannot lose their credential classification.
+		if isRedirectCredentialHeader(kv.Key) {
+			MarkCredentialHeaders(req, kv.Key)
+		}
 		name := strings.ToLower(kv.Key)
 		if name == "accept-encoding" {
 			acceptEncodingSet = true
@@ -1449,12 +1455,13 @@ func (t *redirectCredentialTransport) Close() error {
 }
 
 // isRedirectCredentialHeader reports whether a header can carry credentials
-// or proof of authentication. Matching is on complete hyphen-delimited name
-// components, not arbitrary substrings, so X-Keyboard-Layout is not treated as
-// an API key header. Explicit provenance handles arbitrary generated names.
+// or proof of authentication. Matching is on complete name components and
+// case boundaries, not arbitrary substrings, so X-Keyboard-Layout and
+// X-KeyboardLayout are not treated as API key headers. Explicit provenance
+// handles arbitrary generated names.
 func isRedirectCredentialHeader(name string) bool {
-	name = normalizeHeaderName(name)
-	switch name {
+	name = strings.TrimSpace(name)
+	switch strings.ToLower(name) {
 	case "authorization", "cookie", "cookie2", "proxy-authorization",
 		"www-authenticate", "proxy-authenticate", "set-cookie",
 		"x-amz-date", "x-amz-content-sha256", "x-amz-security-token",
@@ -1462,13 +1469,11 @@ func isRedirectCredentialHeader(name string) bool {
 		return true
 	}
 	var previous string
-	for term := range strings.FieldsFuncSeq(name, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
-	}) {
+	for _, term := range credentialHeaderTerms(name) {
 		switch term {
 		case "auth", "authenticate", "authentication", "authorization", "credential", "credentials",
 			"token", "tokens", "key", "keys", "secret", "secrets", "password",
-			"passwd", "signature", "signing", "private":
+			"passwd", "signature", "signing", "private", "apikey", "authtoken", "clientsecret", "privatekey":
 			return true
 		}
 		if previous == "client" && term == "id" {
@@ -1477,6 +1482,25 @@ func isRedirectCredentialHeader(name string) bool {
 		previous = term
 	}
 	return false
+}
+
+func credentialHeaderTerms(name string) []string {
+	var terms []string
+	for component := range strings.FieldsFuncSeq(name, func(r rune) bool {
+		return !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	}) {
+		start := 0
+		for i := 1; i < len(component); i++ {
+			if component[i] >= 'A' && component[i] <= 'Z' &&
+				((component[i-1] >= 'a' && component[i-1] <= 'z') ||
+					(i+1 < len(component) && component[i+1] >= 'a' && component[i+1] <= 'z')) {
+				terms = append(terms, strings.ToLower(component[start:i]))
+				start = i
+			}
+		}
+		terms = append(terms, strings.ToLower(component[start:]))
+	}
+	return terms
 }
 
 func isRedirectCredentialHeaderForRequest(req *http.Request, name string) bool {
