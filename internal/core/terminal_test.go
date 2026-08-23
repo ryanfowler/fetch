@@ -106,6 +106,7 @@ func TestRedactHeaderValue(t *testing.T) {
 	for _, name := range []string{
 		"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "X-Amz-Security-Token",
 		"X-API-Key", "X-AuthToken", "X-ClientSecret", "X-Request-Signature", "X-PrivateKey", "X-Session-ID",
+		"x-aPiKey", "X-rEqUeStSiGnAtUrE", "x-cLiEnTiD",
 	} {
 		if got := RedactHeaderValue(name, "secret"); got != "[REDACTED]" {
 			t.Errorf("RedactHeaderValue(%q) = %q", name, got)
@@ -116,6 +117,24 @@ func TestRedactHeaderValue(t *testing.T) {
 	}
 	if got := RedactHeaderValue("X-Trace", "ok\x1b[2J"); got != `ok\x1b[2J` {
 		t.Errorf("RedactHeaderValue() = %q", got)
+	}
+}
+
+func TestWriteErrorMsgRedactsTransportURL(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "https://example.test/request?access_token=transport-query-secret&safe=ok",
+		Err: errors.New("connection refused"),
+	}
+	p := TestPrinter(false)
+	WriteErrorMsgNoFlush(p, err)
+
+	got := string(p.Bytes())
+	if strings.Contains(got, "transport-query-secret") {
+		t.Fatalf("transport error leaked query secret: %q", got)
+	}
+	if want := "https://example.test/request?access_token=%5BREDACTED%5D&safe=ok"; !strings.Contains(got, want) {
+		t.Fatalf("transport error = %q, want redacted URL %q", got, want)
 	}
 }
 

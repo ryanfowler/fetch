@@ -130,6 +130,69 @@ func RedactedURL(u *url.URL) string {
 	return TerminalSafeText(copyURL.String())
 }
 
+// RedactedErrorText returns a terminal-safe error message with URLs carried by
+// url.Error values redacted. Transport errors commonly include the complete
+// request URL in their Error string, so sanitizing only the request metadata
+// is not sufficient.
+func RedactedErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	message := err.Error()
+	for _, rawURL := range urlErrorURLs(err) {
+		if rawURL == "" {
+			continue
+		}
+		message = strings.ReplaceAll(message, rawURL, redactedURLString(rawURL))
+	}
+	return TerminalSafeText(message)
+}
+
+func redactedURLString(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err == nil {
+		return RedactedURL(u)
+	}
+
+	// url.Error can carry a URL string that is not parseable because of an
+	// invalid escape in its query. Redact query fields without requiring a
+	// successful URL parse in that case.
+	base, query, hasQuery := strings.Cut(rawURL, "?")
+	if !hasQuery {
+		return TerminalSafeText(rawURL)
+	}
+	query, fragment, hasFragment := strings.Cut(query, "#")
+	redacted := base + "?" + RedactedQuery(query)
+	if hasFragment {
+		redacted += "#" + fragment
+	}
+	return TerminalSafeText(redacted)
+}
+
+func urlErrorURLs(err error) []string {
+	var urls []string
+	var visit func(error)
+	visit = func(current error) {
+		if current == nil {
+			return
+		}
+		switch current := current.(type) {
+		case *url.Error:
+			urls = append(urls, current.URL)
+			visit(current.Err)
+		case interface{ Unwrap() []error }:
+			for _, child := range current.Unwrap() {
+				visit(child)
+			}
+		case interface{ Unwrap() error }:
+			visit(current.Unwrap())
+		}
+	}
+	visit(err)
+	return urls
+}
+
 // RedactedQuery returns a query string with values for sensitive keys
 // replaced while preserving the original key spelling, ordering, duplicate
 // fields, and non-sensitive encoding. The classifier intentionally errs on
@@ -193,10 +256,7 @@ func IsSensitiveHeader(name string) bool {
 
 	var previous string
 	for _, term := range diagnosticHeaderTerms(name) {
-		switch term {
-		case "auth", "authenticate", "authentication", "authorization", "credential", "credentials",
-			"token", "tokens", "key", "keys", "secret", "secrets", "password", "passwd",
-			"signature", "signing", "private", "session", "sessions", "apikey", "authtoken", "clientsecret", "privatekey":
+		if isDiagnosticCredentialTerm(term) {
 			return true
 		}
 		if previous == "client" && term == "id" {
@@ -207,11 +267,35 @@ func IsSensitiveHeader(name string) bool {
 	return false
 }
 
+func isDiagnosticCredentialTerm(term string) bool {
+	term = strings.ToLower(term)
+	switch term {
+	case "auth", "authenticate", "authentication", "authorization", "credential", "credentials",
+		"token", "tokens", "key", "keys", "secret", "secrets", "password", "passwd",
+		"signature", "signing", "private", "session", "sessions", "apikey", "authtoken", "clientid", "clientsecret", "privatekey":
+		return true
+	}
+	for _, sensitive := range []string{
+		"auth", "authenticate", "authorization", "credential", "token", "secret", "password", "passwd",
+		"signature", "signing", "private", "session",
+	} {
+		if strings.Contains(term, sensitive) {
+			return true
+		}
+	}
+	return false
+}
+
 func diagnosticHeaderTerms(name string) []string {
 	var terms []string
 	for component := range strings.FieldsFuncSeq(name, func(r rune) bool {
 		return !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
 	}) {
+		// Include the fully normalized component so compound names such as
+		// X-aPiKey and X-rEqUeStSiGnAtUrE classify the same as their normally
+		// cased forms. The camel-case terms below preserve component-aware
+		// matching for names such as X-KeyboardLayout.
+		terms = append(terms, strings.ToLower(component))
 		start := 0
 		for i := 1; i < len(component); i++ {
 			if component[i] >= 'A' && component[i] <= 'Z' &&

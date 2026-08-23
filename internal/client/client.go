@@ -1533,47 +1533,7 @@ func (t *redirectCredentialTransport) Close() error {
 // X-KeyboardLayout are not treated as API key headers. Explicit provenance
 // handles arbitrary generated names.
 func isRedirectCredentialHeader(name string) bool {
-	name = strings.TrimSpace(name)
-	switch strings.ToLower(name) {
-	case "authorization", "cookie", "cookie2", "proxy-authorization",
-		"www-authenticate", "proxy-authenticate", "set-cookie",
-		"x-amz-date", "x-amz-content-sha256", "x-amz-security-token",
-		"x-amz-session-token", "x-client-id", "x-private-value":
-		return true
-	}
-	var previous string
-	for _, term := range credentialHeaderTerms(name) {
-		switch term {
-		case "auth", "authenticate", "authentication", "authorization", "credential", "credentials",
-			"token", "tokens", "key", "keys", "secret", "secrets", "password",
-			"passwd", "signature", "signing", "private", "apikey", "authtoken", "clientsecret", "privatekey":
-			return true
-		}
-		if previous == "client" && term == "id" {
-			return true
-		}
-		previous = term
-	}
-	return false
-}
-
-func credentialHeaderTerms(name string) []string {
-	var terms []string
-	for component := range strings.FieldsFuncSeq(name, func(r rune) bool {
-		return !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
-	}) {
-		start := 0
-		for i := 1; i < len(component); i++ {
-			if component[i] >= 'A' && component[i] <= 'Z' &&
-				((component[i-1] >= 'a' && component[i-1] <= 'z') ||
-					(i+1 < len(component) && component[i+1] >= 'a' && component[i+1] <= 'z')) {
-				terms = append(terms, strings.ToLower(component[start:i]))
-				start = i
-			}
-		}
-		terms = append(terms, strings.ToLower(component[start:]))
-	}
-	return terms
+	return core.IsSensitiveHeader(name)
 }
 
 func isRedirectCredentialHeaderForRequest(req *http.Request, name string) bool {

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ryanfowler/fetch/internal/core"
+
 	"golang.org/x/net/idna"
 )
 
@@ -45,7 +47,7 @@ func SelectProxy(explicit, target *url.URL) (ProxyDecision, error) {
 	if explicit != nil {
 		proxy, err := validateProxyURL(explicit)
 		if err != nil {
-			return ProxyDecision{}, fmt.Errorf("invalid proxy %q: %w", redactedProxyURL(explicit), err)
+			return ProxyDecision{}, fmt.Errorf("invalid proxy %q: %w", core.RedactedURL(explicit), err)
 		}
 		return ProxyDecision{URL: proxy, Source: "explicit"}, nil
 	}
@@ -131,15 +133,6 @@ func environmentValue(upper, lower string) string {
 		return value
 	}
 	return strings.TrimSpace(getenv(lower))
-}
-
-func redactedProxyURL(proxy *url.URL) string {
-	if proxy == nil {
-		return ""
-	}
-	copy := *proxy
-	copy.User = nil
-	return copy.String()
 }
 
 func validateProxyURL(proxy *url.URL) (*url.URL, error) {
