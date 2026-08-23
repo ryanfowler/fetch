@@ -721,6 +721,18 @@ func TestRedirectHookCannotSendBodyToCrossOriginURL(t *testing.T) {
 			},
 		},
 		{
+			name: "observer clears response after changing body",
+			wrap: func(ctx context.Context, targetURL *url.URL) context.Context {
+				return WithRequestObserver(ctx, func(req *http.Request) {
+					if req.Response != nil {
+						req.URL = targetURL
+						req.Body = io.NopCloser(strings.NewReader("hook-body"))
+						req.Response = nil
+					}
+				})
+			},
+		},
+		{
 			name: "validator",
 			wrap: func(ctx context.Context, targetURL *url.URL) context.Context {
 				return WithRedirectValidator(ctx, func(hop RedirectHop) error {
