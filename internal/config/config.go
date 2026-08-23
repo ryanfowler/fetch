@@ -55,6 +55,7 @@ type Config struct {
 	Redirects    *int
 	Retry        *int
 	RetryDelay   *time.Duration
+	RetryUnsafe  *bool
 	Session      *string
 	Silent       *bool
 	Timeout      *time.Duration
@@ -141,6 +142,9 @@ func (c *Config) OptionKeys() []string {
 	}
 	if c.RetryDelay != nil {
 		keys = append(keys, "retry-delay")
+	}
+	if c.RetryUnsafe != nil {
+		keys = append(keys, "retry-unsafe")
 	}
 	if c.Session != nil {
 		keys = append(keys, "session")
@@ -316,6 +320,12 @@ func (c *Config) Merge(c2 *Config) []string {
 			add("retry-delay")
 		}
 	}
+	if c.RetryUnsafe == nil {
+		c.RetryUnsafe = c2.RetryUnsafe
+		if c2.RetryUnsafe != nil {
+			add("retry-unsafe")
+		}
+	}
 	if c.Session == nil {
 		c.Session = c2.Session
 		if c2.Session != nil {
@@ -451,6 +461,8 @@ func (c *Config) Set(key, val string) error {
 		err = c.ParseRetry(val)
 	case "retry-delay":
 		err = c.ParseRetryDelay(val)
+	case "retry-unsafe":
+		err = c.ParseRetryUnsafe(val)
 	case "session":
 		err = c.ParseSession(val)
 	case "silent":
@@ -907,6 +919,15 @@ func (c *Config) ParseRetryDelay(value string) error {
 		return err
 	}
 	c.RetryDelay = delay
+	return nil
+}
+
+func (c *Config) ParseRetryUnsafe(value string) error {
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return core.NewValueError("retry-unsafe", value, "must be a boolean", c.isFile)
+	}
+	c.RetryUnsafe = &v
 	return nil
 }
 

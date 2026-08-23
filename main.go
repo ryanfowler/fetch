@@ -241,6 +241,7 @@ func main() {
 		RemoteName:       app.RemoteName,
 		Retry:            getValue(app.Cfg.Retry),
 		RetryDelay:       getValue(app.Cfg.RetryDelay),
+		RetryUnsafe:      getValue(app.Cfg.RetryUnsafe),
 		Session:          getValue(app.Cfg.Session),
 		Timeout:          getValue(app.Cfg.Timeout),
 		Timing:           getValue(app.Cfg.Timing),

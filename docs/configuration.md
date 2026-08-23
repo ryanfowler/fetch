@@ -372,7 +372,7 @@ redirects = 10
 **Type**: Integer
 **Default**: `0` (no retries)
 
-Maximum number of retries for transient failures. Retries occur on connection errors and retryable status codes (429, 502, 503, 504).
+Maximum number of retries for transient failures. Retries occur on connection errors and retryable status codes (429, 502, 503, 504) only for GET, HEAD, OPTIONS, and TRACE by default. PUT, DELETE, POST, PATCH, and custom methods require `retry-unsafe = true`.
 
 ```ini
 # Retry up to 3 times
@@ -380,6 +380,21 @@ retry = 3
 
 # Disable retries (default)
 retry = 0
+```
+
+#### `retry-unsafe`
+
+**Type**: Boolean
+**Default**: `false`
+
+Allow automatic retries for POST, PATCH, PUT, DELETE, and custom methods.
+PUT and DELETE are included because HTTP describes them as idempotent, but an
+individual API can still make them unsafe to replay. Set this only when the
+endpoint provides an application-level replay guarantee.
+
+```ini
+# Explicitly allow retries for non-safe methods
+retry-unsafe = true
 ```
 
 #### `retry-delay`

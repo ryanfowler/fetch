@@ -3,6 +3,29 @@
 This guide covers advanced networking, protocol, and TLS options in the Go
 implementation of `fetch`. For shared caps, see [Limits and safety](limits.md).
 
+## Retry safety
+
+`--retry` retries only GET, HEAD, OPTIONS, and TRACE by default, even when the
+request body is replayable. Replayable bytes make retransmission possible but
+do not prove that a server-side operation is safe to repeat. PUT and DELETE
+are treated conservatively with POST, PATCH, and custom methods: they require
+`--retry-unsafe` (or `retry-unsafe = true` in configuration) because an API's
+implementation may have non-idempotent side effects.
+
+Use the opt-in only for an endpoint with a documented replay guarantee, such
+as a service that validates an idempotency key:
+
+```sh
+fetch --method POST --header 'Idempotency-Key: order-123' \
+  --data '{"item":"book"}' --retry 2 --retry-unsafe example.com/orders
+```
+
+Digest authentication is intentionally separate from transient-failure
+retries. When a server challenges with Digest, the authentication handshake
+may resend the request body, including for an unsafe method; this bounded
+challenge replay remains enabled by `--digest` and is not changed by the
+transient retry policy.
+
 ## Custom DNS Resolution
 
 ### `--dns-server`
