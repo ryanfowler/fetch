@@ -122,6 +122,32 @@ func TestWebSocketHandshakeErrorBoundsAndEscapesExcerpt(t *testing.T) {
 	}
 }
 
+func TestWebSocketHandshakeErrorRedactsURLAndQuery(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Status:     "401 Unauthorized",
+		Body:       io.NopCloser(strings.NewReader("handshake rejected")),
+	}
+	err := &url.Error{
+		Op:  "Get",
+		URL: "wss://ws-user:ws-password@example.test/socket?access_token=ws-query-secret&safe=ok",
+		Err: errors.New("remote handshake rejected"),
+	}
+	got := websocketHandshakeError(resp, err)
+	if got == nil {
+		t.Fatal("expected handshake error")
+	}
+	for _, secret := range []string{"ws-user", "ws-password", "ws-query-secret"} {
+		if strings.Contains(got.Error(), secret) {
+			t.Fatalf("WebSocket handshake error leaked %q: %q", secret, got)
+		}
+	}
+	want := "wss://example.test/socket?access_token=%5BREDACTED%5D&safe=ok"
+	if !strings.Contains(got.Error(), want) {
+		t.Fatalf("WebSocket handshake error = %q, want redacted URL %q", got, want)
+	}
+}
+
 func testAWSRequest() *Request {
 	return &Request{
 		AWSSigv4: &aws.Config{

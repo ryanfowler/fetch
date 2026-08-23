@@ -3,6 +3,7 @@ package client
 import (
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -82,6 +83,19 @@ func TestSelectProxyCGIAndExplicitPrecedence(t *testing.T) {
 	}
 	if got == nil || got.String() != explicit.String() {
 		t.Fatalf("explicit proxy = %v, want %v", got, explicit)
+	}
+}
+
+func TestInvalidExplicitProxyRedactsQuery(t *testing.T) {
+	explicit := mustProxyURL(t, "ftp://proxy.example/?PaSsWoRd=proxy-query-secret%zz&safe=ok")
+	_, err := SelectProxy(explicit, mustProxyURL(t, "https://service.example/"))
+	if err == nil {
+		t.Fatal("SelectProxy() error = nil, want invalid proxy error")
+	}
+	if got := err.Error(); strings.Contains(got, "proxy-query-secret") {
+		t.Fatalf("invalid proxy error leaked query secret: %q", got)
+	} else if !strings.Contains(got, "PaSsWoRd=%5BREDACTED%5D") {
+		t.Fatalf("invalid proxy error = %q, want redacted query", got)
 	}
 }
 

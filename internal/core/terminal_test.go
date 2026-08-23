@@ -103,13 +103,80 @@ func TestTerminalSafeTextCommonCaseDoesNotAllocate(t *testing.T) {
 }
 
 func TestRedactHeaderValue(t *testing.T) {
-	for _, name := range []string{"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "X-Amz-Security-Token"} {
+	for _, name := range []string{
+		"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "X-Amz-Security-Token",
+		"X-API-Key", "X-AuthToken", "X-ClientSecret", "X-Request-Signature", "X-PrivateKey", "X-Session-ID",
+		"x-aPiKey", "X-rEqUeStSiGnAtUrE", "x-cLiEnTiD", "x-accesskey", "X-AccessKey", "x-aCcEsSkEy",
+	} {
 		if got := RedactHeaderValue(name, "secret"); got != "[REDACTED]" {
 			t.Errorf("RedactHeaderValue(%q) = %q", name, got)
 		}
 	}
+	if got := RedactHeaderValue("X-KeyboardLayout", "keyboard-layout"); got != "keyboard-layout" {
+		t.Errorf("RedactHeaderValue(X-KeyboardLayout) = %q", got)
+	}
 	if got := RedactHeaderValue("X-Trace", "ok\x1b[2J"); got != `ok\x1b[2J` {
 		t.Errorf("RedactHeaderValue() = %q", got)
+	}
+}
+
+func TestWriteErrorMsgRedactsTransportURL(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "https://example.test/request?access_token=transport-query-secret&safe=ok",
+		Err: errors.New("connection refused"),
+	}
+	p := TestPrinter(false)
+	WriteErrorMsgNoFlush(p, err)
+
+	got := string(p.Bytes())
+	if strings.Contains(got, "transport-query-secret") {
+		t.Fatalf("transport error leaked query secret: %q", got)
+	}
+	if want := "https://example.test/request?access_token=%5BREDACTED%5D&safe=ok"; !strings.Contains(got, want) {
+		t.Fatalf("transport error = %q, want redacted URL %q", got, want)
+	}
+}
+
+func TestWriteErrorMsgRedactsMalformedTransportURLUserinfo(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "https://transport-user:transport-password@example.test/request/%zz?access_token=transport-query-secret&safe=ok",
+		Err: errors.New("connection refused"),
+	}
+	p := TestPrinter(false)
+	WriteErrorMsgNoFlush(p, err)
+
+	got := string(p.Bytes())
+	for _, secret := range []string{"transport-user", "transport-password", "transport-query-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("malformed transport error leaked %q: %q", secret, got)
+		}
+	}
+	want := "https://example.test/request/%zz?access_token=%5BREDACTED%5D&safe=ok"
+	if !strings.Contains(got, want) {
+		t.Fatalf("malformed transport error = %q, want redacted URL %q", got, want)
+	}
+}
+
+func TestWriteErrorMsgRedactsStructurallyMalformedTransportURLUserinfo(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "http:/transport-user:transport-password@example.test/request?access_token=transport-query-secret&safe=ok",
+		Err: errors.New("connection refused"),
+	}
+	p := TestPrinter(false)
+	WriteErrorMsgNoFlush(p, err)
+
+	got := string(p.Bytes())
+	for _, secret := range []string{"transport-user", "transport-password", "transport-query-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("structurally malformed transport error leaked %q: %q", secret, got)
+		}
+	}
+	want := "http:/example.test/request?access_token=%5BREDACTED%5D&safe=ok"
+	if !strings.Contains(got, want) {
+		t.Fatalf("structurally malformed transport error = %q, want redacted URL %q", got, want)
 	}
 }
 
@@ -120,6 +187,63 @@ func TestRedactedURL(t *testing.T) {
 	}
 	if got := RedactedURL(u); got != "https://example.test/path" {
 		t.Fatalf("RedactedURL() = %q", got)
+	}
+}
+
+func TestRedactedURLRedactsStructurallyMalformedAuthority(t *testing.T) {
+	u, err := url.Parse("http:/proxy-user:proxy-password@example.test?access_token=proxy-query-secret&safe=ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := RedactedURL(u)
+	for _, secret := range []string{"proxy-user", "proxy-password", "proxy-query-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("RedactedURL() leaked %q: %q", secret, got)
+		}
+	}
+	if want := "http:/example.test?access_token=%5BREDACTED%5D&safe=ok"; got != want {
+		t.Fatalf("RedactedURL() = %q, want %q", got, want)
+	}
+}
+
+func TestRedactedURLRedactsSensitiveQueryValues(t *testing.T) {
+	u, err := url.Parse("https://example.test/path?safe=one&API_KEY=api-query-secret&access_token=access-query-token-secret&clientSecret=client-query-secret&x%2Dsignature=signature-query-secret&safe=two")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := RedactedURL(u)
+	for _, value := range []string{"api-query-secret", "access-query-token-secret", "client-query-secret", "signature-query-secret"} {
+		if strings.Contains(got, value) {
+			t.Errorf("RedactedURL() leaked %q: %q", value, got)
+		}
+	}
+	want := "https://example.test/path?safe=one&API_KEY=%5BREDACTED%5D&access_token=%5BREDACTED%5D&clientSecret=%5BREDACTED%5D&x%2Dsignature=%5BREDACTED%5D&safe=two"
+	if got != want {
+		t.Fatalf("RedactedURL() = %q, want %q", got, want)
+	}
+}
+
+func TestRedactHeaderValueRedactsLocationURL(t *testing.T) {
+	got := RedactHeaderValue("Location", "/next?password=secret&safe=ok")
+	if strings.Contains(got, "secret") {
+		t.Fatalf("Location redaction leaked secret: %q", got)
+	}
+	if want := "/next?password=%5BREDACTED%5D&safe=ok"; got != want {
+		t.Fatalf("Location redaction = %q, want %q", got, want)
+	}
+}
+
+func TestRedactHeaderValueRedactsStructurallyMalformedLocationURL(t *testing.T) {
+	got := RedactHeaderValue("Location", "http:/location-user:location-password@example.test/next?access_token=location-query-secret&safe=ok")
+	for _, secret := range []string{"location-user", "location-password", "location-query-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("structurally malformed Location leaked %q: %q", secret, got)
+		}
+	}
+	if want := "http:/example.test/next?access_token=%5BREDACTED%5D&safe=ok"; got != want {
+		t.Fatalf("structurally malformed Location = %q, want %q", got, want)
 	}
 }
 

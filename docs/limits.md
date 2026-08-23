@@ -41,9 +41,12 @@ request or connect timeout means unlimited for that budget.
 Output files, HAR files, sessions, HTTP/3 cache files, skill installations, and
 updater staging use exclusive temporary state and atomic commits. Symlink
 redirects are rejected. Terminal diagnostics escape untrusted control bytes;
-Authorization, proxy authorization, cookies, session tokens, and AWS session
-tokens are redacted. HAR artifacts are the exception because they are intended
-to reproduce the exchange and can contain sensitive data.
+Authorization, proxy authorization, cookies, session tokens, AWS session tokens,
+and credential-like custom headers are redacted. Query values whose names
+contain `key`, `token`, `secret`, `password`, `credential`, `signature`, or
+`authorization`, or `session` are also redacted case-insensitively; names remain
+visible. HAR artifacts are the exception because they are intended to reproduce
+the exchange and can contain sensitive data.
 
 Image rendering also rejects decoded dimensions above 8192 by 8192. External
 image adapters and pagers run without a shell, with bounded output and a

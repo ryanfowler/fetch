@@ -335,7 +335,7 @@ func WriteErrorMsgNoFlush(p *Printer, err error) {
 	if pt, ok := err.(PrinterTo); ok {
 		pt.PrintTo(p)
 	} else {
-		p.WriteString(TerminalSafeText(err.Error()))
+		p.WriteString(RedactedErrorText(err))
 	}
 	p.WriteString("\n")
 }
