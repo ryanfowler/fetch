@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/resolver"
@@ -311,73 +311,46 @@ func writeFull(w io.Writer, data []byte) error {
 	return nil
 }
 
-// proxyTransportState is kept small and only records HTTPS proxy endpoints
-// selected from the environment. Explicit proxies are configured directly in
-// NewClient. This lets the standard http.Transport continue to be exposed to
-// existing callers while preserving HTTPS-proxy TLS separation.
-type proxyTransportState struct {
-	mu    sync.RWMutex
-	https map[string]*url.URL
-	socks map[string]*url.URL
+// selectedProxyContextKey carries the proxy selected for one request from
+// the RoundTripper to http.Transport.DialContext. The standard transport
+// passes the request context to its dialer, so this keeps proxy selection and
+// dialing attached to the same request instead of sharing mutable state.
+type selectedProxyContextKey struct{}
+
+func selectedProxy(ctx context.Context) (*url.URL, bool) {
+	proxy, ok := ctx.Value(selectedProxyContextKey{}).(*url.URL)
+	if !ok {
+		return nil, false
+	}
+	return proxy, true
 }
 
-func (s *proxyTransportState) clearHTTPS() {
-	s.mu.Lock()
-	s.https = nil
-	s.mu.Unlock()
+// proxyTransport selects an environment proxy before handing a request to
+// http.Transport. Its context annotation prevents another request's proxy
+// selection from changing the first hop while the transport is dialing.
+type proxyTransport struct {
+	base        http.RoundTripper
+	selectProxy func(*http.Request) (*url.URL, error)
 }
 
-func (s *proxyTransportState) remember(proxy *url.URL) {
-	if proxy == nil || !strings.EqualFold(proxy.Scheme, "https") {
-		return
+func (t *proxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	selected, err := t.selectProxy(req)
+	if err != nil {
+		return nil, err
 	}
-	s.mu.Lock()
-	if s.https == nil {
-		s.https = make(map[string]*url.URL)
-	}
-	s.https[canonicalProxyAddress(proxy)] = proxy
-	s.mu.Unlock()
+	ctx := context.WithValue(req.Context(), selectedProxyContextKey{}, selected)
+	return t.base.RoundTrip(req.WithContext(ctx))
 }
 
-func (s *proxyTransportState) forgetTarget(target *url.URL) {
-	if target == nil {
-		return
+func (t *proxyTransport) CloseIdleConnections() {
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
 	}
-	s.mu.Lock()
-	delete(s.socks, canonicalTargetAddress(target))
-	s.mu.Unlock()
 }
 
-func (s *proxyTransportState) rememberSocks(target *url.URL, proxy *url.URL) {
-	if target == nil || proxy == nil {
-		return
+func (t *proxyTransport) Close() error {
+	if closer, ok := t.base.(io.Closer); ok {
+		return closer.Close()
 	}
-	s.mu.Lock()
-	if s.socks == nil {
-		s.socks = make(map[string]*url.URL)
-	}
-	s.socks[canonicalTargetAddress(target)] = proxy
-	s.mu.Unlock()
-}
-
-func (s *proxyTransportState) lookup(address string) (*url.URL, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if proxy := s.socks[address]; proxy != nil {
-		return proxy, true
-	}
-	return s.https[address], false
-}
-
-func canonicalTargetAddress(target *url.URL) string {
-	port := target.Port()
-	if port == "" {
-		switch strings.ToLower(target.Scheme) {
-		case "http", "ws":
-			port = "80"
-		default:
-			port = "443"
-		}
-	}
-	return net.JoinHostPort(target.Hostname(), port)
+	return nil
 }

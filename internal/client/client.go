@@ -180,8 +180,6 @@ func NewClient(cfg ClientConfig) *Client {
 	})
 	dialer := NewResolverDialer(res, cfg.ConnectTimeout)
 	baseDial := dialer.DialContext
-	proxyState := &proxyTransportState{}
-
 	if cfg.UnixSocket != "" {
 		baseDial = func(ctx context.Context, network, address string) (net.Conn, error) {
 			var d net.Dialer
@@ -225,21 +223,24 @@ func NewClient(cfg ClientConfig) *Client {
 		// as the single HTTP implementation, and replace only the first-hop
 		// dial for the schemes whose semantics need to be explicit.
 		transportProxy := func(req *http.Request) (*url.URL, error) {
-			proxyState.forgetTarget(req.URL)
-			proxyState.clearHTTPS()
-			selected, err := proxy(req)
-			if err != nil || selected == nil {
-				return selected, err
+			selected, ok := selectedProxy(req.Context())
+			if !ok {
+				var err error
+				selected, err = proxy(req)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if selected == nil {
+				return nil, nil
 			}
 			switch strings.ToLower(selected.Scheme) {
 			case "https":
-				proxyState.remember(selected)
 				return httpsProxyAsHTTP(selected), nil
 			case "socks5", "socks5h":
 				// SOCKS destinations are carried by DialContext rather than
 				// net/http's SOCKS implementation so socks5 can resolve
 				// locally and socks5h can preserve the hostname.
-				proxyState.rememberSocks(req.URL, selected)
 				return nil, nil
 			default:
 				return selected, nil
@@ -264,16 +265,19 @@ func NewClient(cfg ClientConfig) *Client {
 			}
 		}
 		if cfg.Proxy == nil {
-			// Environment HTTPS proxies are recorded by transportProxy and
-			// upgraded in the dial path without changing the public
-			// *http.Transport type used by existing callers.
+			// The selected environment proxy is carried in the request context.
+			// http.Transport passes that context to DialContext, so concurrent
+			// requests cannot change one another's first hop.
 			wrappedDial := dial
 			dial = func(ctx context.Context, network, address string) (net.Conn, error) {
-				if selected, socks := proxyState.lookup(address); selected != nil {
-					if socks {
+				selected, ok := selectedProxy(ctx)
+				if ok && selected != nil {
+					switch strings.ToLower(selected.Scheme) {
+					case "socks5", "socks5h":
 						return newSOCKS5Dialer(baseDial, res, selected, strings.EqualFold(selected.Scheme, "socks5"), cfg.ConnectTimeout)(ctx, network, address)
+					case "https":
+						return newHTTPSProxyDialer(baseDial, selected, cfg.ConnectTimeout)(ctx, network, address)
 					}
-					return newHTTPSProxyDialer(baseDial, selected, cfg.ConnectTimeout)(ctx, network, address)
 				}
 				return wrappedDial(ctx, network, address)
 			}
@@ -283,6 +287,9 @@ func NewClient(cfg ClientConfig) *Client {
 		rt.Protocols.SetHTTP1(true)
 		rt.Protocols.SetHTTP2(cfg.HTTP != core.HTTP1)
 		transport = rt
+		if cfg.Proxy == nil {
+			transport = &proxyTransport{base: rt, selectProxy: proxy}
+		}
 		// Automatic HTTP/3 is only safe for direct HTTPS requests. The
 		// wrapper delegates HTTP, proxy, and Unix-socket requests to this
 		// ordinary transport, and prepares exactly one complete TCP/TLS or
@@ -794,7 +801,8 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// HTTPClient returns the underlying *http.Client.
+// HTTPClient returns the underlying *http.Client. Its Transport may be a
+// request-scoped proxy wrapper rather than a concrete *http.Transport.
 func (c *Client) HTTPClient() *http.Client {
 	return c.c
 }

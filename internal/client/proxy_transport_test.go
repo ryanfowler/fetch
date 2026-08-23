@@ -17,6 +17,122 @@ import (
 	"github.com/ryanfowler/fetch/internal/resolver"
 )
 
+func TestProxyTransportCarriesPerRequestSelection(t *testing.T) {
+	proxyURL := &url.URL{Scheme: "https", Host: "proxy.example:443"}
+	base := h3RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		selected, ok := selectedProxy(req.Context())
+		if !ok {
+			return nil, fmt.Errorf("proxy selection is missing from request context")
+		}
+		if req.URL.Host == "proxied.example" && selected != proxyURL {
+			return nil, fmt.Errorf("selected proxy = %v, want %v", selected, proxyURL)
+		}
+		if req.URL.Host == "direct.example" && selected != nil {
+			return nil, fmt.Errorf("selected proxy = %v, want nil", selected)
+		}
+		return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+	})
+	transport := &proxyTransport{
+		base: base,
+		selectProxy: func(req *http.Request) (*url.URL, error) {
+			if req.URL.Host == "proxied.example" {
+				return proxyURL, nil
+			}
+			return nil, nil
+		},
+	}
+
+	for _, host := range []string{"proxied.example", "direct.example"} {
+		req, err := http.NewRequest(http.MethodGet, "http://"+host+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+	}
+}
+
+func TestProxyTransportCarriesConcurrentSelections(t *testing.T) {
+	proxyURLs := map[string]*url.URL{
+		"one.example": {Scheme: "http", Host: "proxy-one.example:8080"},
+		"two.example": {Scheme: "http", Host: "proxy-two.example:8080"},
+	}
+	base := &http.Transport{}
+	base.Proxy = func(req *http.Request) (*url.URL, error) {
+		selected, ok := selectedProxy(req.Context())
+		if !ok {
+			return nil, fmt.Errorf("proxy selection is missing from request context")
+		}
+		return selected, nil
+	}
+	type dialObservation struct {
+		proxy   *url.URL
+		address string
+	}
+	observed := make(chan dialObservation, len(proxyURLs))
+	started := make(chan struct{}, len(proxyURLs))
+	release := make(chan struct{})
+	base.DialContext = func(ctx context.Context, _, address string) (net.Conn, error) {
+		selected, ok := selectedProxy(ctx)
+		if !ok {
+			return nil, fmt.Errorf("proxy selection is missing from dial context")
+		}
+		observed <- dialObservation{proxy: selected, address: address}
+		started <- struct{}{}
+		<-release
+		return nil, fmt.Errorf("stop test dial")
+	}
+	defer base.CloseIdleConnections()
+
+	transport := &proxyTransport{
+		base: base,
+		selectProxy: func(req *http.Request) (*url.URL, error) {
+			return proxyURLs[req.URL.Hostname()], nil
+		},
+	}
+	errs := make(chan error, len(proxyURLs))
+	for host := range proxyURLs {
+		req, err := http.NewRequest(http.MethodGet, "http://"+host+"/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			_, err := transport.RoundTrip(req)
+			errs <- err
+		}()
+	}
+	for range proxyURLs {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("concurrent requests did not reach the dialer")
+		}
+	}
+	close(release)
+	for range proxyURLs {
+		if err := <-errs; err == nil {
+			t.Fatal("request succeeded, want dial error")
+		}
+	}
+
+	seen := map[string]bool{}
+	for range proxyURLs {
+		observation := <-observed
+		if observation.address != canonicalProxyAddress(observation.proxy) {
+			t.Errorf("dial address = %q for proxy %s, want %q", observation.address, observation.proxy, canonicalProxyAddress(observation.proxy))
+		}
+		seen[observation.proxy.String()] = true
+	}
+	for host, proxy := range proxyURLs {
+		if !seen[proxy.String()] {
+			t.Errorf("request for %s did not use proxy %s", host, proxy)
+		}
+	}
+}
+
 func TestHTTPProxyUsesAbsoluteForm(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.IsAbs() == false || r.URL.Host != "origin.example" {
