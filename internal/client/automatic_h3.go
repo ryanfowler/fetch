@@ -45,11 +45,32 @@ type automaticHTTP3Transport struct {
 	persistent            *persistentH3Cache
 	mu                    sync.Mutex
 	tcpTransports         map[string]*http.Transport
-	h3Transports          map[string]*http3.Transport
+	h3Transports          map[string]automaticH3RoundTripper
 	h3TransportCandidates map[string]automaticH3Candidate
 	h3Packets             map[string]net.PacketConn
 	tcpECHCandidates      map[string][]resolver.ServiceCandidate
+	h3TransportStates     map[automaticH3RoundTripper]*automaticH3TransportState
+	transportLastUsed     map[string]time.Time
 	altSvcSlots           chan struct{}
+}
+
+type automaticH3RoundTripper interface {
+	h3RoundTripper
+	Close() error
+	CloseIdleConnections()
+}
+
+type automaticH3TransportState struct {
+	active   int
+	evicted  bool
+	closed   bool
+	packet   net.PacketConn
+	lastUsed time.Time
+}
+
+type automaticH3Close struct {
+	transport automaticH3RoundTripper
+	packet    net.PacketConn
 }
 
 func newAutomaticHTTP3Transport(fallback *http.Transport, res *resolver.Resolver, connectTimeout time.Duration, tlsConfig *tls.Config, echMode core.ECHMode) http.RoundTripper {
@@ -64,10 +85,12 @@ func newAutomaticHTTP3Transport(fallback *http.Transport, res *resolver.Resolver
 		cache:                 newAutomaticH3CacheWithPersistent(persistent),
 		persistent:            persistent,
 		tcpTransports:         make(map[string]*http.Transport),
-		h3Transports:          make(map[string]*http3.Transport),
+		h3Transports:          make(map[string]automaticH3RoundTripper),
 		h3TransportCandidates: make(map[string]automaticH3Candidate),
 		h3Packets:             make(map[string]net.PacketConn),
 		tcpECHCandidates:      make(map[string][]resolver.ServiceCandidate),
+		h3TransportStates:     make(map[automaticH3RoundTripper]*automaticH3TransportState),
+		transportLastUsed:     make(map[string]time.Time),
 		altSvcSlots:           make(chan struct{}, 8),
 	}
 }
@@ -78,7 +101,7 @@ func (t *automaticHTTP3Transport) CloseIdleConnections() {
 	}
 	t.mu.Lock()
 	tcp := make([]*http.Transport, 0, len(t.tcpTransports))
-	h3 := make([]*http3.Transport, 0, len(t.h3Transports))
+	h3 := make([]automaticH3RoundTripper, 0, len(t.h3Transports))
 	for _, transport := range t.tcpTransports {
 		tcp = append(tcp, transport)
 	}
@@ -102,25 +125,54 @@ func (t *automaticHTTP3Transport) Close() error {
 		return nil
 	}
 	t.mu.Lock()
-	h3 := make([]*http3.Transport, 0, len(t.h3Transports))
-	packets := make([]net.PacketConn, 0, len(t.h3Packets))
-	for _, transport := range t.h3Transports {
-		h3 = append(h3, transport)
+	if t.h3TransportStates == nil {
+		t.h3TransportStates = make(map[automaticH3RoundTripper]*automaticH3TransportState)
 	}
-	for _, packet := range t.h3Packets {
-		packets = append(packets, packet)
-	}
-	t.h3Packets = make(map[string]net.PacketConn)
-	t.mu.Unlock()
-	t.CloseIdleConnections()
-	var firstErr error
-	for _, transport := range h3 {
-		if err := transport.Close(); err != nil && firstErr == nil {
-			firstErr = err
+	for key, transport := range t.h3Transports {
+		state := t.h3TransportStates[transport]
+		if state == nil {
+			state = &automaticH3TransportState{}
+			t.h3TransportStates[transport] = state
+		}
+		if state.packet == nil {
+			state.packet = t.h3Packets[key]
 		}
 	}
-	for _, packet := range packets {
-		_ = packet.Close()
+	var closeH3 []automaticH3Close
+	for transport, state := range t.h3TransportStates {
+		state.evicted = true
+		if state.active == 0 && !state.closed {
+			state.closed = true
+			closeH3 = append(closeH3, automaticH3Close{transport: transport, packet: state.packet})
+			delete(t.h3TransportStates, transport)
+		}
+	}
+	for key := range t.h3Transports {
+		delete(t.h3Transports, key)
+		delete(t.h3TransportCandidates, key)
+		delete(t.h3Packets, key)
+		delete(t.transportLastUsed, key)
+	}
+	t.h3Packets = make(map[string]net.PacketConn)
+	tcp := make([]*http.Transport, 0, len(t.tcpTransports))
+	for _, transport := range t.tcpTransports {
+		tcp = append(tcp, transport)
+	}
+	t.tcpTransports = make(map[string]*http.Transport)
+	t.tcpECHCandidates = make(map[string][]resolver.ServiceCandidate)
+	t.transportLastUsed = make(map[string]time.Time)
+	t.mu.Unlock()
+	if t.fallback != nil {
+		t.fallback.CloseIdleConnections()
+	}
+	for _, transport := range tcp {
+		transport.CloseIdleConnections()
+	}
+	var firstErr error
+	for _, closeH3 := range closeH3 {
+		if err := closeH3Transport(closeH3); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	if t.persistent != nil {
 		t.persistent.close()
@@ -450,9 +502,14 @@ func (t *automaticHTTP3Transport) RoundTrip(req *http.Request) (*http.Response, 
 	t.mu.Lock()
 	h3Transport := t.h3Transports[key]
 	tcpTransport := t.tcpTransports[key]
+	if h3Transport != nil {
+		t.acquireH3TransportLocked(key, h3Transport)
+	} else if tcpTransport != nil {
+		t.transportLastUsed[key] = time.Now()
+	}
 	t.mu.Unlock()
 	if h3Transport != nil {
-		resp, err := roundTripHTTP3(h3Transport, req)
+		resp, err := roundTripHTTP3WithDone(h3Transport, req, func() { t.releaseH3Transport(h3Transport) })
 		if err == nil {
 			return resp, nil
 		}
@@ -487,6 +544,7 @@ func (t *automaticHTTP3Transport) RoundTrip(req *http.Request) (*http.Response, 
 		if t.tcpTransports[key] == tcpTransport {
 			delete(t.tcpTransports, key)
 			delete(t.tcpECHCandidates, key)
+			delete(t.transportLastUsed, key)
 		}
 		t.mu.Unlock()
 		tcpTransport.CloseIdleConnections()
@@ -987,6 +1045,7 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 func (t *automaticHTTP3Transport) roundTripTCP(req *http.Request, prepared preparedAutomaticConnection, key string) (*http.Response, error) {
 	t.mu.Lock()
 	rt := t.tcpTransports[key]
+	var closeH3 []automaticH3Close
 	if rt == nil {
 		rt = t.fallback.Clone()
 		first := prepared.tcp
@@ -1022,11 +1081,14 @@ func (t *automaticHTTP3Transport) roundTripTCP(req *http.Request, prepared prepa
 		}
 		t.tcpTransports[key] = rt
 		t.tcpECHCandidates[key] = echCandidates
-		t.evictTransportOriginLocked(key)
+		t.transportLastUsed[key] = time.Now()
+		closeH3 = t.evictTransportOriginLocked(key)
 	} else {
+		t.transportLastUsed[key] = time.Now()
 		_ = prepared.tcp.Close()
 	}
 	t.mu.Unlock()
+	closeH3Transports(closeH3)
 	resp, err := rt.RoundTrip(req)
 	if resp != nil && resp.Header != nil {
 		t.scheduleAltSvc(req.Context(), req.URL, resp.Header.Get("Alt-Svc"))
@@ -1037,11 +1099,14 @@ func (t *automaticHTTP3Transport) roundTripTCP(req *http.Request, prepared prepa
 func (t *automaticHTTP3Transport) roundTripH3(req *http.Request, prepared preparedAutomaticConnection, key string) (*http.Response, error) {
 	candidate := prepared.candidate
 	t.mu.Lock()
-	h3 := t.h3Transports[key]
+	var h3 automaticH3RoundTripper
+	var closeH3 []automaticH3Close
+	h3 = t.h3Transports[key]
 	if h3 == nil {
 		first := prepared.h3
 		var firstMu sync.Mutex
-		h3 = &http3.Transport{
+		var h3Transport *http3.Transport
+		h3Transport = &http3.Transport{
 			DisableCompression: true,
 			TLSClientConfig:    t.tlsConfig.Clone(),
 			Dial: func(ctx context.Context, _ string, _ *tls.Config, _ *quic.Config) (*quic.Conn, error) {
@@ -1056,20 +1121,25 @@ func (t *automaticHTTP3Transport) roundTripH3(req *http.Request, prepared prepar
 				if err != nil {
 					return nil, err
 				}
-				t.replaceH3Packet(key, packet)
+				t.replaceH3Packet(key, h3Transport, packet)
 				return conn, nil
 			},
 		}
+		h3 = h3Transport
 		t.h3Transports[key] = h3
 		t.h3TransportCandidates[key] = candidate
 		t.h3Packets[key] = prepared.packet
-		t.evictTransportOriginLocked(key)
+		t.registerH3TransportLocked(key, h3, prepared.packet)
+		t.acquireH3TransportLocked(key, h3)
+		closeH3 = t.evictTransportOriginLocked(key)
 	} else {
 		_ = prepared.h3.CloseWithError(0, "duplicate HTTP/3 race winner")
 		_ = prepared.packet.Close()
+		t.acquireH3TransportLocked(key, h3)
 	}
 	t.mu.Unlock()
-	resp, err := roundTripHTTP3(h3, req)
+	closeH3Transports(closeH3)
+	resp, err := roundTripHTTP3WithDone(h3, req, func() { t.releaseH3Transport(h3) })
 	if err != nil {
 		var bodyErr *HTTP3RequestBodyError
 		if errors.As(err, &bodyErr) || (req != nil && req.Context().Err() != nil) {
@@ -1128,49 +1198,175 @@ func replayAutomaticRequest(req *http.Request) (*http.Request, error) {
 	return copy, nil
 }
 
-// evictTransportOriginLocked bounds retained per-origin transports. It is
-// called while t.mu is held; HTTP/3 Close is intentionally synchronous so an
-// evicted packet socket cannot outlive the transport that owns it.
-func (t *automaticHTTP3Transport) evictTransportOriginLocked(exclude string) {
-	if len(t.tcpTransports)+len(t.h3Transports) <= automaticTransportOriginLimit {
+func (t *automaticHTTP3Transport) registerH3TransportLocked(key string, transport automaticH3RoundTripper, packet net.PacketConn) {
+	if t.h3TransportStates == nil {
+		t.h3TransportStates = make(map[automaticH3RoundTripper]*automaticH3TransportState)
+	}
+	state := t.h3TransportStates[transport]
+	if state == nil {
+		state = &automaticH3TransportState{}
+		t.h3TransportStates[transport] = state
+	}
+	if packet != nil {
+		state.packet = packet
+	}
+	state.lastUsed = time.Now()
+	if t.transportLastUsed == nil {
+		t.transportLastUsed = make(map[string]time.Time)
+	}
+	t.transportLastUsed[key] = state.lastUsed
+}
+
+func (t *automaticHTTP3Transport) acquireH3TransportLocked(key string, transport automaticH3RoundTripper) {
+	t.registerH3TransportLocked(key, transport, t.h3Packets[key])
+	state := t.h3TransportStates[transport]
+	state.active++
+	state.lastUsed = time.Now()
+	t.transportLastUsed[key] = state.lastUsed
+}
+
+func (t *automaticHTTP3Transport) releaseH3Transport(transport automaticH3RoundTripper) {
+	if transport == nil {
 		return
 	}
+	t.mu.Lock()
+	state := t.h3TransportStates[transport]
+	if state == nil || state.active == 0 {
+		t.mu.Unlock()
+		return
+	}
+	state.active--
+	var closeH3 *automaticH3Close
+	if state.active == 0 && state.evicted && !state.closed {
+		state.closed = true
+		closeH3 = &automaticH3Close{transport: transport, packet: state.packet}
+		delete(t.h3TransportStates, transport)
+	}
+	t.mu.Unlock()
+	if closeH3 != nil {
+		_ = closeH3Transport(*closeH3)
+	}
+}
+
+func (t *automaticHTTP3Transport) markH3TransportEvictedLocked(transport automaticH3RoundTripper, packet net.PacketConn) *automaticH3Close {
+	state := t.h3TransportStates[transport]
+	if state == nil {
+		state = &automaticH3TransportState{packet: packet}
+		t.h3TransportStates[transport] = state
+	} else if state.packet == nil {
+		state.packet = packet
+	}
+	state.evicted = true
+	if state.active != 0 || state.closed {
+		return nil
+	}
+	state.closed = true
+	delete(t.h3TransportStates, transport)
+	return &automaticH3Close{transport: transport, packet: state.packet}
+}
+
+func closeH3Transport(closeH3 automaticH3Close) error {
+	if err := closeH3.transport.Close(); err != nil {
+		if closeH3.packet != nil {
+			_ = closeH3.packet.Close()
+		}
+		return err
+	}
+	if closeH3.packet != nil {
+		_ = closeH3.packet.Close()
+	}
+	return nil
+}
+
+func closeH3Transports(closeH3 []automaticH3Close) {
+	for _, closeH3 := range closeH3 {
+		_ = closeH3Transport(closeH3)
+	}
+}
+
+// evictTransportOriginLocked bounds retained per-origin transports. It is
+// called while t.mu is held. Idle transports are preferred; when every H3
+// transport is active, the least recently used one is marked evicted and is
+// closed after its final request releases it.
+func (t *automaticHTTP3Transport) evictTransportOriginLocked(exclude string) []automaticH3Close {
+	if len(t.tcpTransports)+len(t.h3Transports) <= automaticTransportOriginLimit {
+		return nil
+	}
+	type candidate struct {
+		key      string
+		lastUsed time.Time
+		active   bool
+		h3       automaticH3RoundTripper
+		tcp      *http.Transport
+	}
+	var candidates []candidate
 	for key, transport := range t.h3Transports {
 		if key == exclude {
 			continue
 		}
-		delete(t.h3Transports, key)
-		delete(t.h3TransportCandidates, key)
-		packet := t.h3Packets[key]
-		delete(t.h3Packets, key)
-		_ = transport.Close()
-		if packet != nil {
-			_ = packet.Close()
+		state := t.h3TransportStates[transport]
+		active := state != nil && state.active > 0
+		lastUsed := t.transportLastUsed[key]
+		if state != nil && state.lastUsed.Before(lastUsed) {
+			lastUsed = state.lastUsed
 		}
-		return
+		candidates = append(candidates, candidate{key: key, lastUsed: lastUsed, active: active, h3: transport})
 	}
 	for key, transport := range t.tcpTransports {
 		if key == exclude {
 			continue
 		}
-		delete(t.tcpTransports, key)
-		delete(t.tcpECHCandidates, key)
-		transport.CloseIdleConnections()
-		return
+		candidates = append(candidates, candidate{key: key, lastUsed: t.transportLastUsed[key], tcp: transport})
 	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].active != candidates[j].active {
+			return !candidates[i].active
+		}
+		if !candidates[i].lastUsed.Equal(candidates[j].lastUsed) {
+			return candidates[i].lastUsed.Before(candidates[j].lastUsed)
+		}
+		return candidates[i].key < candidates[j].key
+	})
+	winner := candidates[0]
+	delete(t.transportLastUsed, winner.key)
+	if winner.tcp != nil {
+		delete(t.tcpTransports, winner.key)
+		delete(t.tcpECHCandidates, winner.key)
+		winner.tcp.CloseIdleConnections()
+		return nil
+	}
+	delete(t.h3Transports, winner.key)
+	delete(t.h3TransportCandidates, winner.key)
+	packet := t.h3Packets[winner.key]
+	delete(t.h3Packets, winner.key)
+	if closeH3 := t.markH3TransportEvictedLocked(winner.h3, packet); closeH3 != nil {
+		return []automaticH3Close{*closeH3}
+	}
+	return nil
 }
 
-func (t *automaticHTTP3Transport) replaceH3Packet(key string, packet net.PacketConn) {
+func (t *automaticHTTP3Transport) replaceH3Packet(key string, transport automaticH3RoundTripper, packet net.PacketConn) {
 	t.mu.Lock()
-	old := t.h3Packets[key]
-	t.h3Packets[key] = packet
+	state := t.h3TransportStates[transport]
+	if state == nil {
+		state = &automaticH3TransportState{}
+		t.h3TransportStates[transport] = state
+	}
+	old := state.packet
+	state.packet = packet
+	if t.h3Transports[key] == transport {
+		t.h3Packets[key] = packet
+	}
 	t.mu.Unlock()
 	if old != nil && old != packet {
 		_ = old.Close()
 	}
 }
 
-func (t *automaticHTTP3Transport) removeH3Transport(key string, transport *http3.Transport) {
+func (t *automaticHTTP3Transport) removeH3Transport(key string, transport automaticH3RoundTripper) {
 	t.mu.Lock()
 	if t.h3Transports[key] != transport {
 		t.mu.Unlock()
@@ -1180,10 +1376,11 @@ func (t *automaticHTTP3Transport) removeH3Transport(key string, transport *http3
 	delete(t.h3TransportCandidates, key)
 	packet := t.h3Packets[key]
 	delete(t.h3Packets, key)
+	delete(t.transportLastUsed, key)
+	closeH3 := t.markH3TransportEvictedLocked(transport, packet)
 	t.mu.Unlock()
-	_ = transport.Close()
-	if packet != nil {
-		_ = packet.Close()
+	if closeH3 != nil {
+		_ = closeH3Transport(*closeH3)
 	}
 }
 
