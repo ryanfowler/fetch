@@ -392,7 +392,7 @@ func (f *cssFormatter) format() error {
 func (f *cssFormatter) formatComment() {
 	f.writeIndent()
 	f.printer.Set(core.Dim)
-	f.printer.WriteString(f.current.value)
+	f.printer.WriteStringUntrusted(f.current.value)
 	f.printer.Reset()
 	f.printer.WriteString("\n")
 	f.atNewline = true
@@ -405,7 +405,7 @@ func (f *cssFormatter) formatAtRule() {
 	// Write at-keyword
 	f.printer.Set(core.Bold)
 	f.printer.Set(core.Blue)
-	f.printer.WriteString(f.current.value)
+	f.printer.WriteStringUntrusted(f.current.value)
 	f.printer.Reset()
 	f.advance()
 
@@ -613,7 +613,7 @@ func (f *cssFormatter) formatSelector() {
 				}
 				f.printer.Set(core.Bold)
 				f.printer.Set(core.Blue)
-				f.printer.WriteString(f.current.value)
+				f.printer.WriteStringUntrusted(f.current.value)
 				f.printer.Reset()
 				f.advance()
 				needSpace = true
@@ -626,7 +626,7 @@ func (f *cssFormatter) formatSelector() {
 				}
 				f.printer.Set(core.Bold)
 				f.printer.Set(core.Blue)
-				f.printer.WriteString(f.current.value)
+				f.printer.WriteStringUntrusted(f.current.value)
 				f.printer.Reset()
 				f.advance()
 				needSpace = false
@@ -662,20 +662,20 @@ func (f *cssFormatter) formatSelector() {
 		case cssTokenIdent:
 			f.printer.Set(core.Bold)
 			f.printer.Set(core.Blue)
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
 			f.advance()
 			needSpace = false
 		case cssTokenHash:
 			f.printer.Set(core.Bold)
 			f.printer.Set(core.Blue)
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
 			f.advance()
 			needSpace = false
 		case cssTokenString:
 			f.printer.Set(core.Green)
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
 			f.advance()
 			needSpace = false
@@ -683,7 +683,7 @@ func (f *cssFormatter) formatSelector() {
 			// For pseudo-class functions like :not()
 			f.printer.Set(core.Bold)
 			f.printer.Set(core.Blue)
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
 			f.advance()
 			f.formatFunctionArgs()
@@ -692,7 +692,7 @@ func (f *cssFormatter) formatSelector() {
 			// For @keyframes selectors like 0%, 100%
 			f.printer.Set(core.Bold)
 			f.printer.Set(core.Blue)
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
 			f.advance()
 			needSpace = false
@@ -733,7 +733,7 @@ func (f *cssFormatter) formatDeclaration() {
 
 	// Property name
 	f.printer.Set(core.Cyan)
-	f.printer.WriteString(f.current.value)
+	f.printer.WriteStringUntrusted(f.current.value)
 	f.printer.Reset()
 	f.advance()
 
@@ -823,32 +823,32 @@ func (f *cssFormatter) formatValueToken() {
 		// Check for !important
 		if f.current.value == "important" {
 			f.printer.Set(core.Green)
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
 		} else {
 			f.printer.Set(core.Green)
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
 		}
 		f.advance()
 	case cssTokenNumber, cssTokenDimension:
 		f.printer.Set(core.Green)
-		f.printer.WriteString(f.current.value)
+		f.printer.WriteStringUntrusted(f.current.value)
 		f.printer.Reset()
 		f.advance()
 	case cssTokenString:
 		f.printer.Set(core.Green)
-		f.printer.WriteString(f.current.value)
+		f.printer.WriteStringUntrusted(f.current.value)
 		f.printer.Reset()
 		f.advance()
 	case cssTokenHash:
 		f.printer.Set(core.Green)
-		f.printer.WriteString(f.current.value)
+		f.printer.WriteStringUntrusted(f.current.value)
 		f.printer.Reset()
 		f.advance()
 	case cssTokenFunction:
 		f.printer.Set(core.Green)
-		f.printer.WriteString(f.current.value)
+		f.printer.WriteStringUntrusted(f.current.value)
 		f.printer.Reset()
 		f.advance()
 		f.formatFunctionArgsValue(0)
@@ -897,20 +897,20 @@ func (f *cssFormatter) formatFunctionArgs() {
 		case cssTokenIdent:
 			f.printer.Set(core.Bold)
 			f.printer.Set(core.Blue)
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
 			f.advance()
 		case cssTokenHash:
 			f.printer.Set(core.Bold)
 			f.printer.Set(core.Blue)
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
 			f.advance()
 		case cssTokenDelim:
 			if f.current.value == "." || f.current.value == ":" || f.current.value == "*" {
 				f.printer.Set(core.Bold)
 				f.printer.Set(core.Blue)
-				f.printer.WriteString(f.current.value)
+				f.printer.WriteStringUntrusted(f.current.value)
 				f.printer.Reset()
 			}
 			f.advance()
@@ -969,16 +969,16 @@ func (f *cssFormatter) formatFunctionArgsValue(functionDepth int) {
 
 		switch f.current.typ {
 		case cssTokenIdent, cssTokenNumber, cssTokenDimension:
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.advance()
 		case cssTokenString:
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.advance()
 		case cssTokenHash:
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.advance()
 		case cssTokenFunction:
-			f.printer.WriteString(f.current.value)
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.advance()
 			f.formatFunctionArgsValue(functionDepth + 1)
 		default:

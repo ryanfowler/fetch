@@ -3,6 +3,8 @@ package fetch
 import (
 	"io"
 	"unicode/utf8"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 // binaryGuardReader classifies each response chunk before it is returned to
@@ -41,6 +43,102 @@ type binaryGuardReader struct {
 	terminalErr error
 	triggered   bool
 	drainedErr  error
+}
+
+type untrustedResponseReader struct {
+	io.Reader
+}
+
+func (untrustedResponseReader) untrustedResponse() {}
+
+func (r untrustedResponseReader) Close() error {
+	if closer, ok := r.Reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func newUntrustedResponseReader(source io.Reader) io.ReadCloser {
+	return untrustedResponseReader{Reader: source}
+}
+
+type terminalSafeReader struct {
+	source    io.Reader
+	pending   []byte
+	carry     []byte
+	sourceErr error
+	done      bool
+}
+
+func (r *terminalSafeReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(r.pending) > 0 {
+		n := copy(p, r.pending)
+		r.pending = r.pending[n:]
+		return n, nil
+	}
+	if r.done {
+		return 0, r.sourceErr
+	}
+
+	for {
+		if len(r.carry) > 0 && r.sourceErr != nil {
+			// The source ended with an incomplete UTF-8 sequence. It is
+			// invalid text, so let TerminalSafeText escape its bytes.
+			complete := r.carry
+			r.carry = nil
+			r.done = true
+			return r.writeSafe(p, complete)
+		}
+		if r.sourceErr != nil {
+			r.done = true
+			return 0, r.sourceErr
+		}
+
+		buf := make([]byte, len(p))
+		n, err := r.source.Read(buf)
+		if err != nil {
+			r.sourceErr = err
+		}
+		combined := append(r.carry, buf[:n]...)
+		r.carry = nil
+		if len(combined) == 0 {
+			if err != nil {
+				r.done = true
+				return 0, err
+			}
+			continue
+		}
+
+		complete, tail := splitIncompleteTrailingUTF8(combined)
+		r.carry = tail
+		if len(complete) == 0 {
+			continue
+		}
+		return r.writeSafe(p, complete)
+	}
+}
+
+func (r *terminalSafeReader) writeSafe(p, data []byte) (int, error) {
+	safe := []byte(core.TerminalSafeText(string(data)))
+	written := copy(p, safe)
+	if written < len(safe) {
+		r.pending = safe[written:]
+	}
+	return written, nil
+}
+
+func (r *terminalSafeReader) Close() error {
+	if closer, ok := r.source.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+func newTerminalSafeReader(source io.Reader) io.ReadCloser {
+	return &terminalSafeReader{source: source}
 }
 
 func newBinaryGuardReader(source io.Reader, drain bool, onBinary func()) *binaryGuardReader {

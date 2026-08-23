@@ -21,6 +21,32 @@ func (r *fixedChunkReader) Read(p []byte) (int, error) {
 	return len(chunk), nil
 }
 
+func TestTerminalSafeReaderEscapesControls(t *testing.T) {
+	reader := newTerminalSafeReader(bytes.NewReader([]byte("ok\x1b]0;pwned\x07")))
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `ok\x1b]0;pwned\x07`; string(got) != want {
+		t.Fatalf("safe reader output = %q, want %q", got, want)
+	}
+}
+
+func TestTerminalSafeReaderPreservesSplitUTF8(t *testing.T) {
+	reader := newTerminalSafeReader(&fixedChunkReader{chunks: [][]byte{
+		[]byte("caf\xc3"),
+		[]byte("\xa9 and \xc2"),
+		[]byte("\x85"),
+	}})
+	got, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "café and \\x85"; string(got) != want {
+		t.Fatalf("safe reader output = %q, want %q", got, want)
+	}
+}
+
 func TestBinaryGuardPreservesSplitUTF8(t *testing.T) {
 	input := &fixedChunkReader{chunks: [][]byte{
 		[]byte("caf\xc3"),

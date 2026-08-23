@@ -142,13 +142,13 @@ func writeXMLText(p *core.Printer, t []byte) {
 
 func writeXMLDirective(p *core.Printer, b []byte) {
 	p.Set(core.Cyan)
-	p.Write(b)
+	p.WriteUntrusted(b)
 	p.Reset()
 }
 
 func writeXMLComment(p *core.Printer, b []byte) {
 	p.Set(core.Dim)
-	p.Write(b)
+	p.WriteUntrusted(b)
 	p.Reset()
 }
 
@@ -163,7 +163,7 @@ func writeXMLProcInst(p *core.Printer, inst []byte) {
 
 		key, val, ok := bytes.Cut(pair, equalChar)
 		p.Set(core.Cyan)
-		p.Write(key)
+		p.WriteUntrusted(key)
 		p.Reset()
 		if !ok {
 			continue
@@ -176,14 +176,14 @@ func writeXMLProcInst(p *core.Printer, inst []byte) {
 			val, ok = bytes.CutSuffix(val, quoteChar)
 			if ok {
 				p.Set(core.Green)
-				p.Write(val)
+				p.WriteUntrusted(val)
 				p.Reset()
 				p.Write(quoteChar)
 				continue
 			}
 		}
 		p.Set(core.Cyan)
-		p.Write(val)
+		p.WriteUntrusted(val)
 		p.Reset()
 	}
 }
@@ -202,7 +202,7 @@ func escapeXMLString(p *core.Printer, s string) {
 		}
 	}
 	if !needsEscape {
-		p.WriteString(s)
+		p.WriteStringUntrusted(s)
 		return
 	}
 
@@ -235,11 +235,11 @@ func escapeXMLString(p *core.Printer, s string) {
 			}
 			continue
 		}
-		p.WriteString(s[last : i-width])
+		p.WriteStringUntrusted(s[last : i-width])
 		p.WriteString(esc)
 		last = i
 	}
-	p.WriteString(s[last:])
+	p.WriteStringUntrusted(s[last:])
 }
 
 // Decide whether the given rune is in the XML Character Range, per

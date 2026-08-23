@@ -221,7 +221,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			for line := range strings.SplitSeq(content, "\n") {
 				r.writeBqPrefix()
 				r.printer.Set(core.Cyan)
-				r.printer.WriteString(line)
+				r.printer.WriteStringUntrusted(line)
 				r.popAllAndRestore()
 				r.printer.WriteString("\n")
 			}
@@ -292,7 +292,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			for line := range strings.SplitSeq(content, "\n") {
 				r.writeBqPrefix()
 				r.printer.Set(core.Dim)
-				r.printer.WriteString(line)
+				r.printer.WriteStringUntrusted(line)
 				r.popAllAndRestore()
 				r.printer.WriteString("\n")
 			}
@@ -307,7 +307,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.Text:
 		if entering {
-			r.printer.Write(v.Segment.Value(r.source))
+			r.printer.WriteUntrusted(v.Segment.Value(r.source))
 			if v.SoftLineBreak() {
 				r.printer.WriteString("\n")
 				r.writeBqPrefix()
@@ -333,9 +333,9 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 						start--
 					}
 					if start < seg.Start && start > 0 && r.source[start-1] == '\n' {
-						r.printer.Write(r.source[start:seg.Start])
+						r.printer.WriteUntrusted(r.source[start:seg.Start])
 					}
-					r.printer.Write(seg.Value(r.source))
+					r.printer.WriteUntrusted(seg.Value(r.source))
 				}
 			}
 			r.popAllAndRestore()
@@ -365,7 +365,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			r.printer.WriteString("](")
 			r.popAllAndRestore()
 			r.printer.Set(core.Cyan)
-			r.printer.Write(v.Destination)
+			r.printer.WriteUntrusted(v.Destination)
 			r.popAllAndRestore()
 			r.printer.Set(core.Dim)
 			r.printer.WriteString(")")
@@ -384,7 +384,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			r.printer.WriteString("](")
 			r.popAllAndRestore()
 			r.printer.Set(core.Cyan)
-			r.printer.Write(v.Destination)
+			r.printer.WriteUntrusted(v.Destination)
 			r.popAllAndRestore()
 			r.printer.Set(core.Dim)
 			r.printer.WriteString(")")
@@ -395,7 +395,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if entering {
 			r.printer.WriteString("<")
 			r.printer.Set(core.Cyan)
-			r.printer.Write(v.URL(r.source))
+			r.printer.WriteUntrusted(v.URL(r.source))
 			r.popAllAndRestore()
 			r.printer.WriteString(">")
 		}
@@ -405,7 +405,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			r.printer.Set(core.Dim)
 			for i := 0; i < v.Segments.Len(); i++ {
 				seg := v.Segments.At(i)
-				r.printer.Write(seg.Value(r.source))
+				r.printer.WriteUntrusted(seg.Value(r.source))
 			}
 			r.popAllAndRestore()
 			return ast.WalkSkipChildren, nil
@@ -413,7 +413,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.String:
 		if entering {
-			r.printer.Write(v.Value)
+			r.printer.WriteUntrusted(v.Value)
 		}
 
 	// Extension: Strikethrough
@@ -469,7 +469,7 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 	r.printer.Set(core.Dim)
 	r.printer.WriteString("```")
 	if lang != "" {
-		r.printer.WriteString(lang)
+		r.printer.WriteStringUntrusted(lang)
 	}
 	r.printer.Reset()
 	r.printer.WriteString("\n")
@@ -506,7 +506,7 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 		for _, line := range lines {
 			r.writeBqPrefix()
 			r.printer.Set(core.Cyan)
-			r.printer.WriteString(line)
+			r.printer.WriteStringUntrusted(line)
 			r.printer.Reset()
 			r.printer.WriteString("\n")
 		}
@@ -559,6 +559,7 @@ func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 	widths := make([]int, numCols)
 	for _, row := range rows {
 		for i, cell := range row {
+			cell = core.TerminalSafeText(cell)
 			if len(cell) > widths[i] {
 				widths[i] = len(cell)
 			}
@@ -624,15 +625,16 @@ func (r *mdRenderer) renderTableRow(cells []string, widths []int, isHeader bool)
 		if i < len(cells) {
 			cell = cells[i]
 		}
+		safeCell := core.TerminalSafeText(cell)
 		r.printer.WriteString(" ")
 		if isHeader {
 			r.printer.Set(core.Bold)
 		}
-		r.printer.WriteString(cell)
+		r.printer.WriteStringUntrusted(safeCell)
 		if isHeader {
 			r.popAllAndRestore()
 		}
-		r.printer.WriteString(strings.Repeat(" ", w-len(cell)))
+		r.printer.WriteString(strings.Repeat(" ", w-len(safeCell)))
 		r.printer.WriteString(" ")
 		r.printer.Set(core.Dim)
 		r.printer.WriteString("|")

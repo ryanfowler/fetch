@@ -218,12 +218,23 @@ func (p *Printer) Write(b []byte) (int, error) {
 	return p.buf.Write(b)
 }
 
-// WriteString writes the provided string to the buffer.
+// WriteString writes trusted string data to the buffer.
 func (p *Printer) WriteString(s string) (int, error) {
 	if !p.reserve(len(s)) {
 		return 0, p.limitError
 	}
 	return p.buf.WriteString(s)
+}
+
+// WriteUntrusted writes bytes after escaping terminal control characters.
+func (p *Printer) WriteUntrusted(b []byte) (int, error) {
+	return p.WriteStringUntrusted(string(b))
+}
+
+// WriteStringUntrusted writes a string after escaping terminal control
+// characters. Newlines and tabs are retained.
+func (p *Printer) WriteStringUntrusted(s string) (int, error) {
+	return p.WriteString(TerminalSafeText(s))
 }
 
 // WriteRune writes the provided rune to the buffer.

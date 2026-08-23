@@ -180,7 +180,7 @@ func escapeJSONString(p *core.Printer, s string) {
 		case '\\':
 			p.WriteString(`\\`)
 		default:
-			if c < 0x20 || c == 0x7f {
+			if c < 0x20 || (c >= 0x7f && c <= 0x9f) {
 				fmt.Fprintf(p, "\\u%04x", c)
 			} else {
 				p.WriteRune(c)

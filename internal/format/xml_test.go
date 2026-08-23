@@ -77,6 +77,20 @@ func TestFormatXMLOutput(t *testing.T) {
 	}
 }
 
+func TestFormatXMLSanitizesUntrustedContent(t *testing.T) {
+	p := core.TestPrinter(false)
+	if err := FormatXML([]byte("<root><!--\x1b]0;pwned\x07--></root>"), p); err != nil {
+		t.Fatal(err)
+	}
+	got := string(p.Bytes())
+	if strings.ContainsRune(got, '\x1b') || strings.ContainsRune(got, '\x07') {
+		t.Fatalf("unsafe control character survived: %q", got)
+	}
+	if !strings.Contains(got, `\x1b]0;pwned\x07`) {
+		t.Fatalf("sanitized comment missing from output: %q", got)
+	}
+}
+
 func TestFormatXMLLimitsNestingDepth(t *testing.T) {
 	input := strings.Repeat("<a>", core.MaxFormatterNestingDepth+1) +
 		strings.Repeat("</a>", core.MaxFormatterNestingDepth+1)
