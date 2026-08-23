@@ -171,6 +171,8 @@ Features:
 - Syntax highlighting for headings, bold, italic, code spans, links, images
 - Fenced code block delegation to JSON, YAML, XML, HTML, CSS formatters
 - Blockquote and list marker highlighting
+- On TTYs, links and image alt text are rendered as clickable OSC 8 terminal
+  hyperlinks; non-terminal output does not contain OSC 8 hyperlink escapes
 
 ```sh
 fetch example.com/README.md

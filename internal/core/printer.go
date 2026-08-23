@@ -65,7 +65,12 @@ func (h *Handle) Stdout() *Printer {
 // output writer. It is useful for streaming formatters that must write through
 // an intermediate sink, such as a pager, without buffering the response.
 func (p *Printer) NewWriter(w io.Writer) *Printer {
-	return &Printer{file: w, useColor: p.useColor}
+	return &Printer{
+		file:       w,
+		useColor:   p.useColor,
+		terminal:   p.terminal,
+		hyperlinks: p.hyperlinks,
+	}
 }
 
 // NewBoundedWriter returns a printer that accepts at most max bytes in total.
@@ -74,11 +79,13 @@ func (p *Printer) NewWriter(w io.Writer) *Printer {
 // atomically to another printer.
 func (p *Printer) NewBoundedWriter(w io.Writer, max int64, subsystem string) *Printer {
 	return &Printer{
-		file:      w,
-		useColor:  p.useColor,
-		maxBytes:  max,
-		bounded:   true,
-		limitName: subsystem,
+		file:       w,
+		useColor:   p.useColor,
+		terminal:   p.terminal,
+		hyperlinks: p.hyperlinks,
+		maxBytes:   max,
+		bounded:    true,
+		limitName:  subsystem,
 	}
 }
 
@@ -88,6 +95,8 @@ type Printer struct {
 	file       io.Writer
 	buf        bytes.Buffer
 	useColor   bool
+	terminal   bool
+	hyperlinks bool
 	maxBytes   int64
 	bounded    bool
 	limitError error
@@ -107,13 +116,24 @@ func newPrinter(file *os.File, isTerm bool, c Color) *Printer {
 		// a terminal.
 		useColor = isTerm
 	}
-	return &Printer{file: file, useColor: useColor}
+	return &Printer{file: file, useColor: useColor, terminal: isTerm, hyperlinks: isTerm}
 }
 
 // TestPrinter returns a Printer suitable for testing. All output, including
 // flushed data, is captured and accessible via Bytes.
 func TestPrinter(useColor bool) *Printer {
 	return &Printer{file: &lockedBuffer{}, useColor: useColor}
+}
+
+// TestTerminalPrinter returns a Printer that behaves like a terminal. It is
+// useful for testing terminal-only presentation such as OSC 8 hyperlinks.
+func TestTerminalPrinter(useColor bool) *Printer {
+	return &Printer{
+		file:       &lockedBuffer{},
+		useColor:   useColor,
+		terminal:   true,
+		hyperlinks: true,
+	}
 }
 
 // lockedBuffer is a goroutine-safe bytes.Buffer used as the flush target in
@@ -163,6 +183,33 @@ func (p *Printer) Set(s Sequence) {
 // Reset resets any active escape sequences.
 func (p *Printer) Reset() {
 	p.Set(reset)
+}
+
+// IsTerminal reports whether this printer targets a terminal. Formatting
+// code can use this to select presentation that should not appear in pipes or
+// files.
+func (p *Printer) IsTerminal() bool {
+	return p.terminal
+}
+
+// StartHyperlink begins an OSC 8 terminal hyperlink for url. It returns true
+// when a hyperlink was emitted. URLs containing terminal controls are
+// rejected so untrusted Markdown cannot inject an OSC sequence.
+func (p *Printer) StartHyperlink(url string) bool {
+	if !p.hyperlinks || !validHyperlinkURL(url) {
+		return false
+	}
+	p.WriteString("\x1b]8;;")
+	p.WriteString(url)
+	p.WriteString("\x1b\\")
+	return true
+}
+
+// EndHyperlink closes the most recently started OSC 8 terminal hyperlink.
+func (p *Printer) EndHyperlink() {
+	if p.hyperlinks {
+		p.WriteString("\x1b]8;;\x1b\\")
+	}
 }
 
 // Flush writes any buffered data to the underlying file.

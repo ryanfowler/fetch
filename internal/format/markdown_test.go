@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
@@ -631,6 +632,142 @@ func TestFormatMarkdownColor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFormatMarkdownTerminalLinks(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+		no    []string
+	}{
+		{
+			name:  "link",
+			input: "[docs](https://example.com/docs)",
+			want:  "\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\\n",
+			no:    []string{"[", "](https://example.com/docs)"},
+		},
+		{
+			name:  "autolink",
+			input: "<https://example.com>",
+			want:  "\x1b]8;;https://example.com\x1b\\https://example.com\x1b]8;;\x1b\\\n",
+			no:    []string{"<https://example.com>"},
+		},
+		{
+			name:  "image uses alt text",
+			input: "![logo](https://example.com/logo.png)",
+			want:  "\x1b]8;;https://example.com/logo.png\x1b\\logo\x1b]8;;\x1b\\\n",
+			no:    []string{"![", "](https://example.com/logo.png)"},
+		},
+		{
+			name:  "normalizes escaped destination punctuation",
+			input: `[x](https://example.com/a\)b)`,
+			want:  "\x1b]8;;https://example.com/a)b\x1b\\x\x1b]8;;\x1b\\\n",
+		},
+		{
+			name:  "email autolink",
+			input: "<user@example.com>",
+			want:  "\x1b]8;;mailto:user@example.com\x1b\\user@example.com\x1b]8;;\x1b\\\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := core.TestTerminalPrinter(false)
+			if err := FormatMarkdown([]byte(tt.input), p); err != nil {
+				t.Fatalf("FormatMarkdown() error = %v", err)
+			}
+			got := string(p.Bytes())
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+			for _, unwanted := range tt.no {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("output contains Markdown syntax %q: %q", unwanted, got)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatMarkdownTerminalLinksRejectUnsafeSchemes(t *testing.T) {
+	for _, scheme := range []string{"javascript", "data", "file"} {
+		t.Run(scheme, func(t *testing.T) {
+			input := "[open](" + scheme + ":value)"
+			p := core.TestTerminalPrinter(false)
+			if err := FormatMarkdown([]byte(input), p); err != nil {
+				t.Fatalf("FormatMarkdown() error = %v", err)
+			}
+			got := string(p.Bytes())
+			if strings.Contains(got, "\x1b]8;;") {
+				t.Fatalf("unsafe scheme emitted OSC 8 hyperlink: %q", got)
+			}
+			if !strings.Contains(got, scheme+":value") {
+				t.Fatalf("fallback output = %q, missing destination", got)
+			}
+		})
+	}
+}
+
+func TestFormatMarkdownTerminalLinksFallback(t *testing.T) {
+	for _, useColor := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "colored"}[useColor], func(t *testing.T) {
+			p := core.TestPrinter(useColor)
+			if err := FormatMarkdown([]byte("[docs](https://example.com/docs)"), p); err != nil {
+				t.Fatalf("FormatMarkdown() error = %v", err)
+			}
+			got := string(p.Bytes())
+			for _, part := range []string{"[", "docs", "](", "https://example.com/docs", ")"} {
+				if !strings.Contains(got, part) {
+					t.Fatalf("non-terminal output = %q, missing %q", got, part)
+				}
+			}
+			if strings.Contains(got, "\x1b]8;;") {
+				t.Fatalf("non-terminal output contains OSC 8 hyperlink: %q", got)
+			}
+		})
+	}
+}
+
+func TestFormatMarkdownTerminalPresentation(t *testing.T) {
+	input := "# Title\n\n> quote\n\n- first\n- second"
+	p := core.TestTerminalPrinter(false)
+	if err := FormatMarkdown([]byte(input), p); err != nil {
+		t.Fatalf("FormatMarkdown() error = %v", err)
+	}
+	if got, want := string(p.Bytes()), "Title\n\n│ quote\n\n• first\n• second\n"; got != want {
+		t.Fatalf("terminal output = %q, want %q", got, want)
+	}
+}
+
+func TestFormatMarkdownTableUsesTerminalWidths(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "| Name | Value |\n| --- | --- |\n| 世界 | ok |"
+	if err := FormatMarkdown([]byte(input), p); err != nil {
+		t.Fatalf("FormatMarkdown() error = %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(p.Bytes()), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("table output has %d lines, want 3: %q", len(lines), p.Bytes())
+	}
+	if runewidth.StringWidth(lines[0]) != runewidth.StringWidth(lines[2]) {
+		t.Fatalf("table rows have different display widths: %q vs %q", lines[0], lines[2])
+	}
+}
+
+func TestFormatMarkdownTableTerminalLink(t *testing.T) {
+	input := "| Link |\n| --- |\n| [docs](https://example.com/docs) |"
+	p := core.TestTerminalPrinter(false)
+	if err := FormatMarkdown([]byte(input), p); err != nil {
+		t.Fatalf("FormatMarkdown() error = %v", err)
+	}
+	got := string(p.Bytes())
+	if !strings.Contains(got, "\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\") {
+		t.Fatalf("table link omitted OSC 8 hyperlink: %q", got)
+	}
+	if strings.Contains(got, "[docs](https://example.com/docs)") {
+		t.Fatalf("table link retained Markdown syntax: %q", got)
 	}
 }
 

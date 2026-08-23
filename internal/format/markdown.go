@@ -7,11 +7,13 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/core"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	east "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 )
 
 const maxMarkdownBlockquoteOpeners = 256
@@ -42,6 +44,7 @@ func FormatMarkdown(buf []byte, p *core.Printer) error {
 	doc := md.Parser().Parse(text.NewReader(rest))
 
 	r := &mdRenderer{printer: p, source: rest}
+	r.tty = p.IsTerminal()
 	return ast.Walk(doc, r.walk)
 }
 
@@ -146,6 +149,13 @@ type mdRenderer struct {
 	source  []byte
 	styles  []core.Sequence
 	bqDepth int
+	links   []bool
+	tty     bool
+}
+
+type mdTableCell struct {
+	node ast.Node
+	text string
 }
 
 // pushStyle appends a style to the stack and sets it on the printer.
@@ -166,11 +176,27 @@ func (r *mdRenderer) popStyle() {
 	}
 }
 
-// writeBqPrefix writes the blockquote prefix ("> " repeated bqDepth times).
+// popLink removes the active-state marker for the current link or image.
+func (r *mdRenderer) popLink() bool {
+	if len(r.links) == 0 {
+		return false
+	}
+	active := r.links[len(r.links)-1]
+	r.links = r.links[:len(r.links)-1]
+	return active
+}
+
+// writeBqPrefix writes the blockquote prefix repeatedly for the current
+// nesting depth. TTY output uses a vertical rule; non-terminal output keeps
+// the Markdown marker.
 func (r *mdRenderer) writeBqPrefix() {
 	for range r.bqDepth {
 		r.printer.Set(core.Dim)
-		r.printer.WriteString(">")
+		if r.tty {
+			r.printer.WriteString("│")
+		} else {
+			r.printer.WriteString(">")
+		}
 		r.popAllAndRestore()
 		r.printer.WriteString(" ")
 	}
@@ -210,17 +236,27 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 	case *ast.Heading:
 		if entering {
 			r.writeBqPrefix()
-			hashes := strings.Repeat("#", v.Level)
-			r.printer.Set(core.Bold)
-			r.printer.Set(core.Blue)
-			r.printer.WriteString(hashes)
-			r.popAllAndRestore()
-			if v.HasChildren() {
-				r.printer.WriteString(" ")
+			if r.tty {
+				r.pushStyle(core.Bold)
+				r.pushStyle(core.Blue)
+			} else {
+				hashes := strings.Repeat("#", v.Level)
+				r.printer.Set(core.Bold)
+				r.printer.Set(core.Blue)
+				r.printer.WriteString(hashes)
+				r.popAllAndRestore()
+				if v.HasChildren() {
+					r.printer.WriteString(" ")
+				}
+				r.pushStyle(core.Bold)
 			}
-			r.pushStyle(core.Bold)
 		} else {
-			r.popStyle()
+			if r.tty {
+				r.popStyle()
+				r.popStyle()
+			} else {
+				r.popStyle()
+			}
 			r.printer.WriteString("\n")
 			if n.NextSibling() != nil {
 				r.writeBqPrefix()
@@ -331,7 +367,11 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 				}
 				r.printer.WriteString(fmt.Sprintf("%d.", num))
 			} else {
-				r.printer.WriteString(string(list.Marker))
+				if r.tty {
+					r.printer.WriteString("•")
+				} else {
+					r.printer.WriteString(string(list.Marker))
+				}
 			}
 			r.popAllAndRestore()
 			r.printer.WriteString(" ")
@@ -409,49 +449,77 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.Link:
 		if entering {
-			r.printer.Set(core.Dim)
-			r.printer.WriteString("[")
-			r.popAllAndRestore()
+			active := r.printer.StartHyperlink(markdownLinkDestination(v.Destination))
+			r.links = append(r.links, active)
+			if !active {
+				r.printer.Set(core.Dim)
+				r.printer.WriteString("[")
+				r.popAllAndRestore()
+			}
 			r.pushStyle(core.Underline)
 		} else {
+			active := r.popLink()
 			r.popStyle()
-			r.printer.Set(core.Dim)
-			r.printer.WriteString("](")
-			r.popAllAndRestore()
-			r.printer.Set(core.Cyan)
-			r.printer.WriteUntrusted(v.Destination)
-			r.popAllAndRestore()
-			r.printer.Set(core.Dim)
-			r.printer.WriteString(")")
-			r.popAllAndRestore()
+			if active {
+				r.printer.EndHyperlink()
+			} else {
+				r.printer.Set(core.Dim)
+				r.printer.WriteString("](")
+				r.popAllAndRestore()
+				r.printer.Set(core.Cyan)
+				r.printer.WriteUntrusted(v.Destination)
+				r.popAllAndRestore()
+				r.printer.Set(core.Dim)
+				r.printer.WriteString(")")
+				r.popAllAndRestore()
+			}
 		}
 
 	case *ast.Image:
 		if entering {
-			r.printer.Set(core.Dim)
-			r.printer.WriteString("![")
-			r.popAllAndRestore()
+			active := r.printer.StartHyperlink(markdownLinkDestination(v.Destination))
+			r.links = append(r.links, active)
+			if !active {
+				r.printer.Set(core.Dim)
+				r.printer.WriteString("![")
+				r.popAllAndRestore()
+			}
 			r.pushStyle(core.Italic)
 		} else {
+			active := r.popLink()
 			r.popStyle()
-			r.printer.Set(core.Dim)
-			r.printer.WriteString("](")
-			r.popAllAndRestore()
-			r.printer.Set(core.Cyan)
-			r.printer.WriteUntrusted(v.Destination)
-			r.popAllAndRestore()
-			r.printer.Set(core.Dim)
-			r.printer.WriteString(")")
-			r.popAllAndRestore()
+			if active {
+				r.printer.EndHyperlink()
+			} else {
+				r.printer.Set(core.Dim)
+				r.printer.WriteString("](")
+				r.popAllAndRestore()
+				r.printer.Set(core.Cyan)
+				r.printer.WriteUntrusted(v.Destination)
+				r.popAllAndRestore()
+				r.printer.Set(core.Dim)
+				r.printer.WriteString(")")
+				r.popAllAndRestore()
+			}
 		}
 
 	case *ast.AutoLink:
 		if entering {
-			r.printer.WriteString("<")
-			r.printer.Set(core.Cyan)
-			r.printer.WriteUntrusted(v.URL(r.source))
-			r.popAllAndRestore()
-			r.printer.WriteString(">")
+			label := string(v.Label(r.source))
+			target := markdownAutoLinkTarget(v, r.source)
+			if r.printer.StartHyperlink(target) {
+				r.pushStyle(core.Underline)
+				r.printer.Set(core.Cyan)
+				r.printer.WriteStringUntrusted(label)
+				r.popStyle()
+				r.printer.EndHyperlink()
+			} else {
+				r.printer.WriteString("<")
+				r.printer.Set(core.Cyan)
+				r.printer.WriteStringUntrusted(label)
+				r.popAllAndRestore()
+				r.printer.WriteString(">")
+			}
 		}
 
 	case *ast.RawHTML:
@@ -494,6 +562,23 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 	}
 
 	return ast.WalkContinue, nil
+}
+
+// markdownLinkDestination resolves Markdown escapes and entities before the
+// value is placed in a terminal hyperlink target. Goldmark keeps the source
+// spelling in the AST, while a terminal link needs the actual URL.
+func markdownLinkDestination(destination []byte) string {
+	return string(util.URLEscape(destination, true))
+}
+
+// markdownAutoLinkTarget returns the normalized target for an autolink. Email
+// autolinks display their address but need an explicit mailto: target.
+func markdownAutoLinkTarget(link *ast.AutoLink, source []byte) string {
+	target := string(link.URL(source))
+	if link.AutoLinkType == ast.AutoLinkEmail && !strings.HasPrefix(strings.ToLower(target), "mailto:") {
+		target = "mailto:" + target
+	}
+	return string(util.URLEscape([]byte(target), false))
 }
 
 // listIndent returns indentation string based on list nesting depth.
@@ -579,13 +664,13 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 // renderTable renders a table extension node.
 func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 	// Collect all rows (header + body).
-	var rows [][]string
+	var rows [][]mdTableCell
 	var alignments []east.Alignment
 
 	for row := table.FirstChild(); row != nil; row = row.NextSibling() {
-		var cells []string
+		var cells []mdTableCell
 		for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
-			cells = append(cells, r.inlineText(cell))
+			cells = append(cells, mdTableCell{node: cell, text: r.inlineText(cell)})
 		}
 		rows = append(rows, cells)
 	}
@@ -613,9 +698,9 @@ func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 	widths := make([]int, numCols)
 	for _, row := range rows {
 		for i, cell := range row {
-			cell = core.TerminalSafeText(cell)
-			if len(cell) > widths[i] {
-				widths[i] = len(cell)
+			cellText := terminalTableCell(cell.text)
+			if width := runewidth.StringWidth(cellText); width > widths[i] {
+				widths[i] = width
 			}
 		}
 	}
@@ -670,30 +755,71 @@ func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 }
 
 // renderTableRow renders a single table row.
-func (r *mdRenderer) renderTableRow(cells []string, widths []int, isHeader bool) {
+func (r *mdRenderer) renderTableRow(cells []mdTableCell, widths []int, isHeader bool) {
 	r.printer.Set(core.Dim)
 	r.printer.WriteString("|")
 	r.popAllAndRestore()
 	for i, w := range widths {
-		cell := ""
+		cell := mdTableCell{}
 		if i < len(cells) {
 			cell = cells[i]
 		}
-		safeCell := core.TerminalSafeText(cell)
+		safeCell := terminalTableCell(cell.text)
 		r.printer.WriteString(" ")
 		if isHeader {
-			r.printer.Set(core.Bold)
+			r.pushStyle(core.Bold)
 		}
-		r.printer.WriteStringUntrusted(safeCell)
+		if r.tty {
+			r.renderTableCell(cell.node)
+		} else {
+			r.printer.WriteStringUntrusted(safeCell)
+		}
 		if isHeader {
-			r.popAllAndRestore()
+			r.popStyle()
 		}
-		r.printer.WriteString(strings.Repeat(" ", w-len(safeCell)))
+		r.printer.WriteString(strings.Repeat(" ", w-runewidth.StringWidth(safeCell)))
 		r.printer.WriteString(" ")
 		r.printer.Set(core.Dim)
 		r.printer.WriteString("|")
 		r.popAllAndRestore()
 	}
+}
+
+// renderTableCell renders inline nodes while keeping line breaks inside a
+// table cell from escaping the row. This lets TTY tables retain semantic
+// formatting, including clickable links.
+func (r *mdRenderer) renderTableCell(cell ast.Node) {
+	if cell == nil {
+		return
+	}
+	for child := cell.FirstChild(); child != nil; child = child.NextSibling() {
+		_ = ast.Walk(child, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+			if t, ok := n.(*ast.Text); ok && entering {
+				text := strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(string(t.Segment.Value(r.source)))
+				r.printer.WriteStringUntrusted(text)
+				if t.SoftLineBreak() || t.HardLineBreak() {
+					r.printer.WriteString(" ")
+				}
+				return ast.WalkSkipChildren, nil
+			}
+			return r.walk(n, entering)
+		})
+	}
+}
+
+// terminalTableCell keeps a cell on one display row. Markdown permits line
+// breaks inside table cells, but preserving them would move the following
+// cells out of alignment in a terminal table.
+func terminalTableCell(cell string) string {
+	cell = core.TerminalSafeText(cell)
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', '\r', '\t':
+			return ' '
+		default:
+			return r
+		}
+	}, cell)
 }
 
 // inlineText extracts the plain text from an inline node's children.
@@ -708,6 +834,12 @@ func (r *mdRenderer) inlineText(n ast.Node) string {
 func (r *mdRenderer) collectText(sb *strings.Builder, n ast.Node) {
 	if t, ok := n.(*ast.Text); ok {
 		sb.Write(t.Segment.Value(r.source))
+	}
+	if s, ok := n.(*ast.String); ok {
+		sb.Write(s.Value)
+	}
+	if a, ok := n.(*ast.AutoLink); ok {
+		sb.Write(a.Label(r.source))
 	}
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		r.collectText(sb, c)

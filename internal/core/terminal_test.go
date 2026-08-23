@@ -39,6 +39,57 @@ func TestPrinterWriteUntrustedEscapesTerminalControls(t *testing.T) {
 	}
 }
 
+func TestPrinterHyperlink(t *testing.T) {
+	p := TestTerminalPrinter(false)
+	if !p.StartHyperlink("https://example.com/docs") {
+		t.Fatal("StartHyperlink() = false, want true")
+	}
+	_, _ = p.WriteString("docs")
+	p.EndHyperlink()
+
+	want := "\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\"
+	if got := string(p.Bytes()); got != want {
+		t.Fatalf("hyperlink output = %q, want %q", got, want)
+	}
+}
+
+func TestPrinterHyperlinkRejectsTerminalControls(t *testing.T) {
+	for _, target := range []string{"", "https://example.com\nnext", "https://example.com\x1b\\"} {
+		p := TestTerminalPrinter(false)
+		if p.StartHyperlink(target) {
+			t.Errorf("StartHyperlink(%q) = true, want false", target)
+		}
+		if len(p.Bytes()) != 0 {
+			t.Errorf("StartHyperlink(%q) wrote %q", target, p.Bytes())
+		}
+	}
+}
+
+func TestPrinterHyperlinkRejectsUnsafeSchemes(t *testing.T) {
+	for _, target := range []string{"javascript:alert(1)", "data:text/html,hello", "file:///etc/passwd"} {
+		p := TestTerminalPrinter(false)
+		if p.StartHyperlink(target) {
+			t.Errorf("StartHyperlink(%q) = true, want false", target)
+		}
+	}
+	for _, target := range []string{"https://example.com", "mailto:user@example.com"} {
+		p := TestTerminalPrinter(false)
+		if !p.StartHyperlink(target) {
+			t.Errorf("StartHyperlink(%q) = false, want true", target)
+		}
+	}
+}
+
+func TestPrinterNonTerminalDoesNotEmitHyperlink(t *testing.T) {
+	p := TestPrinter(false)
+	if p.StartHyperlink("https://example.com") {
+		t.Fatal("StartHyperlink() = true for non-terminal printer")
+	}
+	if len(p.Bytes()) != 0 {
+		t.Fatalf("non-terminal hyperlink output = %q", p.Bytes())
+	}
+}
+
 func TestTerminalSafeTextCommonCaseDoesNotAllocate(t *testing.T) {
 	input := "ordinary diagnostic text with UTF-8: café\n"
 	allocs := testing.AllocsPerRun(100, func() {

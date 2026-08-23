@@ -242,6 +242,10 @@ fetch --discard --timing example.com        # Measure timing only
 
 Control response formatting. Values: `auto`, `on`, `off`.
 
+Markdown rendered on a terminal uses clickable OSC 8 hyperlinks when the
+terminal supports them. Non-terminal output does not contain OSC 8 hyperlink
+escapes.
+
 ```sh
 fetch --format off example.com   # Disable formatting
 fetch --format on example.com    # Force formatting
