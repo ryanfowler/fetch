@@ -219,26 +219,48 @@ func TestGetSignedHeadersMergesCaseVariantKeysDeterministically(t *testing.T) {
 	}
 }
 
-func TestBuildCanonicalRequestUsesEscapedPath(t *testing.T) {
+func TestBuildCanonicalRequestEncodesPathForService(t *testing.T) {
 	tests := []struct {
-		name string
-		url  string
-		want string
+		name    string
+		url     string
+		service string
+		want    string
 	}{
 		{
-			name: "escaped slash",
-			url:  "https://example.com/a%2Fb",
-			want: "/a%2Fb",
+			name:    "s3 escaped slash",
+			url:     "https://example.com/a%2Fb",
+			service: "s3",
+			want:    "/a%2Fb",
 		},
 		{
-			name: "escaped space",
-			url:  "https://example.com/space%20here",
-			want: "/space%20here",
+			name:    "s3 escaped space",
+			url:     "https://example.com/space%20here",
+			service: "s3",
+			want:    "/space%20here",
 		},
 		{
-			name: "non-ascii segment",
-			url:  "https://example.com/café/日本",
-			want: "/caf%C3%A9/%E6%97%A5%E6%9C%AC",
+			name:    "s3 non-ascii segment",
+			url:     "https://example.com/café/日本",
+			service: "s3",
+			want:    "/caf%C3%A9/%E6%97%A5%E6%9C%AC",
+		},
+		{
+			name:    "non-s3 escaped slash",
+			url:     "https://example.com/a%2Fb",
+			service: "execute-api",
+			want:    "/a%252Fb",
+		},
+		{
+			name:    "non-s3 escaped space",
+			url:     "https://example.com/space%20here",
+			service: "execute-api",
+			want:    "/space%2520here",
+		},
+		{
+			name:    "non-s3 non-ascii segment",
+			url:     "https://example.com/café/日本",
+			service: "execute-api",
+			want:    "/caf%25C3%25A9/%25E6%2597%25A5%25E6%259C%25AC",
 		},
 	}
 
@@ -246,7 +268,7 @@ func TestBuildCanonicalRequestUsesEscapedPath(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			req, _ := http.NewRequest("GET", test.url, nil)
 
-			canonicalRequest := string(buildCanonicalRequest(req, nil, emptySha256))
+			canonicalRequest := string(buildCanonicalRequest(req, nil, emptySha256, test.service))
 			lines := strings.SplitN(canonicalRequest, "\n", 3)
 			if lines[1] != test.want {
 				t.Fatalf("unexpected canonical path: got %q, want %q", lines[1], test.want)
@@ -270,4 +292,37 @@ func TestGetSignedHeadersUsesRequestHost(t *testing.T) {
 		}
 	}
 	t.Fatal("signed host header not found")
+}
+
+func TestGetSignedHeadersStripsSchemeDefaultPort(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		host string
+		want string
+	}{
+		{name: "https", url: "https://example.com:443", want: "example.com"},
+		{name: "http", url: "http://example.com:80", want: "example.com"},
+		{name: "non-default port", url: "https://example.com:8443", want: "example.com:8443"},
+		{name: "ipv6 https", url: "https://[2001:db8::1]:443", want: "[2001:db8::1]"},
+		{name: "ipv6 non-default port", url: "https://[2001:db8::1]:8443", want: "[2001:db8::1]:8443"},
+		{name: "request host", url: "https://127.0.0.1", host: "vhost.example:443", want: "vhost.example"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", test.url, nil)
+			req.Host = test.host
+
+			for _, header := range getSignedHeaders(req) {
+				if header.Key == "host" {
+					if header.Val != test.want {
+						t.Fatalf("host = %q, want %q", header.Val, test.want)
+					}
+					return
+				}
+			}
+			t.Fatal("signed host header not found")
+		})
+	}
 }
