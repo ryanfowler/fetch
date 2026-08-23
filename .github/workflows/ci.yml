@@ -75,8 +75,10 @@ jobs:
           $testExit = $LASTEXITCODE
 
           Wait-Job $build | Out-Null
-          Receive-Job $build
           $buildFailed = $build.State -ne 'Completed'
+          if ($buildFailed) {
+            Receive-Job $build -ErrorAction Continue
+          }
           Remove-Job $build
 
           if ($testExit -ne 0) {
