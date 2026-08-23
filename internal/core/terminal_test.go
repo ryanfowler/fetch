@@ -159,6 +159,27 @@ func TestWriteErrorMsgRedactsMalformedTransportURLUserinfo(t *testing.T) {
 	}
 }
 
+func TestWriteErrorMsgRedactsStructurallyMalformedTransportURLUserinfo(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "http:/transport-user:transport-password@example.test/request?access_token=transport-query-secret&safe=ok",
+		Err: errors.New("connection refused"),
+	}
+	p := TestPrinter(false)
+	WriteErrorMsgNoFlush(p, err)
+
+	got := string(p.Bytes())
+	for _, secret := range []string{"transport-user", "transport-password", "transport-query-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("structurally malformed transport error leaked %q: %q", secret, got)
+		}
+	}
+	want := "http:/example.test/request?access_token=%5BREDACTED%5D&safe=ok"
+	if !strings.Contains(got, want) {
+		t.Fatalf("structurally malformed transport error = %q, want redacted URL %q", got, want)
+	}
+}
+
 func TestRedactedURL(t *testing.T) {
 	u, err := url.Parse("https://user:secret@example.test/path")
 	if err != nil {
@@ -166,6 +187,23 @@ func TestRedactedURL(t *testing.T) {
 	}
 	if got := RedactedURL(u); got != "https://example.test/path" {
 		t.Fatalf("RedactedURL() = %q", got)
+	}
+}
+
+func TestRedactedURLRedactsStructurallyMalformedAuthority(t *testing.T) {
+	u, err := url.Parse("http:/proxy-user:proxy-password@example.test?access_token=proxy-query-secret&safe=ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := RedactedURL(u)
+	for _, secret := range []string{"proxy-user", "proxy-password", "proxy-query-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("RedactedURL() leaked %q: %q", secret, got)
+		}
+	}
+	if want := "http:/example.test?access_token=%5BREDACTED%5D&safe=ok"; got != want {
+		t.Fatalf("RedactedURL() = %q, want %q", got, want)
 	}
 }
 
@@ -194,6 +232,18 @@ func TestRedactHeaderValueRedactsLocationURL(t *testing.T) {
 	}
 	if want := "/next?password=%5BREDACTED%5D&safe=ok"; got != want {
 		t.Fatalf("Location redaction = %q, want %q", got, want)
+	}
+}
+
+func TestRedactHeaderValueRedactsStructurallyMalformedLocationURL(t *testing.T) {
+	got := RedactHeaderValue("Location", "http:/location-user:location-password@example.test/next?access_token=location-query-secret&safe=ok")
+	for _, secret := range []string{"location-user", "location-password", "location-query-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("structurally malformed Location leaked %q: %q", secret, got)
+		}
+	}
+	if want := "http:/example.test/next?access_token=%5BREDACTED%5D&safe=ok"; got != want {
+		t.Fatalf("structurally malformed Location = %q, want %q", got, want)
 	}
 }
 

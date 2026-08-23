@@ -259,7 +259,7 @@ func websocketHandshakeError(resp *http.Response, err error) error {
 	if err == nil {
 		err = errors.New("handshake failed")
 	}
-	safeErr := core.TerminalSafeText(err.Error())
+	safeErr := core.RedactedErrorText(err)
 	if resp == nil {
 		return errors.New(safeErr)
 	}

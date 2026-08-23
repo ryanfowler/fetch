@@ -126,6 +126,10 @@ func RedactedURL(u *url.URL) string {
 	}
 	copyURL := *u
 	copyURL.User = nil
+	if copyURL.Host == "" && copyURL.Scheme != "" {
+		copyURL.Path = redactMalformedURLPath(copyURL.Path)
+		copyURL.RawPath = ""
+	}
 	copyURL.RawQuery = RedactedQuery(copyURL.RawQuery)
 	return TerminalSafeText(copyURL.String())
 }
@@ -152,6 +156,9 @@ func RedactedErrorText(err error) string {
 func redactedURLString(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err == nil {
+		if malformedURLAuthority(rawURL) {
+			return redactedMalformedURLString(rawURL)
+		}
 		return RedactedURL(u)
 	}
 
@@ -173,6 +180,59 @@ func redactedURLString(rawURL string) string {
 	return TerminalSafeText(redacted)
 }
 
+func redactedMalformedURLString(rawURL string) string {
+	base, query, hasQuery := strings.Cut(rawURL, "?")
+	base = redactURLAuthority(base)
+	redacted := base
+	if !hasQuery {
+		return TerminalSafeText(redacted)
+	}
+
+	query, fragment, hasFragment := strings.Cut(query, "#")
+	redacted += "?" + RedactedQuery(query)
+	if hasFragment {
+		redacted += "#" + fragment
+	}
+	return TerminalSafeText(redacted)
+}
+
+func malformedURLAuthority(rawURL string) bool {
+	schemeEnd := strings.IndexByte(rawURL, ':')
+	if schemeEnd <= 0 {
+		return false
+	}
+	rest := rawURL[schemeEnd+1:]
+	if strings.HasPrefix(rest, "//") {
+		return false
+	}
+	authorityStart := schemeEnd + 1
+	if strings.HasPrefix(rest, "/") {
+		authorityStart++
+	}
+	authorityEnd := len(rawURL)
+	if end := strings.IndexAny(rawURL[authorityStart:], "/?#"); end >= 0 {
+		authorityEnd = authorityStart + end
+	}
+	return strings.Contains(rawURL[authorityStart:authorityEnd], "@")
+}
+
+func redactMalformedURLPath(path string) string {
+	start := 0
+	if strings.HasPrefix(path, "/") {
+		start++
+	}
+	end := len(path)
+	if next := strings.IndexByte(path[start:], '/'); next >= 0 {
+		end = start + next
+	}
+	segment := path[start:end]
+	userinfoEnd := strings.LastIndexByte(segment, '@')
+	if userinfoEnd < 0 {
+		return path
+	}
+	return path[:start] + segment[userinfoEnd+1:] + path[end:]
+}
+
 // redactURLAuthority removes userinfo from a URL whose syntax is too malformed
 // for net/url to parse. Transport diagnostics must not fall back to printing
 // an untrusted authority verbatim because it may contain proxy credentials.
@@ -185,6 +245,11 @@ func redactURLAuthority(rawURL string) string {
 		schemeSeparator := strings.Index(rawURL, "://")
 		if schemeSeparator >= 0 {
 			authorityStart = schemeSeparator + len("://")
+		} else if schemeSeparator = strings.IndexByte(rawURL, ':'); schemeSeparator >= 0 {
+			authorityStart = schemeSeparator + 1
+			if strings.HasPrefix(rawURL[authorityStart:], "/") {
+				authorityStart++
+			}
 		}
 	}
 	if authorityStart < 0 {
@@ -345,11 +410,11 @@ func diagnosticHeaderTerms(name string) []string {
 // RedactHeaderValue replaces sensitive header values with a stable marker.
 func RedactHeaderValue(name, value string) string {
 	if strings.EqualFold(strings.TrimSpace(name), "Location") {
-		u, err := url.Parse(value)
+		_, err := url.Parse(value)
 		if err != nil {
 			return "[invalid redirect location]"
 		}
-		return RedactedURL(u)
+		return redactedURLString(value)
 	}
 	if IsSensitiveHeader(name) {
 		return "[REDACTED]"

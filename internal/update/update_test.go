@@ -1,8 +1,11 @@
 package update
 
 import (
+	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -36,6 +39,24 @@ func TestIsVersionTag(t *testing.T) {
 				t.Errorf("isVersionTag(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBoundUpdateErrorRedactsURLAndQuery(t *testing.T) {
+	err := &url.Error{
+		Op:  "Get",
+		URL: "https://update-user:update-password@example.test/releases/latest?access_token=update-query-secret&safe=ok",
+		Err: errors.New("connection refused"),
+	}
+	got := boundUpdateError(err)
+	for _, secret := range []string{"update-user", "update-password", "update-query-secret"} {
+		if strings.Contains(got.Error(), secret) {
+			t.Fatalf("bounded update error leaked %q: %q", secret, got)
+		}
+	}
+	want := "https://example.test/releases/latest?access_token=%5BREDACTED%5D&safe=ok"
+	if !strings.Contains(got.Error(), want) {
+		t.Fatalf("bounded update error = %q, want redacted URL %q", got, want)
 	}
 }
 

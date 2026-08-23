@@ -72,7 +72,7 @@ func boundUpdateError(err error) error {
 		return nil
 	}
 	const maxDiagnosticBytes = 4 << 10
-	message := core.TerminalSafeText(err.Error())
+	message := core.RedactedErrorText(err)
 	if len(message) > maxDiagnosticBytes {
 		message = message[:maxDiagnosticBytes-len("... (truncated)")] + "... (truncated)"
 	}
