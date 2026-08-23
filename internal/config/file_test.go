@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"math/big"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -152,6 +153,61 @@ func TestGetConfigFileExplicitMissingPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Fatalf("error = %q, want path %q", err, path)
+	}
+}
+
+func TestGetConfigFileSearchFallsThroughMissingCandidate(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "missing"))
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	path := filepath.Join(home, ".config", "fetch", "config")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("color = off\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	gotPath, gotBuf, err := getConfigFile("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != path {
+		t.Fatalf("path = %q, want %q", gotPath, path)
+	}
+	if got := string(gotBuf); got != "color = off\n" {
+		t.Fatalf("contents = %q, want %q", got, "color = off\n")
+	}
+}
+
+func TestGetConfigFileSearchReturnsReadErrorWithoutFallingThrough(t *testing.T) {
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgHome)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	xdgPath := filepath.Join(xdgHome, "fetch", "config")
+	if err := os.MkdirAll(xdgPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	homePath := filepath.Join(home, ".config", "fetch", "config")
+	if err := os.MkdirAll(filepath.Dir(homePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(homePath, []byte("color = off\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	gotPath, gotBuf, err := getConfigFile("")
+	if err == nil {
+		t.Fatal("expected read error")
+	}
+	if gotPath != "" || gotBuf != nil {
+		t.Fatalf("path, contents = %q, %q; want empty results", gotPath, gotBuf)
+	}
+	if !strings.Contains(err.Error(), xdgPath) {
+		t.Fatalf("error = %q, want path %q", err, xdgPath)
 	}
 }
 

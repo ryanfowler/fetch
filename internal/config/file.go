@@ -64,6 +64,9 @@ func getConfigFile(path string) (string, []byte, error) {
 		if err == nil {
 			return path, buf, nil
 		}
+		if !os.IsNotExist(err) {
+			return "", nil, err
+		}
 	}
 	return "", nil, nil
 }
