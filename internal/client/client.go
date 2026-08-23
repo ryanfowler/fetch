@@ -1208,6 +1208,9 @@ func normalizeRedirectRequest(req *http.Request, via []*http.Request) error {
 			clearRedirectBody(req)
 			return nil
 		}
+		if err := rejectCrossOriginRedirectBody(req, previous, via); err != nil {
+			return err
+		}
 		req.Method = previous.Method
 		if err := restoreRedirectBody(req, previous, via[0]); err != nil {
 			return err
@@ -1232,6 +1235,9 @@ func normalizeRedirectRequest(req *http.Request, via []*http.Request) error {
 	// includeBody flag is based on the initial request and can therefore lose a
 	// body after an earlier 301/302. Restore from the previous hop instead.
 	if status == http.StatusTemporaryRedirect || status == http.StatusPermanentRedirect {
+		if err := rejectCrossOriginRedirectBody(req, previous, via); err != nil {
+			return err
+		}
 		req.Method = previous.Method
 		if previous.Body == nil || previous.Body == http.NoBody {
 			clearRedirectBody(req)
@@ -1240,6 +1246,21 @@ func normalizeRedirectRequest(req *http.Request, via []*http.Request) error {
 		return restoreRedirectBody(req, previous, via[0])
 	}
 
+	return nil
+}
+
+func rejectCrossOriginRedirectBody(req, previous *http.Request, via []*http.Request) error {
+	if req == nil || previous == nil || req.URL == nil || len(via) == 0 ||
+		(previous.Body == nil || previous.Body == http.NoBody) {
+		return nil
+	}
+	initial := via[0].URL
+	if state := redirectSecurityStateFrom(req); state != nil && state.initialOrigin != nil {
+		initial = state.initialOrigin
+	}
+	if initial != nil && !SameOrigin(initial, req.URL) {
+		return errors.New("refusing cross-origin redirect with request body")
+	}
 	return nil
 }
 

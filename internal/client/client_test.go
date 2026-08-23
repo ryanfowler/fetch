@@ -568,6 +568,10 @@ func TestRedirectMethodAndBodySemantics(t *testing.T) {
 		{name: "303 HEAD", status: http.StatusSeeOther, method: http.MethodHead, wantMethod: http.MethodHead},
 		{name: "307 PUT", status: http.StatusTemporaryRedirect, method: http.MethodPut, body: "put", wantMethod: http.MethodPut, wantBody: "put"},
 		{name: "308 PATCH", status: http.StatusPermanentRedirect, method: http.MethodPatch, body: "patch", wantMethod: http.MethodPatch, wantBody: "patch"},
+		{name: "301 custom", status: http.StatusMovedPermanently, method: "PROPFIND", body: "custom-301", wantMethod: "PROPFIND", wantBody: "custom-301"},
+		{name: "302 custom", status: http.StatusFound, method: "PROPFIND", body: "custom-302", wantMethod: "PROPFIND", wantBody: "custom-302"},
+		{name: "307 custom", status: http.StatusTemporaryRedirect, method: "PROPFIND", body: "custom-307", wantMethod: "PROPFIND", wantBody: "custom-307"},
+		{name: "308 custom", status: http.StatusPermanentRedirect, method: "PROPFIND", body: "custom-308", wantMethod: "PROPFIND", wantBody: "custom-308"},
 	}
 
 	for _, tt := range tests {
@@ -619,6 +623,52 @@ func TestRedirectMethodAndBodySemantics(t *testing.T) {
 				t.Fatalf("Content-Type = %q, want application/test", gotContentType)
 			}
 		})
+	}
+}
+
+func TestCrossOriginRedirectBodyIsRefused(t *testing.T) {
+	statuses := []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	}
+	methods := []string{http.MethodPut, http.MethodPatch, "PROPFIND"}
+
+	for _, status := range statuses {
+		for _, method := range methods {
+			name := fmt.Sprintf("%d %s", status, method)
+			t.Run(name, func(t *testing.T) {
+				var targetCalls, targetBytes int
+				target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					targetCalls++
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read target body: %v", err)
+					}
+					targetBytes += len(body)
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				defer target.Close()
+
+				source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, target.URL+"/final", status)
+				}))
+				defer source.Close()
+
+				req, err := http.NewRequest(method, source.URL+"/start", strings.NewReader("secret-body"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = NewClient(ClientConfig{}).Do(req)
+				if err == nil || !strings.Contains(err.Error(), "refusing cross-origin redirect with request body") {
+					t.Fatalf("error = %v, want cross-origin body refusal", err)
+				}
+				if targetCalls != 0 || targetBytes != 0 {
+					t.Fatalf("target received %d requests and %d body bytes, want none", targetCalls, targetBytes)
+				}
+			})
+		}
 	}
 }
 

@@ -367,6 +367,13 @@ redirects = 0
 redirects = 10
 ```
 
+Redirects that would preserve a request body across a scheme, host, or port
+boundary are refused before the destination receives a request. This covers
+PUT, PATCH, and custom methods for 301, 302, 307, and 308 responses. There is
+no cross-origin body-replay opt-in. A 301 or 302 POST and every non-HEAD 303
+are converted to GET without a body; same-origin body-preserving redirects
+remain allowed.
+
 #### `retry`
 
 **Type**: Integer
