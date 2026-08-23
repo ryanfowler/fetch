@@ -393,6 +393,11 @@ Session files are stored in the user's cache directory:
 - **Linux**: `~/.cache/fetch/sessions/<NAME>.json`
 - **macOS**: `~/Library/Caches/fetch/sessions/<NAME>.json`
 
+Session files are limited to 2 MiB, and serialized cookie data is limited to
+1 MiB. Each session can contain up to 2,048 cookies (64 per domain); cookie
+names and values are limited to 256 and 4,096 bytes. Cookies rejected or
+evicted by these limits produce a bounded warning.
+
 Can also be configured per-host in the [configuration file](configuration.md).
 
 ## Network Options

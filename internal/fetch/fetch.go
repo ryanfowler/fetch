@@ -459,6 +459,11 @@ func saveSession(r *Request, sess *session.Session) {
 		msg := fmt.Sprintf("unable to save session '%s': %s", sess.Name, saveErr.Error())
 		core.WriteWarningMsgIf(p, msg, r.Verbosity == core.VSilent)
 	}
+	for _, diagnostic := range sess.TakeDiagnostics() {
+		p := r.PrinterHandle.Stderr()
+		msg := fmt.Sprintf("session '%s': %s", sess.Name, diagnostic)
+		core.WriteWarningMsgIf(p, msg, r.Verbosity == core.VSilent)
+	}
 }
 
 func signAWSRequest(r *Request, req *http.Request) error {

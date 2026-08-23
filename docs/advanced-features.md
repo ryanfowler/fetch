@@ -584,6 +584,7 @@ Sessions are stored as JSON in the user's cache directory:
 - **Session cookies** (no explicit expiry): Persist across invocations since the session is explicitly named.
 - **Cookie domain matching**: Delegated to Go's `net/http/cookiejar`, which implements RFC 6265.
 - **Atomic writes**: Session files use owner-only permissions, an operation lock, an exclusive temporary file, and an atomic rename. Saves merge additions, updates, and deletions with the latest file so concurrent fetch processes do not lose cookie changes.
+- **Session limits**: Session files are capped at 2 MiB and serialized cookie data at 1 MiB. A session holds at most 2,048 cookies and 64 cookies per domain; cookie names and values are capped at 256 and 4,096 bytes. New cookies that exceed a name/value limit are rejected. Count and serialized-size pressure evicts the oldest cookies deterministically, with a bounded warning.
 - **WebSockets**: Named-session cookies are sent with WebSocket handshakes and handshake cookie changes are saved after the session ends.
 - **Dry-run**: Dry-run loads sessions without writing them, including when the session file is corrupted.
 - **Name validation**: Only `[a-zA-Z0-9_-]` characters are allowed to prevent path traversal.

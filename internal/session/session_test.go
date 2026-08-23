@@ -1,6 +1,9 @@
 package session
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -240,6 +243,377 @@ func TestSessionJar(t *testing.T) {
 	if len(sess2.Cookies) != 2 {
 		t.Fatalf("expected 2 cookies after reload, got %d", len(sess2.Cookies))
 	}
+}
+
+func TestSessionJarResponseGrowthEvictsOldestPerDomain(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("response-growth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse("https://example.com/")
+	jar := sess.Jar()
+	for i := 0; i < MaxCookiesPerDomain+10; i++ {
+		jar.SetCookies(u, []*http.Cookie{{Name: fmt.Sprintf("cookie-%03d", i), Value: "value"}})
+	}
+
+	if len(sess.Cookies) != MaxCookiesPerDomain {
+		t.Fatalf("session cookie count = %d, want %d", len(sess.Cookies), MaxCookiesPerDomain)
+	}
+	if got := jar.Cookies(u); len(got) != MaxCookiesPerDomain {
+		t.Fatalf("jar cookie count = %d, want %d", len(got), MaxCookiesPerDomain)
+	}
+	if containsCookieName(jar.Cookies(u), "cookie-000") {
+		t.Fatal("oldest per-domain cookie was not evicted from the jar")
+	}
+	if !containsCookieName(jar.Cookies(u), fmt.Sprintf("cookie-%03d", MaxCookiesPerDomain+9)) {
+		t.Fatal("newest per-domain cookie was not retained")
+	}
+	diagnostics := sess.TakeDiagnostics()
+	if len(diagnostics) == 0 || len(diagnostics) > maxSessionDiagnostics {
+		t.Fatalf("diagnostics count = %d, want 1..%d", len(diagnostics), maxSessionDiagnostics)
+	}
+}
+
+func TestSessionJarResponseGrowthEvictsOldestGlobally(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("global-growth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar := sess.Jar()
+	for i := 0; i < MaxSessionCookies+10; i++ {
+		host := fmt.Sprintf("host-%04d.example.com", i)
+		u, _ := url.Parse("https://" + host + "/")
+		jar.SetCookies(u, []*http.Cookie{{Name: "cookie", Value: "value"}})
+	}
+
+	if len(sess.Cookies) != MaxSessionCookies {
+		t.Fatalf("session cookie count = %d, want %d", len(sess.Cookies), MaxSessionCookies)
+	}
+	firstURL, _ := url.Parse("https://host-0000.example.com/")
+	if got := jar.Cookies(firstURL); len(got) != 0 {
+		t.Fatalf("oldest global cookie remains in jar: %+v", got)
+	}
+	lastURL, _ := url.Parse(fmt.Sprintf("https://host-%04d.example.com/", MaxSessionCookies+9))
+	if got := jar.Cookies(lastURL); len(got) != 1 || got[0].Value != "value" {
+		t.Fatalf("newest global cookie = %+v, want one cookie", got)
+	}
+}
+
+func TestSessionJarResponseGrowthEvictsForSerializedSize(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("serialized-growth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar := sess.Jar()
+	value := string(bytes.Repeat([]byte{'v'}, MaxCookieValueBytes))
+	const attempted = 300
+	for i := 0; i < attempted; i++ {
+		u, _ := url.Parse(fmt.Sprintf("https://serialized-%03d.example.com/", i))
+		jar.SetCookies(u, []*http.Cookie{{Name: "cookie", Value: value}})
+	}
+
+	size, err := serializedSessionSize(sess.Cookies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size > MaxSerializedSessionBytes {
+		t.Fatalf("serialized session size = %d, exceeds %d", size, MaxSerializedSessionBytes)
+	}
+	if len(sess.Cookies) >= attempted {
+		t.Fatalf("serialized limit did not evict any cookies: %d", len(sess.Cookies))
+	}
+	lastURL, _ := url.Parse(fmt.Sprintf("https://serialized-%03d.example.com/", attempted-1))
+	if got := jar.Cookies(lastURL); len(got) != 1 || got[0].Value != value {
+		t.Fatalf("newest serialized-limit cookie = %+v, want retained cookie", got)
+	}
+}
+
+func TestSessionSaveEnforcesFormattedSerializedCookieLimitBoundary(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	prefix := make([]SessionCookie, 0, 256)
+	fullValue := string(bytes.Repeat([]byte{'v'}, MaxCookieValueBytes))
+	for i := 0; ; i++ {
+		candidate := append(append([]SessionCookie(nil), prefix...), SessionCookie{
+			Name:   fmt.Sprintf("cookie-%04d", i),
+			Value:  fullValue,
+			Domain: fmt.Sprintf("formatted-%04d.example.com", i),
+			Path:   "/",
+		})
+		size, err := serializedSessionSize(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if size > MaxSerializedSessionBytes {
+			break
+		}
+		prefix = candidate
+	}
+
+	boundaryCookie := func(value string) SessionCookie {
+		return SessionCookie{
+			Name:   "boundary",
+			Value:  value,
+			Domain: "boundary.example.com",
+			Path:   "/",
+		}
+	}
+	candidateWithValue := func(value string) []SessionCookie {
+		candidate := append([]SessionCookie(nil), prefix...)
+		return append(candidate, boundaryCookie(value))
+	}
+	for {
+		candidate := candidateWithValue("")
+		size, err := serializedSessionSize(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if size <= MaxSerializedSessionBytes {
+			break
+		}
+		if len(prefix) == 0 {
+			t.Fatal("could not fit boundary cookie")
+		}
+		prefix = prefix[:len(prefix)-1]
+	}
+
+	lo, hi := 0, MaxCookieValueBytes
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		size, err := serializedSessionSize(candidateWithValue(string(bytes.Repeat([]byte{'v'}, mid))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if size <= MaxSerializedSessionBytes {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+
+	atLimit := candidateWithValue(string(bytes.Repeat([]byte{'v'}, lo)))
+	atLimitSize, err := serializedSessionSize(atLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atLimitSize != MaxSerializedSessionBytes {
+		t.Fatalf("formatted session size = %d, want boundary %d", atLimitSize, MaxSerializedSessionBytes)
+	}
+	compact, err := json.Marshal(sessionFile{Cookies: atLimit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compact) >= MaxSerializedSessionBytes {
+		t.Fatalf("compact session size = %d, want below formatted boundary", len(compact))
+	}
+
+	sess, err := Load("formatted-boundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Cookies = atLimit
+	if err := sess.Save(); err != nil {
+		t.Fatalf("saving exact boundary failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "formatted-boundary.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != MaxSerializedSessionBytes {
+		t.Fatalf("written session size = %d, want boundary %d", len(data), MaxSerializedSessionBytes)
+	}
+
+	overLimit := candidateWithValue(string(bytes.Repeat([]byte{'v'}, lo+1)))
+	overLimitSize, err := serializedSessionSize(overLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overLimitSize != MaxSerializedSessionBytes+1 {
+		t.Fatalf("formatted over-limit size = %d, want %d", overLimitSize, MaxSerializedSessionBytes+1)
+	}
+	sess.Cookies = overLimit
+	if err := sess.Save(); err != nil {
+		t.Fatalf("saving over boundary failed: %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(dir, "formatted-boundary.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > MaxSerializedSessionBytes {
+		t.Fatalf("written over-limit session size = %d, exceeds %d", len(data), MaxSerializedSessionBytes)
+	}
+}
+
+func TestSessionJarRejectsOversizedCookieAndBoundsDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("oversized-cookie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse("https://example.com/")
+	jar := sess.Jar()
+	for i := 0; i < maxSessionDiagnostics+10; i++ {
+		jar.SetCookies(u, []*http.Cookie{{Name: fmt.Sprintf("name-%d", i), Value: string(bytes.Repeat([]byte{'v'}, MaxCookieValueBytes+1))}})
+	}
+	if len(sess.Cookies) != 0 || len(jar.Cookies(u)) != 0 {
+		t.Fatalf("oversized response cookies were accepted: session=%d jar=%d", len(sess.Cookies), len(jar.Cookies(u)))
+	}
+	if diagnostics := sess.TakeDiagnostics(); len(diagnostics) != maxSessionDiagnostics {
+		t.Fatalf("diagnostics count = %d, want %d", len(diagnostics), maxSessionDiagnostics)
+	}
+}
+
+func TestSessionLoadRejectsOversizedFileBeforeDecode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+	path := filepath.Join(dir, "oversized.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, MaxSessionFileBytes+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := Load("oversized")
+	if err == nil {
+		t.Fatal("expected oversized session file error")
+	}
+	if sess == nil || !sess.corrupt {
+		t.Fatalf("session = %+v, want corrupt session", sess)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("session file exceeds")) {
+		t.Fatalf("error = %q, want bounded file-size diagnostic", err)
+	}
+}
+
+func TestSessionLoadRejectsOversizedCookieData(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+	path := filepath.Join(dir, "oversized-cookie-data.json")
+	data, err := json.Marshal(sessionFile{Cookies: []SessionCookie{{
+		Name:   "name",
+		Value:  string(bytes.Repeat([]byte{'v'}, MaxCookieValueBytes+1)),
+		Domain: "example.com",
+		Path:   "/",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := Load("oversized-cookie-data")
+	if err == nil || sess == nil {
+		t.Fatalf("Load = (%+v, %v), want bounded cookie-size error", sess, err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("cookie value exceeds")) {
+		t.Fatalf("error = %q, want cookie-size diagnostic", err)
+	}
+}
+
+func TestSessionLoadRejectsTooManyCookiesWhileDecoding(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	var data bytes.Buffer
+	data.WriteString(`{"cookies":[`)
+	for i := 0; i < MaxSessionCookies+10000; i++ {
+		if i > 0 {
+			data.WriteByte(',')
+		}
+		fmt.Fprintf(&data, `{"name":"cookie-%d","domain":"example.com","path":"/"}`, i)
+	}
+	data.WriteString(`]}`)
+	if err := os.WriteFile(filepath.Join(dir, "too-many.json"), data.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := Load("too-many")
+	if err == nil || sess == nil {
+		t.Fatalf("Load = (%+v, %v), want cookie-count error", sess, err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("session contains more than")) {
+		t.Fatalf("error = %q, want cookie-count diagnostic", err)
+	}
+}
+
+func TestSessionJarReconcilesEvictionWithLaterBatchReaddition(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("batch-readdition")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse("https://example.com/")
+	jar := sess.Jar()
+	for i := 0; i < MaxCookiesPerDomain; i++ {
+		jar.SetCookies(u, []*http.Cookie{{Name: fmt.Sprintf("cookie-%03d", i), Value: "old"}})
+	}
+
+	jar.SetCookies(u, []*http.Cookie{
+		{Name: "new", Value: "value"},
+		{Name: "cookie-000", Value: "readded"},
+	})
+
+	if !containsCookieName(jar.Cookies(u), "cookie-000") {
+		t.Fatal("cookie re-added later in the response batch was removed from the jar")
+	}
+	if !containsCookie(jar.Cookies(u), "cookie-000", "readded") {
+		t.Fatalf("re-added cookie = %+v, want updated value", jar.Cookies(u))
+	}
+	if containsCookieName(jar.Cookies(u), "cookie-001") {
+		t.Fatal("cookie evicted by the final batch state remains in the jar")
+	}
+}
+
+func TestSessionSaveEnforcesLimitsBeforeAtomicWrite(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+	sess, err := Load("save-limits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Cookies = []SessionCookie{{
+		Name:   "name",
+		Value:  string(bytes.Repeat([]byte{'v'}, MaxCookieValueBytes+1)),
+		Domain: "example.com",
+		Path:   "/",
+	}}
+	if err := sess.Save(); err == nil {
+		t.Fatal("expected oversized cookie save error")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "save-limits.json")); !os.IsNotExist(err) {
+		t.Fatalf("session file exists after rejected save: err=%v", err)
+	}
+}
+
+func containsCookieName(cookies []*http.Cookie, name string) bool {
+	for _, c := range cookies {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCookie(cookies []*http.Cookie, name, value string) bool {
+	for _, c := range cookies {
+		if c.Name == name && c.Value == value {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSessionJarDoesNotPersistForeignDomainCookie(t *testing.T) {
@@ -651,6 +1025,63 @@ func TestConcurrentSessionSavesMergeUpdates(t *testing.T) {
 	}
 	if values["left"] != "one" || values["right"] != "two" || values["seed"] != "value" {
 		t.Fatalf("merged cookies = %+v", values)
+	}
+}
+
+func TestConcurrentSessionSavesRemainBounded(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	const sessions = 8
+	const cookiesPerSession = 260
+	originFor := func(i int) *url.URL {
+		u, _ := url.Parse(fmt.Sprintf("https://concurrent-%03d.example.com/", i))
+		return u
+	}
+
+	loaded := make([]*Session, 0, sessions)
+	for i := 0; i < sessions; i++ {
+		sess, err := Load("bounded-concurrent")
+		if err != nil {
+			t.Fatal(err)
+		}
+		jar := sess.Jar()
+		for j := 0; j < cookiesPerSession; j++ {
+			jar.SetCookies(originFor(i*cookiesPerSession+j), []*http.Cookie{{Name: "cookie", Value: "value"}})
+		}
+		loaded = append(loaded, sess)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(loaded))
+	for _, sess := range loaded {
+		wg.Add(1)
+		go func(s *Session) {
+			defer wg.Done()
+			errs <- s.Save()
+		}(sess)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	final, err := Load("bounded-concurrent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(final.Cookies) > MaxSessionCookies {
+		t.Fatalf("final cookie count = %d, exceeds %d", len(final.Cookies), MaxSessionCookies)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "bounded-concurrent.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > MaxSessionFileBytes {
+		t.Fatalf("final session file = %d bytes, exceeds %d", len(data), MaxSessionFileBytes)
 	}
 }
 
