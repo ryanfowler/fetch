@@ -494,7 +494,7 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 			r.printer.Flush()
 			if err := formatter([]byte(content), r.printer); err == nil {
 				delegated = true
-				if content[len(content)-1] != '\n' {
+				if len(content) > 0 && content[len(content)-1] != '\n' {
 					r.printer.WriteString("\n")
 				}
 			}

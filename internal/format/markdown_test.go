@@ -635,6 +635,22 @@ func TestFormatMarkdownCodeBlockDelegation(t *testing.T) {
 	}
 }
 
+func TestFormatMarkdownEmptyDelegatedCodeBlock(t *testing.T) {
+	for _, lang := range []string{"yaml", "html", "css", "xml"} {
+		t.Run(lang, func(t *testing.T) {
+			input := "```" + lang + "\n\n```"
+			p := core.TestPrinter(false)
+			if err := FormatMarkdown([]byte(input), p); err != nil {
+				t.Fatalf("FormatMarkdown() error = %v", err)
+			}
+			want := "```" + lang + "\n```\n"
+			if got := string(p.Bytes()); got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestFormatMarkdownWindowsLineEndings(t *testing.T) {
 	input := "# Hello\r\n\r\nworld\r\n"
 	p := core.TestPrinter(false)
