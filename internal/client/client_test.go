@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/ryanfowler/fetch/internal/core"
 	imultipart "github.com/ryanfowler/fetch/internal/multipart"
+	"github.com/ryanfowler/fetch/internal/resolver"
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/zstd"
@@ -1787,6 +1789,51 @@ func TestCloseClosesTransportAfterIdleConnections(t *testing.T) {
 	want := []string{"close-idle", "close"}
 	if !slicesEqual(transport.calls, want) {
 		t.Fatalf("calls = %v, want %v", transport.calls, want)
+	}
+}
+
+func TestCloseClosesResolverDOHConnections(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-json")
+		if r.URL.Query().Get("type") == "AAAA" {
+			_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":28,"data":"::1"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.com","type":1,"data":"127.0.0.1"}]}`)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := resolver.New(resolver.Config{Server: serverURL})
+	if _, err := res.LookupIPAddr(context.Background(), "example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{c: &http.Client{}, resolver: res}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Client.Close did not release the resolver's DoH connection")
 	}
 }
 
