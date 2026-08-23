@@ -610,6 +610,7 @@ const (
 	// parent context can shorten it further.
 	dnsRetransmissionInterval = time.Second
 	dnsTransactionAttempts    = 2
+	maxDNSMalformedUDPPackets = 8
 	maxDNSWirePacket          = 65535
 	maxDNSTCPFrames           = 8
 	maxDNSTCPBytes            = 256 * 1024
@@ -722,6 +723,7 @@ func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16
 			return nil, err
 		}
 		packet := make([]byte, maxDNSWirePacket+1)
+		malformedMatched := 0
 		for {
 			n, source, readErr := conn.ReadFromUDP(packet)
 			if readErr != nil {
@@ -744,7 +746,14 @@ func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16
 			}
 			message, matched, decodeErr := decodeTransactionPacket(packet[:n], id, question)
 			if decodeErr != nil {
-				return nil, decodeErr
+				// UDP cannot reliably attribute a datagram to this transaction
+				// beyond its source and DNS correlation fields. Count packets that
+				// pass those checks but fail strict decoding without letting a burst
+				// abort the receive window or overflow the counter.
+				if malformedMatched < maxDNSMalformedUDPPackets {
+					malformedMatched++
+				}
+				continue
 			}
 			if !matched {
 				continue

@@ -152,6 +152,100 @@ func TestLookupWireTypeRetransmitsDroppedUDPQuery(t *testing.T) {
 	}
 }
 
+func TestLookupWireTypeRetransmitsAfterMalformedMatchingResponse(t *testing.T) {
+	server := newUDPTestServer(t)
+	defer server.close()
+
+	done := make(chan error, 1)
+	go func() {
+		query, client, err := server.readQuery()
+		if err != nil {
+			done <- err
+			return
+		}
+		message, err := DecodeMessage(query)
+		if err != nil {
+			done <- err
+			return
+		}
+		question := message.Questions[0]
+		malformed := append(responsePacket(query, message.Header.ID, question, nil), 0xff)
+		if _, err := server.udp.WriteToUDP(malformed, client); err != nil {
+			done <- err
+			return
+		}
+
+		query2, client2, err := server.readQuery()
+		if err != nil {
+			done <- err
+			return
+		}
+		if string(query) != string(query2) || !client.IP.Equal(client2.IP) || client.Port != client2.Port {
+			done <- errors.New("retransmission changed the query or client")
+			return
+		}
+		answer := makeRecord(question.Name, dnsTypeA, net.IPv4(192, 0, 2, 14).To4())
+		_, err = server.udp.WriteToUDP(responsePacket(query2, message.Header.ID, question, []Record{answer}), client2)
+		done <- err
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	addrs, err := lookupWireType(ctx, server.addr(), "example.com", dnsTypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 1 || !addrs[0].IP.Equal(net.IPv4(192, 0, 2, 14)) {
+		t.Fatalf("addresses = %v", addrs)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLookupWireTypeAcceptsResponseAfterMalformedMatchingBurst(t *testing.T) {
+	server := newUDPTestServer(t)
+	defer server.close()
+
+	done := make(chan error, 1)
+	go func() {
+		query, client, err := server.readQuery()
+		if err != nil {
+			done <- err
+			return
+		}
+		message, err := DecodeMessage(query)
+		if err != nil {
+			done <- err
+			return
+		}
+		question := message.Questions[0]
+		malformed := append(responsePacket(query, message.Header.ID, question, nil), 0xff)
+		for range maxDNSMalformedUDPPackets {
+			if _, err := server.udp.WriteToUDP(malformed, client); err != nil {
+				done <- err
+				return
+			}
+		}
+		answer := makeRecord(question.Name, dnsTypeA, net.IPv4(192, 0, 2, 15).To4())
+		_, err = server.udp.WriteToUDP(responsePacket(query, message.Header.ID, question, []Record{answer}), client)
+		done <- err
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	addrs, err := lookupWireType(ctx, server.addr(), "example.com", dnsTypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 1 || !addrs[0].IP.Equal(net.IPv4(192, 0, 2, 15)) {
+		t.Fatalf("addresses = %v", addrs)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLookupWireTypeFallsBackToTCPWhenUDPIsTruncated(t *testing.T) {
 	server := newUDPTestServer(t)
 	defer server.close()
