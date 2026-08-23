@@ -229,8 +229,12 @@ header = X-Client-ID: client123
 
 Credential-bearing custom headers are removed before a redirected request is
 sent to a different scheme, host, or port. This includes the examples above
-and generated headers whose names identify authentication material. They are
-not restored if a later redirect returns to the original origin; ordinary
+and generated headers whose names identify authentication material. Header
+names are matched by complete components rather than substrings, so an
+ordinary header such as `X-Keyboard-Layout` continues to follow redirects.
+Code that generates a credential header with an otherwise unclassified name
+must mark it with `client.MarkCredentialHeaders`. Credential headers are not
+restored if a later redirect returns to the original origin; ordinary
 non-credential headers continue to follow redirects.
 
 ## Authentication Precedence

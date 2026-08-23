@@ -683,6 +683,113 @@ func TestRedirectCrossOriginStripsCredentialsAndHost(t *testing.T) {
 	}
 }
 
+func TestRedirectObserverCannotRestoreCrossOriginPolicy(t *testing.T) {
+	var got http.Header
+	var gotHost string
+	var source, target *httptest.Server
+	source = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, target.URL+"/final", http.StatusFound)
+			return
+		}
+		got = r.Header.Clone()
+		gotHost = r.Host
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer source.Close()
+	target = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, source.URL+"/observer-final", http.StatusFound)
+	}))
+	defer target.Close()
+
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-API-Key", "origin-secret")
+	req.Header.Set("X-Trace-ID", "trace-id")
+	req.Host = "virtual-origin.invalid"
+	req = req.WithContext(WithRequestObserver(req.Context(), func(next *http.Request) {
+		if next.Response == nil {
+			return
+		}
+		// Simulate a hook that tries to undo the policy by routing back to the
+		// initial origin, restoring Host, and dropping the security context.
+		u, _ := url.Parse(source.URL + "/observer-final")
+		next.URL = u
+		next.Host = "restored.invalid"
+		next.Header.Set("X-API-Key", "observer-secret")
+		*next = *next.WithContext(context.Background())
+	}))
+
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got.Get("X-API-Key") != "" {
+		t.Fatalf("observer-restored credential = %q, want empty", got.Get("X-API-Key"))
+	}
+	if got.Get("X-Trace-ID") != "trace-id" {
+		t.Fatalf("ordinary header = %q, want trace-id", got.Get("X-Trace-ID"))
+	}
+	if gotHost == "restored.invalid" {
+		t.Fatalf("observer-restored Host = %q", gotHost)
+	}
+}
+
+func TestRedirectCredentialHeaderProvenanceAndClassification(t *testing.T) {
+	tests := map[string]bool{
+		"Authorization":       true,
+		"X-Authentication":    true,
+		"X-API-Key":           true,
+		"X-Client-ID":         true,
+		"X-Private-Value":     true,
+		"X-Keyboard-Layout":   false,
+		"X-Client-Identifier": false,
+		"X-Trace-ID":          false,
+	}
+	for name, want := range tests {
+		if got := isRedirectCredentialHeader(name); got != want {
+			t.Errorf("isRedirectCredentialHeader(%q) = %v, want %v", name, got, want)
+		}
+	}
+
+	var got http.Header
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Account-Value", "user-secret")
+	req = req.WithContext(WithCredentialHeaders(req.Context(), "X-Account-Value"))
+	req = req.WithContext(WithRequestObserver(req.Context(), func(next *http.Request) {
+		if next.Response != nil {
+			next.Header.Set("X-Generated-Value", "generated-secret")
+			MarkCredentialHeaders(next, "X-Generated-Value")
+		}
+	}))
+	resp, err := NewClient(ClientConfig{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	for _, name := range []string{"X-Account-Value", "X-Generated-Value"} {
+		if got.Get(name) != "" {
+			t.Fatalf("unclassified credential header %s = %q, want empty", name, got.Get(name))
+		}
+	}
+}
+
 func TestRedirectCustomCredentialHeadersByOriginAndStatus(t *testing.T) {
 	tests := []struct {
 		name       string

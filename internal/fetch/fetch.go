@@ -464,7 +464,13 @@ func signAWSRequest(r *Request, req *http.Request) error {
 			req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
 		}
 	}
-	return aws.Sign(req, *r.AWSSigv4, time.Now().UTC())
+	if err := aws.Sign(req, *r.AWSSigv4, time.Now().UTC()); err != nil {
+		return err
+	}
+	client.MarkCredentialHeaders(req,
+		"Authorization", "X-Amz-Date", "X-Amz-Content-Sha256",
+		"X-Amz-Security-Token", "X-Amz-Session-Token")
+	return nil
 }
 
 func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRedirects, hadRetries bool, metrics *connectionMetrics) (exitCode int, retErr error) {
