@@ -31,6 +31,10 @@ omits `Content-Length`.
 | Dry-run body preview                     | 1,024 bytes                               |
 | Effective `Retry-After`                  | 30 seconds; clamped values warn           |
 | Update redirects                         | 10                                        |
+| Persistent session file                  | 2 MiB                                     |
+| Persistent session cookies               | 2,048 total; 64 per domain                |
+| Persistent cookie name/value             | 256 / 4,096 bytes                         |
+| Serialized session cookie data           | 1 MiB                                     |
 
 Ordinary downloads, uploads, SSE, NDJSON, gRPC streams, and raw output stream
 instead of buffering a complete body. A bounded transformation reports an

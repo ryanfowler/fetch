@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -25,6 +26,18 @@ var validName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 const (
 	sessionLockTimeout = 5 * time.Second
 	sessionLockPoll    = 10 * time.Millisecond
+
+	// These limits apply to persistent session state. The file limit bounds
+	// input before JSON decoding; the serialized limit bounds the cookie data
+	// itself before an atomic save.
+	MaxSessionFileBytes       = 2 << 20
+	MaxSessionCookies         = 2048
+	MaxCookiesPerDomain       = 64
+	MaxCookieNameBytes        = 256
+	MaxCookieValueBytes       = 4096
+	MaxSerializedSessionBytes = 1 << 20
+	maxSessionDiagnostics     = 8
+	maxDiagnosticBytes        = 256
 )
 
 // IsValidName returns true if the session name contains only
@@ -60,6 +73,7 @@ type Session struct {
 	mu          sync.Mutex
 	baseCookies []SessionCookie
 	corrupt     bool
+	diagnostics []string
 }
 
 // Load loads a session from disk or creates a new empty session.
@@ -122,15 +136,17 @@ func (s *Session) Save() error {
 		return fmt.Errorf("reload session before save: %w", err)
 	}
 	merged := mergeCookies(s.baseCookies, s.Cookies, latest)
-	data, err := json.Marshal(sessionFile{Cookies: merged})
+	merged, err = enforceCookieLimits(merged, nil, s.addDiagnosticLocked)
+	if err != nil {
+		return fmt.Errorf("session %q cannot be saved: %w", s.Name, err)
+	}
+	data, err := marshalSessionFile(merged)
 	if err != nil {
 		return err
 	}
-	formatted := jsontext.Value(data)
-	if err := formatted.Indent(jsontext.WithIndent("  ")); err != nil {
-		return err
+	if len(data) > MaxSessionFileBytes {
+		return fmt.Errorf("session file exceeds %d bytes", MaxSessionFileBytes)
 	}
-	data = append(formatted, '\n')
 
 	if err := writeSessionFile(s.path, data); err != nil {
 		return err
@@ -141,7 +157,7 @@ func (s *Session) Save() error {
 }
 
 func readCookies(path string) ([]SessionCookie, error) {
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -160,10 +176,237 @@ func readCookies(path string) ([]SessionCookie, error) {
 		}
 		cookies = append(cookies, c)
 	}
+	if err := validateCookieSet(cookies); err != nil {
+		return nil, err
+	}
 	return cookies, nil
 }
 
+func readBoundedFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, MaxSessionFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxSessionFileBytes {
+		return nil, fmt.Errorf("session file exceeds %d bytes", MaxSessionFileBytes)
+	}
+	return data, nil
+}
+
+func validateCookie(c SessionCookie) error {
+	if len(c.Name) > MaxCookieNameBytes {
+		return fmt.Errorf("cookie name exceeds %d bytes", MaxCookieNameBytes)
+	}
+	if len(c.Value) > MaxCookieValueBytes {
+		return fmt.Errorf("cookie value exceeds %d bytes", MaxCookieValueBytes)
+	}
+	return nil
+}
+
+func validateCookieSet(cookies []SessionCookie) error {
+	if len(cookies) > MaxSessionCookies {
+		return fmt.Errorf("session contains more than %d cookies", MaxSessionCookies)
+	}
+	perDomain := make(map[string]int)
+	for _, c := range cookies {
+		if err := validateCookie(c); err != nil {
+			return err
+		}
+		domain := normalizeCookieDomain(c.Domain)
+		perDomain[domain]++
+		if perDomain[domain] > MaxCookiesPerDomain {
+			return fmt.Errorf("session contains more than %d cookies for one domain", MaxCookiesPerDomain)
+		}
+	}
+
+	size, err := serializedSessionSize(cookies)
+	if err != nil {
+		return err
+	}
+	if size > MaxSerializedSessionBytes {
+		return fmt.Errorf("serialized session exceeds %d bytes", MaxSerializedSessionBytes)
+	}
+	return nil
+}
+
+func serializedSessionSize(cookies []SessionCookie) (int, error) {
+	var empty []byte
+	var err error
+	if cookies == nil {
+		empty, err = json.Marshal(sessionFile{Cookies: nil})
+	} else {
+		empty, err = json.Marshal(sessionFile{Cookies: []SessionCookie{}})
+	}
+	if err != nil {
+		return 0, err
+	}
+	size := len(empty)
+	if len(cookies) > 0 {
+		size += len(cookies) - 1
+	}
+	for _, c := range cookies {
+		data, err := json.Marshal(c)
+		if err != nil {
+			return 0, err
+		}
+		size += len(data)
+	}
+	return size, nil
+}
+
+func marshalSessionFile(cookies []SessionCookie) ([]byte, error) {
+	data, err := json.Marshal(sessionFile{Cookies: cookies})
+	if err != nil {
+		return nil, err
+	}
+	formatted := jsontext.Value(data)
+	if err := formatted.Indent(jsontext.WithIndent("  ")); err != nil {
+		return nil, err
+	}
+	return append(formatted, '\n'), nil
+}
+
+func enforceCookieLimits(cookies []SessionCookie, protected *cookieKey, diagnostic func(string)) ([]SessionCookie, error) {
+	for _, c := range cookies {
+		if err := validateCookie(c); err != nil {
+			return nil, err
+		}
+	}
+
+	for len(cookies) > MaxSessionCookies {
+		var removed bool
+		cookies, removed = removeOldestCookie(cookies, "", false, protected)
+		if !removed {
+			return nil, fmt.Errorf("session contains more than %d protected cookies", MaxSessionCookies)
+		}
+		diagnostic(fmt.Sprintf("session cookie evicted at global limit of %d cookies", MaxSessionCookies))
+	}
+
+	for {
+		domains := make(map[string]int)
+		for _, c := range cookies {
+			domains[normalizeCookieDomain(c.Domain)]++
+		}
+		var overDomain string
+		overDomainSet := false
+		for _, c := range cookies {
+			domain := normalizeCookieDomain(c.Domain)
+			if domains[domain] > MaxCookiesPerDomain {
+				overDomain = domain
+				overDomainSet = true
+				break
+			}
+		}
+		if !overDomainSet {
+			break
+		}
+		var removed bool
+		cookies, removed = removeOldestCookie(cookies, overDomain, true, protected)
+		if !removed {
+			return nil, fmt.Errorf("session contains more than %d protected cookies for one domain", MaxCookiesPerDomain)
+		}
+		diagnostic(fmt.Sprintf("session cookie evicted at per-domain limit of %d cookies", MaxCookiesPerDomain))
+	}
+
+	if serializedSessionUpperBound(cookies) <= MaxSerializedSessionBytes {
+		return cookies, nil
+	}
+	size, err := serializedSessionSize(cookies)
+	if err != nil {
+		return nil, err
+	}
+	for size > MaxSerializedSessionBytes {
+		index := oldestCookieIndex(cookies, "", false, protected)
+		if index < 0 {
+			return nil, fmt.Errorf("serialized session exceeds %d bytes", MaxSerializedSessionBytes)
+		}
+		cookieData, err := json.Marshal(cookies[index])
+		if err != nil {
+			return nil, err
+		}
+		if len(cookies) > 1 {
+			size -= len(cookieData) + 1
+		} else {
+			size -= len(cookieData)
+		}
+		cookies = append(cookies[:index], cookies[index+1:]...)
+		diagnostic(fmt.Sprintf("session cookie evicted at serialized size limit of %d bytes", MaxSerializedSessionBytes))
+		if size <= MaxSerializedSessionBytes {
+			return cookies, nil
+		}
+	}
+	return cookies, nil
+}
+
+func serializedSessionUpperBound(cookies []SessionCookie) int {
+	// JSON string escaping can expand each input byte to at most six bytes.
+	// The fixed allowance covers field names, punctuation, booleans, and an
+	// RFC3339 timestamp when optional fields are present. This cheap bound
+	// avoids repeatedly marshaling ordinary response-cookie growth.
+	size := len(`{"cookies":[]}`)
+	if cookies == nil {
+		size = len(`{"cookies":null}`)
+	}
+	for _, c := range cookies {
+		size += 256 + 6*(len(c.Name)+len(c.Value)+len(c.Domain)+len(c.Path)+len(c.SameSite))
+		if !c.Expires.IsZero() {
+			size += 64
+		}
+	}
+	return size
+}
+
+func removeOldestCookie(cookies []SessionCookie, domain string, filterDomain bool, protected *cookieKey) ([]SessionCookie, bool) {
+	index := oldestCookieIndex(cookies, domain, filterDomain, protected)
+	if index >= 0 {
+		return append(cookies[:index], cookies[index+1:]...), true
+	}
+	return cookies, false
+}
+
+func oldestCookieIndex(cookies []SessionCookie, domain string, filterDomain bool, protected *cookieKey) int {
+	for i, c := range cookies {
+		if protected != nil && keyForCookie(c) == *protected {
+			continue
+		}
+		if filterDomain && normalizeCookieDomain(c.Domain) != domain {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+func (s *Session) addDiagnosticLocked(message string) {
+	if len(s.diagnostics) >= maxSessionDiagnostics {
+		return
+	}
+	if len(message) > maxDiagnosticBytes {
+		message = message[:maxDiagnosticBytes]
+	}
+	s.diagnostics = append(s.diagnostics, message)
+}
+
+// TakeDiagnostics returns and clears bounded diagnostics generated while
+// response cookies were processed or a session was saved.
+func (s *Session) TakeDiagnostics() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	diagnostics := append([]string(nil), s.diagnostics...)
+	s.diagnostics = nil
+	return diagnostics
+}
+
 func writeSessionFile(path string, data []byte) error {
+	if len(data) > MaxSessionFileBytes {
+		return fmt.Errorf("session file exceeds %d bytes", MaxSessionFileBytes)
+	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".session-*.tmp")
 	if err != nil {
@@ -370,36 +613,79 @@ type sessionJar struct {
 }
 
 func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	j.jar.SetCookies(u, cookies)
+	if u == nil {
+		return
+	}
 
-	// Record cookies into the session.
+	// Filter and evict before updating the underlying jar. This keeps rejected
+	// response cookies from remaining active for the rest of this invocation.
+	accepted := make([]*http.Cookie, 0, len(cookies))
+	evicted := make([]SessionCookie, 0)
 	j.session.mu.Lock()
-	defer j.session.mu.Unlock()
 	now := time.Now()
 	for _, c := range cookies {
+		if c == nil {
+			continue
+		}
 		sc, remove, ok := sessionCookieFromSetCookie(u, c, now)
 		if !ok {
+			continue
+		}
+		if err := validateCookie(sc); err != nil {
+			j.session.addDiagnosticLocked("session cookie rejected: " + err.Error())
 			continue
 		}
 
 		if remove {
 			j.session.removeCookie(sc.Name, sc.Domain, sc.Path)
+			accepted = append(accepted, c)
 			continue
 		}
 
-		// Update existing cookie or append new one.
-		found := false
-		for i, existing := range j.session.Cookies {
-			if cookieKeyMatches(existing, sc.Name, sc.Domain, sc.Path) {
-				j.session.Cookies[i] = sc
-				found = true
-				break
+		key := keyForCookie(sc)
+		before := cloneCookies(j.session.Cookies)
+		candidate := upsertCookie(cloneCookies(j.session.Cookies), sc)
+		fitted, err := enforceCookieLimits(candidate, &key, func(message string) {
+			j.session.addDiagnosticLocked(message)
+		})
+		if err != nil {
+			j.session.addDiagnosticLocked("session cookie rejected: " + err.Error())
+			continue
+		}
+		j.session.Cookies = fitted
+		fittedKeys := make(map[cookieKey]struct{}, len(fitted))
+		for _, c := range fitted {
+			fittedKeys[keyForCookie(c)] = struct{}{}
+		}
+		for _, old := range before {
+			if _, ok := fittedKeys[keyForCookie(old)]; !ok {
+				evicted = append(evicted, old)
 			}
 		}
-		if !found {
-			j.session.Cookies = append(j.session.Cookies, sc)
-		}
+		accepted = append(accepted, c)
 	}
+	j.jar.SetCookies(u, accepted)
+	for _, c := range evicted {
+		j.removeFromJar(c)
+	}
+	j.session.mu.Unlock()
+}
+
+func (j *sessionJar) removeFromJar(c SessionCookie) {
+	host := c.Domain
+	if strings.Contains(host, ":") && net.ParseIP(host) != nil {
+		host = "[" + host + "]"
+	}
+	scheme := "http"
+	if c.Secure {
+		scheme = "https"
+	}
+	u := &url.URL{Scheme: scheme, Host: host, Path: normalizeCookiePath(c.Path)}
+	deletion := &http.Cookie{Name: c.Name, Path: normalizeCookiePath(c.Path), MaxAge: -1}
+	if !c.HostOnly {
+		deletion.Domain = c.Domain
+	}
+	j.jar.SetCookies(u, []*http.Cookie{deletion})
 }
 
 func (j *sessionJar) Cookies(u *url.URL) []*http.Cookie {
