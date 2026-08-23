@@ -182,6 +182,72 @@ func readCookies(path string) ([]SessionCookie, error) {
 	return cookies, nil
 }
 
+// UnmarshalJSONFrom decodes the session file without allocating a slice based
+// on the encoded array length. The file-size limit is enforced by
+// readBoundedFile before this method is called; this limit bounds the number of
+// bytes the decoder can inspect while the cookie-count limit bounds the number
+// of cookie values it decodes.
+func (f *sessionFile) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	tok, err := dec.ReadToken()
+	if err != nil {
+		return err
+	}
+	if tok.Kind() == jsontext.Kind('n') {
+		return nil
+	}
+	if tok.Kind() != jsontext.Kind('{') {
+		return fmt.Errorf("session file must be a JSON object")
+	}
+
+	for {
+		tok, err = dec.ReadToken()
+		if err != nil {
+			return err
+		}
+		if tok.Kind() == jsontext.Kind('}') {
+			return nil
+		}
+		if tok.Kind() != jsontext.Kind('"') {
+			return fmt.Errorf("session file member name must be a JSON string")
+		}
+
+		if tok.String() != "cookies" {
+			if err := dec.SkipValue(); err != nil {
+				return err
+			}
+			continue
+		}
+
+		switch dec.PeekKind() {
+		case jsontext.Kind('n'):
+			if _, err := dec.ReadToken(); err != nil {
+				return err
+			}
+			f.Cookies = nil
+		case jsontext.Kind('['):
+			if _, err := dec.ReadToken(); err != nil {
+				return err
+			}
+			f.Cookies = make([]SessionCookie, 0, MaxSessionCookies)
+			for dec.PeekKind() != jsontext.Kind(']') {
+				if len(f.Cookies) >= MaxSessionCookies {
+					return fmt.Errorf("session contains more than %d cookies", MaxSessionCookies)
+				}
+				var cookie SessionCookie
+				if err := json.UnmarshalDecode(dec, &cookie); err != nil {
+					return err
+				}
+				f.Cookies = append(f.Cookies, cookie)
+			}
+			if _, err := dec.ReadToken(); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("session cookies must be a JSON array")
+		}
+	}
+}
+
 func readBoundedFile(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -666,9 +732,20 @@ func (j *sessionJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	}
 	j.jar.SetCookies(u, accepted)
 	for _, c := range evicted {
-		j.removeFromJar(c)
+		if !containsCookieKey(j.session.Cookies, keyForCookie(c)) {
+			j.removeFromJar(c)
+		}
 	}
 	j.session.mu.Unlock()
+}
+
+func containsCookieKey(cookies []SessionCookie, key cookieKey) bool {
+	for _, c := range cookies {
+		if keyForCookie(c) == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (j *sessionJar) removeFromJar(c SessionCookie) {

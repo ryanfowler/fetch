@@ -404,6 +404,62 @@ func TestSessionLoadRejectsOversizedCookieData(t *testing.T) {
 	}
 }
 
+func TestSessionLoadRejectsTooManyCookiesWhileDecoding(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	var data bytes.Buffer
+	data.WriteString(`{"cookies":[`)
+	for i := 0; i < MaxSessionCookies+10000; i++ {
+		if i > 0 {
+			data.WriteByte(',')
+		}
+		fmt.Fprintf(&data, `{"name":"cookie-%d","domain":"example.com","path":"/"}`, i)
+	}
+	data.WriteString(`]}`)
+	if err := os.WriteFile(filepath.Join(dir, "too-many.json"), data.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sess, err := Load("too-many")
+	if err == nil || sess == nil {
+		t.Fatalf("Load = (%+v, %v), want cookie-count error", sess, err)
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("session contains more than")) {
+		t.Fatalf("error = %q, want cookie-count diagnostic", err)
+	}
+}
+
+func TestSessionJarReconcilesEvictionWithLaterBatchReaddition(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	sess, err := Load("batch-readdition")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse("https://example.com/")
+	jar := sess.Jar()
+	for i := 0; i < MaxCookiesPerDomain; i++ {
+		jar.SetCookies(u, []*http.Cookie{{Name: fmt.Sprintf("cookie-%03d", i), Value: "old"}})
+	}
+
+	jar.SetCookies(u, []*http.Cookie{
+		{Name: "new", Value: "value"},
+		{Name: "cookie-000", Value: "readded"},
+	})
+
+	if !containsCookieName(jar.Cookies(u), "cookie-000") {
+		t.Fatal("cookie re-added later in the response batch was removed from the jar")
+	}
+	if !containsCookie(jar.Cookies(u), "cookie-000", "readded") {
+		t.Fatalf("re-added cookie = %+v, want updated value", jar.Cookies(u))
+	}
+	if containsCookieName(jar.Cookies(u), "cookie-001") {
+		t.Fatal("cookie evicted by the final batch state remains in the jar")
+	}
+}
+
 func TestSessionSaveEnforcesLimitsBeforeAtomicWrite(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
@@ -428,6 +484,15 @@ func TestSessionSaveEnforcesLimitsBeforeAtomicWrite(t *testing.T) {
 func containsCookieName(cookies []*http.Cookie, name string) bool {
 	for _, c := range cookies {
 		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCookie(cookies []*http.Cookie, name, value string) bool {
+	for _, c := range cookies {
+		if c.Name == name && c.Value == value {
 			return true
 		}
 	}
