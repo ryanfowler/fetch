@@ -14,6 +14,8 @@ import (
 	"github.com/yuin/goldmark/text"
 )
 
+const maxMarkdownBlockquoteOpeners = 256
+
 // FormatMarkdown formats the provided Markdown to the Printer.
 func FormatMarkdown(buf []byte, p *core.Printer) error {
 	if len(buf) == 0 {
@@ -34,12 +36,64 @@ func FormatMarkdown(buf []byte, p *core.Printer) error {
 	if len(rest) == 0 {
 		return nil
 	}
+	rest = truncateMarkdownBlockquoteOpeners(rest)
 
 	md := goldmark.New(goldmark.WithExtensions(extension.Strikethrough, extension.Table))
 	doc := md.Parser().Parse(text.NewReader(rest))
 
 	r := &mdRenderer{printer: p, source: rest}
 	return ast.Walk(doc, r.walk)
+}
+
+// truncateMarkdownBlockquoteOpeners caps line-leading blockquote opener runs.
+// Goldmark's container handling becomes quadratic at extreme nesting depths, so
+// discard openers beyond the largest depth that is useful for terminal output.
+func truncateMarkdownBlockquoteOpeners(buf []byte) []byte {
+	var out []byte
+	copyFrom := 0
+
+	for lineStart := 0; lineStart < len(buf); {
+		lineEnd := lineStart
+		for lineEnd < len(buf) && buf[lineEnd] != '\n' {
+			lineEnd++
+		}
+
+		pos := lineStart
+		for pos < lineEnd && pos-lineStart < 3 && buf[pos] == ' ' {
+			pos++
+		}
+
+		keptEnd := pos
+		openers := 0
+		for pos < lineEnd && buf[pos] == '>' {
+			pos++
+			if pos < lineEnd && (buf[pos] == ' ' || buf[pos] == '\t') {
+				pos++
+			}
+			openers++
+			if openers == maxMarkdownBlockquoteOpeners {
+				keptEnd = pos
+			}
+		}
+
+		if openers > maxMarkdownBlockquoteOpeners {
+			if out == nil {
+				out = make([]byte, 0, len(buf)-(pos-keptEnd))
+			}
+			out = append(out, buf[copyFrom:keptEnd]...)
+			copyFrom = pos
+		}
+
+		lineStart = lineEnd
+		if lineStart < len(buf) {
+			lineStart++
+		}
+	}
+
+	if out == nil {
+		return buf
+	}
+	return append(out, buf[copyFrom:]...)
 }
 
 // extractFrontMatter checks if buf starts with YAML front matter delimited by

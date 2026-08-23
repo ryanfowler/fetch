@@ -269,6 +269,23 @@ func TestFormatMarkdownBlockquoteOutput(t *testing.T) {
 	}
 }
 
+func TestFormatMarkdownLimitsBlockquoteOpeners(t *testing.T) {
+	for _, separator := range []string{"", " "} {
+		t.Run(map[string]string{"": "consecutive", " ": "spaced"}[separator], func(t *testing.T) {
+			input := strings.Repeat(">"+separator, maxMarkdownBlockquoteOpeners+100) + "text"
+			p := core.TestPrinter(false)
+			if err := FormatMarkdown([]byte(input), p); err != nil {
+				t.Fatalf("FormatMarkdown() error = %v", err)
+			}
+
+			want := strings.Repeat("> ", maxMarkdownBlockquoteOpeners) + "text\n"
+			if got := string(p.Bytes()); got != want {
+				t.Fatalf("FormatMarkdown() output has length %d, want %d", len(got), len(want))
+			}
+		})
+	}
+}
+
 func TestFormatMarkdownListOutput(t *testing.T) {
 	tests := []struct {
 		name  string
