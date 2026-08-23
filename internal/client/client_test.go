@@ -568,6 +568,10 @@ func TestRedirectMethodAndBodySemantics(t *testing.T) {
 		{name: "303 HEAD", status: http.StatusSeeOther, method: http.MethodHead, wantMethod: http.MethodHead},
 		{name: "307 PUT", status: http.StatusTemporaryRedirect, method: http.MethodPut, body: "put", wantMethod: http.MethodPut, wantBody: "put"},
 		{name: "308 PATCH", status: http.StatusPermanentRedirect, method: http.MethodPatch, body: "patch", wantMethod: http.MethodPatch, wantBody: "patch"},
+		{name: "301 custom", status: http.StatusMovedPermanently, method: "PROPFIND", body: "custom-301", wantMethod: "PROPFIND", wantBody: "custom-301"},
+		{name: "302 custom", status: http.StatusFound, method: "PROPFIND", body: "custom-302", wantMethod: "PROPFIND", wantBody: "custom-302"},
+		{name: "307 custom", status: http.StatusTemporaryRedirect, method: "PROPFIND", body: "custom-307", wantMethod: "PROPFIND", wantBody: "custom-307"},
+		{name: "308 custom", status: http.StatusPermanentRedirect, method: "PROPFIND", body: "custom-308", wantMethod: "PROPFIND", wantBody: "custom-308"},
 	}
 
 	for _, tt := range tests {
@@ -617,6 +621,165 @@ func TestRedirectMethodAndBodySemantics(t *testing.T) {
 			}
 			if tt.wantBody != "" && gotContentType != "application/test" {
 				t.Fatalf("Content-Type = %q, want application/test", gotContentType)
+			}
+		})
+	}
+}
+
+func TestCrossOriginRedirectBodyIsRefused(t *testing.T) {
+	tests := []struct {
+		status      int
+		method      string
+		wantRefused bool
+	}{
+		{status: http.StatusMovedPermanently, method: http.MethodPost},
+		{status: http.StatusFound, method: http.MethodPost},
+		{status: http.StatusTemporaryRedirect, method: http.MethodPost, wantRefused: true},
+		{status: http.StatusPermanentRedirect, method: http.MethodPost, wantRefused: true},
+	}
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		for _, method := range []string{
+			http.MethodGet,
+			http.MethodHead,
+			http.MethodPut,
+			http.MethodPatch,
+			http.MethodDelete,
+			http.MethodOptions,
+			"PROPFIND",
+		} {
+			tests = append(tests, struct {
+				status      int
+				method      string
+				wantRefused bool
+			}{status: status, method: method, wantRefused: true})
+		}
+	}
+
+	for _, tt := range tests {
+		name := fmt.Sprintf("%d %s", tt.status, tt.method)
+		t.Run(name, func(t *testing.T) {
+			var targetCalls, targetBytes int
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetCalls++
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("read target body: %v", err)
+				}
+				targetBytes += len(body)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer target.Close()
+
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL+"/final", tt.status)
+			}))
+			defer source.Close()
+
+			req, err := http.NewRequest(tt.method, source.URL+"/start", strings.NewReader("secret-body"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := NewClient(ClientConfig{}).Do(req)
+			if tt.wantRefused {
+				if err == nil || !strings.Contains(err.Error(), "refusing cross-origin redirect with request body") {
+					t.Fatalf("error = %v, want cross-origin body refusal", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				if targetCalls != 1 || targetBytes != 0 {
+					t.Fatalf("target received %d requests and %d body bytes, want 1 request and 0 bytes", targetCalls, targetBytes)
+				}
+			}
+			if tt.wantRefused && (targetCalls != 0 || targetBytes != 0) {
+				t.Fatalf("target received %d requests and %d body bytes, want none", targetCalls, targetBytes)
+			}
+		})
+	}
+}
+
+func TestRedirectHookCannotSendBodyToCrossOriginURL(t *testing.T) {
+	hooks := []struct {
+		name string
+		wrap func(context.Context, *url.URL) context.Context
+	}{
+		{
+			name: "observer",
+			wrap: func(ctx context.Context, targetURL *url.URL) context.Context {
+				return WithRequestObserver(ctx, func(req *http.Request) {
+					if req.Response != nil {
+						req.URL = targetURL
+					}
+				})
+			},
+		},
+		{
+			name: "observer clears response after changing body",
+			wrap: func(ctx context.Context, targetURL *url.URL) context.Context {
+				return WithRequestObserver(ctx, func(req *http.Request) {
+					if req.Response != nil {
+						req.URL = targetURL
+						req.Body = io.NopCloser(strings.NewReader("hook-body"))
+						req.Response = nil
+					}
+				})
+			},
+		},
+		{
+			name: "validator",
+			wrap: func(ctx context.Context, targetURL *url.URL) context.Context {
+				return WithRedirectValidator(ctx, func(hop RedirectHop) error {
+					hop.NextRequest.URL = targetURL
+					return nil
+				})
+			},
+		},
+		{
+			name: "callback",
+			wrap: func(ctx context.Context, targetURL *url.URL) context.Context {
+				return WithRedirectCallback(ctx, func(hop RedirectHop) {
+					hop.NextRequest.URL = targetURL
+				})
+			},
+		},
+	}
+
+	for _, hook := range hooks {
+		t.Run(hook.name, func(t *testing.T) {
+			var targetCalls int
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetCalls++
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer target.Close()
+			targetURL, err := url.Parse(target.URL + "/final")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/middle", http.StatusTemporaryRedirect)
+			}))
+			defer source.Close()
+
+			req, err := http.NewRequest(http.MethodPut, source.URL+"/start", strings.NewReader("secret-body"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req = req.WithContext(hook.wrap(req.Context(), targetURL))
+			_, err = NewClient(ClientConfig{}).Do(req)
+			if err == nil || !strings.Contains(err.Error(), "refusing cross-origin redirect with request body") {
+				t.Fatalf("error = %v, want cross-origin body refusal", err)
+			}
+			if targetCalls != 0 {
+				t.Fatalf("target received %d requests, want none", targetCalls)
 			}
 		})
 	}

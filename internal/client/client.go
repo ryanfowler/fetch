@@ -380,6 +380,7 @@ func NewClient(cfg ClientConfig) *Client {
 				return errors.New("HTTP/3 cannot be used with a proxy")
 			}
 		}
+		redirectMetadata := captureRedirectMetadata(req, via)
 
 		// net/http applies its historical redirect policy before this callback:
 		// it changes every non-GET/HEAD method to GET for 301/302/303 and drops
@@ -432,6 +433,9 @@ func NewClient(cfg ClientConfig) *Client {
 			if err := rejectClientCertificateCrossOriginRedirect(req, via); err != nil {
 				return err
 			}
+		}
+		if err := rejectCrossOriginRequestBody(req, redirectMetadata); err != nil {
+			return err
 		}
 		if len(via) > 0 && req.Response != nil &&
 			(req.Response.StatusCode == http.StatusTemporaryRedirect || req.Response.StatusCode == http.StatusPermanentRedirect) &&
@@ -1208,6 +1212,9 @@ func normalizeRedirectRequest(req *http.Request, via []*http.Request) error {
 			clearRedirectBody(req)
 			return nil
 		}
+		if err := rejectCrossOriginRedirectBody(req, previous, via); err != nil {
+			return err
+		}
 		req.Method = previous.Method
 		if err := restoreRedirectBody(req, previous, via[0]); err != nil {
 			return err
@@ -1232,6 +1239,9 @@ func normalizeRedirectRequest(req *http.Request, via []*http.Request) error {
 	// includeBody flag is based on the initial request and can therefore lose a
 	// body after an earlier 301/302. Restore from the previous hop instead.
 	if status == http.StatusTemporaryRedirect || status == http.StatusPermanentRedirect {
+		if err := rejectCrossOriginRedirectBody(req, previous, via); err != nil {
+			return err
+		}
 		req.Method = previous.Method
 		if previous.Body == nil || previous.Body == http.NoBody {
 			clearRedirectBody(req)
@@ -1240,6 +1250,52 @@ func normalizeRedirectRequest(req *http.Request, via []*http.Request) error {
 		return restoreRedirectBody(req, previous, via[0])
 	}
 
+	return nil
+}
+
+func rejectCrossOriginRedirectBody(req, previous *http.Request, via []*http.Request) error {
+	if req == nil || previous == nil || req.URL == nil || len(via) == 0 ||
+		(previous.Body == nil || previous.Body == http.NoBody) {
+		return nil
+	}
+	initial := via[0].URL
+	if state := redirectSecurityStateFrom(req); state != nil && state.initialOrigin != nil {
+		initial = state.initialOrigin
+	}
+	if initial != nil && !SameOrigin(initial, req.URL) {
+		return errors.New("refusing cross-origin redirect with request body")
+	}
+	return nil
+}
+
+type redirectMetadata struct {
+	initialOrigin  *url.URL
+	responseExists bool
+}
+
+func captureRedirectMetadata(req *http.Request, via []*http.Request) redirectMetadata {
+	metadata := redirectMetadata{
+		responseExists: req != nil && len(via) > 0 && req.Response != nil,
+	}
+	if state := redirectSecurityStateFrom(req); state != nil && state.initialOrigin != nil {
+		origin := *state.initialOrigin
+		metadata.initialOrigin = &origin
+	} else if len(via) > 0 && via[0] != nil && via[0].URL != nil {
+		origin := *via[0].URL
+		origin.User = nil
+		metadata.initialOrigin = &origin
+	}
+	return metadata
+}
+
+func rejectCrossOriginRequestBody(req *http.Request, metadata redirectMetadata) error {
+	if req == nil || req.URL == nil || !metadata.responseExists ||
+		req.Body == nil || req.Body == http.NoBody {
+		return nil
+	}
+	if metadata.initialOrigin != nil && !SameOrigin(metadata.initialOrigin, req.URL) {
+		return errors.New("refusing cross-origin redirect with request body")
+	}
 	return nil
 }
 
