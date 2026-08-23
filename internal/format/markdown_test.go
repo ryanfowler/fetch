@@ -602,6 +602,11 @@ func TestFormatMarkdownColor(t *testing.T) {
 			seqs:  []string{"\x1b[2m"},
 		},
 		{
+			name:  "blockquote text uses dim",
+			input: "> text",
+			seqs:  []string{"\x1b[2m text"},
+		},
+		{
 			name:  "list marker uses blue",
 			input: "- item",
 			seqs:  []string{"\x1b[34m"},
@@ -610,6 +615,11 @@ func TestFormatMarkdownColor(t *testing.T) {
 			name:  "ordered list marker uses blue",
 			input: "1. item",
 			seqs:  []string{"\x1b[34m"},
+		},
+		{
+			name:  "table header uses bold blue",
+			input: "| Name |\n| --- |\n| value |",
+			seqs:  []string{"\x1b[1m", "\x1b[34m"},
 		},
 		{
 			name:  "strikethrough uses dim",

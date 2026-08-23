@@ -337,9 +337,18 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.Blockquote:
 		if entering {
+			// Keep quoted prose visually subordinate to the document around it.
+			// One style layer is enough for nested quotes; their additional
+			// vertical rules still communicate the nesting depth.
+			if r.bqDepth == 0 {
+				r.pushStyle(core.Dim)
+			}
 			r.bqDepth++
 		} else {
 			r.bqDepth--
+			if r.bqDepth == 0 {
+				r.popStyle()
+			}
 			if n.NextSibling() != nil {
 				r.writeBqPrefix()
 				r.printer.WriteString("\n")
@@ -610,7 +619,7 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 	if lang != "" {
 		r.printer.WriteStringUntrusted(lang)
 	}
-	r.printer.Reset()
+	r.popAllAndRestore()
 	r.printer.WriteString("\n")
 
 	// Collect body lines.
@@ -646,7 +655,7 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 			r.writeBqPrefix()
 			r.printer.Set(core.Cyan)
 			r.printer.WriteStringUntrusted(line)
-			r.printer.Reset()
+			r.popAllAndRestore()
 			r.printer.WriteString("\n")
 		}
 	}
@@ -655,7 +664,7 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 	r.writeBqPrefix()
 	r.printer.Set(core.Dim)
 	r.printer.WriteString("```")
-	r.printer.Reset()
+	r.popAllAndRestore()
 	r.printer.WriteString("\n")
 
 	return ast.WalkSkipChildren, nil
@@ -768,6 +777,7 @@ func (r *mdRenderer) renderTableRow(cells []mdTableCell, widths []int, isHeader 
 		r.printer.WriteString(" ")
 		if isHeader {
 			r.pushStyle(core.Bold)
+			r.pushStyle(core.Blue)
 		}
 		if r.tty {
 			r.renderTableCell(cell.node)
@@ -775,6 +785,7 @@ func (r *mdRenderer) renderTableRow(cells []mdTableCell, widths []int, isHeader 
 			r.printer.WriteStringUntrusted(safeCell)
 		}
 		if isHeader {
+			r.popStyle()
 			r.popStyle()
 		}
 		r.printer.WriteString(strings.Repeat(" ", w-runewidth.StringWidth(safeCell)))
