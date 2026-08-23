@@ -83,7 +83,7 @@ func printRequestMetadataWithURL(p *core.Printer, req *http.Request, httpVersion
 		p.Set(core.Italic)
 		p.Set(core.Cyan)
 		p.WriteString("?")
-		p.WriteString(core.TerminalSafeText(q))
+		p.WriteString(core.TerminalSafeText(core.RedactedQuery(q)))
 		p.Reset()
 	}
 
@@ -285,20 +285,12 @@ func printRedirectHopSummary(p *core.Printer, hop client.RedirectHop) {
 	location := hop.Response.Header.Get("Location")
 	if location != "" {
 		p.Set(core.Cyan)
-		p.WriteString(redactedRedirectLocation(location))
+		p.WriteString(core.RedactHeaderValue("Location", location))
 		p.Reset()
 	}
 
 	p.WriteString("\n")
 	p.Flush()
-}
-
-func redactedRedirectLocation(location string) string {
-	u, err := url.Parse(location)
-	if err != nil {
-		return "[invalid redirect location]"
-	}
-	return core.RedactedURL(u)
 }
 
 func colorForStatus(code int) core.Sequence {

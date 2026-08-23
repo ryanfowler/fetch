@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
@@ -123,6 +124,75 @@ func TestPrintRequestMetadataUsesRequestHost(t *testing.T) {
 	}
 	if strings.Contains(out, "host: 127.0.0.1") {
 		t.Fatalf("expected URL host to be omitted when Request.Host is set, got:\n%s", out)
+	}
+}
+
+func TestDiagnosticOutputRedactsURLsHeadersAndRedirectLocations(t *testing.T) {
+	req := &http.Request{
+		Method: "GET",
+		URL:    mustParseURL("https://example.test/start?safe=ok&API_KEY=query-api-secret&access_token=query-token-secret&clientSecret=query-client-secret&request-signature=query-signature-secret"),
+		Header: http.Header{
+			"X-API-Key":           {"header-api-secret"},
+			"X-AuthToken":         {"header-token-secret"},
+			"X-ClientSecret":      {"header-client-secret"},
+			"X-Request-Signature": {"header-signature-secret"},
+			"X-KeyboardLayout":    {"keyboard-layout"},
+		},
+		Proto: "HTTP/1.1",
+	}
+	resp := &http.Response{
+		StatusCode: 302,
+		Proto:      "HTTP/1.1",
+		Header: http.Header{
+			"Location":         {"https://redirect.test/next?PASSWORD=location-password-secret&safe=ok"},
+			"X-Response-Token": {"response-token-secret"},
+			"X-Response-Trace": {"response-trace"},
+		},
+		Request: req,
+	}
+	hop := client.RedirectHop{
+		Request:     req,
+		Response:    resp,
+		NextRequest: req.Clone(req.Context()),
+	}
+
+	secretValues := []string{
+		"query-api-secret", "query-token-secret", "query-client-secret", "query-signature-secret",
+		"header-api-secret", "header-token-secret", "header-client-secret", "header-signature-secret",
+		"location-password-secret", "response-token-secret",
+	}
+
+	tests := []struct {
+		name  string
+		print func(*core.Printer)
+	}{
+		{name: "normal response", print: func(p *core.Printer) { printResponseMetadata(p, core.VNormal, resp) }},
+		{name: "verbose request", print: func(p *core.Printer) { printRequestMetadata(p, req, core.HTTPDefault, core.VVerbose) }},
+		{name: "verbose response", print: func(p *core.Printer) { printResponseMetadata(p, core.VVerbose, resp) }},
+		{name: "verbose redirect", print: func(p *core.Printer) { printRedirectHop(p, core.VVerbose, hop, core.HTTPDefault) }},
+		{name: "debug request", print: func(p *core.Printer) { printRequestMetadata(p, req, core.HTTPDefault, core.VDebug) }},
+		{name: "debug response", print: func(p *core.Printer) { printResponseMetadata(p, core.VDebug, resp) }},
+		{name: "debug redirect", print: func(p *core.Printer) { printRedirectHop(p, core.VDebug, hop, core.HTTPDefault) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newTestPrinter()
+			tt.print(p)
+			out := string(p.Bytes())
+			for _, secret := range secretValues {
+				if strings.Contains(out, secret) {
+					t.Errorf("diagnostic output leaked %q:\n%s", secret, out)
+				}
+			}
+		})
+	}
+
+	p := newTestPrinter()
+	printRequestMetadata(p, req, core.HTTPDefault, core.VVerbose)
+	out := string(p.Bytes())
+	if !strings.Contains(out, "x-keyboardlayout: keyboard-layout") {
+		t.Fatalf("non-credential compound header was not preserved:\n%s", out)
 	}
 }
 

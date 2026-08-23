@@ -639,6 +639,12 @@ Increase output verbosity. Can be stacked.
 - `-vv` - Show request and response headers with `> ` / `< ` prefixes
 - `-vvv` - Show DNS and TLS details with `> ` / `< ` / `* ` prefixes
 
+Diagnostic URLs and headers redact userinfo, sensitive query values, standard
+credential headers, and credential-like custom header names. Query-key matching
+is case-insensitive and covers names containing `key`, `token`, `secret`,
+`password`, `credential`, `signature`, `authorization`, or `session`; names are
+retained.
+
 ```sh
 fetch -v example.com
 fetch -vvv example.com

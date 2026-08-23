@@ -996,9 +996,6 @@ func getHeaders(headers http.Header) []core.KeyVal[string] {
 	for k, values := range headers {
 		name := strings.ToLower(k)
 		for _, value := range values {
-			if name == "location" {
-				value = redactedRedirectLocation(value)
-			}
 			out = append(out, core.KeyVal[string]{
 				Key: name,
 				Val: core.RedactHeaderValue(name, value),

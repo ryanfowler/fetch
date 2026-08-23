@@ -115,31 +115,126 @@ func writeEscapedRune(b *strings.Builder, value rune) {
 	fmt.Fprintf(b, `\u{%x}`, value)
 }
 
-// RedactedURL returns a terminal-safe URL with userinfo removed. URL
-// userinfo is an authentication source and must not appear in diagnostics.
+const diagnosticRedactedValue = "%5BREDACTED%5D"
+
+// RedactedURL returns a terminal-safe URL with userinfo and sensitive query
+// values removed. URL userinfo and query values are authentication sources
+// that must not appear in diagnostics.
 func RedactedURL(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
 	copyURL := *u
 	copyURL.User = nil
+	copyURL.RawQuery = RedactedQuery(copyURL.RawQuery)
 	return TerminalSafeText(copyURL.String())
 }
 
+// RedactedQuery returns a query string with values for sensitive keys
+// replaced while preserving the original key spelling, ordering, duplicate
+// fields, and non-sensitive encoding. The classifier intentionally errs on
+// the side of hiding values when a key contains a credential-related term.
+func RedactedQuery(rawQuery string) string {
+	if rawQuery == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	for i, field := range strings.Split(rawQuery, "&") {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		name, value, hasValue := strings.Cut(field, "=")
+		b.WriteString(name)
+		if !hasValue {
+			continue
+		}
+		b.WriteByte('=')
+		if IsSensitiveQueryKey(name) {
+			b.WriteString(diagnosticRedactedValue)
+		} else {
+			b.WriteString(value)
+		}
+	}
+	return b.String()
+}
+
+// IsSensitiveQueryKey reports whether a query key is likely to contain a
+// credential. Matching is case-insensitive and covers compound names such as
+// api_key, access_token, clientSecret, and request-signature.
+func IsSensitiveQueryKey(name string) bool {
+	if decoded, err := url.QueryUnescape(name); err == nil {
+		name = decoded
+	}
+	name = strings.ToLower(name)
+	for _, term := range []string{
+		"key", "token", "secret", "password", "credential", "signature", "authorization", "session",
+	} {
+		if strings.Contains(name, term) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsSensitiveHeader reports whether a header contains a credential or session
-// value that must not be printed in diagnostics.
+// value that must not be printed in diagnostics. In addition to the standard
+// credential headers, a component-aware classifier covers user-defined names
+// such as X-API-Key and X-ClientSecret without treating X-KeyboardLayout as a
+// credential header merely because it contains the letters "key".
 func IsSensitiveHeader(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "authorization", "proxy-authorization", "cookie", "set-cookie",
-		"x-amz-security-token", "x-amz-session-token":
+	case "authorization", "proxy-authorization", "cookie", "cookie2", "set-cookie",
+		"www-authenticate", "proxy-authenticate", "x-amz-date",
+		"x-amz-content-sha256", "x-amz-security-token", "x-amz-session-token",
+		"x-client-id", "x-private-value":
 		return true
-	default:
-		return false
 	}
+
+	var previous string
+	for _, term := range diagnosticHeaderTerms(name) {
+		switch term {
+		case "auth", "authenticate", "authentication", "authorization", "credential", "credentials",
+			"token", "tokens", "key", "keys", "secret", "secrets", "password", "passwd",
+			"signature", "signing", "private", "session", "sessions", "apikey", "authtoken", "clientsecret", "privatekey":
+			return true
+		}
+		if previous == "client" && term == "id" {
+			return true
+		}
+		previous = term
+	}
+	return false
+}
+
+func diagnosticHeaderTerms(name string) []string {
+	var terms []string
+	for component := range strings.FieldsFuncSeq(name, func(r rune) bool {
+		return !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	}) {
+		start := 0
+		for i := 1; i < len(component); i++ {
+			if component[i] >= 'A' && component[i] <= 'Z' &&
+				((component[i-1] >= 'a' && component[i-1] <= 'z') ||
+					(i+1 < len(component) && component[i+1] >= 'a' && component[i+1] <= 'z')) {
+				terms = append(terms, strings.ToLower(component[start:i]))
+				start = i
+			}
+		}
+		terms = append(terms, strings.ToLower(component[start:]))
+	}
+	return terms
 }
 
 // RedactHeaderValue replaces sensitive header values with a stable marker.
 func RedactHeaderValue(name, value string) string {
+	if strings.EqualFold(strings.TrimSpace(name), "Location") {
+		u, err := url.Parse(value)
+		if err != nil {
+			return "[invalid redirect location]"
+		}
+		return RedactedURL(u)
+	}
 	if IsSensitiveHeader(name) {
 		return "[REDACTED]"
 	}

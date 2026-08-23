@@ -103,10 +103,16 @@ func TestTerminalSafeTextCommonCaseDoesNotAllocate(t *testing.T) {
 }
 
 func TestRedactHeaderValue(t *testing.T) {
-	for _, name := range []string{"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "X-Amz-Security-Token"} {
+	for _, name := range []string{
+		"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "X-Amz-Security-Token",
+		"X-API-Key", "X-AuthToken", "X-ClientSecret", "X-Request-Signature", "X-PrivateKey", "X-Session-ID",
+	} {
 		if got := RedactHeaderValue(name, "secret"); got != "[REDACTED]" {
 			t.Errorf("RedactHeaderValue(%q) = %q", name, got)
 		}
+	}
+	if got := RedactHeaderValue("X-KeyboardLayout", "keyboard-layout"); got != "keyboard-layout" {
+		t.Errorf("RedactHeaderValue(X-KeyboardLayout) = %q", got)
 	}
 	if got := RedactHeaderValue("X-Trace", "ok\x1b[2J"); got != `ok\x1b[2J` {
 		t.Errorf("RedactHeaderValue() = %q", got)
@@ -120,6 +126,34 @@ func TestRedactedURL(t *testing.T) {
 	}
 	if got := RedactedURL(u); got != "https://example.test/path" {
 		t.Fatalf("RedactedURL() = %q", got)
+	}
+}
+
+func TestRedactedURLRedactsSensitiveQueryValues(t *testing.T) {
+	u, err := url.Parse("https://example.test/path?safe=one&API_KEY=api-query-secret&access_token=access-query-token-secret&clientSecret=client-query-secret&x%2Dsignature=signature-query-secret&safe=two")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := RedactedURL(u)
+	for _, value := range []string{"api-query-secret", "access-query-token-secret", "client-query-secret", "signature-query-secret"} {
+		if strings.Contains(got, value) {
+			t.Errorf("RedactedURL() leaked %q: %q", value, got)
+		}
+	}
+	want := "https://example.test/path?safe=one&API_KEY=%5BREDACTED%5D&access_token=%5BREDACTED%5D&clientSecret=%5BREDACTED%5D&x%2Dsignature=%5BREDACTED%5D&safe=two"
+	if got != want {
+		t.Fatalf("RedactedURL() = %q, want %q", got, want)
+	}
+}
+
+func TestRedactHeaderValueRedactsLocationURL(t *testing.T) {
+	got := RedactHeaderValue("Location", "/next?password=secret&safe=ok")
+	if strings.Contains(got, "secret") {
+		t.Fatalf("Location redaction leaked secret: %q", got)
+	}
+	if want := "/next?password=%5BREDACTED%5D&safe=ok"; got != want {
+		t.Fatalf("Location redaction = %q, want %q", got, want)
 	}
 }
 
