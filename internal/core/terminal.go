@@ -23,6 +23,32 @@ func TerminalSafeText(s string) string {
 	return escapeTerminalText(s, unsafe)
 }
 
+// validHyperlinkURL reports whether s can safely be placed inside an OSC 8
+// hyperlink control sequence. Unlike ordinary terminal text, newlines and
+// tabs are not retained here because they would become part of the control
+// sequence rather than visible content.
+func validHyperlinkURL(s string) bool {
+	if s == "" || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || unicode.IsControl(r) {
+			return false
+		}
+	}
+
+	parsed, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https", "mailto":
+		return true
+	default:
+		return false
+	}
+}
+
 // firstUnsafeTerminalByte returns the byte offset of the first value that
 // needs escaping, or -1 when s is already safe for terminal diagnostics. This
 // keeps the common all-printable path allocation-free.

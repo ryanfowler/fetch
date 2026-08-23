@@ -397,7 +397,7 @@ func printConciseHelp(app *cli.App, p *core.Printer) {
 func printVerboseHelp(ctx context.Context, app *cli.App) int {
 	useColor := app.Cfg.Color == core.ColorOn ||
 		(app.Cfg.Color != core.ColorOff && core.IsStdoutTerm)
-	p := core.TestPrinter(useColor)
+	p := newVerboseHelpPrinter(useColor, core.IsStdoutTerm)
 	if err := format.FormatMarkdown(verboseHelp, p); err != nil {
 		return handleMetadataOutputError(core.NewHandle(app.Cfg.Color), err)
 	}
@@ -416,6 +416,13 @@ func printVerboseHelp(ctx context.Context, app *cli.App) int {
 		return handleMetadataOutputError(core.NewHandle(app.Cfg.Color), err)
 	}
 	return 0
+}
+
+func newVerboseHelpPrinter(useColor bool, terminal bool) *core.Printer {
+	if terminal {
+		return core.TestTerminalPrinter(useColor)
+	}
+	return core.TestPrinter(useColor)
 }
 
 func flushMetadata(handle *core.Handle) int {

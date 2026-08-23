@@ -14,6 +14,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/cli"
 	"github.com/ryanfowler/fetch/internal/config"
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/format"
 )
 
 func TestHelpVerboseRequested(t *testing.T) {
@@ -46,6 +47,23 @@ func TestHelpVerboseRequested(t *testing.T) {
 			t.Fatal("method value was treated as a verbosity flag")
 		}
 	})
+}
+
+func TestVerboseHelpPrinterUsesTerminalMarkdownRendering(t *testing.T) {
+	p := newVerboseHelpPrinter(false, true)
+	if !p.IsTerminal() {
+		t.Fatal("verbose help printer is not terminal-aware")
+	}
+	if err := format.FormatMarkdown([]byte("# Help\n\n[docs](https://example.com/docs)"), p); err != nil {
+		t.Fatalf("FormatMarkdown() error = %v", err)
+	}
+	got := string(p.Bytes())
+	if strings.Contains(got, "# Help") {
+		t.Fatalf("terminal help retained heading marker: %q", got)
+	}
+	if !strings.Contains(got, "\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\") {
+		t.Fatalf("terminal help omitted OSC 8 link: %q", got)
+	}
 }
 
 func TestParseConfigFileMergesScopesAndRecordsProvenance(t *testing.T) {
