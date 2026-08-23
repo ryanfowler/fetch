@@ -1494,6 +1494,57 @@ func TestRedirectCookieJarDoesNotLeakAcrossPorts(t *testing.T) {
 	}
 }
 
+func TestRedirectCookieJarDoesNotLeakWithoutSetCookie(t *testing.T) {
+	var received *http.Request
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/app/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceURL, err := url.Parse(source.URL + "/start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationURL, err := url.Parse(target.URL + "/app/final")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(sourceURL, []*http.Cookie{{Name: "source", Value: "secret", Path: "/"}})
+	jar.SetCookies(destinationURL, []*http.Cookie{{Name: "destination", Value: "valid", Path: "/app"}})
+
+	c := NewClient(ClientConfig{})
+	defer c.Close()
+	c.SetJar(jar)
+	req, err := http.NewRequest(http.MethodGet, sourceURL.String(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if received == nil {
+		t.Fatal("destination request was not received")
+	}
+	if _, err := received.Cookie("source"); err == nil {
+		t.Fatalf("cross-origin source cookie was sent: %q", received.Header.Get("Cookie"))
+	}
+	destinationCookie, err := received.Cookie("destination")
+	if err != nil || destinationCookie.Value != "valid" {
+		t.Fatalf("destination cookie = %v, %v; want destination=valid", destinationCookie, err)
+	}
+}
+
 func TestRedirectCookiesPreserveDestinationScopeAcrossStatuses(t *testing.T) {
 	statuses := []int{
 		http.StatusMovedPermanently,
@@ -1618,10 +1669,9 @@ func TestRedirectCookiesPreserveSameValueDestinationPathVariants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jar.SetCookies(sourceURL, []*http.Cookie{{Name: "sid", Value: "shared", Path: "/"}})
 	jar.SetCookies(destinationURL, []*http.Cookie{
-		{Name: "sid", Value: "shared", Path: "/"},
 		{Name: "sid", Value: "shared", Path: "/app"},
+		{Name: "sid", Value: "shared", Path: "/app/"},
 	})
 
 	c := NewClient(ClientConfig{})

@@ -1752,14 +1752,11 @@ func originCookieMatches(cookies originCookieSet, remaining []int, req *http.Req
 			return true
 		}
 		if cookie.provenance == cookieJar {
-			// Jar-selected cookies have no scope metadata. They can only be
-			// identified safely when the request returns to the origin from
-			// which that opaque selection was recorded.
-			if cookie.scope.origin != nil && SameOrigin(cookie.scope.origin, cookieRequestURL(req)) {
-				remaining[i]--
-				return true
-			}
-			continue
+			// Jar-selected cookies have no scope metadata. They were selected
+			// for the source request, so remove a matching value at every
+			// cross-origin destination even if net/http selected it again.
+			remaining[i]--
+			return true
 		}
 		if cookie.scopeKnown && cookieScopeMatchesRequest(cookie.scope, cookieRequestURL(req)) &&
 			!SameOrigin(cookie.scope.origin, cookieRequestURL(req)) {
