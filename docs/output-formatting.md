@@ -21,6 +21,11 @@ fetch --format off example.com/api    # Raw output
 fetch --format on example.com/api     # Force formatting
 ```
 
+Buffered formatters limit generated output to 1 MiB and reject excessive
+nesting. When formatting exceeds a limit, fetch returns the original response
+body instead of retaining partial formatted output. Use raw output for larger
+or highly nested responses.
+
 ### `--color OPTION`
 
 Control syntax highlighting:

@@ -68,10 +68,10 @@ func (p *Printer) NewWriter(w io.Writer) *Printer {
 	return &Printer{file: w, useColor: p.useColor}
 }
 
-// NewBoundedWriter returns a printer that accepts at most max bytes. Writes
-// after the limit are discarded and Err reports the limit error. It is useful
-// for formatters that must materialize output before appending it atomically to
-// another printer.
+// NewBoundedWriter returns a printer that accepts at most max bytes in total.
+// Writes after the limit are discarded and Err reports the limit error. It is
+// useful for formatters that must materialize output before appending it
+// atomically to another printer.
 func (p *Printer) NewBoundedWriter(w io.Writer, max int64, subsystem string) *Printer {
 	return &Printer{
 		file:      w,
@@ -92,6 +92,7 @@ type Printer struct {
 	bounded    bool
 	limitError error
 	limitName  string
+	accepted   int64
 }
 
 func newPrinter(file *os.File, isTerm bool, c Color) *Printer {
@@ -129,10 +130,11 @@ func (p *Printer) reserve(n int) bool {
 	if !p.bounded {
 		return true
 	}
-	if n < 0 || int64(p.buf.Len()) > p.maxBytes-int64(n) {
+	if n < 0 || int64(n) > p.maxBytes-p.accepted {
 		p.limitError = LimitError{Subsystem: p.limitName, Limit: p.maxBytes}
 		return false
 	}
+	p.accepted += int64(n)
 	return true
 }
 
@@ -174,9 +176,14 @@ func (p *Printer) Flush() error {
 	return err
 }
 
-// Discard clears the buffer without writing to the underlying file.
+// Discard clears the buffer without writing to the underlying file. A bounded
+// printer also starts a new bounded transaction.
 func (p *Printer) Discard() {
 	p.buf.Reset()
+	if p.bounded {
+		p.accepted = 0
+		p.limitError = nil
+	}
 }
 
 // Bytes returns the current contents of the buffer. For test printers created
@@ -234,21 +241,21 @@ func (p *Printer) WriteRune(r rune) (int, error) {
 // WriteRequestPrefix writes a dim "> " prefix for request lines.
 func (p *Printer) WriteRequestPrefix() {
 	p.Set(Dim)
-	p.buf.WriteString("> ")
+	p.WriteString("> ")
 	p.Reset()
 }
 
 // WriteResponsePrefix writes a dim "< " prefix for response lines.
 func (p *Printer) WriteResponsePrefix() {
 	p.Set(Dim)
-	p.buf.WriteString("< ")
+	p.WriteString("< ")
 	p.Reset()
 }
 
 // WriteInfoPrefix writes a dim "* " prefix for informational lines.
 func (p *Printer) WriteInfoPrefix() {
 	p.Set(Dim)
-	p.buf.WriteString("* ")
+	p.WriteString("* ")
 	p.Reset()
 }
 
