@@ -30,6 +30,9 @@ func writeLoop(ctx context.Context, cfg Config) error {
 func writeTextLoop(ctx context.Context, cfg Config) error {
 	reader := bufio.NewReaderSize(cfg.Stdin, websocketStdinBufferSize)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		line, ok, err := readBoundedLine(reader, core.MaxWebSocketPipedTextLine)
 		if err != nil {
 			return err
@@ -86,6 +89,9 @@ func readBoundedLine(reader *bufio.Reader, max int64) ([]byte, bool, error) {
 func writeBinaryLoop(ctx context.Context, cfg Config) error {
 	buf := make([]byte, websocketStdinBufferSize)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		n, err := cfg.Stdin.Read(buf)
 		if n > 0 {
 			if writeErr := writeMessage(ctx, cfg.Conn, websocket.MessageBinary, buf[:n]); writeErr != nil {
@@ -103,11 +109,11 @@ func writeBinaryLoop(ctx context.Context, cfg Config) error {
 
 func writeMessage(ctx context.Context, conn *websocket.Conn, typ websocket.MessageType, data []byte) error {
 	if err := ctx.Err(); err != nil {
-		return nil
+		return err
 	}
 	if err := conn.Write(ctx, typ, data); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		return fmt.Errorf("write WebSocket message: %w", err)
 	}

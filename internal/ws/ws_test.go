@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -290,6 +291,180 @@ func TestWriteLoopReturnsStdinReadError(t *testing.T) {
 	if !errors.Is(err, readErr) {
 		t.Fatalf("expected stdin read error, got %v", err)
 	}
+}
+
+func TestWriteMessageReturnsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := writeMessage(ctx, nil, websocket.MessageText, []byte("message"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("writeMessage() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWriteLoopsStopOnContextCancellation(t *testing.T) {
+	for _, mode := range []core.WSMessageMode{core.WSMessageText, core.WSMessageBinary} {
+		t.Run(mode.String(), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			err := writeLoop(ctx, Config{
+				Stdin:       strings.NewReader("message\n"),
+				MessageMode: mode,
+			})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("writeLoop() error = %v, want context.Canceled", err)
+			}
+		})
+	}
+}
+
+func TestCancellationClosesAndJoinsClosableStdin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	input := &blockingReadCloser{blockingReader: newBlockingReader()}
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- Run(ctx, Config{
+			Conn:   conn,
+			Stdin:  input,
+			Stderr: core.TestPrinter(false),
+			Stdout: core.TestPrinter(false),
+		})
+	}()
+
+	select {
+	case <-input.started:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not start reading stdin")
+	}
+	cancel()
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run() did not join the closable stdin writer")
+	}
+	select {
+	case <-input.done:
+	default:
+		t.Fatal("closable stdin Read was not released before Run returned")
+	}
+}
+
+func TestCancellationWaitsForBlockingNonClosableStdin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+
+	input := newBlockingReader()
+	defer input.unblock()
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- Run(ctx, Config{
+			Conn:   conn,
+			Stdin:  input,
+			Stderr: core.TestPrinter(false),
+			Stdout: core.TestPrinter(false),
+		})
+	}()
+
+	select {
+	case <-input.started:
+	case <-time.After(time.Second):
+		t.Fatal("writer did not start reading stdin")
+	}
+	cancel()
+	select {
+	case err := <-runDone:
+		t.Fatalf("Run() returned %v while non-closable stdin was blocked", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	input.unblock()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run() did not finish after the non-closable stdin returned")
+	}
+	select {
+	case <-input.done:
+	default:
+		t.Fatal("non-closable stdin Read did not return before Run finished")
+	}
+}
+
+type blockingReader struct {
+	started    chan struct{}
+	release    chan struct{}
+	done       chan struct{}
+	releaseOne sync.Once
+	doneOnce   sync.Once
+}
+
+func newBlockingReader() *blockingReader {
+	return &blockingReader{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+func (r *blockingReader) Read([]byte) (int, error) {
+	close(r.started)
+	<-r.release
+	r.doneOnce.Do(func() { close(r.done) })
+	return 0, io.EOF
+}
+
+func (r *blockingReader) unblock() {
+	r.releaseOne.Do(func() { close(r.release) })
+}
+
+type blockingReadCloser struct {
+	*blockingReader
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.unblock()
+	return nil
 }
 
 func TestInitialMessageEcho(t *testing.T) {

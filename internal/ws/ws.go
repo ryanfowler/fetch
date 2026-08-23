@@ -16,7 +16,12 @@ import (
 
 // Config holds the configuration for a WebSocket session.
 type Config struct {
-	Conn          *websocket.Conn
+	Conn *websocket.Conn
+	// Stdin must be interruptible while Run is active. Run closes a Stdin
+	// that implements io.Closer when cancellation or the peer ends the
+	// session. A non-closable reader must otherwise arrange for its Read to
+	// return independently; Run joins the writer before returning and cannot
+	// complete cancellation until that Read returns.
 	Stdin         io.Reader
 	Stderr        *core.Printer
 	Stdout        *core.Printer
@@ -117,20 +122,6 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// A context cancellation must unblock both network operations and a
-	// closable stdin source. An arbitrary Reader cannot be interrupted, so it
-	// is deliberately not retained in an additional goroutine after return.
-	stopCancellation := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			closeInput(cfg.Stdin)
-			_ = cfg.Conn.CloseNow()
-		case <-stopCancellation:
-		}
-	}()
-	defer close(stopCancellation)
-
 	writeDone := make(chan error, 1)
 	go func() { writeDone <- writeLoop(sessionCtx, cfg) }()
 
@@ -140,14 +131,10 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 	for {
 		select {
 		case <-ctx.Done():
-			closeInput(cfg.Stdin)
-			cancel()
-			_ = cfg.Conn.CloseNow()
+			stopAndJoinWriter(cfg, cancel, writeDone)
 			return contextTerminationError(ctx)
 		case err := <-readDone:
-			closeInput(cfg.Stdin)
-			cancel()
-			_ = cfg.Conn.CloseNow()
+			stopAndJoinWriter(cfg, cancel, writeDone)
 			if ctx.Err() != nil {
 				return contextTerminationError(ctx)
 			}
@@ -158,6 +145,9 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 				closeInput(cfg.Stdin)
 				cancel()
 				_ = cfg.Conn.CloseNow()
+				if ctx.Err() != nil {
+					return contextTerminationError(ctx)
+				}
 				return err
 			}
 
@@ -268,6 +258,17 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 			}
 		}
 	}
+}
+
+// stopAndJoinWriter interrupts the network and input sides, then waits for
+// writeLoop. Waiting is required because writeLoop owns the only read from
+// Stdin and must not outlive the WebSocket session. For a non-closable Stdin,
+// this wait lasts until its Read implementation returns.
+func stopAndJoinWriter(cfg Config, cancel context.CancelFunc, writeDone <-chan error) {
+	closeInput(cfg.Stdin)
+	cancel()
+	_ = cfg.Conn.CloseNow()
+	<-writeDone
 }
 
 func closeInput(input io.Reader) {
