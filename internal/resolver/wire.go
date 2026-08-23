@@ -466,7 +466,7 @@ func decodeKnownRData(record *Record, packet []byte, start, end int, boundaries 
 			return errors.New("CAA record has an invalid tag length")
 		}
 		tagLen := int(packet[start+1])
-		if tagLen == 0 || tagLen > 15 || tagLen > end-start-2 {
+		if tagLen == 0 || tagLen > end-start-2 {
 			return errors.New("CAA record has an invalid tag length")
 		}
 	case dnsTypeOPT:
