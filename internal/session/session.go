@@ -23,9 +23,8 @@ import (
 var validName = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 const (
-	sessionLockTimeout    = 5 * time.Second
-	sessionLockPoll       = 10 * time.Millisecond
-	sessionLockStaleAfter = 30 * time.Second
+	sessionLockTimeout = 5 * time.Second
+	sessionLockPoll    = 10 * time.Millisecond
 )
 
 // IsValidName returns true if the session name contains only
@@ -201,27 +200,41 @@ func writeSessionFile(path string, data []byte) error {
 }
 
 func acquireLock(path string) (func(), error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return nil, err
+	}
+
 	deadline := time.Now().Add(sessionLockTimeout)
 	for {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err == nil {
-			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+		locked, err := tryLockFile(f)
+		if err != nil {
 			_ = f.Close()
-			return func() { _ = os.Remove(path) }, nil
-		}
-		if !os.IsExist(err) {
 			return nil, err
 		}
-		// A process can die after creating the sentinel and before its
-		// deferred cleanup runs. Recover only locks that are well past the
-		// normal save duration; an active save keeps the lock fresh enough
-		// that it is not mistaken for a crashed owner.
-		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > sessionLockStaleAfter {
-			if removeErr := os.Remove(path); removeErr == nil {
-				continue
+		if locked {
+			if err := f.Truncate(0); err != nil {
+				_ = unlockFile(f)
+				_ = f.Close()
+				return nil, err
 			}
+			if _, err := f.Seek(0, 0); err != nil {
+				_ = unlockFile(f)
+				_ = f.Close()
+				return nil, err
+			}
+			if _, err := fmt.Fprintf(f, "%d\n", os.Getpid()); err != nil {
+				_ = unlockFile(f)
+				_ = f.Close()
+				return nil, err
+			}
+			return func() {
+				_ = unlockFile(f)
+				_ = f.Close()
+			}, nil
 		}
 		if time.Now().After(deadline) {
+			_ = f.Close()
 			return nil, fmt.Errorf("timed out waiting for session lock %q", path)
 		}
 		time.Sleep(sessionLockPoll)

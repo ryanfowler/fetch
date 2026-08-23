@@ -755,24 +755,40 @@ func TestSessionJarRoundTripForIPv6Host(t *testing.T) {
 	}
 }
 
-func TestStaleSessionLockIsRecoverable(t *testing.T) {
+func TestSessionLockUsesFileLock(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
-	sess, err := Load("stale-lock")
+	lockPath := filepath.Join(dir, "session.lock")
+	release, err := acquireLock(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lockPath := filepath.Join(dir, "stale-lock.json.lock")
-	if err := os.WriteFile(lockPath, []byte("dead process\n"), 0600); err != nil {
+
+	f, err := os.OpenFile(lockPath, os.O_RDWR, 0600)
+	if err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-(sessionLockStaleAfter + time.Second))
-	if err := os.Chtimes(lockPath, old, old); err != nil {
+	locked, err := tryLockFile(f)
+	if err != nil {
+		_ = f.Close()
 		t.Fatal(err)
 	}
-	if err := sess.Save(); err != nil {
-		t.Fatalf("stale lock was not recovered: %v", err)
+	if locked {
+		_ = unlockFile(f)
+		_ = f.Close()
+		t.Fatal("second file descriptor acquired an exclusive session lock")
 	}
+	_ = f.Close()
+
+	release()
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("lock file should remain after release: %v", err)
+	}
+
+	release, err = acquireLock(lockPath)
+	if err != nil {
+		t.Fatalf("session lock was not reacquired after release: %v", err)
+	}
+	release()
 }
 
 func TestCorruptedSessionFile(t *testing.T) {
