@@ -40,7 +40,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+        os: ["ubuntu-latest", "macos-latest"]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -52,47 +52,60 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Test
-        if: runner.os != 'Windows'
         run: go test -v -parallel 8 ./...
 
-      - name: Test (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Linking is unusually slow on Windows runners, so overlap the CLI
-          # build with unit tests and reuse the result for integration tests.
-          $repo = $PWD.Path
-          $fetchPath = Join-Path $env:RUNNER_TEMP 'fetch.exe'
-          $build = Start-Job -ScriptBlock {
-            Set-Location $using:repo
-            go build -trimpath '-ldflags=-s -w' -o $using:fetchPath .
-            if ($LASTEXITCODE -ne 0) {
-              throw "go build failed with exit code $LASTEXITCODE"
-            }
-          }
+  test-windows:
+    name: test (windows-latest)
+    needs: build-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
-          go test -v -parallel 8 . ./internal/...
-          $testExit = $LASTEXITCODE
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
 
-          Wait-Job $build | Out-Null
-          $buildFailed = $build.State -ne 'Completed'
-          if ($buildFailed) {
-            Receive-Job $build -ErrorAction Continue
-          }
-          Remove-Job $build
+      - name: Download fetch binary
+        uses: actions/download-artifact@v8
+        with:
+          name: fetch-windows-amd64
+          path: ${{ runner.temp }}
 
-          if ($testExit -ne 0) {
-            exit $testExit
-          }
-          if ($buildFailed) {
-            exit 1
-          }
+      - name: Test
+        env:
+          FETCH_INTEGRATION_BINARY: ${{ runner.temp }}\fetch.exe
+        run: go test -v -parallel 8 ./...
 
-          $env:FETCH_INTEGRATION_BINARY = $fetchPath
-          go test -v -parallel 16 ./integration
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
-          }
+  build-windows:
+    name: build (windows-amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Go build
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags="-s -w" -o fetch.exe
+
+      - name: Upload fetch binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: fetch-windows-amd64
+          path: fetch.exe
+          if-no-files-found: error
+          retention-days: 1
 
   build:
     runs-on: ubuntu-latest
@@ -103,7 +116,6 @@ jobs:
           - linux-arm64
           - darwin-amd64
           - darwin-arm64
-          - windows-amd64
           - windows-arm64
         include:
           - build: linux-amd64
@@ -118,9 +130,6 @@ jobs:
           - build: darwin-arm64
             goos: darwin
             goarch: arm64
-          - build: windows-amd64
-            goos: windows
-            goarch: amd64
           - build: windows-arm64
             goos: windows
             goarch: arm64
