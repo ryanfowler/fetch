@@ -922,13 +922,16 @@ func (t *automaticHTTP3Transport) roundTripH3(req *http.Request, prepared prepar
 	h3 := t.h3Transports[key]
 	if h3 == nil {
 		first := prepared.h3
+		var firstMu sync.Mutex
 		h3 = &http3.Transport{
 			DisableCompression: true,
 			TLSClientConfig:    t.tlsConfig.Clone(),
 			Dial: func(ctx context.Context, _ string, _ *tls.Config, _ *quic.Config) (*quic.Conn, error) {
-				if first != nil {
-					conn := first
-					first = nil
+				firstMu.Lock()
+				conn := first
+				first = nil
+				firstMu.Unlock()
+				if conn != nil {
 					return conn, nil
 				}
 				conn, packet, err := t.dialH3(ctx, req.URL, candidate)
