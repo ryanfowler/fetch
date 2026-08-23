@@ -89,6 +89,132 @@ func TestLookupDOHTypeReturnsTTL(t *testing.T) {
 	}
 }
 
+func TestDOHClientCloseClosesOwnedTransportConnections(t *testing.T) {
+	server, closed := newTrackedDOHServer(t)
+	client, err := NewDOHClient(DOHConfig{ServerURL: mustURL(t, server.URL)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := client.LookupType(context.Background(), "example.com", "A", dnsTypeA); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("owned DoH transport did not close the idle server connection")
+	}
+}
+
+func TestDOHClientCloseLeavesExternalTransportOpen(t *testing.T) {
+	server, closed := newTrackedDOHServer(t)
+	external := &http.Transport{}
+	defer external.CloseIdleConnections()
+	client, err := NewDOHClient(DOHConfig{
+		ServerURL:    mustURL(t, server.URL),
+		RoundTripper: external,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := client.LookupType(context.Background(), "example.com", "A", dnsTypeA); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-closed:
+		t.Fatal("DoH client closed a caller-owned transport")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	external.CloseIdleConnections()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("external transport did not close the idle server connection")
+	}
+}
+
+func TestResolverCloseClosesOwnedDOHClient(t *testing.T) {
+	server, closed := newTrackedDOHServer(t)
+	r := New(Config{Server: mustURL(t, server.URL)})
+	if _, err := r.LookupIPAddr(context.Background(), "example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not close the owned DoH connection")
+	}
+}
+
+func TestResolverSetRoundTripperClosesReplacedOwnedDOHClient(t *testing.T) {
+	server, closed := newTrackedDOHServer(t)
+	r := New(Config{Server: mustURL(t, server.URL)})
+	if _, err := r.LookupIPAddr(context.Background(), "example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("unexpected replacement request")
+	})
+	if err := r.SetRoundTripper(replacement); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("replaced owned DoH client did not close its idle connection")
+	}
+}
+
+func newTrackedDOHServer(t *testing.T) (*httptest.Server, <-chan struct{}) {
+	t.Helper()
+	closed := make(chan struct{}, 1)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read query: %v", err)
+			return
+		}
+		message, err := DecodeMessage(query)
+		if err != nil || len(message.Questions) != 1 {
+			t.Errorf("decode query: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-message")
+		answer := makeRecord(message.Questions[0].Name, message.Questions[0].Type, []byte{127, 0, 0, 1})
+		_, _ = w.Write(responsePacket(query, message.Header.ID, message.Questions[0], []Record{answer}))
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+	return server, closed
+}
+
 func TestDOHWireFormatIsAttemptedBeforeJSON(t *testing.T) {
 	var post, get int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

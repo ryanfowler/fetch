@@ -196,6 +196,16 @@ func (r *Resolver) NetResolver() *net.Resolver {
 	return nil
 }
 
+// Close releases resources owned by the resolver. It is safe to call more
+// than once; externally supplied DoH transports remain the caller's
+// responsibility.
+func (r *Resolver) Close() error {
+	if r == nil || r.dohClient == nil {
+		return nil
+	}
+	return r.dohClient.Close()
+}
+
 // LookupIPAddr resolves host to IP addresses using the configured backend.
 func (r *Resolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
 	if ip := net.ParseIP(host); ip != nil {

@@ -23,6 +23,7 @@ func (r *Resolver) SetRoundTripper(transport http.RoundTripper) error {
 	if err != nil {
 		return err
 	}
+	old := r.dohClient
 	r.dohClient = client
-	return nil
+	return old.Close()
 }

@@ -848,13 +848,17 @@ func (t *http3TimingTransport) Close() error {
 
 // Close closes the underlying transport, releasing any resources.
 func (c *Client) Close() error {
+	var closeErr error
 	if idleCloser, ok := c.c.Transport.(interface{ CloseIdleConnections() }); ok {
 		idleCloser.CloseIdleConnections()
 	}
 	if closer, ok := c.c.Transport.(io.Closer); ok {
-		return closer.Close()
+		closeErr = errors.Join(closeErr, closer.Close())
 	}
-	return nil
+	if c.resolver != nil {
+		closeErr = errors.Join(closeErr, c.resolver.Close())
+	}
+	return closeErr
 }
 
 // HTTPClient returns the underlying *http.Client. Its Transport may be a
