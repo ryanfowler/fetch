@@ -223,6 +223,12 @@ func newDebugTrace(p *core.Printer) (*httptrace.ClientTrace, *connectionMetrics)
 				// a later successful dial may be the losing race candidate.
 				if err == nil {
 					duration = time.Since(start)
+					// Some platforms expose a coarse wall clock. Preserve
+					// the invariant that a completed dial has a positive
+					// measured duration.
+					if duration <= 0 {
+						duration = time.Nanosecond
+					}
 					if !m.tcpDurKnown {
 						m.tcpDur = duration
 						m.tcpDurKnown = true
