@@ -627,48 +627,149 @@ func TestRedirectMethodAndBodySemantics(t *testing.T) {
 }
 
 func TestCrossOriginRedirectBodyIsRefused(t *testing.T) {
-	statuses := []int{
+	tests := []struct {
+		status      int
+		method      string
+		wantRefused bool
+	}{
+		{status: http.StatusMovedPermanently, method: http.MethodPost},
+		{status: http.StatusFound, method: http.MethodPost},
+		{status: http.StatusTemporaryRedirect, method: http.MethodPost, wantRefused: true},
+		{status: http.StatusPermanentRedirect, method: http.MethodPost, wantRefused: true},
+	}
+	for _, status := range []int{
 		http.StatusMovedPermanently,
 		http.StatusFound,
 		http.StatusTemporaryRedirect,
 		http.StatusPermanentRedirect,
+	} {
+		for _, method := range []string{
+			http.MethodGet,
+			http.MethodHead,
+			http.MethodPut,
+			http.MethodPatch,
+			http.MethodDelete,
+			http.MethodOptions,
+			"PROPFIND",
+		} {
+			tests = append(tests, struct {
+				status      int
+				method      string
+				wantRefused bool
+			}{status: status, method: method, wantRefused: true})
+		}
 	}
-	methods := []string{http.MethodPut, http.MethodPatch, "PROPFIND"}
 
-	for _, status := range statuses {
-		for _, method := range methods {
-			name := fmt.Sprintf("%d %s", status, method)
-			t.Run(name, func(t *testing.T) {
-				var targetCalls, targetBytes int
-				target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					targetCalls++
-					body, err := io.ReadAll(r.Body)
-					if err != nil {
-						t.Errorf("read target body: %v", err)
-					}
-					targetBytes += len(body)
-					w.WriteHeader(http.StatusNoContent)
-				}))
-				defer target.Close()
-
-				source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					http.Redirect(w, r, target.URL+"/final", status)
-				}))
-				defer source.Close()
-
-				req, err := http.NewRequest(method, source.URL+"/start", strings.NewReader("secret-body"))
+	for _, tt := range tests {
+		name := fmt.Sprintf("%d %s", tt.status, tt.method)
+		t.Run(name, func(t *testing.T) {
+			var targetCalls, targetBytes int
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetCalls++
+				body, err := io.ReadAll(r.Body)
 				if err != nil {
-					t.Fatal(err)
+					t.Errorf("read target body: %v", err)
 				}
-				_, err = NewClient(ClientConfig{}).Do(req)
+				targetBytes += len(body)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer target.Close()
+
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL+"/final", tt.status)
+			}))
+			defer source.Close()
+
+			req, err := http.NewRequest(tt.method, source.URL+"/start", strings.NewReader("secret-body"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := NewClient(ClientConfig{}).Do(req)
+			if tt.wantRefused {
 				if err == nil || !strings.Contains(err.Error(), "refusing cross-origin redirect with request body") {
 					t.Fatalf("error = %v, want cross-origin body refusal", err)
 				}
-				if targetCalls != 0 || targetBytes != 0 {
-					t.Fatalf("target received %d requests and %d body bytes, want none", targetCalls, targetBytes)
+			} else {
+				if err != nil {
+					t.Fatal(err)
 				}
-			})
-		}
+				resp.Body.Close()
+				if targetCalls != 1 || targetBytes != 0 {
+					t.Fatalf("target received %d requests and %d body bytes, want 1 request and 0 bytes", targetCalls, targetBytes)
+				}
+			}
+			if tt.wantRefused && (targetCalls != 0 || targetBytes != 0) {
+				t.Fatalf("target received %d requests and %d body bytes, want none", targetCalls, targetBytes)
+			}
+		})
+	}
+}
+
+func TestRedirectHookCannotSendBodyToCrossOriginURL(t *testing.T) {
+	hooks := []struct {
+		name string
+		wrap func(context.Context, *url.URL) context.Context
+	}{
+		{
+			name: "observer",
+			wrap: func(ctx context.Context, targetURL *url.URL) context.Context {
+				return WithRequestObserver(ctx, func(req *http.Request) {
+					if req.Response != nil {
+						req.URL = targetURL
+					}
+				})
+			},
+		},
+		{
+			name: "validator",
+			wrap: func(ctx context.Context, targetURL *url.URL) context.Context {
+				return WithRedirectValidator(ctx, func(hop RedirectHop) error {
+					hop.NextRequest.URL = targetURL
+					return nil
+				})
+			},
+		},
+		{
+			name: "callback",
+			wrap: func(ctx context.Context, targetURL *url.URL) context.Context {
+				return WithRedirectCallback(ctx, func(hop RedirectHop) {
+					hop.NextRequest.URL = targetURL
+				})
+			},
+		},
+	}
+
+	for _, hook := range hooks {
+		t.Run(hook.name, func(t *testing.T) {
+			var targetCalls int
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetCalls++
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer target.Close()
+			targetURL, err := url.Parse(target.URL + "/final")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/middle", http.StatusTemporaryRedirect)
+			}))
+			defer source.Close()
+
+			req, err := http.NewRequest(http.MethodPut, source.URL+"/start", strings.NewReader("secret-body"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req = req.WithContext(hook.wrap(req.Context(), targetURL))
+			_, err = NewClient(ClientConfig{}).Do(req)
+			if err == nil || !strings.Contains(err.Error(), "refusing cross-origin redirect with request body") {
+				t.Fatalf("error = %v, want cross-origin body refusal", err)
+			}
+			if targetCalls != 0 {
+				t.Fatalf("target received %d requests, want none", targetCalls)
+			}
+		})
 	}
 }
 

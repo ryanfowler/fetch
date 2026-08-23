@@ -368,11 +368,13 @@ redirects = 10
 ```
 
 Redirects that would preserve a request body across a scheme, host, or port
-boundary are refused before the destination receives a request. This covers
-PUT, PATCH, and custom methods for 301, 302, 307, and 308 responses. There is
-no cross-origin body-replay opt-in. A 301 or 302 POST and every non-HEAD 303
-are converted to GET without a body; same-origin body-preserving redirects
-remain allowed.
+boundary are refused before the destination receives a request. The rule is
+based on body presence and the status/method semantics, rather than only on
+PUT, PATCH, or custom methods; body-bearing GET, HEAD, DELETE, OPTIONS, POST,
+and custom methods are covered when their redirect would preserve the body.
+There is no cross-origin body-replay opt-in. A 301 or 302 POST and every
+non-HEAD 303 are converted to GET without a body; same-origin body-preserving
+redirects remain allowed.
 
 #### `retry`
 

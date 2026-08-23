@@ -434,11 +434,14 @@ When `--cert` configures mTLS, a redirect crossing a scheme, host, or port
 boundary is refused before connecting to the destination. Same-origin
 redirects remain allowed.
 
-Request bodies are also protected at origin boundaries. Redirects that would
-preserve a PUT, PATCH, or custom-method body (301, 302, 307, or 308) are
-refused with an error before any bytes are sent to the destination. There is no
-cross-origin body-replay opt-in. A 301 or 302 POST and every non-HEAD 303 are
-changed to GET without a body, so those redirects remain allowed.
+Request bodies are also protected at origin boundaries. A redirect is refused
+with an error before any bytes are sent to the destination when the effective
+redirected request has a body and the status/method semantics preserve that
+body. This rule is based on body presence, not a fixed list of methods, so it
+also covers body-bearing GET, HEAD, DELETE, OPTIONS, POST, and custom methods.
+There is no cross-origin body-replay opt-in. A 301 or 302 POST and every
+non-HEAD 303 are changed to GET without a body, so those redirects remain
+allowed.
 
 ### `--retry NUM`
 

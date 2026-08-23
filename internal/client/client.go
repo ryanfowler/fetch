@@ -433,6 +433,9 @@ func NewClient(cfg ClientConfig) *Client {
 				return err
 			}
 		}
+		if err := rejectCrossOriginRequestBody(req, via); err != nil {
+			return err
+		}
 		if len(via) > 0 && req.Response != nil &&
 			(req.Response.StatusCode == http.StatusTemporaryRedirect || req.Response.StatusCode == http.StatusPermanentRedirect) &&
 			req.GetBody == nil && req.Body != nil && req.Body != http.NoBody {
@@ -1252,6 +1255,21 @@ func normalizeRedirectRequest(req *http.Request, via []*http.Request) error {
 func rejectCrossOriginRedirectBody(req, previous *http.Request, via []*http.Request) error {
 	if req == nil || previous == nil || req.URL == nil || len(via) == 0 ||
 		(previous.Body == nil || previous.Body == http.NoBody) {
+		return nil
+	}
+	initial := via[0].URL
+	if state := redirectSecurityStateFrom(req); state != nil && state.initialOrigin != nil {
+		initial = state.initialOrigin
+	}
+	if initial != nil && !SameOrigin(initial, req.URL) {
+		return errors.New("refusing cross-origin redirect with request body")
+	}
+	return nil
+}
+
+func rejectCrossOriginRequestBody(req *http.Request, via []*http.Request) error {
+	if req == nil || req.URL == nil || len(via) == 0 || req.Response == nil ||
+		req.Body == nil || req.Body == http.NoBody {
 		return nil
 	}
 	initial := via[0].URL
