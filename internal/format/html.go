@@ -115,6 +115,8 @@ var preserveWhitespaceElements = map[string]bool{
 	"textarea": true,
 }
 
+const maxHTMLEndTagSearchDepth = 32
+
 // htmlStackEntry tracks information about an open element.
 type htmlStackEntry struct {
 	tagName       string
@@ -210,10 +212,16 @@ func formatHTML(buf []byte, w *core.Printer) error {
 				continue
 			}
 
-			// Find and pop the matching tag from the stack.
+			// Find and pop a nearby matching tag from the stack. Bounding the
+			// search prevents unmatched end tags from repeatedly scanning a deep
+			// open-element stack.
 			var entry htmlStackEntry
 			found := false
-			for i := len(stack) - 1; i >= 0; i-- {
+			searchStart := len(stack) - maxHTMLEndTagSearchDepth
+			if searchStart < 0 {
+				searchStart = 0
+			}
+			for i := len(stack) - 1; i >= searchStart; i-- {
 				if stack[i].tagName == tagNameLower {
 					entry = stack[i]
 					stack = stack[:i]

@@ -194,6 +194,30 @@ func TestFormatHTMLLimitsNestingDepth(t *testing.T) {
 	}
 }
 
+func TestFormatHTMLBoundsEndTagSearch(t *testing.T) {
+	t.Run("matches within window", func(t *testing.T) {
+		input := "<div>" + strings.Repeat("<span>", maxHTMLEndTagSearchDepth-1) + "</div>"
+		p := core.TestPrinter(false)
+		if err := FormatHTML([]byte(input), p); err != nil {
+			t.Fatalf("FormatHTML() error = %v", err)
+		}
+		if got := string(p.Bytes()); !strings.HasSuffix(got, "</div>\n") {
+			t.Fatalf("FormatHTML() did not match end tag within search window: %q", got)
+		}
+	})
+
+	t.Run("ignores match beyond window", func(t *testing.T) {
+		input := "<div>" + strings.Repeat("<span>", maxHTMLEndTagSearchDepth) + "</div>"
+		p := core.TestPrinter(false)
+		if err := FormatHTML([]byte(input), p); err != nil {
+			t.Fatalf("FormatHTML() error = %v", err)
+		}
+		if got := string(p.Bytes()); strings.HasSuffix(got, "</div>\n") {
+			t.Fatalf("FormatHTML() matched end tag beyond search window: %q", got)
+		}
+	})
+}
+
 func TestFormatHTMLLimitsOutput(t *testing.T) {
 	input := "<div>" + strings.Repeat("x", core.MaxFormattedBodyBytes+1) + "</div>"
 	p := core.TestPrinter(false)
