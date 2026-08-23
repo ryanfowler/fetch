@@ -126,6 +126,87 @@ func TestEchoRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPipedStdinDrainsMessagesBeforeClose(t *testing.T) {
+	ready := make(chan struct{})
+	pingSeen := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+			OnPingReceived: func(context.Context, []byte) bool {
+				close(pingSeen)
+				return true
+			},
+		})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+
+		messages := make([]struct {
+			typ  websocket.MessageType
+			data []byte
+		}, 2)
+		for i := range messages {
+			messages[i].typ, messages[i].data, err = conn.Read(r.Context())
+			if err != nil {
+				return
+			}
+		}
+		close(ready)
+		// Keep a reader active so the client's ping can complete. This
+		// makes the drain barrier observable instead of relying on timing.
+		go func() {
+			_, _, _ = conn.Read(r.Context())
+		}()
+		select {
+		case <-pingSeen:
+		case <-r.Context().Done():
+			return
+		}
+		for _, message := range messages {
+			if err := conn.Write(r.Context(), message.typ, message.data); err != nil {
+				return
+			}
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "done")
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := core.TestPrinter(false)
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- Run(ctx, Config{
+			Conn:   conn,
+			Stdin:  strings.NewReader("line1\nline2\n"),
+			Stderr: core.TestPrinter(false),
+			Stdout: stdout,
+			Format: core.FormatOff,
+		})
+	}()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("server did not receive piped messages")
+	}
+	select {
+	case <-pingSeen:
+	case <-time.After(time.Second):
+		t.Fatal("client did not drain messages with a WebSocket ping")
+	}
+	if err := <-runDone; err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := string(stdout.Bytes()); got != "line1\nline2\n" {
+		t.Fatalf("stdout = %q, want both echoed messages", got)
+	}
+}
+
 func TestPipedStdinLongMessage(t *testing.T) {
 	message := strings.Repeat("x", 70*1024)
 	received := make(chan []byte, 1)

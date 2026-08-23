@@ -148,6 +148,9 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 			closeInput(cfg.Stdin)
 			cancel()
 			_ = cfg.Conn.CloseNow()
+			if ctx.Err() != nil {
+				return contextTerminationError(ctx)
+			}
 			return err
 
 		case err := <-writeDone:
@@ -158,16 +161,59 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 				return err
 			}
 
-			// EOF is a local, orderly shutdown. Conn.Close writes and flushes
-			// the normal close frame, then waits for the peer response with the
-			// library's finite close-handshake deadline. The reader remains
-			// active while this happens, so peer data already in flight is not
-			// needlessly dropped.
+			// Drain messages sent before EOF before starting the close
+			// handshake. coder/websocket documents that Conn.Close discards
+			// data frames received during its handshake, so use a ping as a
+			// barrier: the reader must process all earlier frames before it
+			// can observe the pong.
+			drainCtx, cancelDrain := context.WithTimeout(ctx, time.Second)
+			pingErr := cfg.Conn.Ping(drainCtx)
+			cancelDrain()
+			if pingErr != nil {
+				// A peer can close while the barrier ping is in flight. Give
+				// the reader priority; otherwise use the bounded fallback
+				// delay before starting a close that may discard data.
+				select {
+				case err := <-readDone:
+					cancel()
+					if ctx.Err() != nil {
+						return contextTerminationError(ctx)
+					}
+					return err
+				case <-ctx.Done():
+					cancel()
+					_ = cfg.Conn.CloseNow()
+					return contextTerminationError(ctx)
+				case <-time.After(localCloseDrainDelay):
+				}
+			}
+			select {
+			case err := <-readDone:
+				cancel()
+				if ctx.Err() != nil {
+					return contextTerminationError(ctx)
+				}
+				return err
+			default:
+			}
+			if ctx.Err() != nil {
+				cancel()
+				_ = cfg.Conn.CloseNow()
+				return contextTerminationError(ctx)
+			}
+
+			// Conn.Close writes and flushes the normal close frame, then waits
+			// for the peer response with the library's finite close-handshake
+			// deadline. The reader remains active while this happens.
 			closeDone := startNormalClose(cfg.Conn)
 
 			for {
 				select {
 				case err := <-readDone:
+					if ctx.Err() != nil {
+						cancel()
+						return contextTerminationError(ctx)
+					}
 					if err != nil {
 						cancel()
 						return err
@@ -182,10 +228,33 @@ func runBidirectional(ctx context.Context, cfg Config) error {
 					case <-time.After(time.Second):
 						cancel()
 						return nil
+					case <-ctx.Done():
+						cancel()
+						_ = cfg.Conn.CloseNow()
+						return contextTerminationError(ctx)
 					}
 				case closeErr := <-closeDone:
-					cancel()
-					return normalizeCloseError(closeErr)
+					// Close may finish before the reader has processed frames
+					// that were already in flight. Keep the reader alive briefly
+					// so local EOF cannot discard those messages.
+					select {
+					case readErr := <-readDone:
+						cancel()
+						if ctx.Err() != nil {
+							return contextTerminationError(ctx)
+						}
+						if readErr != nil {
+							return readErr
+						}
+						return normalizeCloseError(closeErr)
+					case <-time.After(time.Second):
+						cancel()
+						return normalizeCloseError(closeErr)
+					case <-ctx.Done():
+						cancel()
+						_ = cfg.Conn.CloseNow()
+						return contextTerminationError(ctx)
+					}
 				case <-ctx.Done():
 					closeInput(cfg.Stdin)
 					cancel()
