@@ -1467,6 +1467,123 @@ func TestRedirectCookieJarDoesNotLeakAcrossPorts(t *testing.T) {
 	}
 }
 
+func TestRedirectCookiesPreserveDestinationScopeAcrossStatuses(t *testing.T) {
+	statuses := []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	}
+	for _, status := range statuses {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var received string
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				received = r.Header.Get("Cookie")
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer target.Close()
+
+			targetURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, targetURL+"/app/final", status)
+			}))
+			defer source.Close()
+
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceURL, err := url.Parse(source.URL + "/start")
+			if err != nil {
+				t.Fatal(err)
+			}
+			destinationURL, err := url.Parse(targetURL + "/app/final")
+			if err != nil {
+				t.Fatal(err)
+			}
+			jar.SetCookies(sourceURL, []*http.Cookie{{Name: "sid", Value: "source", Path: "/"}})
+			jar.SetCookies(destinationURL, []*http.Cookie{{Name: "sid", Value: "destination", Path: "/app"}})
+
+			c := NewClient(ClientConfig{})
+			defer c.Close()
+			c.SetJar(jar)
+			req, err := http.NewRequest(http.MethodGet, sourceURL.String(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := c.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+
+			if received != "sid=destination" {
+				t.Fatalf("redirect %d Cookie = %q, want destination cookie", status, received)
+			}
+		})
+	}
+}
+
+func TestRedirectManualCookiePreservesSameNameDestinationCookie(t *testing.T) {
+	var received string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	targetURL := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetURL+"/app/final", http.StatusFound)
+	}))
+	defer source.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationURL, err := url.Parse(targetURL + "/app/final")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(destinationURL, []*http.Cookie{{Name: "sid", Value: "destination", Path: "/app"}})
+
+	c := NewClient(ClientConfig{})
+	defer c.Close()
+	c.SetJar(jar)
+	req, err := http.NewRequest(http.MethodGet, source.URL+"/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Cookie", "sid=manual")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if received != "sid=destination" {
+		t.Fatalf("redirect Cookie = %q, want destination cookie", received)
+	}
+}
+
+func TestCookieScopeRecordsDomainHostOnlyAndPath(t *testing.T) {
+	origin := mustURL(t, "https://app.example.test/account/login")
+	hostOnly := cookieScopeForSetCookie(origin, &http.Cookie{Name: "host", Value: "one"})
+	if hostOnly.domain != "app.example.test" || !hostOnly.hostOnly || hostOnly.path != "/account" || !SameOrigin(hostOnly.origin, origin) {
+		t.Fatalf("host-only scope = %+v", hostOnly)
+	}
+
+	domain := cookieScopeForSetCookie(origin, &http.Cookie{
+		Name:   "domain",
+		Value:  "two",
+		Domain: ".example.test",
+		Path:   "/account/private",
+	})
+	if domain.domain != "example.test" || domain.hostOnly || domain.path != "/account/private" || !SameOrigin(domain.origin, origin) {
+		t.Fatalf("domain scope = %+v", domain)
+	}
+}
+
 func TestRedirectSameOriginPreservesCustomHost(t *testing.T) {
 	var gotHost string
 	var server *httptest.Server
