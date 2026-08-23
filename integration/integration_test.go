@@ -46,7 +46,7 @@ import (
 )
 
 func TestMain(t *testing.T) {
-	fetchPath := goBuild(t, t.TempDir())
+	fetchPath := fetchExecutable(t)
 	version := getFetchVersion(t, fetchPath)
 
 	t.Run("help", func(t *testing.T) {
@@ -3763,6 +3763,23 @@ func createTempFile(t *testing.T, data string) string {
 	}
 
 	return f.Name()
+}
+
+func fetchExecutable(t *testing.T) string {
+	t.Helper()
+
+	if path := os.Getenv("FETCH_INTEGRATION_BINARY"); path != "" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("unable to stat prebuilt fetch binary: %s", err.Error())
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("prebuilt fetch binary is not a regular file: %s", path)
+		}
+		return path
+	}
+
+	return goBuild(t, t.TempDir())
 }
 
 func goBuild(t *testing.T, dir string) string {
