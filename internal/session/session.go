@@ -302,28 +302,12 @@ func validateCookieSet(cookies []SessionCookie) error {
 }
 
 func serializedSessionSize(cookies []SessionCookie) (int, error) {
-	var empty []byte
-	var err error
-	if cookies == nil {
-		empty, err = json.Marshal(sessionFile{Cookies: nil})
-	} else {
-		empty, err = json.Marshal(sessionFile{Cookies: []SessionCookie{}})
-	}
+	// marshalSessionFile returns the exact indented representation written by Save.
+	data, err := marshalSessionFile(cookies)
 	if err != nil {
 		return 0, err
 	}
-	size := len(empty)
-	if len(cookies) > 0 {
-		size += len(cookies) - 1
-	}
-	for _, c := range cookies {
-		data, err := json.Marshal(c)
-		if err != nil {
-			return 0, err
-		}
-		size += len(data)
-	}
-	return size, nil
+	return len(data), nil
 }
 
 func marshalSessionFile(cookies []SessionCookie) ([]byte, error) {
@@ -392,19 +376,11 @@ func enforceCookieLimits(cookies []SessionCookie, protected *cookieKey, diagnost
 		if index < 0 {
 			return nil, fmt.Errorf("serialized session exceeds %d bytes", MaxSerializedSessionBytes)
 		}
-		cookieData, err := json.Marshal(cookies[index])
-		if err != nil {
-			return nil, err
-		}
-		if len(cookies) > 1 {
-			size -= len(cookieData) + 1
-		} else {
-			size -= len(cookieData)
-		}
 		cookies = append(cookies[:index], cookies[index+1:]...)
 		diagnostic(fmt.Sprintf("session cookie evicted at serialized size limit of %d bytes", MaxSerializedSessionBytes))
-		if size <= MaxSerializedSessionBytes {
-			return cookies, nil
+		size, err = serializedSessionSize(cookies)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return cookies, nil

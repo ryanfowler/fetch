@@ -337,6 +337,123 @@ func TestSessionJarResponseGrowthEvictsForSerializedSize(t *testing.T) {
 	}
 }
 
+func TestSessionSaveEnforcesFormattedSerializedCookieLimitBoundary(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
+
+	prefix := make([]SessionCookie, 0, 256)
+	fullValue := string(bytes.Repeat([]byte{'v'}, MaxCookieValueBytes))
+	for i := 0; ; i++ {
+		candidate := append(append([]SessionCookie(nil), prefix...), SessionCookie{
+			Name:   fmt.Sprintf("cookie-%04d", i),
+			Value:  fullValue,
+			Domain: fmt.Sprintf("formatted-%04d.example.com", i),
+			Path:   "/",
+		})
+		size, err := serializedSessionSize(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if size > MaxSerializedSessionBytes {
+			break
+		}
+		prefix = candidate
+	}
+
+	boundaryCookie := func(value string) SessionCookie {
+		return SessionCookie{
+			Name:   "boundary",
+			Value:  value,
+			Domain: "boundary.example.com",
+			Path:   "/",
+		}
+	}
+	candidateWithValue := func(value string) []SessionCookie {
+		candidate := append([]SessionCookie(nil), prefix...)
+		return append(candidate, boundaryCookie(value))
+	}
+	for {
+		candidate := candidateWithValue("")
+		size, err := serializedSessionSize(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if size <= MaxSerializedSessionBytes {
+			break
+		}
+		if len(prefix) == 0 {
+			t.Fatal("could not fit boundary cookie")
+		}
+		prefix = prefix[:len(prefix)-1]
+	}
+
+	lo, hi := 0, MaxCookieValueBytes
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		size, err := serializedSessionSize(candidateWithValue(string(bytes.Repeat([]byte{'v'}, mid))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if size <= MaxSerializedSessionBytes {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+
+	atLimit := candidateWithValue(string(bytes.Repeat([]byte{'v'}, lo)))
+	atLimitSize, err := serializedSessionSize(atLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atLimitSize != MaxSerializedSessionBytes {
+		t.Fatalf("formatted session size = %d, want boundary %d", atLimitSize, MaxSerializedSessionBytes)
+	}
+	compact, err := json.Marshal(sessionFile{Cookies: atLimit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compact) >= MaxSerializedSessionBytes {
+		t.Fatalf("compact session size = %d, want below formatted boundary", len(compact))
+	}
+
+	sess, err := Load("formatted-boundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Cookies = atLimit
+	if err := sess.Save(); err != nil {
+		t.Fatalf("saving exact boundary failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "formatted-boundary.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != MaxSerializedSessionBytes {
+		t.Fatalf("written session size = %d, want boundary %d", len(data), MaxSerializedSessionBytes)
+	}
+
+	overLimit := candidateWithValue(string(bytes.Repeat([]byte{'v'}, lo+1)))
+	overLimitSize, err := serializedSessionSize(overLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overLimitSize != MaxSerializedSessionBytes+1 {
+		t.Fatalf("formatted over-limit size = %d, want %d", overLimitSize, MaxSerializedSessionBytes+1)
+	}
+	sess.Cookies = overLimit
+	if err := sess.Save(); err != nil {
+		t.Fatalf("saving over boundary failed: %v", err)
+	}
+	data, err = os.ReadFile(filepath.Join(dir, "formatted-boundary.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > MaxSerializedSessionBytes {
+		t.Fatalf("written over-limit session size = %d, exceeds %d", len(data), MaxSerializedSessionBytes)
+	}
+}
+
 func TestSessionJarRejectsOversizedCookieAndBoundsDiagnostics(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FETCH_INTERNAL_SESSIONS_DIR", dir)
