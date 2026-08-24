@@ -425,8 +425,12 @@ func TestCompileProtosContainsChildWithInheritedPipes(t *testing.T) {
 
 func readChildPID(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	const waitTimeout = 5 * time.Second
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(waitTimeout)
+	defer deadline.Stop()
+	for {
 		data, err := os.ReadFile(path)
 		if err == nil {
 			var pid int
@@ -434,10 +438,13 @@ func readChildPID(t *testing.T, path string) int {
 				return pid
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("fake protoc did not record child PID in %s within %s", path, waitTimeout)
+			return 0
+		}
 	}
-	t.Fatalf("fake protoc did not record child PID in %s", path)
-	return 0
 }
 
 func buildFakeProtoc(t *testing.T) string {
