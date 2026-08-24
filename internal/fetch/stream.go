@@ -35,9 +35,11 @@ type binaryGuardReader struct {
 	drain    bool
 	onBinary func()
 
-	pending []byte
-	carry   []byte
-	readBuf []byte
+	pending  []byte
+	combined []byte
+	readBuf  []byte
+	carry    [utf8.UTFMax]byte
+	carryLen int
 
 	done        bool
 	terminalErr error
@@ -63,9 +65,14 @@ func newUntrustedResponseReader(source io.Reader) io.ReadCloser {
 }
 
 type terminalSafeReader struct {
-	source    io.Reader
-	pending   []byte
-	carry     []byte
+	source   io.Reader
+	pending  []byte
+	combined []byte
+	readBuf  []byte
+	scratch  []byte
+	carry    [utf8.UTFMax]byte
+	carryLen int
+
 	sourceErr error
 	done      bool
 }
@@ -76,7 +83,12 @@ func (r *terminalSafeReader) Read(p []byte) (int, error) {
 	}
 	if len(r.pending) > 0 {
 		n := copy(p, r.pending)
-		r.pending = r.pending[n:]
+		if n == len(r.pending) {
+			r.pending = nil
+			r.scratch = r.scratch[:0]
+		} else {
+			r.pending = r.pending[n:]
+		}
 		return n, nil
 	}
 	if r.done {
@@ -84,11 +96,11 @@ func (r *terminalSafeReader) Read(p []byte) (int, error) {
 	}
 
 	for {
-		if len(r.carry) > 0 && r.sourceErr != nil {
+		if r.carryLen > 0 && r.sourceErr != nil {
 			// The source ended with an incomplete UTF-8 sequence. It is
 			// invalid text, so let TerminalSafeText escape its bytes.
-			complete := r.carry
-			r.carry = nil
+			complete := r.carry[:r.carryLen]
+			r.carryLen = 0
 			r.done = true
 			return r.writeSafe(p, complete)
 		}
@@ -97,13 +109,24 @@ func (r *terminalSafeReader) Read(p []byte) (int, error) {
 			return 0, r.sourceErr
 		}
 
-		buf := make([]byte, len(p))
-		n, err := r.source.Read(buf)
+		if cap(r.readBuf) < len(p) {
+			r.readBuf = make([]byte, len(p))
+		}
+		if cap(r.combined) < len(p)+utf8.UTFMax {
+			r.combined = make([]byte, len(p)+utf8.UTFMax)
+		}
+		r.readBuf = r.readBuf[:len(p)]
+		r.combined = r.combined[:r.carryLen]
+		copy(r.combined, r.carry[:r.carryLen])
+		n, err := r.source.Read(r.readBuf)
 		if err != nil {
 			r.sourceErr = err
 		}
-		combined := append(r.carry, buf[:n]...)
-		r.carry = nil
+		carryLen := r.carryLen
+		r.combined = r.combined[:carryLen+n]
+		copy(r.combined[carryLen:], r.readBuf[:n])
+		combined := r.combined
+		r.carryLen = 0
 		if len(combined) == 0 {
 			if err != nil {
 				r.done = true
@@ -112,20 +135,23 @@ func (r *terminalSafeReader) Read(p []byte) (int, error) {
 			continue
 		}
 
-		complete, tail := splitIncompleteTrailingUTF8(combined)
-		r.carry = tail
-		if len(complete) == 0 {
+		completeLen, tailLen := splitIncompleteTrailingUTF8Len(combined)
+		copy(r.carry[:tailLen], combined[completeLen:])
+		r.carryLen = tailLen
+		if completeLen == 0 {
 			continue
 		}
-		return r.writeSafe(p, complete)
+		return r.writeSafe(p, combined[:completeLen])
 	}
 }
 
 func (r *terminalSafeReader) writeSafe(p, data []byte) (int, error) {
-	safe := []byte(core.TerminalSafeText(string(data)))
-	written := copy(p, safe)
-	if written < len(safe) {
-		r.pending = safe[written:]
+	r.scratch = core.AppendTerminalSafeBytes(r.scratch[:0], data)
+	written := copy(p, r.scratch)
+	if written < len(r.scratch) {
+		r.pending = r.scratch[written:]
+	} else {
+		r.scratch = r.scratch[:0]
 	}
 	return written, nil
 }
@@ -142,11 +168,14 @@ func newTerminalSafeReader(source io.Reader) io.ReadCloser {
 }
 
 func newBinaryGuardReader(source io.Reader, drain bool, onBinary func()) *binaryGuardReader {
+	const readSize = 64 * 1024
+
 	return &binaryGuardReader{
 		source:   source,
 		drain:    drain,
 		onBinary: onBinary,
-		readBuf:  make([]byte, 64*1024),
+		readBuf:  make([]byte, readSize),
+		combined: make([]byte, readSize+utf8.UTFMax),
 	}
 }
 
@@ -159,6 +188,9 @@ func (r *binaryGuardReader) Read(p []byte) (int, error) {
 		if len(r.pending) > 0 {
 			n := copy(p, r.pending)
 			r.pending = r.pending[n:]
+			if len(r.pending) == 0 {
+				r.pending = nil
+			}
 			return n, nil
 		}
 		if r.triggered {
@@ -168,11 +200,11 @@ func (r *binaryGuardReader) Read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 		if r.done {
-			if len(r.carry) > 0 {
+			if r.carryLen > 0 {
 				// An incomplete UTF-8 sequence at end of input cannot be
 				// completed by a later transport chunk. Do not write it to a
 				// terminal as if it were text.
-				r.carry = nil
+				r.carryLen = 0
 				r.triggerBinary()
 				return 0, r.drainedError()
 			}
@@ -189,19 +221,22 @@ func (r *binaryGuardReader) Read(p []byte) (int, error) {
 			if err != nil && err != io.EOF {
 				r.terminalErr = err
 			}
-			combined := make([]byte, 0, len(r.carry)+n)
-			combined = append(combined, r.carry...)
-			combined = append(combined, r.readBuf[:n]...)
-			r.carry = nil
+			carryLen := r.carryLen
+			r.combined = r.combined[:carryLen+n]
+			copy(r.combined, r.carry[:carryLen])
+			copy(r.combined[carryLen:], r.readBuf[:n])
+			combined := r.combined
+			r.carryLen = 0
 
 			if !printableBytes(combined) {
 				r.triggerBinary()
 				return 0, r.drainedError()
 			}
 
-			complete, tail := splitIncompleteTrailingUTF8(combined)
-			r.pending = complete
-			r.carry = tail
+			completeLen, tailLen := splitIncompleteTrailingUTF8Len(combined)
+			r.pending = combined[:completeLen]
+			copy(r.carry[:tailLen], combined[completeLen:])
+			r.carryLen = tailLen
 		}
 
 		if err != nil {
@@ -268,10 +303,7 @@ func closeReaderOnContext(ctx interface{ Done() <-chan struct{} }, source io.Rea
 	return func() { close(done) }
 }
 
-// splitIncompleteTrailingUTF8 returns a complete prefix and a trailing UTF-8
-// sequence that needs more bytes. Invalid bytes are not treated as a suffix;
-// printableBytes has already classified them as unsafe.
-func splitIncompleteTrailingUTF8(data []byte) ([]byte, []byte) {
+func splitIncompleteTrailingUTF8Len(data []byte) (completeLen, tailLen int) {
 	maxTail := 4
 	if len(data) < maxTail {
 		maxTail = len(data)
@@ -283,10 +315,10 @@ func splitIncompleteTrailingUTF8(data []byte) ([]byte, []byte) {
 			continue
 		}
 		if !utf8.FullRune(tail) {
-			return data[:split], tail
+			return split, tailLen
 		}
 	}
-	return data, nil
+	return len(data), 0
 }
 
 func isUTF8LeadingByte(b byte) bool {

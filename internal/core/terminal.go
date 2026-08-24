@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"syscall"
 	"unicode"
@@ -21,6 +22,59 @@ func TerminalSafeText(s string) string {
 		return s
 	}
 	return escapeTerminalText(s, unsafe)
+}
+
+// TerminalSafeBytes returns src when it is already safe, or a sanitized copy
+// otherwise. It is the byte-oriented equivalent of TerminalSafeText.
+func TerminalSafeBytes(src []byte) []byte {
+	if firstUnsafeTerminalByteBytes(src) < 0 {
+		return src
+	}
+	return AppendTerminalSafeBytes(nil, src)
+}
+
+// AppendTerminalSafeBytes appends src after escaping terminal control
+// characters and invalid UTF-8. Newlines and tabs are retained. The
+// destination can be reused by callers that sanitize a stream repeatedly.
+func AppendTerminalSafeBytes(dst, src []byte) []byte {
+	unsafe := firstUnsafeTerminalByteBytes(src)
+	if unsafe < 0 {
+		return append(dst, src...)
+	}
+
+	dst = append(dst, src[:unsafe]...)
+	src = src[unsafe:]
+	for len(src) > 0 {
+		if src[0] < utf8.RuneSelf {
+			value := src[0]
+			src = src[1:]
+			switch {
+			case value == '\n' || value == '\t' || value >= 0x20 && value != 0x7f:
+				dst = append(dst, value)
+			default:
+				dst = appendEscapedTerminalByte(dst, value)
+			}
+			continue
+		}
+
+		r, size := utf8.DecodeRune(src)
+		if r == utf8.RuneError && size == 1 {
+			dst = appendEscapedTerminalByte(dst, src[0])
+			src = src[1:]
+			continue
+		}
+		src = src[size:]
+
+		switch {
+		case r == '\n' || r == '\t':
+			dst = utf8.AppendRune(dst, r)
+		case r < 0x20 || r >= 0x7f && r <= 0x9f || unicode.IsControl(r):
+			dst = appendEscapedTerminalRune(dst, r)
+		default:
+			dst = utf8.AppendRune(dst, r)
+		}
+	}
+	return dst
 }
 
 // validHyperlinkURL reports whether s can safely be placed inside an OSC 8
@@ -73,6 +127,44 @@ func firstUnsafeTerminalByte(s string) int {
 		i += size
 	}
 	return -1
+}
+
+func firstUnsafeTerminalByteBytes(src []byte) int {
+	for i := 0; i < len(src); {
+		if src[i] < utf8.RuneSelf {
+			c := src[i]
+			if c == '\n' || c == '\t' || c >= 0x20 && c != 0x7f {
+				i++
+				continue
+			}
+			return i
+		}
+
+		r, size := utf8.DecodeRune(src[i:])
+		if r == utf8.RuneError && size == 1 {
+			return i
+		}
+		if r >= 0x80 && r <= 0x9f || unicode.IsControl(r) {
+			return i
+		}
+		i += size
+	}
+	return -1
+}
+
+const terminalHex = "0123456789abcdef"
+
+func appendEscapedTerminalByte(dst []byte, value byte) []byte {
+	return append(dst, '\\', 'x', terminalHex[value>>4], terminalHex[value&0xf])
+}
+
+func appendEscapedTerminalRune(dst []byte, value rune) []byte {
+	if value <= 0xff {
+		return appendEscapedTerminalByte(dst, byte(value))
+	}
+	dst = append(dst, '\\', 'u', '{')
+	dst = strconv.AppendInt(dst, int64(value), 16)
+	return append(dst, '}')
 }
 
 func escapeTerminalText(s string, firstUnsafe int) string {

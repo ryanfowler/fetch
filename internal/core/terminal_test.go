@@ -102,6 +102,57 @@ func TestTerminalSafeTextCommonCaseDoesNotAllocate(t *testing.T) {
 	}
 }
 
+func TestTerminalSafeBytesMatchesTerminalSafeText(t *testing.T) {
+	inputs := []string{
+		"ordinary diagnostic text with UTF-8: café\n",
+		"controls\x00\x01\x1b[2J\x7f\x80\u0085\tline",
+		"invalid UTF-8: \xff\xc3",
+		"unicode control: \u009f",
+	}
+
+	for _, input := range inputs {
+		src := []byte(input)
+		want := TerminalSafeText(input)
+		if got := string(TerminalSafeBytes(src)); got != want {
+			t.Errorf("TerminalSafeBytes(%q) = %q, want %q", input, got, want)
+		}
+
+		dst := make([]byte, len("prefix:"), len("prefix:")+len(src)+16)
+		copy(dst, "prefix:")
+		got := AppendTerminalSafeBytes(dst, src)
+		if want := "prefix:" + TerminalSafeText(input); string(got) != want {
+			t.Errorf("AppendTerminalSafeBytes(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestTerminalSafeBytesSafeInputReturnsSource(t *testing.T) {
+	src := []byte("safe UTF-8: café\n")
+	got := TerminalSafeBytes(src)
+	if len(got) == 0 || &got[0] != &src[0] {
+		t.Fatal("TerminalSafeBytes copied safe input")
+	}
+}
+
+func BenchmarkAppendTerminalSafeBytes(b *testing.B) {
+	cases := map[string][]byte{
+		"SafeText": []byte(strings.Repeat("ordinary text with UTF-8: café\n", 128)),
+		"Controls": []byte(strings.Repeat("line\x1b[2J\x07\x00\n", 128)),
+	}
+	for name, src := range cases {
+		b.Run(name, func(b *testing.B) {
+			dst := make([]byte, 0, len(src)*4)
+			b.SetBytes(int64(len(src)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				dst = AppendTerminalSafeBytes(dst[:0], src)
+			}
+			_ = dst
+		})
+	}
+}
+
 func TestRedactHeaderValue(t *testing.T) {
 	for _, name := range []string{
 		"Authorization", "proxy-authorization", "Cookie", "Set-Cookie", "X-Amz-Security-Token",
