@@ -4,7 +4,6 @@ package update
 
 import (
 	"archive/zip"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,15 +28,54 @@ func unpackArtifact(dir string, r io.Reader) error {
 	if err := validateExtractionRoot(dir); err != nil {
 		return err
 	}
-	data, err := io.ReadAll(io.LimitReader(r, core.MaxUpdaterArtifactBytes+1))
+	archive, err := os.CreateTemp(dir, ".fetch-update-archive-*")
 	if err != nil {
 		return err
 	}
-	if int64(len(data)) > core.MaxUpdaterArtifactBytes {
+	archivePath := archive.Name()
+	defer func() {
+		_ = archive.Close()
+		_ = os.Remove(archivePath)
+	}()
+
+	size, err := io.Copy(archive, io.LimitReader(r, core.MaxUpdaterArtifactBytes+1))
+	if err != nil {
+		return err
+	}
+	if size > core.MaxUpdaterArtifactBytes {
 		return core.LimitError{Subsystem: "update archive", Limit: core.MaxUpdaterArtifactBytes}
 	}
+	if err := archive.Sync(); err != nil {
+		return err
+	}
+	return unpackArtifactFile(dir, archive, size)
+}
 
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+// unpackArtifactFile extracts the verified disk-backed archive directly with
+// zip.NewReader. The archive has already been hashed and closed by the
+// downloader, so its size is the compressed archive limit without materializing
+// another copy in memory.
+func unpackArtifactFile(dir string, archive *os.File, size int64) error {
+	if err := validateExtractionRoot(dir); err != nil {
+		return err
+	}
+	if archive == nil {
+		return errors.New("archive file is nil")
+	}
+	if size < 0 || size > core.MaxUpdaterArtifactBytes {
+		return core.LimitError{Subsystem: "update archive", Limit: core.MaxUpdaterArtifactBytes}
+	}
+	info, err := archive.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() != size {
+		return errors.New("verified archive file changed")
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	zr, err := zip.NewReader(archive, size)
 	if err != nil {
 		return err
 	}

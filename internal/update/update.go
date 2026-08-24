@@ -283,13 +283,11 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 		return fmt.Errorf("checksum verification: SHA-256 mismatch (expected %s, got %s)",
 			hex.EncodeToString(expectedDigest[:]), hex.EncodeToString(actualDigest[:]))
 	}
-	_ = contentLength
-
 	archive, err := os.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("opening verified archive: %w", err)
 	}
-	err = unpackArtifact(tempDir, archive)
+	err = unpackArtifactFile(tempDir, archive, contentLength)
 	closeErr := archive.Close()
 	if err == nil {
 		err = closeErr

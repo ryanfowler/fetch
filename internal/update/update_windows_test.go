@@ -5,11 +5,15 @@ package update
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 func TestUnpackArtifact_PathTraversal(t *testing.T) {
@@ -89,6 +93,61 @@ func TestUnpackArtifact_RejectsNestedDirectoryEntry(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "bin", "fetch.exe")); !os.IsNotExist(err) {
 		t.Fatalf("nested payload exists after rejection, stat error = %v", err)
+	}
+}
+
+func TestUnpackArtifactFile_ExtractsNearLimitDiskBackedArchive(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "update.zip")
+	size := createNearLimitZip(t, archivePath)
+	if size < core.MaxUpdaterArtifactBytes-(1<<20) {
+		t.Fatalf("archive size = %d, want within 1 MiB of the compressed limit", size)
+	}
+
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+
+	dir := t.TempDir()
+	if err := unpackArtifactFile(dir, archive, size); err != nil {
+		t.Fatalf("unpackArtifactFile: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, getFetchFilename()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "candidate" {
+		t.Fatalf("extracted content = %q, want candidate", got)
+	}
+}
+
+func TestUnpackArtifactFile_RejectsCompressedLimitOverflow(t *testing.T) {
+	archive, err := os.CreateTemp(t.TempDir(), "update.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+
+	if err := archive.Truncate(core.MaxUpdaterArtifactBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := unpackArtifactFile(t.TempDir(), archive, core.MaxUpdaterArtifactBytes+1); err == nil {
+		t.Fatal("unpackArtifactFile accepted an oversized compressed archive")
+	}
+}
+
+func TestUnpackArtifact_CleansSpoolAfterExtractionError(t *testing.T) {
+	dir := t.TempDir()
+	if err := unpackArtifact(dir, bytes.NewReader([]byte("not a zip archive"))); err == nil {
+		t.Fatal("unpackArtifact accepted an invalid archive")
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, ".fetch-update-archive-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Fatalf("temporary archive files remain after extraction failure: %v", paths)
 	}
 }
 
@@ -327,4 +386,59 @@ func createZip(t *testing.T, filename string, content []byte) []byte {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
+}
+
+// createNearLimitZip leaves a sparse gap between the local entry and the
+// central directory. ZIP permits this gap, which makes the archive nearly the
+// compressed-size limit without requiring a large in-memory test fixture.
+func createNearLimitZip(t *testing.T, path string) int64 {
+	t.Helper()
+	name := getFetchFilename()
+	content := []byte("candidate")
+	data := createZip(t, name, content)
+	eocdOffset := bytes.LastIndex(data, []byte("PK\x05\x06"))
+	if eocdOffset < 0 || eocdOffset+22 > len(data) {
+		t.Fatalf("unexpected ZIP layout: missing EOCD")
+	}
+	centralOffset := int64(binary.LittleEndian.Uint32(data[eocdOffset+16 : eocdOffset+20]))
+	if centralOffset < 0 || centralOffset+4 > int64(eocdOffset) ||
+		!bytes.Equal(data[centralOffset:centralOffset+4], []byte("PK\x01\x02")) {
+		t.Fatalf("unexpected ZIP layout: invalid central-directory offset")
+	}
+
+	targetSize := core.MaxUpdaterArtifactBytes - 1
+	gap := targetSize - int64(len(data))
+	if gap <= 0 {
+		t.Fatalf("test archive is already too large: %d", len(data))
+	}
+	centralOffset += gap
+	binary.LittleEndian.PutUint32(data[eocdOffset+16:eocdOffset+20], uint32(centralOffset))
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeFile := func() {
+		if err := f.Close(); err != nil {
+			t.Error(err)
+		}
+	}
+	defer closeFile()
+	prefixLen := centralOffset - gap
+	if _, err := f.Write(data[:prefixLen]); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(targetSize); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Seek(centralOffset, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(data[prefixLen:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	return targetSize
 }

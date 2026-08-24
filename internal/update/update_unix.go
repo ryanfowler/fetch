@@ -88,6 +88,30 @@ func unpackArtifact(dir string, r io.Reader) error {
 	}
 }
 
+// unpackArtifactFile extracts the verified archive file. Unix archives are
+// streamed by the tar reader, but keep the file-based entry point shared with
+// Windows so the updater always extracts the already-verified disk-backed
+// archive.
+func unpackArtifactFile(dir string, archive *os.File, size int64) error {
+	if archive == nil {
+		return errors.New("archive file is nil")
+	}
+	if size < 0 || size > core.MaxUpdaterArtifactBytes {
+		return core.LimitError{Subsystem: "update archive", Limit: core.MaxUpdaterArtifactBytes}
+	}
+	info, err := archive.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() != size {
+		return errors.New("verified archive file changed")
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	return unpackArtifact(dir, archive)
+}
+
 // selfReplace stages the new executable beside the destination and performs
 // one checked rename. The final rename is atomic on Unix and never follows a
 // destination symlink.
