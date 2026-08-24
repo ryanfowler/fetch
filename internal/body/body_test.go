@@ -90,6 +90,42 @@ func TestFileBodyRejectsTruncationAndReplacement(t *testing.T) {
 	}
 }
 
+func TestNewFileFromOpenFilePreservesClosedFileStatError(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "body-closed-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, statErr := f.Stat()
+	if statErr == nil {
+		t.Fatal("Stat succeeded on a closed file")
+	}
+
+	if _, err := NewFileFromOpenFile(f, "text/plain"); err == nil {
+		t.Fatal("NewFileFromOpenFile() succeeded with a closed file")
+	} else if err.Error() != statErr.Error() {
+		t.Fatalf("NewFileFromOpenFile() error = %v, want the original Stat error %v", err, statErr)
+	}
+}
+
+func TestNewFileFromOpenFileClosesNonRegularFile(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	if _, err := NewFileFromOpenFile(reader, "application/octet-stream"); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("NewFileFromOpenFile() error = %v, want a non-regular-file error", err)
+	}
+	if err := reader.Close(); err == nil {
+		t.Fatal("non-regular file was not closed")
+	}
+}
+
 func TestAttachPreservesExplicitWireMetadata(t *testing.T) {
 	t.Run("content length", func(t *testing.T) {
 		req, err := http.NewRequest(http.MethodPost, "https://example.com", nil)

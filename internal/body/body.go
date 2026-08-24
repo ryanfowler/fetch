@@ -147,10 +147,17 @@ func NewFile(path, contentType string) (*Body, error) {
 // NewFileFromOpenFile converts an already-open regular file into a replayable
 // source and closes the caller's descriptor. It is useful at the boundary
 // where CLI parsing has already opened a file to inspect its content type.
-func NewFileFromOpenFile(f *os.File, contentType string) (*Body, error) {
+func NewFileFromOpenFile(f *os.File, contentType string) (body *Body, err error) {
 	if f == nil {
 		return nil, errors.New("request body file is nil")
 	}
+	defer func() {
+		closeErr := f.Close()
+		if err == nil && closeErr != nil {
+			body = nil
+			err = closeErr
+		}
+	}()
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
@@ -162,9 +169,6 @@ func NewFileFromOpenFile(f *os.File, contentType string) (*Body, error) {
 		return nil, err
 	}
 	path := f.Name()
-	if err := f.Close(); err != nil {
-		return nil, err
-	}
 	return newFile(path, info, contentType), nil
 }
 
