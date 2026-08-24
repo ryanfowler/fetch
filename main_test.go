@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/cli"
@@ -47,6 +48,25 @@ func TestHelpVerboseRequested(t *testing.T) {
 			t.Fatal("method value was treated as a verbosity flag")
 		}
 	})
+}
+
+func TestConciseHelpLinesStayWithin80Columns(t *testing.T) {
+	app, err := cli.Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	p := core.TestPrinter(false)
+	printConciseHelp(app, p)
+
+	lines := strings.Split(string(p.Bytes()), "\n")
+	if len(lines) < 10 {
+		t.Fatalf("concise help unexpectedly short: %d lines", len(lines))
+	}
+	for i, line := range lines {
+		if n := utf8.RuneCountInString(line); n > 80 {
+			t.Fatalf("help line %d is %d columns, want <= 80: %q", i+1, n, line)
+		}
+	}
 }
 
 func TestVerboseHelpPrinterUsesTerminalMarkdownRendering(t *testing.T) {
