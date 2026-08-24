@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -359,38 +360,109 @@ func handleMetadataCommand(ctx context.Context, app *cli.App, handle *core.Handl
 	return 0
 }
 
+type helpRow struct {
+	opts string
+	desc string
+}
+
+type helpSection struct {
+	title string
+	rows  []helpRow
+}
+
+func conciseHelpSections() []helpSection {
+	sections := []helpSection{
+		{
+			title: "Common options:",
+			rows: []helpRow{
+				{"--help, -h", "Show this concise help"},
+				{"--verbose, -v", "Increase output detail"},
+				{"--version, -V", "Print the version"},
+				{"--buildinfo", "Print build information"},
+				{"--config PATH", "Read a configuration file"},
+				{"--install-skill [AGENT]", "Install the portable Agent Skill"},
+			},
+		},
+		{
+			title: "Request and output options:",
+			rows: []helpRow{
+				{"--method METHOD", "Set the HTTP method"},
+				{"--header NAME:VALUE", "Add a request header"},
+				{"--query KEY=VALUE", "Append query parameters to the URL"},
+				{"--data [@]VALUE", "Send a request body"},
+				{"--json [@]VALUE", "Send a JSON request body"},
+				{"--xml [@]VALUE", "Send an XML request body"},
+				{"--form KEY=VALUE", "Send a urlencoded form body"},
+				{"--multipart NAME=[@]VALUE", "Send a multipart form body"},
+				{"--format MODE", "Select response formatting"},
+				{"--article", "Extract readable page content"},
+				{"--output PATH", "Write the response to a file"},
+				{"--pager MODE", "Select pager behavior"},
+				{"--compress MODE", "Select response compression"},
+			},
+		},
+		{
+			title: "Authentication:",
+			rows: []helpRow{
+				{"--basic USER:PASS", "Enable HTTP basic authentication"},
+				{"--bearer TOKEN", "Enable HTTP bearer authentication"},
+				{"--digest USER:PASS", "Enable HTTP digest authentication"},
+				{"--aws-sigv4 REGION/SERVICE", "Sign the request using AWS signature V4"},
+			},
+		},
+		{
+			title: "Networking and diagnostics:",
+			rows: []helpRow{
+				{"--http VERSION", "Select HTTP/1.1, HTTP/2, or HTTP/3"},
+				{"--proxy PROXY", "Use a proxy"},
+				{"--timeout SECONDS", "Set the request timeout"},
+				{"--dry-run", "Print out the request info and exit"},
+				{"--inspect-dns", "Inspect DNS resolution"},
+				{"--inspect-tls", "Inspect the TLS handshake"},
+				{"--grpc", "Use gRPC mode"},
+			},
+		},
+	}
+	if runtime.GOOS != "windows" {
+		last := len(sections) - 1
+		sections[last].rows = append(sections[last].rows, helpRow{opts: "--unix PATH", desc: "Use a Unix socket"})
+	}
+	if !core.NoSelfUpdate {
+		rows := sections[0].rows
+		i := len(rows) - 1
+		sections[0].rows = slices.Insert(rows, i, helpRow{opts: "--update", desc: "Update the fetch binary in place"})
+	}
+	return sections
+}
+
 func printConciseHelp(app *cli.App, p *core.Printer) {
+	sections := conciseHelpSections()
+	width := 0
+	for _, section := range sections {
+		for _, row := range section.rows {
+			if n := len(row.opts); n > width {
+				width = n
+			}
+		}
+	}
 	p.WriteString("fetch is a modern HTTP(S) client for the command line\n\n")
 	p.Set(core.Bold)
 	p.Set(core.Underline)
 	p.WriteString("Usage")
 	p.Reset()
 	p.WriteString(": fetch [OPTIONS] [URL]\n\n")
-	p.WriteString("Common options:\n")
-	p.WriteString("  --help, -h       Show this concise help\n")
-	p.WriteString("  --verbose, -v    Increase output detail\n")
-	p.WriteString("  --version, -V    Print the version\n")
-	p.WriteString("  --buildinfo      Print build information\n")
-	p.WriteString("  --config PATH    Read a configuration file\n")
-	p.WriteString("  --complete SHELL Print shell completion\n")
-	p.WriteString("\nRequest and output options:\n")
-	p.WriteString("  --method METHOD  Set the HTTP method\n")
-	p.WriteString("  --header NAME:VALUE  Add a request header\n")
-	p.WriteString("  --data VALUE     Send a request body\n")
-	p.WriteString("  --format MODE    Select response formatting\n")
-	p.WriteString("  --article        Extract readable page content\n")
-	p.WriteString("  --output PATH    Write the response to a file\n")
-	p.WriteString("  --pager MODE     Select pager behavior\n")
-	p.WriteString("  --compress MODE  Select response compression\n")
-	p.WriteString("\nNetworking and diagnostics:\n")
-	p.WriteString("  --http VERSION   Select HTTP/1.1, HTTP/2, or HTTP/3\n")
-	p.WriteString("  --proxy PROXY    Use a proxy\n")
-	p.WriteString("  --timeout SECONDS  Set the request timeout\n")
-	p.WriteString("  --inspect-dns    Inspect DNS resolution\n")
-	p.WriteString("  --inspect-tls   Inspect the TLS handshake\n")
-	p.WriteString("  --grpc           Use gRPC mode\n")
-	if runtime.GOOS != "windows" {
-		p.WriteString("  --unix PATH      Use a Unix socket\n")
+	for i, section := range sections {
+		if i > 0 {
+			p.WriteString("\n")
+		}
+		p.WriteString(section.title + "\n")
+		for _, row := range section.rows {
+			p.WriteString("  ")
+			p.WriteString(row.opts)
+			p.WriteString(strings.Repeat(" ", width+2-len(row.opts)))
+			p.WriteString(row.desc)
+			p.WriteString("\n")
+		}
 	}
 	p.WriteString("\nUse `fetch -v --help` for the full Markdown reference.\n")
 }

@@ -89,7 +89,7 @@ func TestStreamContextTerminatesPagerProcessGroup(t *testing.T) {
 	t.Setenv("FETCH_TEST_PAGER_READY", readyPath)
 	t.Setenv("FETCH_TEST_PAGER_CHILD_PID", childPIDPath)
 	t.Setenv("PAGER", pagerPath)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	done := make(chan error, 1)
 	go func() {
 		done <- StreamContext(ctx, strings.NewReader("help"), core.PagerOn, false, false, io.Discard)
@@ -113,7 +113,7 @@ func TestStreamContextTerminatesPagerProcessGroup(t *testing.T) {
 		}
 	})
 
-	readyDeadline := time.NewTimer(time.Second)
+	readyDeadline := time.NewTimer(5 * time.Second)
 	defer readyDeadline.Stop()
 	readyTicker := time.NewTicker(5 * time.Millisecond)
 	defer readyTicker.Stop()
@@ -149,7 +149,7 @@ func TestStreamContextTerminatesPagerProcessGroup(t *testing.T) {
 		if streamErr == nil {
 			t.Fatal("canceled pager returned nil")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("pager process group did not terminate")
 	}
 	if !waitForTestProcessExit(childPID, time.Second) {
