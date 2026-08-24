@@ -786,6 +786,42 @@ func TestFormatMarkdownWrapsStyledLinkByVisibleWidth(t *testing.T) {
 	}
 }
 
+func TestFormatMarkdownPreservesSpacesBeforeStyledInline(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "emphasis",
+			input: "before *italic*",
+			want:  "before italic\n",
+		},
+		{
+			name:  "terminal link",
+			input: "before [docs](https://example.com/docs)",
+			want:  "before \x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\\n",
+		},
+		{
+			name:  "code span",
+			input: "before `code`",
+			want:  "before code\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := core.TestTerminalPrinter(false)
+			if err := FormatMarkdownWithOptions([]byte(tt.input), p, MarkdownOptions{MaxWidth: 80}); err != nil {
+				t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+			}
+			if got := string(p.Bytes()); got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatMarkdownWrapsWideUnicodeByDisplayWidth(t *testing.T) {
 	p := core.TestTerminalPrinter(false)
 	input := "世界 世界 世界 世界 世界"

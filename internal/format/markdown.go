@@ -180,6 +180,7 @@ type mdRenderer struct {
 	listContinuations []string
 	width             int
 	lineWidth         int
+	pendingSpace      string
 	tty               bool
 }
 
@@ -243,6 +244,7 @@ func (r *mdRenderer) writeString(s string) {
 // writeUntrusted writes terminal-safe visible text while tracking its display
 // width after escaping controls.
 func (r *mdRenderer) writeUntrusted(s string) {
+	r.flushPendingSpace()
 	r.writeString(core.TerminalSafeText(s))
 }
 
@@ -279,11 +281,13 @@ func (r *mdRenderer) writeWrappedUntrusted(s string) {
 func (r *mdRenderer) writeWrappedUntrustedToWidth(s string, limit int) {
 	s = core.TerminalSafeText(s)
 	if limit <= 0 {
+		r.flushPendingSpace()
 		r.writeString(s)
 		return
 	}
 
-	pendingSpace := ""
+	pendingSpace := r.pendingSpace
+	r.pendingSpace = ""
 	for len(s) > 0 {
 		if s[0] == '\n' {
 			r.writeLineBreak()
@@ -362,6 +366,31 @@ func (r *mdRenderer) writeWrappedUntrustedToWidth(s string, limit int) {
 		}
 		s = s[i:]
 	}
+	r.pendingSpace = pendingSpace
+}
+
+// flushPendingSpace emits whitespace retained for the next inline node.
+// Block and line boundaries discard pending whitespace separately, so
+// formatted output does not acquire trailing spaces.
+func (r *mdRenderer) flushPendingSpace() {
+	if r.pendingSpace == "" {
+		return
+	}
+
+	pendingSpace := r.pendingSpace
+	r.pendingSpace = ""
+	if r.width > 0 && r.lineWidth > 0 &&
+		displayWidth(pendingSpace, r.lineWidth) > r.width {
+		r.writeLineBreak()
+		return
+	}
+	r.writeString(pendingSpace)
+}
+
+// discardPendingSpace drops whitespace that ended an inline node at a block
+// or line boundary.
+func (r *mdRenderer) discardPendingSpace() {
+	r.pendingSpace = ""
 }
 
 func markdownSpaceAt(s string) (bool, int) {
@@ -394,6 +423,7 @@ func displayWidth(s string, start int) int {
 // temporarily closed so list or blockquote indentation cannot become part of
 // the clickable region.
 func (r *mdRenderer) writeLineBreak() {
+	r.discardPendingSpace()
 	if r.width <= 0 {
 		r.writeString("\n")
 		r.writeBqPrefix()
@@ -417,6 +447,7 @@ func (r *mdRenderer) writeLineBreak() {
 // nesting depth. TTY output uses a vertical rule; non-terminal output keeps
 // the Markdown marker.
 func (r *mdRenderer) writeBqPrefix() {
+	r.discardPendingSpace()
 	for range r.bqDepth {
 		r.printer.Set(core.Dim)
 		if r.tty {
@@ -689,6 +720,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 	case *ast.Link:
 		if entering {
 			target := markdownLinkDestination(v.Destination)
+			r.flushPendingSpace()
 			active := r.printer.StartHyperlink(target)
 			r.links = append(r.links, active)
 			r.linkTargets = append(r.linkTargets, target)
@@ -702,8 +734,10 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			active := r.popLink()
 			r.popStyle()
 			if active {
+				r.flushPendingSpace()
 				r.printer.EndHyperlink()
 			} else {
+				r.flushPendingSpace()
 				r.printer.Set(core.Dim)
 				r.writeString("](")
 				r.popAllAndRestore()
@@ -719,6 +753,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 	case *ast.Image:
 		if entering {
 			target := markdownLinkDestination(v.Destination)
+			r.flushPendingSpace()
 			active := r.printer.StartHyperlink(target)
 			r.links = append(r.links, active)
 			r.linkTargets = append(r.linkTargets, target)
@@ -732,8 +767,10 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			active := r.popLink()
 			r.popStyle()
 			if active {
+				r.flushPendingSpace()
 				r.printer.EndHyperlink()
 			} else {
+				r.flushPendingSpace()
 				r.printer.Set(core.Dim)
 				r.writeString("](")
 				r.popAllAndRestore()
@@ -750,6 +787,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if entering {
 			label := string(v.Label(r.source))
 			target := markdownAutoLinkTarget(v, r.source)
+			r.flushPendingSpace()
 			active := r.printer.StartHyperlink(target)
 			r.links = append(r.links, active)
 			r.linkTargets = append(r.linkTargets, target)
@@ -761,6 +799,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 				r.popLink()
 				r.printer.EndHyperlink()
 			} else {
+				r.flushPendingSpace()
 				r.writeString("<")
 				r.printer.Set(core.Cyan)
 				r.writeWrappedUntrusted(label)
