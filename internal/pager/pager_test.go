@@ -3,7 +3,10 @@ package pager
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -75,22 +78,82 @@ func TestStreamContextTerminatesPagerProcessGroup(t *testing.T) {
 	if testing.Short() || runtime.GOOS == "windows" {
 		t.Skip("starts a Unix subprocess")
 	}
-	t.Setenv("PAGER", "sh -c 'sleep 30'")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+
+	fixtureDir := t.TempDir()
+	readyPath := filepath.Join(fixtureDir, "ready")
+	childPIDPath := filepath.Join(fixtureDir, "child.pid")
+	pagerPath := filepath.Join(fixtureDir, "pager.sh")
+	if err := os.WriteFile(pagerPath, []byte("#!/bin/sh\nsleep 30 &\nchild_pid=$!\nprintf '%s\\n' \"$child_pid\" > \"$FETCH_TEST_PAGER_CHILD_PID\"\nprintf ready > \"$FETCH_TEST_PAGER_READY\"\nwait \"$child_pid\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FETCH_TEST_PAGER_READY", readyPath)
+	t.Setenv("FETCH_TEST_PAGER_CHILD_PID", childPIDPath)
+	t.Setenv("PAGER", pagerPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	done := make(chan error, 1)
 	go func() {
 		done <- StreamContext(ctx, strings.NewReader("help"), core.PagerOn, false, false, io.Discard)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	childPID := 0
+	streamDone := false
+	t.Cleanup(func() {
+		cancel()
+		if !streamDone {
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Log("pager cleanup exceeded its deadline")
+			}
+		}
+		if childPID != 0 && !testProcessExited(childPID) {
+			killTestProcess(childPID)
+			if !waitForTestProcessExit(childPID, time.Second) {
+				t.Logf("pager child process %d did not exit during cleanup", childPID)
+			}
+		}
+	})
+
+	readyDeadline := time.NewTimer(time.Second)
+	defer readyDeadline.Stop()
+	readyTicker := time.NewTicker(5 * time.Millisecond)
+	defer readyTicker.Stop()
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		}
+		select {
+		case <-readyDeadline.C:
+			t.Fatal("pager fixture did not start before the deadline")
+		case <-ctx.Done():
+			t.Fatal("pager fixture did not start before the deadline")
+		case <-readyTicker.C:
+		}
+	}
+
+	pidData, err := os.ReadFile(childPIDPath)
+	if err != nil {
+		t.Fatalf("read pager child PID: %v", err)
+	}
+	childPID, err = strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil || childPID <= 0 {
+		t.Fatalf("invalid pager child PID %q", pidData)
+	}
+	if testProcessExited(childPID) {
+		t.Fatalf("pager child process %d exited before cancellation", childPID)
+	}
+
 	cancel()
 	select {
-	case err := <-done:
-		if err == nil {
+	case streamErr := <-done:
+		streamDone = true
+		if streamErr == nil {
 			t.Fatal("canceled pager returned nil")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("pager process group did not terminate")
+	}
+	if !waitForTestProcessExit(childPID, time.Second) {
+		t.Fatalf("pager child process %d survived cancellation", childPID)
 	}
 }
 

@@ -3,6 +3,7 @@ package grpc
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -333,5 +334,25 @@ func TestReadFrameRoundTrip(t *testing.T) {
 		if !bytes.Equal(unframed, data) {
 			t.Errorf("round trip failed: got %v, want %v", unframed, data)
 		}
+	}
+}
+
+var benchmarkFrameResult []byte
+
+func BenchmarkFrame(b *testing.B) {
+	for _, size := range []int{0, 1 << 10, 64 << 10, 1 << 20} {
+		b.Run(fmt.Sprintf("%dB", size), func(b *testing.B) {
+			data := bytes.Repeat([]byte{'x'}, size)
+			b.SetBytes(int64(len(data)))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				var err error
+				benchmarkFrameResult, err = FrameChecked(data, false)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
