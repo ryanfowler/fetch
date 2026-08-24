@@ -18,13 +18,17 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-const maxMarkdownBlockquoteOpeners = 256
+const (
+	maxMarkdownBlockquoteOpeners = 256
+	defaultMarkdownMaxWidth      = 100
+)
 
 // MarkdownOptions controls terminal-only Markdown presentation.
 //
 // MaxWidth is a maximum display width in terminal columns. A zero value uses
-// the current terminal width when the destination is a TTY. Non-terminal
-// output remains raw Markdown regardless of this value.
+// the smaller of the current terminal width and 100 columns when the
+// destination is a TTY. Non-terminal output remains raw Markdown regardless
+// of this value.
 type MarkdownOptions struct {
 	MaxWidth int
 }
@@ -62,16 +66,22 @@ func FormatMarkdownWithOptions(buf []byte, p *core.Printer, options MarkdownOpti
 
 	width := 0
 	if p.IsTerminal() {
-		width = options.MaxWidth
-		if terminalWidth := core.GetTerminalCols(); terminalWidth > 0 &&
-			(width <= 0 || terminalWidth < width) {
-			width = terminalWidth
-		}
+		width = markdownWidth(options.MaxWidth, core.GetTerminalCols())
 	}
 
 	r := &mdRenderer{printer: p, source: rest, width: width}
 	r.tty = p.IsTerminal()
 	return ast.Walk(doc, r.walk)
+}
+
+func markdownWidth(maxWidth, terminalWidth int) int {
+	if maxWidth <= 0 {
+		maxWidth = defaultMarkdownMaxWidth
+	}
+	if terminalWidth > 0 && terminalWidth < maxWidth {
+		return terminalWidth
+	}
+	return maxWidth
 }
 
 // truncateMarkdownBlockquoteOpeners caps line-leading blockquote opener runs.

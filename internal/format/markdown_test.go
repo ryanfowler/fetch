@@ -768,6 +768,29 @@ func TestFormatMarkdownWrapsTerminalProseToDisplayWidth(t *testing.T) {
 	}
 }
 
+func TestMarkdownWidthDefaultsToTerminalWidthOr100(t *testing.T) {
+	tests := []struct {
+		name          string
+		maxWidth      int
+		terminalWidth int
+		want          int
+	}{
+		{name: "narrow terminal", terminalWidth: 80, want: 80},
+		{name: "wide terminal", terminalWidth: 120, want: 100},
+		{name: "terminal unavailable", want: 100},
+		{name: "explicit width", maxWidth: 40, terminalWidth: 120, want: 40},
+		{name: "explicit width capped by terminal", maxWidth: 120, terminalWidth: 80, want: 80},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := markdownWidth(tt.maxWidth, tt.terminalWidth); got != tt.want {
+				t.Fatalf("markdownWidth(%d, %d) = %d, want %d", tt.maxWidth, tt.terminalWidth, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatMarkdownWrapsStyledLinkByVisibleWidth(t *testing.T) {
 	p := core.TestTerminalPrinter(false)
 	input := "[one two three four five](https://example.com/docs)"
