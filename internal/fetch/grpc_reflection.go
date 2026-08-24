@@ -706,7 +706,7 @@ func discoverGRPC(ctx context.Context, r *Request) (int, error) {
 }
 
 func loadDiscoverySchema(ctx context.Context, r *Request) (*iproto.Schema, bool, *client.Client, error) {
-	schema, err := loadProtoSchema(r)
+	schema, err := loadProtoSchema(ctx, r)
 	if err != nil {
 		return nil, false, nil, err
 	}
@@ -759,7 +759,7 @@ func loadDiscoverySchema(ctx context.Context, r *Request) (*iproto.Schema, bool,
 }
 
 func resolveCallSchema(ctx context.Context, r *Request, c *client.Client) (*iproto.Schema, error) {
-	schema, err := loadProtoSchema(r)
+	schema, err := loadProtoSchema(ctx, r)
 	if err != nil || schema != nil {
 		return schema, err
 	}

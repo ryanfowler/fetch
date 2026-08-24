@@ -11,32 +11,35 @@ import (
 // Shared resource limits. Keep feature-specific limits here so callers and
 // tests use the same security boundary instead of duplicating constants.
 const (
-	MaxArticleBodyBytes          int64 = 16 << 20
-	MaxReadabilityElements             = 500_000
-	MaxHARRequestBodyBytes       int64 = 16 << 20
-	MaxHARResponseBodyBytes      int64 = 16 << 20
-	MaxWebSocketMessageBytes     int64 = 16 << 20
-	MaxWebSocketPipedTextLine    int64 = 16 << 20
-	MaxWebSocketInteractiveEntry int64 = 16 << 20
-	MaxStreamingRecordBytes      int64 = 16 << 20
-	MaxCompositeMaterialization  int64 = 16 << 20
-	MaxGRPCMessageBytes          int64 = 64 << 20
-	MaxReflectionMessages              = 128
-	MaxReflectionBytes           int64 = 64 << 20
-	MaxNestingDepth                    = 128
-	MaxClipboardBytes            int64 = 1 << 20
-	MaxFormatterNestingDepth           = 1024
-	MaxDOHWireResponseBytes      int64 = 65_535
-	MaxDOHJSONResponseBytes      int64 = 1 << 20
-	MaxUpdaterReleaseMetadata    int64 = 1 << 20
-	MaxUpdaterChecksumSidecar    int64 = 1 << 10
-	MaxUpdaterArtifact           int64 = 128 << 20
-	MaxUpdaterUnpackedData       int64 = 512 << 20
-	MaxUpdaterArchiveEntries           = 128
-	MaxDryRunBodyPreview         int64 = 1_024
-	MaxRetryAfter                      = 30 * time.Second
-	MaxUpdateRedirects                 = 10
-	DefaultDOHTimeout                  = 5 * time.Second
+	MaxArticleBodyBytes           int64 = 16 << 20
+	MaxReadabilityElements              = 500_000
+	MaxHARRequestBodyBytes        int64 = 16 << 20
+	MaxHARResponseBodyBytes       int64 = 16 << 20
+	MaxWebSocketMessageBytes      int64 = 16 << 20
+	MaxWebSocketPipedTextLine     int64 = 16 << 20
+	MaxWebSocketInteractiveEntry  int64 = 16 << 20
+	MaxStreamingRecordBytes       int64 = 16 << 20
+	MaxCompositeMaterialization   int64 = 16 << 20
+	MaxGRPCMessageBytes           int64 = 64 << 20
+	MaxReflectionMessages               = 128
+	MaxReflectionBytes            int64 = 64 << 20
+	MaxProtobufDescriptorSetBytes int64 = 64 << 20
+	MaxProtocOutputBytes          int64 = 64 << 10
+	MaxNestingDepth                     = 128
+	MaxClipboardBytes             int64 = 1 << 20
+	MaxFormatterNestingDepth            = 1024
+	MaxDOHWireResponseBytes       int64 = 65_535
+	MaxDOHJSONResponseBytes       int64 = 1 << 20
+	MaxUpdaterReleaseMetadata     int64 = 1 << 20
+	MaxUpdaterChecksumSidecar     int64 = 1 << 10
+	MaxUpdaterArtifact            int64 = 128 << 20
+	MaxUpdaterUnpackedData        int64 = 512 << 20
+	MaxUpdaterArchiveEntries            = 128
+	MaxDryRunBodyPreview          int64 = 1_024
+	MaxRetryAfter                       = 30 * time.Second
+	MaxUpdateRedirects                  = 10
+	DefaultDOHTimeout                   = 5 * time.Second
+	DefaultProtocTimeout                = 10 * time.Second
 )
 
 const (

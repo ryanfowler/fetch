@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json/jsontext"
 	"errors"
@@ -39,12 +40,12 @@ func checkGRPCStatus(r *Request, resp *http.Response, exitCode int) int {
 }
 
 // loadProtoSchema loads schema from files or descriptor set.
-func loadProtoSchema(r *Request) (*proto.Schema, error) {
+func loadProtoSchema(ctx context.Context, r *Request) (*proto.Schema, error) {
 	if len(r.ProtoFiles) > 0 {
-		return proto.CompileProtos(r.ProtoFiles, r.ProtoImports)
+		return proto.CompileProtosWithContext(ctx, r.ProtoFiles, r.ProtoImports)
 	}
 	if r.ProtoDesc != "" {
-		return proto.LoadDescriptorSetFile(r.ProtoDesc)
+		return proto.LoadDescriptorSetFileWithContext(ctx, r.ProtoDesc)
 	}
 	return nil, nil
 }
