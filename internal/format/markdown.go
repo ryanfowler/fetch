@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
 
@@ -18,8 +20,23 @@ import (
 
 const maxMarkdownBlockquoteOpeners = 256
 
+// MarkdownOptions controls terminal-only Markdown presentation.
+//
+// MaxWidth is a maximum display width in terminal columns. A zero value uses
+// the current terminal width when the destination is a TTY. Non-terminal
+// output remains raw Markdown regardless of this value.
+type MarkdownOptions struct {
+	MaxWidth int
+}
+
 // FormatMarkdown formats the provided Markdown to the Printer.
 func FormatMarkdown(buf []byte, p *core.Printer) error {
+	return FormatMarkdownWithOptions(buf, p, MarkdownOptions{})
+}
+
+// FormatMarkdownWithOptions formats the provided Markdown to the Printer
+// using the supplied terminal presentation options.
+func FormatMarkdownWithOptions(buf []byte, p *core.Printer, options MarkdownOptions) error {
 	if len(buf) == 0 {
 		return nil
 	}
@@ -43,7 +60,16 @@ func FormatMarkdown(buf []byte, p *core.Printer) error {
 	md := goldmark.New(goldmark.WithExtensions(extension.Strikethrough, extension.Table))
 	doc := md.Parser().Parse(text.NewReader(rest))
 
-	r := &mdRenderer{printer: p, source: rest}
+	width := 0
+	if p.IsTerminal() {
+		width = options.MaxWidth
+		if terminalWidth := core.GetTerminalCols(); terminalWidth > 0 &&
+			(width <= 0 || terminalWidth < width) {
+			width = terminalWidth
+		}
+	}
+
+	r := &mdRenderer{printer: p, source: rest, width: width}
 	r.tty = p.IsTerminal()
 	return ast.Walk(doc, r.walk)
 }
@@ -145,12 +171,16 @@ func extractFrontMatter(buf []byte) (frontMatter, rest []byte) {
 
 // mdRenderer walks a goldmark AST and writes ANSI-styled output.
 type mdRenderer struct {
-	printer *core.Printer
-	source  []byte
-	styles  []core.Sequence
-	bqDepth int
-	links   []bool
-	tty     bool
+	printer           *core.Printer
+	source            []byte
+	styles            []core.Sequence
+	bqDepth           int
+	links             []bool
+	linkTargets       []string
+	listContinuations []string
+	width             int
+	lineWidth         int
+	tty               bool
 }
 
 type mdTableCell struct {
@@ -183,7 +213,204 @@ func (r *mdRenderer) popLink() bool {
 	}
 	active := r.links[len(r.links)-1]
 	r.links = r.links[:len(r.links)-1]
+	r.linkTargets = r.linkTargets[:len(r.linkTargets)-1]
 	return active
+}
+
+// writeString writes trusted visible text while tracking its terminal display
+// width. ANSI and OSC 8 sequences are emitted separately by Printer and do
+// not reach this method, so byte length is never used as display width.
+func (r *mdRenderer) writeString(s string) {
+	_, _ = r.printer.WriteString(s)
+	if r.width <= 0 {
+		return
+	}
+
+	for len(s) > 0 {
+		line := s
+		if newline := strings.IndexByte(line, '\n'); newline >= 0 {
+			line = line[:newline]
+		}
+		r.lineWidth = displayWidth(line, r.lineWidth)
+		if len(line) == len(s) {
+			return
+		}
+		r.lineWidth = 0
+		s = s[len(line)+1:]
+	}
+}
+
+// writeUntrusted writes terminal-safe visible text while tracking its display
+// width after escaping controls.
+func (r *mdRenderer) writeUntrusted(s string) {
+	r.writeString(core.TerminalSafeText(s))
+}
+
+// writeLinePrefix writes the prefix used by a continuation line. Blockquote
+// rules come first, followed by indentation under the current list marker.
+func (r *mdRenderer) writeLinePrefix() {
+	r.writeBqPrefix()
+	if r.width <= 0 {
+		return
+	}
+	if n := len(r.listContinuations); n > 0 {
+		r.writeString(r.listContinuations[n-1])
+	}
+}
+
+// activeLinkTarget returns the target for the innermost active OSC 8 link.
+func (r *mdRenderer) activeLinkTarget() string {
+	if len(r.links) == 0 || !r.links[len(r.links)-1] {
+		return ""
+	}
+	return r.linkTargets[len(r.linkTargets)-1]
+}
+
+// writeWrappedUntrusted writes text without allowing ordinary prose to
+// exceed the configured display width. Wrapping is performed on terminal-safe
+// text, so escaped control bytes are measured as the characters the terminal
+// will actually display.
+func (r *mdRenderer) writeWrappedUntrusted(s string) {
+	r.writeWrappedUntrustedToWidth(s, r.width)
+}
+
+// writeWrappedUntrustedToWidth is writeWrappedUntrusted with an optional
+// tighter line limit for text that must leave room for a following suffix.
+func (r *mdRenderer) writeWrappedUntrustedToWidth(s string, limit int) {
+	s = core.TerminalSafeText(s)
+	if limit <= 0 {
+		r.writeString(s)
+		return
+	}
+
+	pendingSpace := ""
+	for len(s) > 0 {
+		if s[0] == '\n' {
+			r.writeLineBreak()
+			pendingSpace = ""
+			s = s[1:]
+			continue
+		}
+
+		// Consume a run of whitespace or non-whitespace. Whitespace at a
+		// wrap point is discarded, just as terminal prose wrapping normally
+		// does, while whitespace that fits is preserved.
+		isSpace, _ := markdownSpaceAt(s)
+		i := 0
+		for i < len(s) && s[i] != '\n' {
+			currentSpace, size := markdownSpaceAt(s[i:])
+			if currentSpace != isSpace {
+				break
+			}
+			i += size
+		}
+		token := s[:i]
+		tokenWidth := runewidth.StringWidth(token)
+
+		if isSpace {
+			pendingSpace += token
+			s = s[i:]
+			continue
+		}
+
+		if r.lineWidth > 0 {
+			pendingWidth := displayWidth(pendingSpace, r.lineWidth) - r.lineWidth
+			switch {
+			case r.lineWidth+pendingWidth+tokenWidth <= limit:
+				r.writeString(pendingSpace)
+			case r.lineWidth <= limit && r.lineWidth+tokenWidth > limit:
+				r.writeLineBreak()
+			}
+		}
+		pendingSpace = ""
+		if tokenWidth == 0 || r.lineWidth+tokenWidth <= limit {
+			r.writeString(token)
+			s = s[i:]
+			continue
+		}
+
+		// A single unbreakable word is split by display cell, ensuring that
+		// prose has a useful upper bound even for long hashes or URLs.
+		for len(token) > 0 {
+			available := limit - r.lineWidth
+			if available <= 0 {
+				// A structural prefix can itself be as wide as the requested
+				// width. There is no useful continuation line in that case;
+				// emit the token rather than repeatedly reproducing the prefix.
+				r.writeString(token)
+				break
+			}
+			j := 0
+			used := 0
+			for j < len(token) {
+				runeValue, size := utf8.DecodeRuneInString(token[j:])
+				runeWidth := runewidth.RuneWidth(runeValue)
+				if used > 0 && used+runeWidth > available {
+					break
+				}
+				j += size
+				used += runeWidth
+			}
+			if j == 0 {
+				j = len(token[:1])
+			}
+			r.writeString(token[:j])
+			token = token[j:]
+			if len(token) > 0 {
+				r.writeLineBreak()
+			}
+		}
+		s = s[i:]
+	}
+}
+
+func markdownSpaceAt(s string) (bool, int) {
+	r, size := utf8.DecodeRuneInString(s)
+	return unicode.IsSpace(r), size
+}
+
+// displayWidth returns the terminal cell width of s starting at column start.
+// Tabs are retained in terminal-safe text, so they must advance to the next
+// eight-column tab stop rather than being treated as zero-width runes.
+func displayWidth(s string, start int) int {
+	width := start
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		s = s[size:]
+		switch r {
+		case '\n':
+			width = 0
+		case '\t':
+			width += 8 - width%8
+		default:
+			width += runewidth.RuneWidth(r)
+		}
+	}
+	return width
+}
+
+// writeLineBreak inserts a renderer-owned line break and restores the
+// prefixes and styles needed by the continuation line. OSC 8 hyperlinks are
+// temporarily closed so list or blockquote indentation cannot become part of
+// the clickable region.
+func (r *mdRenderer) writeLineBreak() {
+	if r.width <= 0 {
+		r.writeString("\n")
+		r.writeBqPrefix()
+		r.reapplyStyles()
+		return
+	}
+
+	linkTarget := r.activeLinkTarget()
+	if linkTarget != "" {
+		r.printer.EndHyperlink()
+	}
+	r.writeString("\n")
+	r.writeLinePrefix()
+	r.reapplyStyles()
+	if linkTarget != "" {
+		_ = r.printer.StartHyperlink(linkTarget)
+	}
 }
 
 // writeBqPrefix writes the blockquote prefix repeatedly for the current
@@ -193,12 +420,12 @@ func (r *mdRenderer) writeBqPrefix() {
 	for range r.bqDepth {
 		r.printer.Set(core.Dim)
 		if r.tty {
-			r.printer.WriteString("│")
+			r.writeString("│")
 		} else {
-			r.printer.WriteString(">")
+			r.writeString(">")
 		}
 		r.popAllAndRestore()
-		r.printer.WriteString(" ")
+		r.writeString(" ")
 	}
 }
 
@@ -243,10 +470,10 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 				hashes := strings.Repeat("#", v.Level)
 				r.printer.Set(core.Bold)
 				r.printer.Set(core.Blue)
-				r.printer.WriteString(hashes)
+				r.writeString(hashes)
 				r.popAllAndRestore()
 				if v.HasChildren() {
-					r.printer.WriteString(" ")
+					r.writeString(" ")
 				}
 				r.pushStyle(core.Bold)
 			}
@@ -257,10 +484,10 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			} else {
 				r.popStyle()
 			}
-			r.printer.WriteString("\n")
+			r.writeString("\n")
 			if n.NextSibling() != nil {
 				r.writeBqPrefix()
-				r.printer.WriteString("\n")
+				r.writeString("\n")
 			}
 		}
 
@@ -271,12 +498,12 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 				r.writeBqPrefix()
 			}
 		} else {
-			r.printer.WriteString("\n")
+			r.writeString("\n")
 			// Add blank line after paragraph unless it's the last child or in a tight list.
 			if n.NextSibling() != nil {
 				if _, inList := n.Parent().(*ast.ListItem); !inList {
 					r.writeBqPrefix()
-					r.printer.WriteString("\n")
+					r.writeString("\n")
 				}
 			}
 		}
@@ -287,19 +514,19 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 				r.writeBqPrefix()
 			}
 		} else {
-			r.printer.WriteString("\n")
+			r.writeString("\n")
 		}
 
 	case *ast.ThematicBreak:
 		if entering {
 			r.writeBqPrefix()
 			r.printer.Set(core.Dim)
-			r.printer.WriteString("---")
+			r.writeString("---")
 			r.popAllAndRestore()
-			r.printer.WriteString("\n")
+			r.writeString("\n")
 			if n.NextSibling() != nil {
 				r.writeBqPrefix()
-				r.printer.WriteString("\n")
+				r.writeString("\n")
 			}
 		}
 
@@ -311,13 +538,13 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			for line := range strings.SplitSeq(content, "\n") {
 				r.writeBqPrefix()
 				r.printer.Set(core.Cyan)
-				r.printer.WriteStringUntrusted(line)
+				r.writeUntrusted(line)
 				r.popAllAndRestore()
-				r.printer.WriteString("\n")
+				r.writeString("\n")
 			}
 			if n.NextSibling() != nil {
 				r.writeBqPrefix()
-				r.printer.WriteString("\n")
+				r.writeString("\n")
 			}
 			return ast.WalkSkipChildren, nil
 		}
@@ -330,7 +557,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			}
 			if n.NextSibling() != nil {
 				r.writeBqPrefix()
-				r.printer.WriteString("\n")
+				r.writeString("\n")
 			}
 			return status, nil
 		}
@@ -351,14 +578,14 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			}
 			if n.NextSibling() != nil {
 				r.writeBqPrefix()
-				r.printer.WriteString("\n")
+				r.writeString("\n")
 			}
 		}
 
 	case *ast.List:
 		if !entering && n.NextSibling() != nil {
 			r.writeBqPrefix()
-			r.printer.WriteString("\n")
+			r.writeString("\n")
 		}
 
 	case *ast.ListItem:
@@ -366,26 +593,33 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			list := v.Parent().(*ast.List)
 			indent := r.listIndent(v)
 			r.writeBqPrefix()
-			r.printer.WriteString(indent)
+			r.writeString(indent)
 			r.printer.Set(core.Blue)
+			marker := ""
 			if list.IsOrdered() {
 				num := list.Start
 				// Count preceding siblings to determine item number.
 				for sib := v.Parent().FirstChild(); sib != nil && sib != n; sib = sib.NextSibling() {
 					num++
 				}
-				r.printer.WriteString(fmt.Sprintf("%d.", num))
+				marker = fmt.Sprintf("%d.", num)
 			} else {
 				if r.tty {
-					r.printer.WriteString("•")
+					marker = "•"
 				} else {
-					r.printer.WriteString(string(list.Marker))
+					marker = string(list.Marker)
 				}
 			}
+			r.writeString(marker)
 			r.popAllAndRestore()
-			r.printer.WriteString(" ")
+			r.writeString(" ")
+			r.listContinuations = append(r.listContinuations,
+				strings.Repeat(" ", runewidth.StringWidth(indent)+runewidth.StringWidth(marker)+1))
 		} else {
 			// newline handled by child paragraph/textblock
+			if len(r.listContinuations) > 0 {
+				r.listContinuations = r.listContinuations[:len(r.listContinuations)-1]
+			}
 		}
 
 	case *ast.HTMLBlock:
@@ -395,13 +629,13 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			for line := range strings.SplitSeq(content, "\n") {
 				r.writeBqPrefix()
 				r.printer.Set(core.Dim)
-				r.printer.WriteStringUntrusted(line)
+				r.writeUntrusted(line)
 				r.popAllAndRestore()
-				r.printer.WriteString("\n")
+				r.writeString("\n")
 			}
 			if n.NextSibling() != nil {
 				r.writeBqPrefix()
-				r.printer.WriteString("\n")
+				r.writeString("\n")
 			}
 			return ast.WalkSkipChildren, nil
 		}
@@ -410,16 +644,12 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.Text:
 		if entering {
-			r.printer.WriteUntrusted(v.Segment.Value(r.source))
+			r.writeWrappedUntrusted(string(v.Segment.Value(r.source)))
 			if v.SoftLineBreak() {
-				r.printer.WriteString("\n")
-				r.writeBqPrefix()
-				r.reapplyStyles()
+				r.writeLineBreak()
 			}
 			if v.HardLineBreak() {
-				r.printer.WriteString("\n")
-				r.writeBqPrefix()
-				r.reapplyStyles()
+				r.writeLineBreak()
 			}
 		}
 
@@ -436,9 +666,9 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 						start--
 					}
 					if start < seg.Start && start > 0 && r.source[start-1] == '\n' {
-						r.printer.WriteUntrusted(r.source[start:seg.Start])
+						r.writeUntrusted(string(r.source[start:seg.Start]))
 					}
-					r.printer.WriteUntrusted(seg.Value(r.source))
+					r.writeUntrusted(string(seg.Value(r.source)))
 				}
 			}
 			r.popAllAndRestore()
@@ -458,11 +688,13 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.Link:
 		if entering {
-			active := r.printer.StartHyperlink(markdownLinkDestination(v.Destination))
+			target := markdownLinkDestination(v.Destination)
+			active := r.printer.StartHyperlink(target)
 			r.links = append(r.links, active)
+			r.linkTargets = append(r.linkTargets, target)
 			if !active {
 				r.printer.Set(core.Dim)
-				r.printer.WriteString("[")
+				r.writeString("[")
 				r.popAllAndRestore()
 			}
 			r.pushStyle(core.Underline)
@@ -473,24 +705,26 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 				r.printer.EndHyperlink()
 			} else {
 				r.printer.Set(core.Dim)
-				r.printer.WriteString("](")
+				r.writeString("](")
 				r.popAllAndRestore()
 				r.printer.Set(core.Cyan)
-				r.printer.WriteUntrusted(v.Destination)
+				r.writeWrappedUntrusted(string(v.Destination))
 				r.popAllAndRestore()
 				r.printer.Set(core.Dim)
-				r.printer.WriteString(")")
+				r.writeString(")")
 				r.popAllAndRestore()
 			}
 		}
 
 	case *ast.Image:
 		if entering {
-			active := r.printer.StartHyperlink(markdownLinkDestination(v.Destination))
+			target := markdownLinkDestination(v.Destination)
+			active := r.printer.StartHyperlink(target)
 			r.links = append(r.links, active)
+			r.linkTargets = append(r.linkTargets, target)
 			if !active {
 				r.printer.Set(core.Dim)
-				r.printer.WriteString("![")
+				r.writeString("![")
 				r.popAllAndRestore()
 			}
 			r.pushStyle(core.Italic)
@@ -501,13 +735,13 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 				r.printer.EndHyperlink()
 			} else {
 				r.printer.Set(core.Dim)
-				r.printer.WriteString("](")
+				r.writeString("](")
 				r.popAllAndRestore()
 				r.printer.Set(core.Cyan)
-				r.printer.WriteUntrusted(v.Destination)
+				r.writeWrappedUntrusted(string(v.Destination))
 				r.popAllAndRestore()
 				r.printer.Set(core.Dim)
-				r.printer.WriteString(")")
+				r.writeString(")")
 				r.popAllAndRestore()
 			}
 		}
@@ -516,18 +750,23 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if entering {
 			label := string(v.Label(r.source))
 			target := markdownAutoLinkTarget(v, r.source)
-			if r.printer.StartHyperlink(target) {
+			active := r.printer.StartHyperlink(target)
+			r.links = append(r.links, active)
+			r.linkTargets = append(r.linkTargets, target)
+			if active {
 				r.pushStyle(core.Underline)
 				r.printer.Set(core.Cyan)
-				r.printer.WriteStringUntrusted(label)
+				r.writeWrappedUntrusted(label)
 				r.popStyle()
+				r.popLink()
 				r.printer.EndHyperlink()
 			} else {
-				r.printer.WriteString("<")
+				r.writeString("<")
 				r.printer.Set(core.Cyan)
-				r.printer.WriteStringUntrusted(label)
+				r.writeWrappedUntrusted(label)
 				r.popAllAndRestore()
-				r.printer.WriteString(">")
+				r.writeString(">")
+				r.popLink()
 			}
 		}
 
@@ -536,7 +775,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			r.printer.Set(core.Dim)
 			for i := 0; i < v.Segments.Len(); i++ {
 				seg := v.Segments.At(i)
-				r.printer.WriteUntrusted(seg.Value(r.source))
+				r.writeUntrusted(string(seg.Value(r.source)))
 			}
 			r.popAllAndRestore()
 			return ast.WalkSkipChildren, nil
@@ -544,7 +783,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.String:
 		if entering {
-			r.printer.WriteUntrusted(v.Value)
+			r.writeWrappedUntrusted(string(v.Value))
 		}
 
 	// Extension: Strikethrough
@@ -564,7 +803,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			}
 			if n.NextSibling() != nil {
 				r.writeBqPrefix()
-				r.printer.WriteString("\n")
+				r.writeString("\n")
 			}
 			return status, nil
 		}
@@ -615,12 +854,12 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 	// Opening fence.
 	r.writeBqPrefix()
 	r.printer.Set(core.Dim)
-	r.printer.WriteString("```")
+	r.writeString("```")
 	if lang != "" {
-		r.printer.WriteStringUntrusted(lang)
+		r.writeUntrusted(lang)
 	}
 	r.popAllAndRestore()
-	r.printer.WriteString("\n")
+	r.writeString("\n")
 
 	// Collect body lines.
 	var lines []string
@@ -642,8 +881,9 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 			r.printer.Flush()
 			if err := formatter([]byte(content), r.printer); err == nil {
 				delegated = true
+				r.lineWidth = 0
 				if len(content) > 0 && content[len(content)-1] != '\n' {
-					r.printer.WriteString("\n")
+					r.writeString("\n")
 				}
 			}
 		}
@@ -654,18 +894,18 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 		for _, line := range lines {
 			r.writeBqPrefix()
 			r.printer.Set(core.Cyan)
-			r.printer.WriteStringUntrusted(line)
+			r.writeUntrusted(line)
 			r.popAllAndRestore()
-			r.printer.WriteString("\n")
+			r.writeString("\n")
 		}
 	}
 
 	// Closing fence.
 	r.writeBqPrefix()
 	r.printer.Set(core.Dim)
-	r.printer.WriteString("```")
+	r.writeString("```")
 	r.popAllAndRestore()
-	r.printer.WriteString("\n")
+	r.writeString("\n")
 
 	return ast.WalkSkipChildren, nil
 }
@@ -720,15 +960,22 @@ func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 		}
 	}
 
+	// A wide table is more readable as a sequence of labeled records than as
+	// a grid that forces the terminal to wrap every row independently. The
+	// vertical form also gives long cell values the normal prose wrapper.
+	if r.width > 0 && tableDisplayWidth(widths)+r.bqPrefixWidth() > r.width {
+		return r.renderVerticalTable(rows), nil
+	}
+
 	// Render header row.
 	r.writeBqPrefix()
 	r.renderTableRow(rows[0], widths, true)
-	r.printer.WriteString("\n")
+	r.writeString("\n")
 
 	// Render separator.
 	r.writeBqPrefix()
 	r.printer.Set(core.Dim)
-	r.printer.WriteString("|")
+	r.writeString("|")
 	for i, w := range widths {
 		a := east.AlignNone
 		if i < len(alignments) {
@@ -736,37 +983,106 @@ func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 		}
 		switch a {
 		case east.AlignLeft:
-			r.printer.WriteString(":")
-			r.printer.WriteString(strings.Repeat("-", w-1))
+			r.writeString(":")
+			r.writeString(strings.Repeat("-", w-1))
 		case east.AlignRight:
-			r.printer.WriteString(strings.Repeat("-", w-1))
-			r.printer.WriteString(":")
+			r.writeString(strings.Repeat("-", w-1))
+			r.writeString(":")
 		case east.AlignCenter:
-			r.printer.WriteString(":")
-			r.printer.WriteString(strings.Repeat("-", w-2))
-			r.printer.WriteString(":")
+			r.writeString(":")
+			r.writeString(strings.Repeat("-", w-2))
+			r.writeString(":")
 		default:
-			r.printer.WriteString(strings.Repeat("-", w))
+			r.writeString(strings.Repeat("-", w))
 		}
-		r.printer.WriteString("|")
+		r.writeString("|")
 	}
 	r.popAllAndRestore()
-	r.printer.WriteString("\n")
+	r.writeString("\n")
 
 	// Render body rows.
 	for _, row := range rows[1:] {
 		r.writeBqPrefix()
 		r.renderTableRow(row, widths, false)
-		r.printer.WriteString("\n")
+		r.writeString("\n")
 	}
 
 	return ast.WalkSkipChildren, nil
 }
 
+func tableDisplayWidth(widths []int) int {
+	width := 1 // leading border
+	for _, columnWidth := range widths {
+		width += columnWidth + 3 // spaces, cell, and trailing border
+	}
+	return width
+}
+
+func (r *mdRenderer) bqPrefixWidth() int {
+	return r.bqDepth * 2 // rule plus following space
+}
+
+// renderVerticalTable renders a wide Markdown table as labeled records. The
+// values are kept styled when they fit on one line; oversized values use the
+// same display-width-aware wrapper as prose.
+func (r *mdRenderer) renderVerticalTable(rows [][]mdTableCell) ast.WalkStatus {
+	if len(rows) == 0 {
+		return ast.WalkSkipChildren
+	}
+
+	headers := rows[0]
+	body := rows[1:]
+	if len(body) == 0 {
+		body = rows[:1]
+	}
+
+	for rowIndex, row := range body {
+		if rowIndex > 0 {
+			r.writeString("\n")
+		}
+		r.writeBqPrefix()
+		r.writeWrappedUntrusted(fmt.Sprintf("--- Row %d ---", rowIndex+1))
+		r.writeString("\n")
+
+		columnCount := max(len(headers), len(row))
+		for column := range columnCount {
+			r.writeBqPrefix()
+			label := ""
+			if column < len(headers) {
+				label = terminalTableCell(headers[column].text)
+			}
+			// Wrap the label separately so the separator is retained even
+			// though the prose wrapper intentionally drops trailing spaces.
+			labelLimit := r.width
+			if labelLimit > 0 {
+				// Keep the ": " separator on the same logical field line,
+				// including when the label would otherwise exactly fill it.
+				labelLimit -= 2
+			}
+			r.writeWrappedUntrustedToWidth(label, labelLimit)
+			r.writeString(": ")
+
+			cell := mdTableCell{}
+			if column < len(row) {
+				cell = row[column]
+			}
+			safeCell := terminalTableCell(cell.text)
+			if r.width <= 0 || runewidth.StringWidth(safeCell) <= r.width-r.lineWidth {
+				r.renderTableCell(cell.node)
+			} else {
+				r.writeWrappedUntrusted(safeCell)
+			}
+			r.writeString("\n")
+		}
+	}
+
+	return ast.WalkSkipChildren
+}
+
 // renderTableRow renders a single table row.
 func (r *mdRenderer) renderTableRow(cells []mdTableCell, widths []int, isHeader bool) {
 	r.printer.Set(core.Dim)
-	r.printer.WriteString("|")
+	r.writeString("|")
 	r.popAllAndRestore()
 	for i, w := range widths {
 		cell := mdTableCell{}
@@ -774,7 +1090,7 @@ func (r *mdRenderer) renderTableRow(cells []mdTableCell, widths []int, isHeader 
 			cell = cells[i]
 		}
 		safeCell := terminalTableCell(cell.text)
-		r.printer.WriteString(" ")
+		r.writeString(" ")
 		if isHeader {
 			r.pushStyle(core.Bold)
 			r.pushStyle(core.Blue)
@@ -782,16 +1098,16 @@ func (r *mdRenderer) renderTableRow(cells []mdTableCell, widths []int, isHeader 
 		if r.tty {
 			r.renderTableCell(cell.node)
 		} else {
-			r.printer.WriteStringUntrusted(safeCell)
+			r.writeUntrusted(safeCell)
 		}
 		if isHeader {
 			r.popStyle()
 			r.popStyle()
 		}
-		r.printer.WriteString(strings.Repeat(" ", w-runewidth.StringWidth(safeCell)))
-		r.printer.WriteString(" ")
+		r.writeString(strings.Repeat(" ", w-runewidth.StringWidth(safeCell)))
+		r.writeString(" ")
 		r.printer.Set(core.Dim)
-		r.printer.WriteString("|")
+		r.writeString("|")
 		r.popAllAndRestore()
 	}
 }
@@ -807,9 +1123,9 @@ func (r *mdRenderer) renderTableCell(cell ast.Node) {
 		_ = ast.Walk(child, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			if t, ok := n.(*ast.Text); ok && entering {
 				text := strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(string(t.Segment.Value(r.source)))
-				r.printer.WriteStringUntrusted(text)
+				r.writeUntrusted(text)
 				if t.SoftLineBreak() || t.HardLineBreak() {
-					r.printer.WriteString(" ")
+					r.writeString(" ")
 				}
 				return ast.WalkSkipChildren, nil
 			}
@@ -822,8 +1138,7 @@ func (r *mdRenderer) renderTableCell(cell ast.Node) {
 // breaks inside table cells, but preserving them would move the following
 // cells out of alignment in a terminal table.
 func terminalTableCell(cell string) string {
-	cell = core.TerminalSafeText(cell)
-	return strings.Map(func(r rune) rune {
+	cell = strings.Map(func(r rune) rune {
 		switch r {
 		case '\n', '\r', '\t':
 			return ' '
@@ -831,6 +1146,7 @@ func terminalTableCell(cell string) string {
 			return r
 		}
 	}, cell)
+	return core.TerminalSafeText(cell)
 }
 
 // inlineText extracts the plain text from an inline node's children.
