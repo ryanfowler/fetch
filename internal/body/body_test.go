@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"strings"
@@ -100,8 +99,15 @@ func TestNewFileFromOpenFilePreservesClosedFileStatError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := NewFileFromOpenFile(f, "text/plain"); !errors.Is(err, fs.ErrClosed) {
-		t.Fatalf("NewFileFromOpenFile() error = %v, want a closed-file error", err)
+	_, statErr := f.Stat()
+	if statErr == nil {
+		t.Fatal("Stat succeeded on a closed file")
+	}
+
+	if _, err := NewFileFromOpenFile(f, "text/plain"); err == nil {
+		t.Fatal("NewFileFromOpenFile() succeeded with a closed file")
+	} else if err.Error() != statErr.Error() {
+		t.Fatalf("NewFileFromOpenFile() error = %v, want the original Stat error %v", err, statErr)
 	}
 }
 
