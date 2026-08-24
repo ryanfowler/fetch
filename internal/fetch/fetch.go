@@ -587,7 +587,11 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 	if r.Discard {
 		_, err := io.Copy(io.Discard, resp.Body)
 		if err != nil {
-			return 0, err
+			// A canceled request closes the response body to unblock the read.
+			// The close can win the race and return a transport error instead of
+			// the context cause. Preserve the stable request timeout/cancellation
+			// error in that case.
+			return 0, contextCauseOr(err, ctx)
 		}
 		if r.Timing && bodyTimer != nil {
 			p := r.PrinterHandle.Stderr()
@@ -606,7 +610,7 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 
 	body, err := formatResponse(ctx, r, resp, cc)
 	if err != nil {
-		return 0, err
+		return 0, contextCauseOr(err, ctx)
 	}
 
 	if body == nil {
@@ -623,7 +627,7 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 		contentType := resp.Header.Get("Content-Type")
 		err = streamToStdoutWithPagerContent(ctx, body, p, forceRaw, r.NoPager, cc != nil || r.harRecorder != nil, r.Verbosity == core.VSilent, r.Pager, contentType)
 		if err != nil {
-			return 0, err
+			return 0, contextCauseOr(err, ctx)
 		}
 	}
 
