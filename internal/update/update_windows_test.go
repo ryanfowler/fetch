@@ -396,13 +396,14 @@ func createNearLimitZip(t *testing.T, path string) int64 {
 	name := getFetchFilename()
 	content := []byte("candidate")
 	data := createZip(t, name, content)
-	prefixLen := 30 + len(name) + len(content)
-	if prefixLen+4 > len(data) || !bytes.Equal(data[prefixLen:prefixLen+4], []byte("PK\x01\x02")) {
-		t.Fatalf("unexpected ZIP layout: central directory does not follow local entry")
-	}
-	eocdOffset := len(data) - 22
-	if eocdOffset < prefixLen || !bytes.Equal(data[eocdOffset:eocdOffset+4], []byte("PK\x05\x06")) {
+	eocdOffset := bytes.LastIndex(data, []byte("PK\x05\x06"))
+	if eocdOffset < 0 || eocdOffset+22 > len(data) {
 		t.Fatalf("unexpected ZIP layout: missing EOCD")
+	}
+	centralOffset := int64(binary.LittleEndian.Uint32(data[eocdOffset+16 : eocdOffset+20]))
+	if centralOffset < 0 || centralOffset+4 > int64(eocdOffset) ||
+		!bytes.Equal(data[centralOffset:centralOffset+4], []byte("PK\x01\x02")) {
+		t.Fatalf("unexpected ZIP layout: invalid central-directory offset")
 	}
 
 	targetSize := core.MaxUpdaterArtifactBytes - 1
@@ -410,7 +411,7 @@ func createNearLimitZip(t *testing.T, path string) int64 {
 	if gap <= 0 {
 		t.Fatalf("test archive is already too large: %d", len(data))
 	}
-	centralOffset := int64(prefixLen) + gap
+	centralOffset += gap
 	binary.LittleEndian.PutUint32(data[eocdOffset+16:eocdOffset+20], uint32(centralOffset))
 
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
@@ -423,6 +424,7 @@ func createNearLimitZip(t *testing.T, path string) int64 {
 		}
 	}
 	defer closeFile()
+	prefixLen := centralOffset - gap
 	if _, err := f.Write(data[:prefixLen]); err != nil {
 		t.Fatal(err)
 	}
