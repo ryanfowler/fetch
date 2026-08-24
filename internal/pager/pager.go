@@ -77,16 +77,31 @@ func StreamContext(ctx context.Context, src io.Reader, mode core.PagerMode, stdo
 	// An interactive pager must remain in the terminal's foreground process
 	// group. Otherwise it cannot receive keystrokes such as `q`; the parent
 	// still owns the pager's data pipe, so the command appears to hang.
-	configureProcess(cmd, stdoutTerminal)
+	if err := configureProcess(cmd, stdoutTerminal); err != nil {
+		return fmt.Errorf("unable to configure pager: %w", err)
+	}
 	cmd.Stdout = dst
 	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		releaseProcess(cmd)
 		return err
 	}
 	if err := cmd.Start(); err != nil {
+		terminateProcessTree(cmd)
+		if cmd.Process != nil {
+			_ = cmd.Wait()
+		}
+		releaseProcess(cmd)
 		return fmt.Errorf("unable to start pager: %w", err)
 	}
+	if err := attachProcess(cmd); err != nil {
+		terminateProcessTree(cmd)
+		_ = cmd.Wait()
+		releaseProcess(cmd)
+		return fmt.Errorf("unable to attach pager: %w", err)
+	}
+	defer releaseProcess(cmd)
 
 	// A non-closable reader cannot be interrupted by this package. Keep its
 	// copy synchronous so cancellation cannot strand a producer goroutine.

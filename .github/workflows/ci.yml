@@ -3,12 +3,15 @@ name: ci
 on:
   pull_request:
     branches: ["main"]
+  schedule:
+    - cron: "17 3 * * 1"
 
 env:
   GO_VERSION: "1.27.0"
 
 jobs:
   check:
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -37,6 +40,7 @@ jobs:
           install-go: false
 
   test:
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -54,7 +58,23 @@ jobs:
       - name: Test
         run: go test -v -parallel 8 ./...
 
+  race:
+    if: ${{ github.event_name == 'pull_request' }}
+    name: race (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Race test lifecycle-sensitive packages
+        run: go test -race -count=1 -parallel 8 ./internal/client ./internal/fetch ./internal/grpc ./internal/pager ./internal/resolver ./internal/ws
+
   test-windows:
+    if: ${{ github.event_name == 'pull_request' }}
     name: test (windows-latest)
     needs: build-windows
     runs-on: windows-latest
@@ -80,6 +100,7 @@ jobs:
         run: go test -v -parallel 8 ./...
 
   build-windows:
+    if: ${{ github.event_name == 'pull_request' }}
     name: build (windows-amd64)
     runs-on: ubuntu-latest
     steps:
@@ -108,6 +129,7 @@ jobs:
           retention-days: 1
 
   build:
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -147,3 +169,30 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go install -trimpath -ldflags="-s -w"
+
+  scheduled-smoke:
+    if: ${{ github.event_name == 'schedule' }}
+    name: scheduled fuzz and benchmark smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Fuzz DNS wire decoder
+        run: go test -run '^$' -fuzz FuzzDecodeDNSWire -fuzztime 5s ./internal/resolver
+
+      - name: Fuzz gRPC framing
+        run: go test -run '^$' -fuzz FuzzUnframe -fuzztime 5s ./internal/grpc
+
+      - name: Fuzz WebSocket piped-line framing
+        run: go test -run '^$' -fuzz FuzzReadBoundedLine -fuzztime 5s ./internal/ws
+
+      - name: Benchmark terminal streaming
+        run: go test -run '^$' -bench '^BenchmarkTerminalSafeReader' -benchtime 1x ./internal/fetch
+
+      - name: Benchmark gRPC framing
+        run: go test -run '^$' -bench '^BenchmarkFrame' -benchtime 1x ./internal/grpc
