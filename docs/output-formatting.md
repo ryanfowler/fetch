@@ -173,6 +173,8 @@ Features:
 - Blockquote and list marker highlighting; TTY blockquotes use a muted rule
   and muted text
 - Bold blue table headers with dimmed table borders and separators
+- TTY prose wraps to the detected terminal width using display-cell widths;
+  wide tables use a vertical record layout
 - On TTYs, links and image alt text are rendered as clickable OSC 8 terminal
   hyperlinks; non-terminal output does not contain OSC 8 hyperlink escapes
 

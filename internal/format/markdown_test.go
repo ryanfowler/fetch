@@ -751,6 +751,166 @@ func TestFormatMarkdownTerminalPresentation(t *testing.T) {
 	}
 }
 
+func TestFormatMarkdownWrapsTerminalProseToDisplayWidth(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "one two three four five six seven eight nine ten"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 20}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+
+	for _, line := range visibleMarkdownLines(string(p.Bytes())) {
+		if width := runewidth.StringWidth(line); width > 20 {
+			t.Errorf("line width = %d, want <= 20: %q", width, line)
+		}
+	}
+	if got := string(p.Bytes()); !strings.Contains(got, "one two three four\n") {
+		t.Errorf("wrapped output lost the first line: %q", got)
+	}
+}
+
+func TestFormatMarkdownWrapsStyledLinkByVisibleWidth(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "[one two three four five](https://example.com/docs)"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 12}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+
+	output := string(p.Bytes())
+	for _, line := range visibleMarkdownLines(output) {
+		if width := runewidth.StringWidth(line); width > 12 {
+			t.Errorf("styled line width = %d, want <= 12: %q", width, line)
+		}
+	}
+	if got := strings.Count(output, "\x1b]8;;https://example.com/docs\x1b\\"); got < 2 {
+		t.Errorf("wrapped link was not reopened across lines, got %d hyperlink starts: %q", got, output)
+	}
+}
+
+func TestFormatMarkdownWrapsWideUnicodeByDisplayWidth(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "世界 世界 世界 世界 世界"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 10}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+
+	for _, line := range visibleMarkdownLines(string(p.Bytes())) {
+		if width := runewidth.StringWidth(line); width > 10 {
+			t.Errorf("Unicode line width = %d, want <= 10: %q", width, line)
+		}
+	}
+}
+
+func TestFormatMarkdownCountsTabsInDisplayWidth(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "one\ttwo three four five six"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 12}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+
+	for _, line := range visibleMarkdownLines(string(p.Bytes())) {
+		if width := displayWidth(line, 0); width > 12 {
+			t.Errorf("tabbed line width = %d, want <= 12: %q", width, line)
+		}
+	}
+}
+
+func TestFormatMarkdownWrapsListItemsUnderTheirMarker(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "- one two three four five six seven eight"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 20}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+
+	lines := visibleMarkdownLines(string(p.Bytes()))
+	if len(lines) < 2 || !strings.HasPrefix(lines[1], "  ") {
+		t.Fatalf("wrapped list continuation is not indented under its marker: %q", lines)
+	}
+	for _, line := range lines {
+		if width := runewidth.StringWidth(line); width > 20 {
+			t.Errorf("list line width = %d, want <= 20: %q", width, line)
+		}
+	}
+}
+
+func TestFormatMarkdownWideTableUsesVerticalTerminalLayout(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "| Name | Description |\n| --- | --- |\n| Ada | A very long description that should not make the terminal table wider |"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 30}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+
+	output := string(p.Bytes())
+	if !strings.Contains(output, "--- Row 1 ---") {
+		t.Fatalf("wide table did not use vertical layout: %q", output)
+	}
+	if !strings.Contains(output, "Name: Ada") {
+		t.Fatalf("vertical table lost the label separator: %q", output)
+	}
+	for _, line := range visibleMarkdownLines(output) {
+		if width := runewidth.StringWidth(line); width > 30 {
+			t.Errorf("table line width = %d, want <= 30: %q", width, line)
+		}
+	}
+}
+
+func TestFormatMarkdownVerticalTableWrapsLongLabels(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "| VeryLongColumnName | Value |\n| --- | --- |\n| x | y |"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 20}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+
+	for _, line := range visibleMarkdownLines(string(p.Bytes())) {
+		if width := runewidth.StringWidth(line); width > 20 {
+			t.Errorf("table line width = %d, want <= 20: %q", width, line)
+		}
+	}
+}
+
+func TestFormatMarkdownVerticalTableKeepsLabelSeparatorWithinWidth(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "| 12345678901234567890 | Value |\n| --- | --- |\n| x | y |"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 20}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+
+	for _, line := range visibleMarkdownLines(string(p.Bytes())) {
+		if width := runewidth.StringWidth(line); width > 20 {
+			t.Errorf("table line width = %d, want <= 20: %q", width, line)
+		}
+	}
+}
+
+func TestFormatMarkdownWidthOptionDoesNotChangeNonTerminalOutput(t *testing.T) {
+	p := core.TestPrinter(false)
+	input := "one two three four five six"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 5}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+	if got, want := string(p.Bytes()), input+"\n"; got != want {
+		t.Fatalf("non-terminal output = %q, want %q", got, want)
+	}
+}
+
+func visibleMarkdownLines(output string) []string {
+	output = stripMarkdownHyperlinks(output)
+	return strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+}
+
+func stripMarkdownHyperlinks(output string) string {
+	for {
+		start := strings.Index(output, "\x1b]8;;")
+		if start < 0 {
+			return output
+		}
+		end := strings.Index(output[start:], "\x1b\\")
+		if end < 0 {
+			return output[:start]
+		}
+		output = output[:start] + output[start+end+2:]
+	}
+}
+
 func TestFormatMarkdownTableUsesTerminalWidths(t *testing.T) {
 	p := core.TestTerminalPrinter(false)
 	input := "| Name | Value |\n| --- | --- |\n| 世界 | ok |"
