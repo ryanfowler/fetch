@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"strings"
@@ -87,6 +88,35 @@ func TestFileBodyRejectsTruncationAndReplacement(t *testing.T) {
 	}
 	if _, err := b.Replay(); err == nil {
 		t.Fatal("Replay succeeded after file replacement/truncation")
+	}
+}
+
+func TestNewFileFromOpenFilePreservesClosedFileStatError(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "body-closed-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewFileFromOpenFile(f, "text/plain"); !errors.Is(err, fs.ErrClosed) {
+		t.Fatalf("NewFileFromOpenFile() error = %v, want a closed-file error", err)
+	}
+}
+
+func TestNewFileFromOpenFileClosesNonRegularFile(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	if _, err := NewFileFromOpenFile(reader, "application/octet-stream"); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("NewFileFromOpenFile() error = %v, want a non-regular-file error", err)
+	}
+	if err := reader.Close(); err == nil {
+		t.Fatal("non-regular file was not closed")
 	}
 }
 
