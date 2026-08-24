@@ -36,6 +36,7 @@ const (
 	MaxUpdaterUnpackedData        int64 = 512 << 20
 	MaxUpdaterArchiveEntries            = 128
 	MaxDryRunBodyPreview          int64 = 1_024
+	MaxRetries                          = 100
 	MaxRetryAfter                       = 30 * time.Second
 	MaxUpdateRedirects                  = 10
 	DefaultDOHTimeout                   = 5 * time.Second

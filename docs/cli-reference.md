@@ -451,6 +451,7 @@ allowed.
 ### `--retry NUM`
 
 Maximum number of retries for transient failures. Default: `0` (no retries).
+The value must be between `0` and `100`.
 
 Retries occur on connection errors and retryable status codes (429, 502, 503, 504) for GET, HEAD, OPTIONS, and TRACE requests. Non-retryable errors (4xx, TLS certificate errors) are not retried. PUT and DELETE are not retried by default: although HTTP describes them as idempotent, individual APIs may implement side effects that are unsafe to repeat. POST, PATCH, PUT, DELETE, and custom methods require the explicit `--retry-unsafe` opt-in. Uses exponential backoff with jitter between attempts.
 

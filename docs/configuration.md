@@ -382,6 +382,7 @@ redirects remain allowed.
 **Default**: `0` (no retries)
 
 Maximum number of retries for transient failures. Retries occur on connection errors and retryable status codes (429, 502, 503, 504) only for GET, HEAD, OPTIONS, and TRACE by default. PUT, DELETE, POST, PATCH, and custom methods require `retry-unsafe = true`.
+The value must be between `0` and `100`.
 
 ```ini
 # Retry up to 3 times

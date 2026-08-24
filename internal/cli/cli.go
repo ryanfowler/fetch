@@ -773,7 +773,9 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		}
 	}
 	if r.RetrySet {
-		a.Cfg.Retry = &r.Retry
+		if err := a.Cfg.ParseRetry(strconv.Itoa(r.Retry)); err != nil {
+			return err
+		}
 	}
 	if r.RetryDelaySet {
 		a.Cfg.RetryDelay = new(time.Duration(float64(time.Second) * r.RetryDelay))

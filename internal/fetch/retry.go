@@ -233,6 +233,9 @@ func retryAttemptCount(retries int) (int, error) {
 	if retries == int(^uint(0)>>1) {
 		return 0, errors.New("retry count is too large")
 	}
+	if retries > core.MaxRetries {
+		return 0, fmt.Errorf("retry count exceeds maximum of %d", core.MaxRetries)
+	}
 	return retries + 1, nil
 }
 
