@@ -1,10 +1,18 @@
 package proto
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 func TestCompileProtosSuccess(t *testing.T) {
@@ -262,6 +270,274 @@ message SecondMessage {
 	}
 }
 
+func TestCompileProtosRejectsFloodedOutput(t *testing.T) {
+	buildFakeProtoc(t)
+	for _, stream := range []string{"stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			t.Setenv("FETCH_FAKE_PROTOC_MODE", stream+"-flood")
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+
+			_, err := CompileProtosWithContext(ctx, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), "output exceeded") {
+				t.Fatalf("CompileProtosWithContext() error = %v, want bounded output error", err)
+			}
+		})
+	}
+}
+
+func TestCompileProtosStartFailurePreservesCause(t *testing.T) {
+	protocName := "protoc"
+	if os.PathSeparator == '\\' {
+		protocName += ".exe"
+	}
+	protocPath := filepath.Join(t.TempDir(), protocName)
+	if err := os.WriteFile(protocPath, []byte("not a valid executable"), 0700); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	t.Setenv("PATH", filepath.Dir(protocPath))
+
+	_, err := CompileProtosWithContext(t.Context(), nil, nil)
+	if err == nil {
+		t.Fatal("CompileProtosWithContext() succeeded with invalid protoc executable")
+	}
+	var protocErr *ProtocError
+	if !errors.As(err, &protocErr) {
+		t.Fatalf("CompileProtosWithContext() error = %T, want *ProtocError", err)
+	}
+	if protocErr.Err == nil {
+		t.Fatal("ProtocError.Err is nil after cmd.Start() failure")
+	}
+	if !errors.Is(err, protocErr.Err) {
+		t.Fatal("errors.Is(CompileProtosWithContext() error, ProtocError.Err) = false")
+	}
+}
+
+func TestProtocOutputFailureProducersDoNotBlock(t *testing.T) {
+	descriptorPath := filepath.Join(t.TempDir(), "descriptor.pb")
+	if err := os.WriteFile(descriptorPath, nil, 0600); err != nil {
+		t.Fatalf("os.WriteFile() error = %v", err)
+	}
+	if err := os.Truncate(descriptorPath, core.MaxProtobufDescriptorSetBytes+1); err != nil {
+		t.Fatalf("os.Truncate() error = %v", err)
+	}
+
+	failures := make(chan protocOutputFailure, protocOutputFailureCapacity)
+	var producers sync.WaitGroup
+	producers.Add(3)
+
+	monitorStop := make(chan struct{})
+	monitorDone := make(chan struct{})
+	go func() {
+		defer producers.Done()
+		monitorProtocDescriptorOutput(descriptorPath, monitorStop, monitorDone, failures)
+	}()
+
+	go func() {
+		defer producers.Done()
+		drainProtocOutput(strings.NewReader(strings.Repeat("x", int(core.MaxProtocOutputBytes)+1)), core.NewBoundedBuffer(core.MaxProtocOutputBytes, "stdout"), "stdout", make(chan struct{}), failures)
+	}()
+	go func() {
+		defer producers.Done()
+		drainProtocOutput(strings.NewReader(strings.Repeat("x", int(core.MaxProtocOutputBytes)+1)), core.NewBoundedBuffer(core.MaxProtocOutputBytes, "stderr"), "stderr", make(chan struct{}), failures)
+	}()
+
+	finished := make(chan struct{})
+	go func() {
+		producers.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("protoc output failure producer blocked")
+	}
+
+	if got := len(failures); got != 3 {
+		t.Fatalf("reported output failures = %d, want 3", got)
+	}
+}
+
+func TestCompileProtosRejectsOversizedGeneratedDescriptor(t *testing.T) {
+	buildFakeProtoc(t)
+	t.Setenv("FETCH_FAKE_PROTOC_MODE", "descriptor-flood-running")
+
+	started := time.Now()
+	_, err := CompileProtosWithContext(t.Context(), nil, nil)
+	if err == nil || !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("CompileProtosWithContext() error = %v, want generated descriptor size limit", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("generated descriptor overflow was not detected while protoc was running: %s", elapsed)
+	}
+}
+
+func TestCompileProtosStopsHangingProtoc(t *testing.T) {
+	buildFakeProtoc(t)
+	t.Setenv("FETCH_FAKE_PROTOC_MODE", "hang")
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	_, err := CompileProtosWithContext(ctx, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("CompileProtosWithContext() error = %v, want timeout", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CompileProtosWithContext() error = %v, want errors.Is(context.DeadlineExceeded)", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("hanging protoc was not terminated promptly: %s", elapsed)
+	}
+}
+
+func TestCompileProtosPreservesCancellation(t *testing.T) {
+	buildFakeProtoc(t)
+	t.Setenv("FETCH_FAKE_PROTOC_MODE", "hang")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := CompileProtosWithContext(ctx, nil, nil)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("CompileProtosWithContext() error = %v, want errors.Is(context.Canceled)", err)
+	}
+}
+
+func TestCompileProtosContainsChildWithInheritedPipes(t *testing.T) {
+	buildFakeProtoc(t)
+	t.Setenv("FETCH_FAKE_PROTOC_MODE", "child-pipe")
+	childPIDPath := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("FETCH_FAKE_PROTOC_CHILD_PID_FILE", childPIDPath)
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	started := time.Now()
+	if _, err := CompileProtosWithContext(ctx, nil, nil); err != nil {
+		t.Fatalf("CompileProtosWithContext() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("CompileProtosWithContext() hung on inherited pipes: %s", elapsed)
+	}
+
+	pid := readChildPID(t, childPIDPath)
+	assertProtocChildTerminated(t, pid)
+}
+
+func readChildPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			var pid int
+			if _, err := fmt.Sscanf(string(data), "%d", &pid); err == nil && pid > 0 {
+				return pid
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("fake protoc did not record child PID in %s", path)
+	return 0
+}
+
+func buildFakeProtoc(t *testing.T) string {
+	t.Helper()
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go not found in PATH, skipping fake protoc test")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(source, []byte(fakeProtocSource), 0600); err != nil {
+		t.Fatalf("write fake protoc: %v", err)
+	}
+	helper := filepath.Join(dir, "protoc")
+	if os.PathSeparator == '\\' {
+		helper += ".exe"
+	}
+	cmd := exec.Command(goTool, "build", "-o", helper, "main.go")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GO111MODULE=off")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake protoc: %v\n%s", err, output)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return helper
+}
+
+const fakeProtocSource = `package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+func descriptorPath() string {
+	const prefix = "--descriptor_set_out="
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, prefix) {
+			return strings.TrimPrefix(arg, prefix)
+		}
+	}
+	return ""
+}
+
+func main() {
+	switch os.Getenv("FETCH_FAKE_PROTOC_MODE") {
+	case "stdout-flood":
+		_, _ = os.Stdout.Write([]byte(strings.Repeat("x", 1<<20)))
+	case "stderr-flood":
+		_, _ = os.Stderr.Write([]byte(strings.Repeat("x", 1<<20)))
+	case "descriptor-flood":
+		file, err := os.Create(descriptorPath())
+		if err != nil {
+			os.Exit(1)
+		}
+		_ = file.Truncate(64<<20 + 1)
+		_ = file.Close()
+	case "descriptor-flood-running":
+		file, err := os.Create(descriptorPath())
+		if err != nil {
+			os.Exit(1)
+		}
+		_ = file.Truncate(64<<20 + 1)
+		_ = file.Close()
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "child-pipe":
+		child := exec.Command(os.Args[0], "-child-pipe-worker")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(1)
+		}
+		if path := os.Getenv("FETCH_FAKE_PROTOC_CHILD_PID_FILE"); path != "" {
+			_ = os.WriteFile(path, []byte(fmt.Sprint(child.Process.Pid)), 0600)
+		}
+	case "-child-pipe-worker":
+		for {
+			time.Sleep(time.Hour)
+		}
+	case "hang":
+		for {
+			time.Sleep(time.Hour)
+		}
+	default:
+		file, err := os.Create(descriptorPath())
+		if err != nil {
+			os.Exit(1)
+		}
+		_, _ = io.Copy(file, strings.NewReader(""))
+		_ = file.Close()
+	}
+}
+`
+
 func TestProtocNotFoundError(t *testing.T) {
 	err := &ProtocNotFoundError{}
 	msg := err.Error()
@@ -274,12 +550,16 @@ func TestProtocNotFoundError(t *testing.T) {
 }
 
 func TestProtocError(t *testing.T) {
-	err := &ProtocError{Message: "test error message"}
+	cause := errors.New("test cause")
+	err := &ProtocError{Message: "test error message", Err: cause}
 	msg := err.Error()
 	if msg == "" {
 		t.Error("ProtocError.Error() returned empty string")
 	}
 	if msg != "protoc failed: test error message" {
 		t.Errorf("ProtocError.Error() = %v, want 'protoc failed: test error message'", msg)
+	}
+	if !errors.Is(err, cause) {
+		t.Error("errors.Is(ProtocError, cause) = false, want true")
 	}
 }
