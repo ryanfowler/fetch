@@ -285,7 +285,7 @@ func ResolveHTTPS(ctx context.Context, host string, records HTTPSRecordLookup, a
 			if addresses != nil {
 				resolved, resolveErr := resolveServiceAddresses(ctx, candidate.TargetName.String(), candidate.Hints, addresses)
 				if resolveErr != nil {
-					classified := classifyDiscoveryError(resolveErr, false)
+					classified := classifyDiscoveryError(resolveErr, options.Authenticated)
 					if errors.Is(resolveErr, context.Canceled) || errors.Is(resolveErr, context.DeadlineExceeded) || len(candidate.Addresses) == 0 || !MayDowngrade(classified) {
 						return result, classified
 					}

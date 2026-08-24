@@ -146,13 +146,16 @@ func TestDiscoveryDowngradePolicy(t *testing.T) {
 func TestResolveHTTPSAuthenticatedAddressFailureDoesNotDowngradeWithHints(t *testing.T) {
 	origin, _ := ParseName("origin.example")
 	answers := []Record{{Owner: origin, Type: dnsTypeHTTPS, Class: 1, RData: svcbRData(1, []string{"service", "example"}, svcbParam(svcParamIPv4Hint, []byte{192, 0, 2, 1}))}}
-	_, err := ResolveHTTPS(context.Background(), "origin.example", func(context.Context, string) ([]Record, error) {
+	result, err := ResolveHTTPS(context.Background(), "origin.example", func(context.Context, string) ([]Record, error) {
 		return answers, nil
 	}, func(context.Context, string) ([]net.IPAddr, error) {
-		return nil, &DiscoveryError{Kind: DiscoveryFailureAuthenticated, Err: errors.New("verified DNS transport failed")}
-	}, ServiceDiscoveryOptions{})
-	if err == nil || !IsAuthenticatedDiscoveryFailure(err) || MayDowngrade(err) {
+		return nil, errors.New("address lookup failed")
+	}, ServiceDiscoveryOptions{Authenticated: true})
+	if err == nil || DiscoveryFailure(err) != DiscoveryFailureAuthenticated || MayDowngrade(err) {
 		t.Fatalf("err = %v, kind = %v, may downgrade = %v", err, DiscoveryFailure(err), MayDowngrade(err))
+	}
+	if len(result.Candidates) != 0 {
+		t.Fatalf("candidates = %v, want no fallback candidate", result.Candidates)
 	}
 }
 
