@@ -24,6 +24,30 @@ import (
 	imultipart "github.com/ryanfowler/fetch/internal/multipart"
 )
 
+func TestRetryAttemptCount(t *testing.T) {
+	t.Run("maximum value", func(t *testing.T) {
+		got, err := retryAttemptCount(core.MaxRetries)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != core.MaxRetries+1 {
+			t.Fatalf("retryAttemptCount = %d, want %d", got, core.MaxRetries+1)
+		}
+	})
+
+	t.Run("above maximum", func(t *testing.T) {
+		if _, err := retryAttemptCount(core.MaxRetries + 1); err == nil {
+			t.Fatal("expected error for retry count above maximum")
+		}
+	})
+
+	t.Run("negative value", func(t *testing.T) {
+		if _, err := retryAttemptCount(-1); err == nil {
+			t.Fatal("expected error for negative retry count")
+		}
+	})
+}
+
 func TestComputeDelay(t *testing.T) {
 	t.Run("exponential growth", func(t *testing.T) {
 		// With no jitter influence check, just verify growth trend.

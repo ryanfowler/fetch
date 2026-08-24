@@ -141,6 +141,23 @@ func TestParseRetry(t *testing.T) {
 		}
 	})
 
+	t.Run("maximum value", func(t *testing.T) {
+		c := &Config{}
+		if err := c.ParseRetry("100"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if c.Retry == nil || *c.Retry != 100 {
+			t.Errorf("expected retry=100, got %v", c.Retry)
+		}
+	})
+
+	t.Run("above maximum", func(t *testing.T) {
+		c := &Config{}
+		if err := c.ParseRetry("101"); err == nil {
+			t.Error("expected error for retry value above maximum")
+		}
+	})
+
 	t.Run("valid value", func(t *testing.T) {
 		c := &Config{}
 		if err := c.ParseRetry("3"); err != nil {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"crypto/tls"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -635,6 +636,28 @@ func TestFromCurlRedirects(t *testing.T) {
 				t.Fatalf("Redirects = %d, want %d", *app.Cfg.Redirects, tt.want)
 			}
 		})
+	}
+}
+
+func TestFromCurlRetryLimit(t *testing.T) {
+	maxRetryCommand := fmt.Sprintf("curl --retry %d https://example.com", core.MaxRetries)
+	app, err := Parse([]string{"--from-curl", maxRetryCommand})
+	if err != nil {
+		t.Fatalf("Parse() at maximum: %v", err)
+	}
+	if app.Cfg.Retry == nil || *app.Cfg.Retry != core.MaxRetries {
+		t.Fatalf("Retry = %v, want %d", app.Cfg.Retry, core.MaxRetries)
+	}
+
+	for _, args := range [][]string{
+		{"--from-curl", fmt.Sprintf("curl --retry %d https://example.com", core.MaxRetries+1)},
+		{"--dry-run", "--from-curl", fmt.Sprintf("curl --retry %d https://example.com", core.MaxRetries+1)},
+	} {
+		if _, err := Parse(args); err == nil {
+			t.Fatalf("Parse(%v) succeeded, want retry-limit error", args)
+		} else if !strings.Contains(err.Error(), "retry") {
+			t.Fatalf("Parse(%v) error = %q, want retry error", args, err)
+		}
 	}
 }
 

@@ -905,8 +905,8 @@ func (c *Config) ParseRedirects(value string) error {
 
 func (c *Config) ParseRetry(value string) error {
 	n, err := strconv.Atoi(value)
-	if err != nil || n < 0 {
-		const usage = "must be a non-negative integer"
+	if err != nil || n < 0 || n > core.MaxRetries {
+		usage := fmt.Sprintf("must be a non-negative integer no greater than %d", core.MaxRetries)
 		return core.NewValueError("retry", value, usage, c.isFile)
 	}
 	c.Retry = &n
