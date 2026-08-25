@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/klauspost/compress/gzip"
@@ -167,6 +168,24 @@ func TestSelfReplaceIsAtomicAndRejectsSymlink(t *testing.T) {
 	}
 	if err := selfReplace(link, candidate); !errors.Is(err, fileutil.ErrSymlinkTarget) {
 		t.Fatalf("selfReplace symlink error = %v, want %v", err, fileutil.ErrSymlinkTarget)
+	}
+}
+
+func TestValidateReplacementDirectory_ActionableError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0775); err != nil {
+		t.Fatal(err)
+	}
+
+	err := validateReplacementDirectory(filepath.Join(dir, "fetch"))
+	if err == nil {
+		t.Fatal("validateReplacementDirectory accepted a group-writable directory")
+	}
+	message := err.Error()
+	for _, want := range []string{"writable by group or others", "0775", dir, "chmod go-w", "private directory"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("error = %q, want it to contain %q", message, want)
+		}
 	}
 }
 

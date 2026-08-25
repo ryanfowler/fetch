@@ -231,7 +231,8 @@ func validateReplacementDirectory(target string) error {
 		return errors.New("replacement directory is not a real directory")
 	}
 	if info.Mode().Perm()&022 != 0 {
-		return fmt.Errorf("replacement directory is writable by group or others (mode %04o)", info.Mode().Perm())
+		dir := filepath.Dir(target)
+		return fmt.Errorf("replacement directory %q is writable by group or others (mode %04o); remove group/other write permission by running `chmod go-w` on this directory (use `sudo` if needed), or install fetch in a private directory such as `~/.local/bin`", dir, info.Mode().Perm())
 	}
 	return nil
 }
