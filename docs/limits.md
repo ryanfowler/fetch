@@ -53,7 +53,8 @@ contain `key`, `token`, `secret`, `password`, `credential`, `signature`, or
 visible. HAR artifacts are the exception because they are intended to reproduce
 the exchange and can contain sensitive data.
 
-Image rendering also rejects decoded dimensions above 8192 by 8192. External
-image adapters and pagers run without a shell, with bounded output and a
-process deadline. See [output formatting](output-formatting.md), [HAR](har.md),
+Image rendering also rejects decoded dimensions above 8192 by 8192. Article
+image fetching allows at most 16 images, 8 MiB per image, and 32 MiB in total.
+External image adapters and pagers run without a shell, with bounded output and
+a process deadline. See [output formatting](output-formatting.md), [HAR](har.md),
 [updates](updates.md), and [Agent Skill](agent-skill.md) for feature details.

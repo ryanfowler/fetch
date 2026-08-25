@@ -3,12 +3,10 @@ package image
 import (
 	"fmt"
 	"image"
-	"os"
+	"io"
 )
 
-// writeKitty writes the provided image to the terminal using the kitty
-// graphics protocol.
-func writeKitty(img image.Image, termWidthPx, termHeightPx int) error {
+func writeKittyTo(img image.Image, termWidthPx, termHeightPx int, dst io.Writer) error {
 	img = resizeForTerm(img, termWidthPx, termHeightPx)
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
@@ -21,8 +19,10 @@ func writeKitty(img image.Image, termWidthPx, termHeightPx int) error {
 	// The image is written in chunks of up to 4096 bytes.
 	next := min(4096, len(data))
 	chunk := data[:next]
-	fmt.Fprintf(os.Stdout, "\x1b_Gq=2,f=100,a=T,t=d,s=%d,v=%d,m=%d;%s\x1b\\",
-		width, height, boolToInt(next < len(data)), chunk)
+	if _, err := fmt.Fprintf(dst, "\x1b_Gq=2,f=100,a=T,t=d,s=%d,v=%d,m=%d;%s\x1b\\",
+		width, height, boolToInt(next < len(data)), chunk); err != nil {
+		return err
+	}
 
 	pos := next
 	for pos < len(data) {
@@ -30,12 +30,14 @@ func writeKitty(img image.Image, termWidthPx, termHeightPx int) error {
 		chunk = data[pos:next]
 		pos = next
 
-		fmt.Fprintf(os.Stdout, "\x1b_Gm=%d;%s\x1b\\",
-			boolToInt(next < len(data)), chunk)
+		if _, err := fmt.Fprintf(dst, "\x1b_Gm=%d;%s\x1b\\",
+			boolToInt(next < len(data)), chunk); err != nil {
+			return err
+		}
 	}
 
-	fmt.Fprintln(os.Stdout)
-	return nil
+	_, err = fmt.Fprintln(dst)
+	return err
 }
 
 func boolToInt(b bool) int {

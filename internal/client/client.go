@@ -871,6 +871,26 @@ func (c *Client) HTTPClient() *http.Client {
 	return c.c
 }
 
+// LookupIPAddr resolves host using the resolver configured for this client.
+// It keeps policy checks consistent with the addresses used by its transport.
+func (c *Client) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	if c != nil && c.resolver != nil {
+		return c.resolver.LookupIPAddr(ctx, host)
+	}
+	return net.DefaultResolver.LookupIPAddr(ctx, host)
+}
+
+// UsesProxy reports whether requests for target use a configured proxy.
+// Callers that inspect the peer connection must account for the proxy because
+// the peer is then the proxy, not the requested origin.
+func (c *Client) UsesProxy(target *url.URL) bool {
+	if c == nil || target == nil {
+		return false
+	}
+	proxy, err := ProxyForURL(c.proxy, target)
+	return err == nil && proxy != nil
+}
+
 // ResolverProvenance identifies the resolver policy used by this client. It
 // is safe for diagnostics because resolver endpoints redact credentials during
 // parsing and display construction.

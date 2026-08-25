@@ -1109,6 +1109,29 @@ func TestFormatMarkdownImageInline(t *testing.T) {
 	}
 }
 
+func TestFormatMarkdownRenderedImageSkipsMarkdownImage(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	err := FormatMarkdownWithOptions([]byte("Before ![logo](https://example.com/logo.png) after"), p, MarkdownOptions{
+		RenderImage: func(destination string) bool {
+			if destination != "https://example.com/logo.png" {
+				t.Fatalf("image destination = %q", destination)
+			}
+			_, _ = p.WriteString("<image>\n")
+			return true
+		},
+	})
+	if err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+	output := string(p.Bytes())
+	if !strings.Contains(output, "<image>") || !strings.Contains(output, "Before") || !strings.Contains(output, "after") {
+		t.Fatalf("rendered image output = %q", output)
+	}
+	if strings.Contains(output, "logo") || strings.Contains(output, "https://example.com/logo.png") {
+		t.Fatalf("Markdown image fallback was rendered: %q", output)
+	}
+}
+
 func TestFormatMarkdownTable(t *testing.T) {
 	input := "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |\n"
 	p := core.TestPrinter(false)

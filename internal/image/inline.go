@@ -3,12 +3,10 @@ package image
 import (
 	"fmt"
 	"image"
-	"os"
+	"io"
 )
 
-// writeInline writes the provided image to the terminal using iTerm2's inline
-// image protocol.
-func writeInline(img image.Image, termWidthPx, termHeightPx int) error {
+func writeInlineTo(img image.Image, termWidthPx, termHeightPx int, dst io.Writer) error {
 	img = resizeForTerm(img, termWidthPx, termHeightPx)
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
@@ -18,7 +16,7 @@ func writeInline(img image.Image, termWidthPx, termHeightPx int) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stdout, "\x1b]1337;File=inline=1;preserveAspectRatio=1;size=%d;width=%dpx;height=%dpx:%s\x07\n",
+	_, err = fmt.Fprintf(dst, "\x1b]1337;File=inline=1;preserveAspectRatio=1;size=%d;width=%dpx;height=%dpx:%s\x07\n",
 		len(data), width, height, data)
-	return nil
+	return err
 }

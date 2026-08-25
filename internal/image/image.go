@@ -9,7 +9,9 @@ import (
 	"image"
 	_ "image/jpeg"
 	"image/png"
+	"io"
 	"math"
+	"os"
 	"strings"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -35,8 +37,18 @@ func Render(ctx context.Context, b []byte, nativeOnly bool) error {
 // explicit opt-in because image responses are untrusted input and adapters
 // have a much larger attack surface than the Go decoders.
 func RenderWithMode(ctx context.Context, b []byte, mode core.ImageSetting) error {
+	return RenderWithModeTo(ctx, b, mode, os.Stdout)
+}
+
+// RenderWithModeTo decodes an image and writes its terminal presentation to
+// dst. Keeping the destination explicit lets Markdown presentation buffer
+// image protocols together with the surrounding document.
+func RenderWithModeTo(ctx context.Context, b []byte, mode core.ImageSetting, dst io.Writer) error {
 	if mode == core.ImageOff {
 		return errors.New("image rendering is disabled")
+	}
+	if dst == nil {
+		return errors.New("image rendering destination is nil")
 	}
 	img, err := decodeImage(ctx, b, mode)
 	if err != nil {
@@ -57,16 +69,16 @@ func RenderWithMode(ctx context.Context, b []byte, mode core.ImageSetting) error
 	if size.WidthPx == 0 || size.HeightPx == 0 {
 		// If we're unable to get the terminal dimensions in pixels,
 		// render the image using blocks.
-		return writeBlocks(img, size.Cols, size.Rows)
+		return writeBlocksTo(img, size.Cols, size.Rows, dst)
 	}
 
 	switch detectEmulator().Protocol() {
 	case protoInline:
-		return writeInline(img, size.WidthPx, size.HeightPx)
+		return writeInlineTo(img, size.WidthPx, size.HeightPx, dst)
 	case protoKitty:
-		return writeKitty(img, size.WidthPx, size.HeightPx)
+		return writeKittyTo(img, size.WidthPx, size.HeightPx, dst)
 	default:
-		return writeBlocks(img, size.Cols, size.Rows)
+		return writeBlocksTo(img, size.Cols, size.Rows, dst)
 	}
 }
 

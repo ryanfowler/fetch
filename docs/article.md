@@ -45,8 +45,12 @@ Only available fields are emitted. String values use JSON string quoting, which
 is a safe YAML scalar. `length` is numeric. Markdown pass-through emits only
 `url`.
 
-Terminal output may use the normal formatter, color, and pager. Output files,
-pipes, and clipboard destinations receive raw, uncolored Markdown.
+Terminal output may use the normal formatter and color. On a terminal,
+article images are fetched and rendered with the configured image policy. Use
+`--image off` to disable this behavior. Article images are not fetched for
+output files, pipes, or clipboard destinations, which receive raw, uncolored
+Markdown. Image fetches are bounded and failed images fall back to their alt
+text and URL.
 
 Article mode cannot be combined with WebSockets, gRPC, DNS/TLS inspection,
 `--discard`, `--remote-name`, or `--remote-header-name`.

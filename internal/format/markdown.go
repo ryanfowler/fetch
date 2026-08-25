@@ -31,6 +31,11 @@ const (
 // of this value.
 type MarkdownOptions struct {
 	MaxWidth int
+
+	// RenderImage renders a Markdown image for terminal presentation and
+	// returns true when it wrote the image. It is ignored for non-terminal
+	// output. The callback owns image fetching and safety policy.
+	RenderImage func(destination string) bool
 }
 
 // FormatMarkdown formats the provided Markdown to the Printer.
@@ -69,7 +74,13 @@ func FormatMarkdownWithOptions(buf []byte, p *core.Printer, options MarkdownOpti
 		width = markdownWidth(options.MaxWidth, core.GetTerminalCols())
 	}
 
-	r := &mdRenderer{printer: p, source: rest, width: width}
+	r := &mdRenderer{
+		printer:        p,
+		source:         rest,
+		width:          width,
+		imageRenderer:  options.RenderImage,
+		renderedImages: make(map[*ast.Image]bool),
+	}
 	r.tty = p.IsTerminal()
 	return ast.Walk(doc, r.walk)
 }
@@ -192,6 +203,8 @@ type mdRenderer struct {
 	lineWidth         int
 	pendingSpace      string
 	tty               bool
+	imageRenderer     func(destination string) bool
+	renderedImages    map[*ast.Image]bool
 }
 
 type mdTableCell struct {
@@ -761,8 +774,28 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		}
 
 	case *ast.Image:
+		if !entering && r.renderedImages[v] {
+			delete(r.renderedImages, v)
+			return ast.WalkSkipChildren, nil
+		}
 		if entering {
 			target := markdownLinkDestination(v.Destination)
+			if r.tty && r.imageRenderer != nil {
+				r.flushPendingSpace()
+				if r.lineWidth > 0 {
+					r.writeLineBreak()
+				}
+				if r.imageRenderer(target) {
+					r.popAllAndRestore()
+					r.renderedImages[v] = true
+					// Image protocols emit their own terminal line. Keep the
+					// following Markdown content on a fresh logical line and do
+					// not render the image's alt text a second time.
+					r.pendingSpace = ""
+					r.lineWidth = 0
+					return ast.WalkSkipChildren, nil
+				}
+			}
 			r.flushPendingSpace()
 			active := r.printer.StartHyperlink(target)
 			r.links = append(r.links, active)
