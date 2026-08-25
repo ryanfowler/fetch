@@ -489,7 +489,7 @@ func signAWSRequest(r *Request, req *http.Request) error {
 	return nil
 }
 
-func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRedirects, hadRetries bool, metrics *connectionMetrics) (exitCode int, retErr error) {
+func processResponse(ctx context.Context, r *Request, c *client.Client, resp *http.Response, hadRedirects, hadRetries bool, metrics *connectionMetrics) (exitCode int, retErr error) {
 	if !r.IgnoreStatus {
 		exitCode = getExitCodeForStatus(resp.StatusCode)
 	}
@@ -608,7 +608,7 @@ func processResponse(ctx context.Context, r *Request, resp *http.Response, hadRe
 	// If --copy is requested, wrap the response body to capture raw bytes.
 	cc := newClipboardCopier(r, resp)
 
-	body, err := formatResponse(ctx, r, resp, cc)
+	body, err := formatResponse(ctx, r, resp, cc, c)
 	if err != nil {
 		return 0, contextCauseOr(err, ctx)
 	}
@@ -664,14 +664,14 @@ func formatWithBoundedOutput(p *core.Printer, subsystem string, fn func(*core.Pr
 	return out.Bytes(), nil
 }
 
-func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *clipboardCopier) (io.Reader, error) {
+func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *clipboardCopier, c *client.Client) (io.Reader, error) {
 	// Avoid trying to format the response for HEAD requests.
 	if resp.Request != nil && resp.Request.Method == "HEAD" {
 		return nil, nil
 	}
 
 	if r.Article {
-		return formatArticleResponse(r, resp, cc)
+		return formatArticleResponse(ctx, r, resp, cc, c)
 	}
 
 	output, outputWarning, err := getOutputValueDetails(r, resp)
@@ -839,7 +839,7 @@ func sameDestinationPath(first, second string) bool {
 	return strings.EqualFold(first, second) && os.PathSeparator == '\\'
 }
 
-func formatArticleResponse(r *Request, resp *http.Response, cc *clipboardCopier) (io.Reader, error) {
+func formatArticleResponse(ctx context.Context, r *Request, resp *http.Response, cc *clipboardCopier, c *client.Client) (io.Reader, error) {
 	_, charset := format.GetContentType(resp.Header)
 	original := resp.Body
 	decoded, err := article.ReadLimited(transcodeReader(original, charset))
@@ -891,8 +891,25 @@ func formatArticleResponse(r *Request, resp *http.Response, cc *clipboardCopier)
 	}
 
 	p := r.PrinterHandle.Stdout()
-	if err := format.FormatMarkdown(markdown, p); err != nil {
+	options := format.MarkdownOptions{}
+	var images *articleImageFetcher
+	if r.Image != core.ImageOff && p.IsTerminal() && c != nil && r.Output == "" && r.Format != core.FormatOff {
+		images = newArticleImageFetcher(ctx, c, r.Image, pageURL)
+		if images != nil {
+			options.RenderImage = func(destination string) bool {
+				return images.render(destination, p)
+			}
+		}
+	}
+	if err := format.FormatMarkdownWithOptions(markdown, p, options); err != nil {
 		return nil, err
+	}
+	if images != nil && images.rendered > 0 {
+		// Image protocols must not pass through a pager or the text binary
+		// guard. The reader marker below preserves the terminal-only output
+		// contract while keeping raw article output unchanged.
+		r.NoPager = true
+		return terminalPresentationReader{Reader: bytes.NewReader(p.Bytes())}, nil
 	}
 	return bytes.NewReader(p.Bytes()), nil
 }
@@ -916,7 +933,8 @@ func streamToStdout(r io.Reader, p *core.Printer, forceOutput, noPager, drainSup
 }
 
 func streamToStdoutWithPagerContent(ctx context.Context, r io.Reader, p *core.Printer, forceOutput, noPager, drainSuppressedBinary, silent bool, pagerMode core.PagerMode, contentType string) error {
-	if noPager || forceOutput || isImageContentType(contentType) {
+	_, terminalPresentation := r.(interface{ terminalPresentation() })
+	if noPager || forceOutput || terminalPresentation || isImageContentType(contentType) {
 		// Raw output must remain byte-oriented, and image protocol bytes must
 		// never be fed to a text pager. This also makes --output - an explicit
 		// pager bypass, matching its raw-output contract.
@@ -935,7 +953,7 @@ func streamToStdoutWithPagerContent(ctx context.Context, r io.Reader, p *core.Pr
 	// A terminal must not receive a response chunk until that chunk has
 	// passed the binary classifier. The guard continues checking later chunks,
 	// so a binary response cannot hide behind an initial text prefix.
-	if core.IsStdoutTerm && !forceOutput {
+	if core.IsStdoutTerm && !forceOutput && !terminalPresentation {
 		guard := newBinaryGuardReader(r, drainSuppressedBinary, nil)
 		stopClosing := closeReaderOnContext(ctx, guard)
 		first := make([]byte, 64*1024)

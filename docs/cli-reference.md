@@ -257,7 +257,9 @@ fetch --format on example.com    # Force formatting
 Extract a readable HTML/XHTML page as Markdown with YAML frontmatter. Markdown
 responses (`text/markdown` and `text/x-markdown`) pass through after a `url`
 frontmatter field. Article mode buffers at most 16 MiB of decoded content and
-does not execute JavaScript. It cannot be combined with `--discard`,
+does not execute JavaScript. On terminals, embedded article images are fetched
+and rendered unless `--image off` is set. Output files and pipes retain image
+links in the raw Markdown. It cannot be combined with `--discard`,
 `--remote-name`, or `--remote-header-name`.
 
 The frontmatter fields are `title`, `byline`, `site_name`, `published_time`,

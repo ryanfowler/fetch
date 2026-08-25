@@ -21,8 +21,7 @@ type rgbColor struct {
 	r, g, b int
 }
 
-// writeBlocks resizes the image and outputs it as terminal blocks.
-func writeBlocks(img image.Image, termWidth, termHeight int) error {
+func writeBlocksTo(img image.Image, termWidth, termHeight int, writer io.Writer) error {
 	trueColor := supportsTrueColor()
 
 	// Each terminal block represents 2 vertical pixels.
@@ -30,7 +29,7 @@ func writeBlocks(img image.Image, termWidth, termHeight int) error {
 	targetWidth := cols
 	targetHeight := rows * 2
 
-	dst := resizeImage(img, targetWidth, targetHeight)
+	raster := resizeImage(img, targetWidth, targetHeight)
 
 	// Process the image in blocks (each block = two vertical pixels).
 	var out bytes.Buffer
@@ -39,10 +38,10 @@ func writeBlocks(img image.Image, termWidth, termHeight int) error {
 		bottomY := topY + 1
 
 		for x := range cols {
-			top := pixelToColor(dst.At(x, topY))
+			top := pixelToColor(raster.At(x, topY))
 			var bottom *rgbColor
 			if bottomY < targetHeight {
-				bottom = pixelToColor(dst.At(x, bottomY))
+				bottom = pixelToColor(raster.At(x, bottomY))
 			}
 
 			writeBlock(&out, top, bottom, trueColor)
@@ -52,8 +51,8 @@ func writeBlocks(img image.Image, termWidth, termHeight int) error {
 
 	// Reset ANSI formatting at the end.
 	out.WriteString("\x1b[0m")
-	out.WriteTo(os.Stdout)
-	return nil
+	_, err := out.WriteTo(writer)
+	return err
 }
 
 // supportsTrueColor checks the current terminal emulator for true color support.

@@ -51,7 +51,8 @@ URL after redirects to resolve links.
 Article mode decodes the response before extraction and accepts at most 16 MiB
 of decoded content. It does not run JavaScript, so content rendered only by
 client-side scripts is not available. Output files and pipes receive raw,
-uncolored Markdown. On a terminal, `--format`, `--color`, and `--pager` affect
+uncolored Markdown. On a terminal, embedded article images are fetched and
+rendered unless `--image off` is set. `--format`, `--color`, and `--pager` affect
 presentation only.
 
 ```sh

@@ -15,7 +15,9 @@ Control how images are rendered:
 | `off`      | Disable image rendering                               |
 
 `native` remains accepted as a compatibility alias for `auto`. External
-programs never run in `auto` mode.
+programs never run in `auto` mode. When `--article` formats a document on a
+terminal, embedded images use this same policy. Images are not fetched for
+files, pipes, or clipboard output.
 
 ```sh
 fetch --image auto example.com/photo.jpg

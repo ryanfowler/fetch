@@ -170,7 +170,7 @@ func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *ht
 				return 0, errors.New("request completed without a response")
 			}
 			defer func() { _ = resp.Body.Close() }()
-			return processResponse(requestCtx, r, resp, hadRedirects, attempt > 0, metrics)
+			return processResponse(requestCtx, r, c, resp, hadRedirects, attempt > 0, metrics)
 		}
 
 		if resp != nil {
