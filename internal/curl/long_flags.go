@@ -267,6 +267,13 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		}
 		r.DoHURL = v
 		return n, nil
+	case "resolve":
+		v, n, err := consumeArg()
+		if err != nil {
+			return 0, fmt.Errorf("--resolve requires an argument")
+		}
+		r.Resolve = append(r.Resolve, v)
+		return n, nil
 	case "retry":
 		v, n, err := consumeArg()
 		if err != nil {

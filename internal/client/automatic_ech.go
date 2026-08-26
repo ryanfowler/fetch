@@ -81,6 +81,7 @@ func (t *automaticHTTP3Transport) dialAutomaticECHTCP(ctx context.Context, origi
 		Host:       host,
 		Port:       port,
 		OriginHost: origin.Hostname(),
+		OriginPort: originPort(origin),
 		Resolver:   t.resolver,
 		Candidates: addresses,
 	}, cfg, t.ech)

@@ -252,7 +252,7 @@ func newECHHTTPDialTLS(base func(context.Context, string, string) (net.Conn, err
 		}
 		got, err := dialResolverWithECH(connectCtx, NewResolverDialer(res, timeout), DialRequest{
 			Network: "tcp", Host: connection.targetHost, Port: connection.targetPort,
-			OriginHost: host, Candidates: connection.addresses,
+			OriginHost: host, OriginPort: port, Candidates: connection.addresses,
 		}, connection.tlsConfig, mode)
 		if err != nil {
 			return nil, err

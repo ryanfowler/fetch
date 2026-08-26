@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -65,6 +66,30 @@ func TestLookupIPAddrDOHNXDomain(t *testing.T) {
 	_, err := New(Config{Server: mustURL(t, server.URL)}).LookupIPAddr(context.Background(), "missing.example")
 	if err == nil || !strings.Contains(err.Error(), "NXDomain") {
 		t.Fatalf("err = %v, want NXDomain", err)
+	}
+}
+
+func TestDOHClientUsesResolveForEndpointBootstrap(t *testing.T) {
+	var dialed string
+	client, err := NewDOHClient(DOHConfig{
+		ServerURL: mustURL(t, "http://resolver.example/dns-query"),
+		Resolve:   []ResolveEntry{{Host: "resolver.example", Port: "80", IP: net.ParseIP("192.0.2.10")}},
+		DialContext: func(_ context.Context, _, address string) (net.Conn, error) {
+			dialed = address
+			return nil, errors.New("stop bootstrap")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	_, err = client.LookupType(context.Background(), "example.com", "A", dnsTypeA)
+	if err == nil || !strings.Contains(err.Error(), "stop bootstrap") {
+		t.Fatalf("LookupType error = %v, want bootstrap dial error", err)
+	}
+	if dialed != "192.0.2.10:80" {
+		t.Fatalf("DoH endpoint dial address = %q, want 192.0.2.10:80", dialed)
 	}
 }
 
@@ -664,6 +689,42 @@ func TestDialContextUsesResolvedAddress(t *testing.T) {
 	}
 	conn.Close()
 	<-accepted
+}
+
+func TestDialContextUsesResolveForDOHEndpoint(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{})
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			_ = conn.Close()
+		}
+		close(accepted)
+	}()
+
+	port := listener.Addr().(*net.TCPAddr).Port
+	serverURL, err := url.Parse(fmt.Sprintf("https://resolver.example:%d/dns-query", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New(Config{
+		Server:  serverURL,
+		Resolve: []ResolveEntry{{Host: "resolver.example", Port: strconv.Itoa(port), IP: net.ParseIP("127.0.0.1")}},
+	})
+	conn, err := r.DialContext(context.Background(), "tcp", net.JoinHostPort("resolver.example", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("DoH endpoint did not receive the statically resolved connection")
+	}
 }
 
 func mustURL(t *testing.T, raw string) *url.URL {

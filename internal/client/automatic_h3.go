@@ -675,6 +675,11 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 	defer race.finish()
 	raceCtx := race.ctx
 	innerCtx := WithoutDialTimingSelector(raceCtx)
+	originPortText := originPort(origin)
+	_, hasResolve, resolveErr := t.resolver.ResolveAddressOverride("tcp", origin.Hostname(), originPortText)
+	if resolveErr != nil {
+		return preparedAutomaticConnection{}, resolveErr
+	}
 	selectTiming := func(timing DialTiming) {
 		if selector := dialTimingSelector(ctx); selector != nil {
 			selector.ConnectionSelected(timing)
@@ -724,53 +729,58 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 		race.send(result)
 	}()
 
-	go func() {
-		result := race.result("discovery")
-		discovery, err := t.resolver.DiscoverHTTPS(raceCtx, origin.Hostname(), uint16(parsePort(originPort(origin))), nil)
-		if err != nil {
-			kind := resolver.DiscoveryFailure(err)
-			if kind == resolver.DiscoveryFailureNODATA || kind == resolver.DiscoveryFailureNXDOMAIN {
-				// Authenticated NODATA/NXDOMAIN is a successful fresh
-				// replacement of the DNS RRset, not a transient failure.
-				t.cache.replaceDNS(key, nil)
+	if !hasResolve {
+		go func() {
+			result := race.result("discovery")
+			discovery, err := t.resolver.DiscoverHTTPS(raceCtx, origin.Hostname(), uint16(parsePort(originPortText)), nil)
+			if err != nil {
+				kind := resolver.DiscoveryFailure(err)
+				if kind == resolver.DiscoveryFailureNODATA || kind == resolver.DiscoveryFailureNXDOMAIN {
+					// Authenticated NODATA/NXDOMAIN is a successful fresh
+					// replacement of the DNS RRset, not a transient failure.
+					t.cache.replaceDNS(key, nil)
+				}
+				result.err = err
+				race.send(result)
+				return
 			}
-			result.err = err
+			values := make([]automaticH3Candidate, 0, len(discovery.Candidates))
+			echCandidates := make([]resolver.ServiceCandidate, 0, len(discovery.Candidates))
+			for _, service := range discovery.Candidates {
+				if len(service.ECH) > 0 && serviceAdvertisesTCP(service) {
+					echCandidates = append(echCandidates, service)
+				}
+				if !serviceAdvertisesH3(service) || len(service.Addresses) == 0 {
+					continue
+				}
+				values = append(values, automaticH3Candidate{
+					host:      service.TargetName.String(),
+					port:      service.Port,
+					ech:       append([]byte(nil), service.ECH...),
+					addresses: append([]net.IPAddr(nil), service.Addresses...),
+					expires:   ttlExpiry(service.TTL, service.TTLPresent),
+					source:    h3SourceDNS,
+					priority:  service.Priority,
+					learned:   time.Now(),
+				})
+			}
+			// A successful fresh RRset replaces old DNS candidates, including an
+			// authenticated NODATA result represented by an empty list.
+			t.cache.replaceDNS(key, values)
+			result.candidates = values
+			result.echCandidates = echCandidates
 			race.send(result)
-			return
-		}
-		values := make([]automaticH3Candidate, 0, len(discovery.Candidates))
-		echCandidates := make([]resolver.ServiceCandidate, 0, len(discovery.Candidates))
-		for _, service := range discovery.Candidates {
-			if len(service.ECH) > 0 && serviceAdvertisesTCP(service) {
-				echCandidates = append(echCandidates, service)
-			}
-			if !serviceAdvertisesH3(service) || len(service.Addresses) == 0 {
-				continue
-			}
-			values = append(values, automaticH3Candidate{
-				host:      service.TargetName.String(),
-				port:      service.Port,
-				ech:       append([]byte(nil), service.ECH...),
-				addresses: append([]net.IPAddr(nil), service.Addresses...),
-				expires:   ttlExpiry(service.TTL, service.TTLPresent),
-				source:    h3SourceDNS,
-				priority:  service.Priority,
-				learned:   time.Now(),
-			})
-		}
-		// A successful fresh RRset replaces old DNS candidates, including an
-		// authenticated NODATA result represented by an empty list.
-		t.cache.replaceDNS(key, values)
-		result.candidates = values
-		result.echCandidates = echCandidates
-		race.send(result)
-	}()
+		}()
+	}
 
-	pending := 3 // TCP, persistent-cache load, and discovery.
+	pending := 2 // TCP and persistent-cache load.
+	if !hasResolve {
+		pending++ // HTTPS/SVCB discovery.
+	}
 	var lastErr error
 	var tcpPending automaticPrepareResult
 	var haveTCP bool
-	discoveryDone := false
+	discoveryDone := hasResolve
 	var discoveredECH []resolver.ServiceCandidate
 	echEnabled := t.ech != core.ECHUnknown && t.ech != core.ECHOff
 	for pending > 0 {
@@ -930,6 +940,14 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 }
 
 func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, candidate automaticH3Candidate) (*quic.Conn, net.PacketConn, DialTiming, error) {
+	if override, ok, err := t.resolver.ResolveAddressOverride("udp", origin.Hostname(), originPort(origin)); ok {
+		if err != nil {
+			return nil, nil, DialTiming{}, err
+		}
+		candidate.host = origin.Hostname()
+		candidate.port = uint16(parsePort(originPort(origin)))
+		candidate.addresses = override.Addrs
+	}
 	if candidate.port == 0 || len(candidate.addresses) == 0 {
 		return nil, nil, DialTiming{}, errors.New("HTTP/3 candidate has no address")
 	}
@@ -1071,7 +1089,7 @@ func (t *automaticHTTP3Transport) roundTripTCP(req *http.Request, prepared prepa
 			cfg := t.tlsConfig.Clone()
 			cfg.NextProtos = []string{"h2", "http/1.1"}
 			got, err := t.dialer.Dial(ctx, DialRequest{
-				Network: "tcp", Host: host, Port: port, OriginHost: req.URL.Hostname(),
+				Network: "tcp", Host: host, Port: port, OriginHost: req.URL.Hostname(), OriginPort: originPort(req.URL),
 				Resolver: t.resolver, TLSConfig: cfg, ALPN: cfg.NextProtos,
 			})
 			if err != nil {
@@ -1458,9 +1476,17 @@ func (t *automaticHTTP3Transport) recordAltSvc(ctx context.Context, origin *url.
 		if host == "" {
 			host = origin.Hostname()
 		}
-		addresses, err := t.resolver.LookupIPAddr(lookupCtx, host)
-		if err != nil {
-			continue
+		var addresses []net.IPAddr
+		if override, ok, err := t.resolver.ResolveAddressOverride("udp", host, strconv.Itoa(int(item.port))); ok {
+			if err != nil {
+				continue
+			}
+			addresses = override.Addrs
+		} else {
+			addresses, err = t.resolver.LookupIPAddr(lookupCtx, host)
+			if err != nil {
+				continue
+			}
 		}
 		t.cache.addAltSvc(key, automaticH3Candidate{host: host, port: item.port, addresses: addresses, expires: time.Now().Add(item.maxAge), source: h3SourceAltSvc, learned: time.Now()})
 	}

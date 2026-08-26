@@ -52,6 +52,7 @@ type Result struct {
 	ConnectTimeoutSet bool
 	Proxy             string
 	DoHURL            string
+	Resolve           []string
 	HTTPVersion       string
 	TLSMaxVersion     string
 	TLSVersion        string

@@ -87,12 +87,15 @@ func dialTimingSelector(ctx context.Context) DialTimingSelector {
 // the effective service target. OriginHost is used for TLS SNI only when the
 // TLS config does not already provide ServerName; this preserves origin
 // authority when an HTTPS/SVCB service target differs from the origin host.
+// OriginPort is the URL authority port used to match static resolve entries
+// when Port has been replaced by an HTTPS/SVCB service port.
 type DialRequest struct {
 	Network    string
 	Address    string
 	Host       string
 	Port       string
 	OriginHost string
+	OriginPort string
 	Mode       DialMode
 
 	Resolver      *resolver.Resolver
@@ -232,6 +235,25 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 	}
 
 	candidates := append([]net.IPAddr(nil), req.Candidates...)
+	// A static --resolve entry is authoritative for the request authority,
+	// including when a prior discovery step supplied a different candidate.
+	// OriginHost matters for SVCB/ECH targets: the mapping belongs to the URL
+	// authority, not to the service name selected during discovery.
+	resolveHost := req.Host
+	if req.OriginHost != "" {
+		resolveHost = req.OriginHost
+	}
+	resolvePort := req.Port
+	if req.OriginPort != "" {
+		resolvePort = req.OriginPort
+	}
+	if override, ok, err := res.ResolveAddressOverride(req.Network, resolveHost, resolvePort); ok {
+		if err != nil {
+			return DialResult{}, err
+		}
+		candidates = override.Addrs
+		req.Port = override.Port
+	}
 	if len(candidates) == 0 {
 		result.Timing.ResolutionStart = time.Now()
 		if req.Recorder != nil {

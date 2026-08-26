@@ -98,6 +98,7 @@ type Request struct {
 	Redirects        *int
 	RemoteHeaderName bool
 	RemoteName       bool
+	Resolve          []resolver.ResolveEntry
 	Retry            int
 	RetryDelay       time.Duration
 	RetryUnsafe      bool

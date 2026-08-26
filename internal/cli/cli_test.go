@@ -194,6 +194,42 @@ func TestCLI002Validation(t *testing.T) {
 	}
 }
 
+func TestResolveFlag(t *testing.T) {
+	app, err := Parse([]string{
+		"--resolve", "Example.com:443:192.0.2.10",
+		"--resolve=*:80:192.0.2.11,192.0.2.12",
+		"https://example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(app.Resolve) != 3 || app.Resolve[0].Host != "example.com" || app.Resolve[0].Port != "443" || app.Resolve[0].IP.String() != "192.0.2.10" || app.Resolve[1].Host != "*" || app.Resolve[2].IP.String() != "192.0.2.12" {
+		t.Fatalf("Resolve = %+v, want three parsed mappings", app.Resolve)
+	}
+	if !app.OptionProvenance("resolve").Has(SourceCLI) {
+		t.Fatal("resolve did not record explicit CLI provenance")
+	}
+
+	for _, value := range []string{"example.com:443", "example.com:443:not-an-ip"} {
+		if _, err := Parse([]string{"--resolve", value, "https://example.com"}); err == nil || !strings.Contains(err.Error(), "resolve") {
+			t.Fatalf("Parse(--resolve %q) error = %v, want resolve validation error", value, err)
+		}
+	}
+}
+
+func TestFromCurlResolve(t *testing.T) {
+	app, err := Parse([]string{"--from-curl", "curl --resolve +example.com:443:192.0.2.10,192.0.2.11 https://example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(app.Resolve) != 2 || app.Resolve[0].Host != "example.com" || app.Resolve[0].IP.String() != "192.0.2.10" || app.Resolve[1].IP.String() != "192.0.2.11" {
+		t.Fatalf("Resolve = %+v, want imported mapping", app.Resolve)
+	}
+	if !app.OptionProvenance("resolve").Has(SourceCurl) {
+		t.Fatal("imported resolve did not record curl provenance")
+	}
+}
+
 func TestCLIProxyParseErrorRedactsURLCredentials(t *testing.T) {
 	value := "http://proxy-user:proxy-password@example.test/bad%zz?access_token=proxy-query-secret&safe=ok"
 	_, err := Parse([]string{"--proxy", value, "https://example.com"})
