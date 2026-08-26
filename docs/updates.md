@@ -47,6 +47,11 @@ Dry-run downloads bounded release metadata and the checksum sidecar to validate
 asset selection and checksum availability. It does not download the executable
 archive, replace the binary, or update the automatic-check timestamp.
 
+The update destination must not be writable by its group or by other users. If
+`--update` reports that the replacement directory is writable, remove those
+permissions with `chmod go-w <directory>` (use `sudo` if needed), or install
+`fetch` in a private directory such as `~/.local/bin`.
+
 ## Automatic checks
 
 Set an interval in the configuration file:
