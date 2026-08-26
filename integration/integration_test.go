@@ -1363,8 +1363,7 @@ func TestMain(t *testing.T) {
 	t.Run("brotli compression", func(t *testing.T) {
 		t.Parallel()
 		const data = "this is the test data"
-		// The google/brotli module only provides a decoder, so use a fixed
-		// Brotli stream for the integration server response.
+		// Use a fixed Brotli stream for the integration server response.
 		const encoded = "\x0b\x0a\x80this is the test data\x03"
 
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
