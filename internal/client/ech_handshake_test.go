@@ -9,13 +9,38 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/resolver"
 )
+
+func TestDialResolverWithECHUsesResolveOriginPort(t *testing.T) {
+	res := resolver.New(resolver.Config{Resolve: []resolver.ResolveEntry{{
+		Host: "origin.test", Port: "443", IP: net.ParseIP("192.0.2.10"),
+	}}})
+	var dialed string
+	dialer := NewResolverDialer(res, time.Second)
+	dialer.BaseDial = func(_ context.Context, _, address string) (net.Conn, error) {
+		dialed = address
+		return nil, errors.New("stop before TLS")
+	}
+
+	_, err := dialResolverWithECHInfo(context.Background(), dialer, DialRequest{
+		Network: "tcp", Host: "edge.test", Port: "8443", OriginHost: "origin.test", OriginPort: "0443",
+		Resolver: res, Candidates: []net.IPAddr{{IP: net.ParseIP("192.0.2.11")}},
+	}, &tls.Config{}, core.ECHOff, false)
+	if err == nil {
+		t.Fatal("dialResolverWithECHInfo succeeded, want test dial failure")
+	}
+	if dialed != "192.0.2.10:443" {
+		t.Fatalf("dial address = %q, want 192.0.2.10:443", dialed)
+	}
+}
 
 func TestDialTLSWithECHPolicyAcceptsRealECH(t *testing.T) {
 	certificate, roots := echTestCertificate(t)

@@ -41,6 +41,7 @@ type DOHConfig struct {
 	Proxy             func(*http.Request) (*url.URL, error)
 	DialContext       DialContextFunc
 	Bootstrap         BootstrapFunc
+	Resolve           []ResolveEntry
 	TLSConfig         *tls.Config
 	CACerts           []*x509.Certificate
 	ClientCert        *tls.Certificate
@@ -103,7 +104,7 @@ func NewDOHClient(cfg DOHConfig) (*DOHClient, error) {
 			var d net.Dialer
 			dial = d.DialContext
 		}
-		base.DialContext = dohDialContext(dial, cfg.Bootstrap, cfg.Endpoint, serverURL)
+		base.DialContext = dohDialContext(dial, cfg.Bootstrap, cfg.Endpoint, serverURL, cfg.Resolve)
 		transport = base
 	}
 
@@ -160,7 +161,7 @@ func dohTLSConfig(cfg DOHConfig, serverName string) *tls.Config {
 	})
 }
 
-func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *Endpoint, serverURL *url.URL) DialContextFunc {
+func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *Endpoint, serverURL *url.URL, resolve []ResolveEntry) DialContextFunc {
 	endpointHost := strings.TrimSuffix(serverURL.Hostname(), ".")
 	var bootstrapAddrs []net.IPAddr
 	if endpoint != nil {
@@ -177,6 +178,25 @@ func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *End
 			// the base dialer is the deliberate, narrow bootstrap exception.
 			return dial(ctx, network, address)
 		}
+		var lastErr error
+		if override, ok, overrideErr := resolveAddressOverride(resolve, network, host, port); ok {
+			if overrideErr != nil {
+				return nil, overrideErr
+			}
+			addresses := override.Addrs
+			for _, ip := range addresses {
+				conn, dialErr := dial(ctx, network, core.JoinIPHostPort(ip, port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			if lastErr == nil {
+				lastErr = errors.New("no DoH endpoint resolve addresses")
+			}
+			return nil, lastErr
+		}
+
 		addresses := bootstrapAddrs
 		if len(addresses) == 0 && bootstrap != nil && net.ParseIP(host) == nil {
 			addresses, err = bootstrap(ctx, host)
@@ -187,7 +207,6 @@ func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *End
 		if len(addresses) == 0 {
 			return dial(ctx, network, address)
 		}
-		var lastErr error
 		for _, ip := range addresses {
 			conn, dialErr := dial(ctx, network, core.JoinIPHostPort(ip, port))
 			if dialErr == nil {

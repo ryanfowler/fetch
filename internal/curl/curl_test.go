@@ -667,6 +667,13 @@ func TestParseNetwork(t *testing.T) {
 			},
 		},
 		{
+			name:  "resolve",
+			input: "curl --resolve example.com:443:192.0.2.10 --resolve '*:80:192.0.2.11' https://example.com",
+			check: func(t *testing.T, r *Result) {
+				assertSliceEqual(t, "Resolve", r.Resolve, []string{"example.com:443:192.0.2.10", "*:80:192.0.2.11"})
+			},
+		},
+		{
 			name:  "retry",
 			input: "curl --retry 3 https://example.com",
 			check: func(t *testing.T, r *Result) {

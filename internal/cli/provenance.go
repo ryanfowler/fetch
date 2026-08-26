@@ -158,6 +158,9 @@ func (a *App) markCurlOptions(r *curl.Result) {
 	if r.DoHURL != "" {
 		a.markCurlOption("dns-server")
 	}
+	if len(r.Resolve) > 0 {
+		a.markCurlOption("resolve")
+	}
 	if r.RetrySet {
 		a.markCurlOption("retry")
 	}

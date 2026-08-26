@@ -75,6 +75,26 @@ func TestSplitAltSvcRejectsMalformedAuthorities(t *testing.T) {
 	}
 }
 
+func TestRecordAltSvcUsesStaticResolveEntry(t *testing.T) {
+	origin, err := url.Parse("https://origin.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := resolver.New(resolver.Config{
+		Resolve: []resolver.ResolveEntry{{Host: "origin.test", Port: "8443", IP: net.ParseIP("192.0.2.10")}},
+		SystemLookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			return nil, fmt.Errorf("unexpected DNS lookup")
+		},
+	})
+	transport := &automaticHTTP3Transport{resolver: res, cache: newAutomaticH3Cache()}
+	transport.recordAltSvc(context.Background(), origin, `h3=":8443"; ma=60`)
+
+	values := transport.cache.get(automaticH3CacheKey(origin, res), time.Now())
+	if len(values) != 1 || values[0].port != 8443 || len(values[0].addresses) != 1 || values[0].addresses[0].IP.String() != "192.0.2.10" {
+		t.Fatalf("Alt-Svc candidates = %+v, want static address on port 8443", values)
+	}
+}
+
 func TestAutomaticH3CacheScopesAndReplacesDNSCandidates(t *testing.T) {
 	cache := newAutomaticH3Cache()
 	keyA := "https://example.com:443|udp://resolver-a"

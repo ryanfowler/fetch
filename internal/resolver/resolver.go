@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -23,6 +24,7 @@ import (
 type Config struct {
 	Endpoint *Endpoint
 	Server   *url.URL
+	Resolve  []ResolveEntry
 
 	// SystemLookupIPAddr replaces the platform resolver in deterministic tests.
 	// Production callers leave it nil so net.Resolver remains authoritative for
@@ -71,6 +73,7 @@ type Resolver struct {
 	tlsMin       uint16
 	tlsMax       uint16
 	systemLookup func(context.Context, string) ([]net.IPAddr, error)
+	resolve      []ResolveEntry
 }
 
 // ResolvedEndpoint contains a parsed host:port address and its resolved IP
@@ -115,6 +118,7 @@ func New(cfg Config) *Resolver {
 		tlsMin:       cfg.TLSMin,
 		tlsMax:       cfg.TLSMax,
 		systemLookup: systemLookup,
+		resolve:      cloneResolveEntries(cfg.Resolve),
 	}
 	if r.err == nil && endpoint != nil && endpoint.Transport == TransportHTTPS {
 		r.dohClient, r.err = NewDOHClient(DOHConfig{
@@ -123,6 +127,7 @@ func New(cfg Config) *Resolver {
 			Proxy:        cfg.Proxy,
 			DialContext:  cfg.DialContext,
 			Bootstrap:    cfg.Bootstrap,
+			Resolve:      cfg.Resolve,
 			TLSConfig:    cfg.TLSConfig,
 			CACerts:      cfg.CACerts,
 			ClientCert:   cfg.ClientCert,
@@ -275,6 +280,9 @@ func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) 
 	if err != nil {
 		return ResolvedEndpoint{}, err
 	}
+	if endpoint, ok, err := r.ResolveAddressOverride(network, host, port); ok {
+		return endpoint, err
+	}
 
 	addrs, err := r.LookupIPAddr(ctx, host)
 	if err != nil {
@@ -284,12 +292,60 @@ func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) 
 		return ResolvedEndpoint{}, fmt.Errorf("lookup %s: no addresses found", host)
 	}
 
+	return resolvedEndpoint(network, host, port, addrs)
+}
+
+// ResolveAddressOverride returns addresses configured for host and port by a
+// static resolve entry. The boolean distinguishes an absent entry from an
+// entry whose address is unusable for the requested network.
+func (r *Resolver) ResolveAddressOverride(network, host, port string) (ResolvedEndpoint, bool, error) {
+	if r == nil || len(r.resolve) == 0 {
+		return ResolvedEndpoint{}, false, nil
+	}
+	return resolveAddressOverride(r.resolve, network, host, port)
+}
+
+func resolveAddressOverride(entries []ResolveEntry, network, host, port string) (ResolvedEndpoint, bool, error) {
+	port = normalizeResolvePort(port)
+	var exact, wildcard []net.IPAddr
+	for _, entry := range entries {
+		if normalizeResolvePort(entry.Port) != port {
+			continue
+		}
+		addr := net.IPAddr{IP: append(net.IP(nil), entry.IP...)}
+		if entry.Host == "*" {
+			wildcard = append(wildcard, addr)
+		} else if strings.EqualFold(strings.TrimSuffix(entry.Host, "."), strings.TrimSuffix(host, ".")) {
+			exact = append(exact, addr)
+		}
+	}
+	if len(exact) == 0 && len(wildcard) == 0 {
+		return ResolvedEndpoint{}, false, nil
+	}
+	if len(exact) > 0 {
+		endpoint, err := resolvedEndpoint(network, host, port, exact)
+		return endpoint, true, err
+	}
+	endpoint, err := resolvedEndpoint(network, host, port, wildcard)
+	return endpoint, true, err
+}
+
+func normalizeResolvePort(port string) string {
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || portNumber == 0 {
+		return port
+	}
+	return strconv.FormatUint(portNumber, 10)
+}
+
+func resolvedEndpoint(network, host, port string, addrs []net.IPAddr) (ResolvedEndpoint, error) {
+	addrs = deduplicateAddresses(addrs)
 	// A family-specific network must not waste attempts on addresses that the
 	// platform dialer will reject. For dual-stack networks, retain the
 	// resolver-preferred family and interleave the other family below.
 	switch strings.ToLower(network) {
 	case "tcp4", "udp4":
-		filtered := addrs[:0]
+		filtered := make([]net.IPAddr, 0, len(addrs))
 		for _, addr := range addrs {
 			if addr.IP.To4() != nil {
 				filtered = append(filtered, addr)
@@ -297,7 +353,7 @@ func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) 
 		}
 		addrs = filtered
 	case "tcp6", "udp6":
-		filtered := addrs[:0]
+		filtered := make([]net.IPAddr, 0, len(addrs))
 		for _, addr := range addrs {
 			if addr.IP.To4() == nil && addr.IP.To16() != nil {
 				filtered = append(filtered, addr)
@@ -319,6 +375,15 @@ func (r *Resolver) ResolveAddress(ctx context.Context, network, address string) 
 	return ResolvedEndpoint{Host: host, Port: port, Addrs: addrs}, nil
 }
 
+func cloneResolveEntries(values []ResolveEntry) []ResolveEntry {
+	out := make([]ResolveEntry, len(values))
+	for i, value := range values {
+		out[i] = value
+		out[i].IP = append(net.IP(nil), value.IP...)
+	}
+	return out
+}
+
 // DialContext resolves address and dials each returned IP until one succeeds.
 // DialContext resolves address and races its candidates with the shared
 // Happy Eyeballs policy. The first address retains the resolver's preferred
@@ -333,6 +398,13 @@ func (r *Resolver) DialContext(ctx context.Context, network, address string) (ne
 			addrs := make([]net.IPAddr, 0, len(r.endpoint.BootstrapAddrs))
 			for _, ip := range r.endpoint.BootstrapAddrs {
 				addrs = append(addrs, net.IPAddr{IP: append(net.IP(nil), ip...)})
+			}
+			if override, ok, overrideErr := r.ResolveAddressOverride(network, host, port); ok {
+				if overrideErr != nil {
+					return nil, overrideErr
+				}
+				addrs = override.Addrs
+				port = override.Port
 			}
 			if len(addrs) == 0 {
 				var lookupErr error

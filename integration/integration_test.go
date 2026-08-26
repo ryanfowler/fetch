@@ -545,6 +545,64 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("resolve connects to the selected IP and preserves the URL host", func(t *testing.T) {
+		t.Parallel()
+		chHost := make(chan string, 1)
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			chHost <- r.Host
+			io.WriteString(w, "resolved")
+		})
+		defer server.Close()
+
+		_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		host := "resolve.example.test"
+		target := "http://" + host + ":" + port
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: []string{
+			"HTTP_PROXY=", "http_proxy=", "HTTPS_PROXY=", "https_proxy=", "ALL_PROXY=", "all_proxy=",
+			"NO_PROXY=*", "no_proxy=*",
+		}}, target, "--resolve", host+":"+port+":127.0.0.1")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "resolved")
+		if got := <-chHost; got != host+":"+port {
+			t.Fatalf("request Host = %q, want %q", got, host+":"+port)
+		}
+	})
+
+	t.Run("resolve preserves HTTPS Host and SNI", func(t *testing.T) {
+		t.Parallel()
+		info := make(chan [2]string, 1)
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			sni := ""
+			if r.TLS != nil {
+				sni = r.TLS.ServerName
+			}
+			info <- [2]string{r.Host, sni}
+			io.WriteString(w, "secure-resolved")
+		}))
+		defer server.Close()
+
+		_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "https://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		host := "tls-resolve.example.test"
+		target := "https://" + host + ":" + port
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: []string{
+			"HTTP_PROXY=", "http_proxy=", "HTTPS_PROXY=", "https_proxy=", "ALL_PROXY=", "all_proxy=",
+			"NO_PROXY=*", "no_proxy=*",
+		}}, target, "--insecure", "--resolve", host+":"+port+":127.0.0.1")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "secure-resolved")
+		got := <-info
+		wantHost := host + ":" + port
+		if got[0] != wantHost || got[1] != host {
+			t.Fatalf("request Host/SNI = %q/%q, want %q/%q", got[0], got[1], wantHost, host)
+		}
+	})
+
 	t.Run("dns over https", func(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {

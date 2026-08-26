@@ -176,6 +176,7 @@ type ClientConfig struct {
 	CACerts        []*x509.Certificate
 	ClientCert     *tls.Certificate
 	ConnectTimeout time.Duration
+	Resolve        []resolver.ResolveEntry
 	// ResolverEndpoint is the validated endpoint from CLI/config parsing.
 	// DNSServer remains for compatibility with direct internal callers/tests.
 	ResolverEndpoint *resolver.Endpoint
@@ -210,6 +211,7 @@ func NewClient(cfg ClientConfig) *Client {
 	res := resolver.New(resolver.Config{
 		Endpoint:           cfg.ResolverEndpoint,
 		Server:             cfg.DNSServer,
+		Resolve:            cfg.Resolve,
 		SystemLookupIPAddr: cfg.SystemLookupIPAddr,
 		Proxy:              proxy,
 		TLSConfig:          tlsConfig,
@@ -599,6 +601,15 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 		ctx, cancel := connectContext(ctx, connectTimeout, "DNS/QUIC/TLS connect")
 		defer cancel()
 		trace := httptrace.ContextClientTrace(ctx)
+		originHost, originPortText, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			originHost = addr
+			originPortText = "443"
+		}
+		_, hasResolve, resolveErr := res.ResolveAddressOverride("udp", originHost, originPortText)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
 		if trace != nil && trace.DNSStart != nil {
 			trace.DNSStart(httptrace.DNSStartInfo{Host: addr})
 		}
@@ -615,50 +626,54 @@ func getHTTP3Transport(res *resolver.Resolver, tlsConfig *tls.Config, connectTim
 			return nil, err
 		}
 
-		// HTTPS/SVCB discovery is scoped to this resolver and target. It is
-		// opportunistic for ordinary forced H3, but ECH=on requires an
-		// advertised, validated configuration.
-		originHost, _, splitErr := net.SplitHostPort(addr)
-		if splitErr != nil {
-			originHost = addr
-		}
-		originPort, portErr := strconv.ParseUint(endpoint.Port, 10, 16)
-		if portErr != nil {
-			return nil, portErr
-		}
-		discovery, discoveryErr := res.DiscoverHTTPS(ctx, originHost, uint16(originPort), nil)
-		if discoveryErr != nil {
-			if echMode == core.ECHOn || resolver.IsAuthenticatedDiscoveryFailure(discoveryErr) {
-				return nil, discoveryErr
+		// HTTPS/SVCB discovery is scoped to this resolver and target. A static
+		// --resolve mapping is authoritative, so it must not be made dependent
+		// on an authenticated discovery query that can never affect its address
+		// or port. ECH=on consequently cannot proceed without a discovered ECH
+		// configuration.
+		if hasResolve {
+			if echMode == core.ECHOn {
+				return nil, ErrECHConfigUnavailable
 			}
 		} else {
-			var selected *resolver.ServiceCandidate
-			for i := range discovery.Candidates {
-				candidate := &discovery.Candidates[i]
-				for _, alpn := range candidate.ALPN {
-					if string(alpn) == "h3" {
-						selected = candidate
+			originPort, portErr := strconv.ParseUint(endpoint.Port, 10, 16)
+			if portErr != nil {
+				return nil, portErr
+			}
+			discovery, discoveryErr := res.DiscoverHTTPS(ctx, originHost, uint16(originPort), nil)
+			if discoveryErr != nil {
+				if echMode == core.ECHOn || resolver.IsAuthenticatedDiscoveryFailure(discoveryErr) {
+					return nil, discoveryErr
+				}
+			} else {
+				var selected *resolver.ServiceCandidate
+				for i := range discovery.Candidates {
+					candidate := &discovery.Candidates[i]
+					for _, alpn := range candidate.ALPN {
+						if string(alpn) == "h3" {
+							selected = candidate
+							break
+						}
+					}
+					if selected != nil {
 						break
 					}
 				}
 				if selected != nil {
-					break
-				}
-			}
-			if selected != nil {
-				if len(selected.Addresses) > 0 {
-					endpoint.Addrs = selected.Addresses
-				}
-				endpoint.Port = strconv.Itoa(int(selected.Port))
-				if len(selected.ECH) > 0 && (echMode == core.ECHAuto || echMode == core.ECHOn) {
-					tlsCfg = tlsCfg.Clone()
-					tlsCfg.MinVersion = tls.VersionTLS13
-					tlsCfg.EncryptedClientHelloConfigList = append([]byte(nil), selected.ECH...)
+					if len(selected.Addresses) > 0 {
+						endpoint.Addrs = selected.Addresses
+					}
+					endpoint.Port = strconv.Itoa(int(selected.Port))
+					if len(selected.ECH) > 0 && (echMode == core.ECHAuto || echMode == core.ECHOn) {
+						tlsCfg = tlsCfg.Clone()
+						tlsCfg.MinVersion = tls.VersionTLS13
+						tlsCfg.EncryptedClientHelloConfigList = append([]byte(nil), selected.ECH...)
+					} else if echMode == core.ECHOn {
+						return nil, errors.New("ECH is required but the selected HTTPS record has no ECH configuration")
+					}
 				} else if echMode == core.ECHOn {
-					return nil, errors.New("ECH is required but the selected HTTPS record has no ECH configuration")
+					return nil, errors.New("ECH is required but no HTTPS service configuration supports HTTP/3")
 				}
-			} else if echMode == core.ECHOn {
-				return nil, errors.New("ECH is required but no HTTPS service configuration supports HTTP/3")
 			}
 		}
 		if echMode == core.ECHAuto && len(tlsCfg.EncryptedClientHelloConfigList) == 0 {

@@ -11,6 +11,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/config"
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/resolver"
 )
 
 // App represents the full configuration for a fetch invocation.
@@ -60,6 +61,7 @@ type App struct {
 	Range            []string
 	RemoteHeaderName bool
 	RemoteName       bool
+	Resolve          []resolver.ResolveEntry
 	UnixSocket       string
 	Update           bool
 	CheckUpdate      bool
@@ -489,6 +491,14 @@ func (a *App) CLI() *CLI {
 			boolFlag(&a.RemoteName, "remote-name", "O", "Use URL path component as output filename").
 				WithAliases("output-current-dir"),
 
+			{
+				Long:        "resolve",
+				Args:        "HOST:PORT:IP",
+				Description: "Connect to IP while preserving Host/SNI",
+				IsSet:       func() bool { return len(a.Resolve) > 0 },
+				Fn:          a.parseResolveFlag,
+			},
+
 			cfgFlag("retry", "", "NUM", "Maximum number of retries",
 				func() bool { return a.Cfg.Retry != nil }, a.Cfg.ParseRetry).
 				WithDefault("0"),
@@ -632,6 +642,15 @@ func (a *App) parseBasicFlag(value string) error {
 		return core.NewValueError("basic", value, usage, false)
 	}
 	a.Basic = &core.KeyVal[string]{Key: user, Val: pass}
+	return nil
+}
+
+func (a *App) parseResolveFlag(value string) error {
+	entries, err := resolver.ParseResolveEntries(value)
+	if err != nil {
+		return core.NewValueError("resolve", value, err.Error(), false)
+	}
+	a.Resolve = append(a.Resolve, entries...)
 	return nil
 }
 

@@ -535,6 +535,18 @@ fetch --proxy http://localhost:8080 example.com
 fetch --proxy socks5://localhost:1080 example.com
 ```
 
+### `--resolve [+]HOST:PORT:IP[,IP]`
+
+Connect to the supplied IP address for a matching host and port while keeping
+the URL host as the HTTP Host header and TLS SNI. Repeat the option or provide
+comma-separated addresses to provide multiple candidates. A `*` host acts as
+a fallback for any host. A leading `+` is accepted for curl compatibility.
+
+```sh
+fetch --resolve example.com:443:127.0.0.1 https://example.com
+fetch --resolve '*:443:192.0.2.10' https://example.com
+```
+
 ### `--unix PATH`
 
 Make request over a Unix domain socket. Unix-like systems only.
@@ -804,7 +816,7 @@ fetch --from-curl 'https://example.com'
 | Auth                       | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                 |
 | TLS                        | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`, `--ech hard                                                    | true | auto | false` |
 | Output                     | `-o`, `-O`, `-J`                                                                                                                   |
-| Network                    | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--retry`, `--retry-delay`, `--retry-unsafe`, `-r` |
+| Network                    | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--resolve`, `--retry`, `--retry-delay`, `--retry-unsafe`, `-r` |
 | HTTP version               | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                            |
 | Headers                    | `-A`, `-e`, `-b`                                                                                                                   |
 | Verbosity                  | `-v`, `-s`                                                                                                                         |

@@ -263,7 +263,7 @@ func (r *OptionRegistry) Ignored(mode OptionMode, explicit func(string) bool) []
 	for i, label := range []string{
 		"--data/--json/--xml", "--form", "--multipart", "--grpc", "--grpc-describe", "--grpc-list",
 		"--output", "--remote-name", "--remote-header-name", "--copy", "--method", "--header", "--query",
-		"--edit", "--session", "--retry", "--retry-unsafe", "--range", "--timing", "--proxy", "--discard", "--unix",
+		"--edit", "--session", "--retry", "--retry-unsafe", "--range", "--timing", "--proxy", "--resolve", "--discard", "--unix",
 		"--inspect-tls", "--bearer", "--basic", "--digest", "--aws-sigv4", "--ca-cert", "--cert", "--key",
 		"--tls", "--max-tls", "--insecure", "--format", "--dry-run",
 	} {
@@ -279,7 +279,7 @@ func applyFlagDefinition(flag *Flag) {
 	if flag.ConfigKey == "" {
 		flag.ConfigKey = flag.Long
 	}
-	if flag.Long == "header" || flag.Long == "query" || flag.Long == "ca-cert" {
+	if flag.Long == "header" || flag.Long == "query" || flag.Long == "ca-cert" || flag.Long == "resolve" {
 		flag.Repeatable = true
 	}
 	if flag.Long == "form" || flag.Long == "multipart" || flag.Long == "range" || flag.Long == "verbose" {
@@ -346,7 +346,8 @@ var fromCurlOptions = map[string]bool{
 	"range": true, "unix": true, "timeout": true, "connect-timeout": true,
 	"redirects": true, "proxy": true, "insecure": true, "max-tls": true, "min-tls": true,
 	"http": true, "ech": true, "cert": true, "key": true, "ca-cert": true, "dns-server": true,
-	"retry": true, "retry-delay": true, "grpc": true, "grpc-describe": true,
+	"resolve": true,
+	"retry":   true, "retry-delay": true, "grpc": true, "grpc-describe": true,
 	"grpc-list": true, "query": true,
 }
 
@@ -408,6 +409,7 @@ var flagDefinitions = map[string]Flag{
 
 	"header":        {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
 	"query":         {IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
+	"resolve":       {IgnoredIn: []OptionMode{ModeDNSInspection}},
 	"grpc":          {Conflicts: []string{"grpc-list", "grpc-describe"}, IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
 	"grpc-describe": {Conflicts: []string{"grpc", "grpc-list"}, IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},
 	"grpc-list":     {Conflicts: []string{"grpc", "grpc-describe"}, IgnoredIn: []OptionMode{ModeDNSInspection, ModeTLSInspection}},

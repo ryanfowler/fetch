@@ -841,6 +841,7 @@ func newClient(r *Request) *client.Client {
 		ECH:              r.ECH,
 		Insecure:         r.Insecure,
 		Proxy:            r.Proxy,
+		Resolve:          r.Resolve,
 		Redirects:        r.Redirects,
 		TLSMax:           r.TLSMax,
 		TLSMin:           r.TLSMin,

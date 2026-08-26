@@ -165,6 +165,31 @@ func dialResolverWithECHInfo(ctx context.Context, dialer *ResolverDialer, reques
 	if port == "" {
 		return DialResult{}, errors.New("ECH resolver dial requires a port")
 	}
+	resolveHost := request.Host
+	if request.OriginHost != "" {
+		resolveHost = request.OriginHost
+	}
+	resolvePort := port
+	if request.OriginPort != "" {
+		resolvePort = request.OriginPort
+	}
+	resolveNetwork := request.Network
+	if resolveNetwork == "" {
+		resolveNetwork = "tcp"
+	}
+	res := request.Resolver
+	if res == nil {
+		res = dialer.Resolver
+	}
+	if res != nil {
+		if override, ok, err := res.ResolveAddressOverride(resolveNetwork, resolveHost, resolvePort); ok {
+			if err != nil {
+				return DialResult{}, err
+			}
+			port = override.Port
+			request.Port = port
+		}
+	}
 	request.TLSConfig = nil
 	request.ALPN = nil
 	request.AttemptWithInfo = func(attemptCtx context.Context, network string, ip net.IPAddr) (net.Conn, any, error) {

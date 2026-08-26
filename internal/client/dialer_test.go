@@ -59,6 +59,67 @@ func TestResolverDialerResolvesAndReportsWinningAddress(t *testing.T) {
 	}
 }
 
+func TestResolverDialerUsesStaticResolveEntry(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	lookupCalled := false
+	res := resolver.New(resolver.Config{
+		Resolve: []resolver.ResolveEntry{{
+			Host: "service.test", Port: strconv.Itoa(listener.Addr().(*net.TCPAddr).Port), IP: net.ParseIP("127.0.0.1"),
+		}},
+		SystemLookupIPAddr: func(context.Context, string) ([]net.IPAddr, error) {
+			lookupCalled = true
+			return nil, errors.New("unexpected lookup")
+		},
+	})
+	dialer := NewResolverDialer(res, time.Second)
+	result, err := dialer.Dial(context.Background(), DialRequest{
+		Network: "tcp",
+		Host:    "service.test",
+		Port:    strconv.Itoa(listener.Addr().(*net.TCPAddr).Port),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Conn.Close()
+	if lookupCalled {
+		t.Fatal("static resolve entry performed a DNS lookup")
+	}
+	if got := result.RemoteIP.String(); got != "127.0.0.1" {
+		t.Fatalf("remote IP = %s, want 127.0.0.1", got)
+	}
+}
+
+func TestResolverDialerUsesOriginPortForStaticServiceTarget(t *testing.T) {
+	var dialed string
+	res := resolver.New(resolver.Config{Resolve: []resolver.ResolveEntry{{
+		Host: "origin.test", Port: "443", IP: net.ParseIP("192.0.2.10"),
+	}}})
+	dialer := NewResolverDialer(res, time.Second)
+	dialer.BaseDial = func(_ context.Context, _, address string) (net.Conn, error) {
+		dialed = address
+		conn, peer := net.Pipe()
+		_ = peer.Close()
+		return conn, nil
+	}
+
+	result, err := dialer.Dial(context.Background(), DialRequest{
+		Network: "tcp", Host: "edge.test", Port: "8443",
+		OriginHost: "origin.test", OriginPort: "0443",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Conn.Close()
+	if dialed != "192.0.2.10:443" {
+		t.Fatalf("dial address = %q, want 192.0.2.10:443", dialed)
+	}
+}
+
 func TestResolverDialerPreservesCandidatePreferenceAndClosesLoser(t *testing.T) {
 	first := net.ParseIP("2001:db8::1")
 	second := net.ParseIP("192.0.2.1")

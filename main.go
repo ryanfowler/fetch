@@ -240,6 +240,7 @@ func main() {
 		Redirects:        app.Cfg.Redirects,
 		RemoteHeaderName: app.RemoteHeaderName,
 		RemoteName:       app.RemoteName,
+		Resolve:          app.Resolve,
 		Retry:            getValue(app.Cfg.Retry),
 		RetryDelay:       getValue(app.Cfg.RetryDelay),
 		RetryUnsafe:      getValue(app.Cfg.RetryUnsafe),
@@ -415,6 +416,7 @@ func conciseHelpSections() []helpSection {
 			rows: []helpRow{
 				{"--http VERSION", "Select HTTP/1.1, HTTP/2, or HTTP/3"},
 				{"--proxy PROXY", "Use a proxy"},
+				{"--resolve [+]HOST:PORT:IP[,IP]", "Connect to IP preserving Host/SNI"},
 				{"--timeout SECONDS", "Set the request timeout"},
 				{"--dry-run", "Print out the request info and exit"},
 				{"--inspect-dns", "Inspect DNS resolution"},
@@ -873,6 +875,7 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		ClientCert:       clientCert,
 		ResolverEndpoint: app.Cfg.DNSEndpoint,
 		DNSServer:        app.Cfg.DNSServer,
+		Resolve:          app.Resolve,
 		HTTP:             app.Cfg.HTTP,
 		ECH:              app.Cfg.ECH,
 		Insecure:         getValue(app.Cfg.Insecure),

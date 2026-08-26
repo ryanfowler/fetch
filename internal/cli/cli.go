@@ -772,6 +772,11 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 			return err
 		}
 	}
+	for _, value := range r.Resolve {
+		if err := a.parseResolveFlag(value); err != nil {
+			return err
+		}
+	}
 	if r.RetrySet {
 		if err := a.Cfg.ParseRetry(strconv.Itoa(r.Retry)); err != nil {
 			return err

@@ -34,6 +34,7 @@ type Config struct {
 	ClientCert       *tls.Certificate
 	ResolverEndpoint *resolver.Endpoint
 	DNSServer        *url.URL
+	Resolve          []resolver.ResolveEntry
 	HTTP             core.HTTPVersion
 	ECH              core.ECHMode
 	Insecure         bool
@@ -87,6 +88,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	res := resolver.New(resolver.Config{
 		Endpoint:   cfg.ResolverEndpoint,
 		Server:     cfg.DNSServer,
+		Resolve:    cfg.Resolve,
 		CACerts:    cfg.CACerts,
 		ClientCert: cfg.ClientCert,
 		Insecure:   cfg.Insecure,
@@ -142,6 +144,14 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 			quicAddr = net.JoinHostPort(targetHost, targetPort)
 			quicCandidates = echConfig.Addresses()
 		}
+		if override, ok, err := res.ResolveAddressOverride("udp", host, port); ok {
+			if err != nil {
+				writeTLSError(p, err)
+				return 1
+			}
+			quicAddr = addr
+			quicCandidates = override.Addrs
+		}
 		var fallbackTLS *tls.Config
 		if cfg.ECH == core.ECHAuto && echConfig != nil && echConfig.Offered() {
 			fallbackTLS = tlsConfig.Clone()
@@ -190,6 +200,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		dialRequest.Address = ""
 		dialRequest.Host = targetHost
 		dialRequest.Port = targetPort
+		dialRequest.OriginPort = port
 		dialRequest.Candidates = echConfig.Addresses()
 	}
 	var result client.DialResult

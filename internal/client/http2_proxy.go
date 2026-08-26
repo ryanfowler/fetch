@@ -47,7 +47,7 @@ func newHTTP2DialTLS(base func(context.Context, string, string) (net.Conn, error
 			if connection.configured {
 				got, dialErr := dialResolverWithECH(ctx, NewResolverDialer(res, timeout), DialRequest{
 					Network: "tcp", Host: connection.targetHost, Port: connection.targetPort,
-					OriginHost: host, Candidates: connection.addresses,
+					OriginHost: host, OriginPort: port, Candidates: connection.addresses,
 				}, connection.tlsConfig, echMode)
 				if dialErr != nil {
 					return nil, dialErr
