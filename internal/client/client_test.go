@@ -389,8 +389,8 @@ func TestDoClosesResponseBodyWhenDecoderConstructionFails(t *testing.T) {
 
 func TestDoDecodesBrotliContentEncoding(t *testing.T) {
 	const data = "this is Brotli encoded data"
-	// The google/brotli module only provides a decoder. Keep the encoded
-	// fixture constant so this test does not need a second Brotli dependency.
+	// Keep the encoded fixture constant so this test does not need a second
+	// Brotli dependency.
 	body := []byte("\x0b\x0d\x80this is Brotli encoded data\x03")
 	c := &Client{
 		c: &http.Client{

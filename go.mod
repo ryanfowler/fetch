@@ -3,9 +3,9 @@ module github.com/ryanfowler/fetch
 go 1.27.0
 
 require (
+	github.com/andybalholm/brotli v1.2.2
 	github.com/coder/websocket v1.8.15
 	github.com/goccy/go-yaml v1.19.2
-	github.com/google/brotli/go/brotli v1.1.1-rc0.0.20260804194026-8e10eeb3378f
 	github.com/klauspost/compress v1.19.2
 	github.com/mattn/go-runewidth v0.0.28
 	github.com/quic-go/quic-go v0.61.0
@@ -23,7 +23,6 @@ require (
 
 require (
 	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
-	github.com/google/brotli/go/cbrotli v1.1.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 )

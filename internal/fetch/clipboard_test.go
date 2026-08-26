@@ -52,7 +52,6 @@ func TestClipboardCommandHelper(t *testing.T) {
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("unable to start clipboard descendant: %v", err)
 		}
-		os.Exit(0)
 	}
 	if os.Getenv("FETCH_TEST_CLIPBOARD_BLOCK") == "1" {
 		select {}
@@ -68,8 +67,11 @@ func TestClipboardCommandHelper(t *testing.T) {
 }
 
 func TestCopyToClipboardTimeout(t *testing.T) {
+	// Keep both processes alive so the test does not depend on the platform's
+	// stdin pipe capacity.
 	t.Setenv("FETCH_TEST_CLIPBOARD_HELPER", "1")
 	t.Setenv("FETCH_TEST_CLIPBOARD_FORK", "1")
+	t.Setenv("FETCH_TEST_CLIPBOARD_BLOCK", "1")
 
 	start := time.Now()
 	err := copyToClipboardWithTimeout(context.Background(), &clipboardCmd{
