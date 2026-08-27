@@ -24,6 +24,59 @@ func TestLoadSystemResolverPolicy(t *testing.T) {
 	}
 }
 
+func TestQuerySystemTypeRetriesAcrossNameservers(t *testing.T) {
+	// A silent UDP socket as the first nameserver forces a retry to the
+	// working second nameserver.
+	blackHole, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blackHole.Close()
+
+	server := newUDPTestServer(t)
+	defer server.close()
+
+	done := make(chan error, 1)
+	go func() {
+		query, client, err := server.readQuery()
+		if err != nil {
+			done <- err
+			return
+		}
+		message, err := DecodeMessage(query)
+		if err != nil {
+			done <- err
+			return
+		}
+		question := message.Questions[0]
+		answer := makeRecord(question.Name, dnsTypeA, net.IPv4(192, 0, 2, 55).To4())
+		_, err = server.udp.WriteToUDP(responsePacket(query, message.Header.ID, question, []Record{answer}), client)
+		done <- err
+	}()
+
+	policy := SystemResolverPolicy{
+		Nameservers: []string{blackHole.LocalAddr().String(), server.addr()},
+		Attempts:    1,
+		Timeout:     100 * time.Millisecond,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	records, _, err := QuerySystemType(ctx, policy, "example.com", dnsTypeA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Type != dnsTypeA {
+		t.Fatalf("records = %#v, want one A record", records)
+	}
+	if got, want := net.IP(records[0].RData).String(), "192.0.2.55"; got != want {
+		t.Fatalf("A address = %s, want %s", got, want)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestParseResolvConfSkipsMalformedNameserversAndReadsPolicy(t *testing.T) {
 	policy := ParseResolvConf(strings.TrimSpace(`
 # comments and malformed entries are ignored

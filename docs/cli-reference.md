@@ -519,7 +519,7 @@ platform bootstrap and negotiate the standard `doq` ALPN.
 
 ### `--inspect-dns`
 
-Inspect DNS resolution for the URL hostname only (no HTTP request is made). Without `--dns-server`, it uses the platform resolver and displays A and AAAA records; the platform resolver does not provide per-record TTLs. With an explicit resolver, it queries A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS concurrently. The output includes resolver security, record counts, and duration. If one query fails, successful records remain visible, a warning identifies the incomplete record types, and the command exits with status 1.
+Inspect DNS resolution for the URL hostname only (no HTTP request is made). Without `--dns-server`, it queries the nameservers listed in the system resolver configuration (`/etc/resolv.conf`) directly, so it reports every record type (A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS) with per-record TTLs. On platforms without a usable resolver file (notably Windows and macOS with scoped resolver configuration), or when the name is resolved only through OS mechanisms (the hosts file, NSS modules, or mDNS), it uses the platform resolver for A and AAAA records without per-record TTLs. Any records already returned by direct DNS remain visible. With an explicit resolver it queries the same record types concurrently. The output includes resolver security, record counts, and duration. If one query fails, successful records remain visible, a warning identifies the incomplete record types, and the command exits with status 1.
 
 ```sh
 fetch --inspect-dns example.com

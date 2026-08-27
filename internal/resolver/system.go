@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -20,8 +21,9 @@ const (
 )
 
 // SystemResolverPolicy describes the portable subset of resolv.conf policy
-// that can be applied to raw HTTPS/SVCB queries. A/AAAA queries still use the
-// platform resolver API, which preserves NSS and OS-specific routing.
+// that can be applied to raw DNS queries. The ordinary resolver still uses the
+// platform API for A/AAAA lookups, which preserves NSS and OS-specific
+// routing.
 type SystemResolverPolicy struct {
 	Nameservers []string
 	Attempts    int
@@ -114,20 +116,57 @@ func parseSystemNameserver(value string) string {
 
 var systemResolverRotation atomic.Uint32
 
-// QuerySystemHTTPS queries the configured system resolver policy. It is kept
-// separate from Resolver so callers can use it for automatic HTTP/3/ECH
-// discovery without changing ordinary platform A/AAAA resolution.
+// QuerySystemHTTPS queries the configured system resolver policy for an
+// HTTPS or SVCB record. It is kept separate from Resolver so callers can use
+// it for automatic HTTP/3/ECH discovery without changing ordinary platform
+// A/AAAA resolution.
 func QuerySystemHTTPS(ctx context.Context, policy SystemResolverPolicy, host string, typ uint16) ([]Record, error) {
 	if typ != dnsTypeHTTPS && typ != dnsTypeSVCB {
 		return nil, fmt.Errorf("system service lookup does not support DNS type %d", typ)
 	}
-	if policy.UseSystemdResolved && runtime.GOOS == "linux" {
+	records, _, err := QuerySystemType(ctx, policy, host, typ)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Record, 0, len(records))
+	for _, record := range records {
+		if record.Type == typ {
+			out = append(out, record)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errDNSNoData
+	}
+	return out, nil
+}
+
+// RotateSystemResolverPolicy applies resolv.conf rotation once and disables
+// per-query rotation. This is useful for one diagnostic operation whose
+// concurrent queries should use the same ordered nameserver set.
+func RotateSystemResolverPolicy(policy SystemResolverPolicy) SystemResolverPolicy {
+	if !policy.Rotate || len(policy.Nameservers) < 2 {
+		policy.Rotate = false
+		return policy
+	}
+	start := int(systemResolverRotation.Add(1)-1) % len(policy.Nameservers)
+	policy.Nameservers = append(slices.Clone(policy.Nameservers[start:]), policy.Nameservers[:start]...)
+	policy.Rotate = false
+	return policy
+}
+
+// QuerySystemType resolves host for an arbitrary DNS record type using the
+// configured system nameservers, honoring the resolv.conf attempts, rotate,
+// and timeout policy. The boolean reports whether any nameserver required a
+// TCP fallback. systemd-resolved is consulted only for HTTPS/SVCB because
+// resolvectl does not expose other record types.
+func QuerySystemType(ctx context.Context, policy SystemResolverPolicy, host string, typ uint16) ([]Record, bool, error) {
+	if policy.UseSystemdResolved && runtime.GOOS == "linux" && (typ == dnsTypeHTTPS || typ == dnsTypeSVCB) {
 		if records, err := querySystemdResolved(ctx, host, typ); err == nil && len(records) > 0 {
-			return records, nil
+			return records, false, nil
 		}
 	}
 	if len(policy.Nameservers) == 0 {
-		return nil, ErrHTTPSRecordsUnavailable
+		return nil, false, ErrHTTPSRecordsUnavailable
 	}
 	attempts := policy.Attempts
 	if attempts <= 0 {
@@ -142,10 +181,11 @@ func QuerySystemHTTPS(ctx context.Context, policy SystemResolverPolicy, host str
 		start = int(systemResolverRotation.Add(1)-1) % len(policy.Nameservers)
 	}
 	var lastErr error
+	var totalFallback bool
 	for offset := range len(policy.Nameservers) {
 		index := (start + offset) % len(policy.Nameservers)
 		queryCtx, cancel := context.WithTimeout(ctx, timeout)
-		message, _, err := lookupUDPMessage(queryCtx, policy.Nameservers[index], host, typ, attempts)
+		message, fallback, err := lookupUDPMessage(queryCtx, policy.Nameservers[index], host, typ, attempts)
 		cancel()
 		if err != nil {
 			lastErr = err
@@ -153,33 +193,36 @@ func QuerySystemHTTPS(ctx context.Context, policy SystemResolverPolicy, host str
 		}
 		name, err := ParseName(host)
 		if err != nil {
-			return nil, err
+			return nil, fallback, err
 		}
 		if message.Header.RCode != 0 {
-			return nil, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+			return nil, fallback, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
 		}
 		authorized, err := AuthorizeAnswers(message, Question{Name: name, Type: typ, Class: 1})
 		if err != nil {
-			return nil, err
+			return nil, fallback, err
 		}
 		out := make([]Record, 0, len(authorized))
+		hasRequestedType := false
 		for _, record := range authorized {
-			if record.Type == typ {
-				out = append(out, record)
-			}
+			out = append(out, record)
+			hasRequestedType = hasRequestedType || record.Type == typ
 		}
-		if len(out) == 0 {
-			return nil, errDNSNoData
+		if !hasRequestedType {
+			return nil, fallback, errDNSNoData
 		}
-		return out, nil
+		if fallback {
+			totalFallback = true
+		}
+		return out, totalFallback, nil
 	}
 	if err := contextError(ctx); err != nil {
-		return nil, err
+		return nil, totalFallback, err
 	}
 	if lastErr == nil {
 		lastErr = errors.New("system resolver query failed")
 	}
-	return nil, lastErr
+	return nil, totalFallback, lastErr
 }
 
 func querySystemdResolved(ctx context.Context, host string, typ uint16) ([]Record, error) {

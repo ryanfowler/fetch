@@ -82,7 +82,7 @@ fetch --inspect-dns example.com
 fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 ```
 
-Without `--dns-server`, inspection uses the platform resolver and shows only A and AAAA records. Per-record TTLs are unavailable through that resolver. With an explicit resolver, inspection queries A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS concurrently. The output shows the resolver security classification, address and record counts, and duration. If a query fails, successful records are retained, the incomplete record types are reported, and the command exits with status 1.
+Without `--dns-server`, inspection queries the nameservers listed in the system resolver configuration (`/etc/resolv.conf`) directly, so it reports every record type (A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS) with per-record TTLs. On platforms without a usable resolver file (notably Windows and macOS with scoped resolver configuration), or when the name is resolved only through OS mechanisms (the hosts file, NSS modules, or mDNS), it uses the platform resolver for A and AAAA records without per-record TTLs. Any records already returned by direct DNS remain visible. With an explicit resolver, inspection queries the same record types concurrently. The output shows the resolver security classification, address and record counts, and duration. If a query fails, successful records are retained, the incomplete record types are reported, and the command exits with status 1.
 
 ### Configuration File
 
