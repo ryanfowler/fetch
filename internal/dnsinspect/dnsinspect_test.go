@@ -7,12 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/ryanfowler/fetch/internal/resolver"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -57,6 +59,47 @@ func TestInspectDOHShowsAAndAAAATTLs(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestDNSQueryHostPreservesASCIIServiceLabels(t *testing.T) {
+	got, err := dnsQueryHost("_acme-challenge.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "_acme-challenge.example"; got != want {
+		t.Fatalf("DNS query host = %q, want %q", got, want)
+	}
+}
+
+func TestInspectNormalizesIDNForDNSQueries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		if got, want := r.URL.Query().Get("name"), "xn--mnich-kva.example"; got != want {
+			http.Error(w, "unexpected DNS name", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Query().Get("type") == "A" {
+			io.WriteString(w, `{"Status":0,"Answer":[{"name":"xn--mnich-kva.example.","type":1,"data":"192.0.2.1","TTL":60}]}`)
+			return
+		}
+		io.WriteString(w, `{"Status":0}`)
+	}))
+	defer server.Close()
+
+	p := core.TestPrinter(false)
+	status := Inspect(context.Background(), p, &Config{
+		DNSServer: mustURL(t, server.URL),
+		URL:       mustURL(t, "https://münich.example"),
+	})
+	if status != 0 {
+		t.Fatalf("status = %d, want 0\n%s", status, p.Bytes())
+	}
+	if !strings.Contains(string(p.Bytes()), "192.0.2.1") {
+		t.Fatalf("output missing IDN A record:\n%s", p.Bytes())
 	}
 }
 
@@ -255,7 +298,8 @@ func TestLookupWithoutExplicitServerUsesPlatformResolver(t *testing.T) {
 		}, nil
 	}
 
-	res, err := lookup(context.Background(), &Config{}, "example.com", time.Now())
+	// A resolv.conf with no nameservers forces the platform fallback path.
+	res, err := lookup(context.Background(), &Config{ResolvConfPath: emptyResolvConf(t)}, "example.com", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +332,7 @@ func TestLookupUsesPlatformResolver(t *testing.T) {
 		}, nil
 	}
 
-	res, err := lookup(context.Background(), &Config{}, "example.com", time.Now())
+	res, err := lookup(context.Background(), &Config{ResolvConfPath: emptyResolvConf(t)}, "example.com", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,6 +351,98 @@ func TestLookupUsesPlatformResolver(t *testing.T) {
 	if res.records["A"][0].hasTTL || res.records["AAAA"][0].hasTTL {
 		t.Fatalf("default resolver records unexpectedly reported TTLs: %#v", res.records)
 	}
+}
+
+func TestLookupSystemNameserverReturnsTTL(t *testing.T) {
+	addr, stop := startUDPServer(t)
+	defer stop()
+
+	// Select the test UDP server as the system nameserver via a direct policy,
+	// so inspection queries a real nameserver and keeps TTLs.
+	res, err := lookup(context.Background(), &Config{SystemPolicy: &resolver.SystemResolverPolicy{
+		Nameservers: []string{addr},
+		Attempts:    1,
+		Timeout:     time.Second,
+	}}, "example.com", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.resolver != "udp "+addr {
+		t.Fatalf("resolver label = %q, want %q", res.resolver, "udp "+addr)
+	}
+	if res.ttlUnavailable {
+		t.Fatal("ttlUnavailable = true, want false for a direct nameserver query")
+	}
+	if got := len(res.records["A"]); got != 1 {
+		t.Fatalf("A records = %d, want 1", got)
+	}
+	if got, want := res.records["A"][0].value, "192.0.2.10"; got != want {
+		t.Fatalf("A value = %q, want %q", got, want)
+	}
+	if got, want := res.records["A"][0].ttl, uint32(42); got != want {
+		t.Fatalf("A TTL = %d, want %d", got, want)
+	}
+}
+
+func TestLookupSystemFallsBackToPlatform(t *testing.T) {
+	origDefaultLookupIPAddr := defaultLookupIPAddr
+	t.Cleanup(func() {
+		defaultLookupIPAddr = origDefaultLookupIPAddr
+	})
+
+	// A policy pointing at a dead nameserver: every record type fails, so
+	// inspection must fall back to the platform resolver for A/AAAA.
+	defaultLookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("192.0.2.99")}}, nil
+	}
+
+	res, err := lookup(context.Background(), &Config{SystemPolicy: &resolver.SystemResolverPolicy{
+		Nameservers: []string{"127.0.0.1:1"},
+		Attempts:    1,
+		Timeout:     50 * time.Millisecond,
+	}}, "example.com", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.resolver != "system resolver (configured nameservers) (platform fallback)" {
+		t.Fatalf("resolver label = %q, want platform fallback label", res.resolver)
+	}
+	if !res.ttlUnavailable {
+		t.Fatal("ttlUnavailable = false, want true for platform fallback")
+	}
+	if got := len(res.records["A"]); got != 1 {
+		t.Fatalf("A records = %d, want 1", got)
+	}
+	if got, want := res.records["A"][0].value, "192.0.2.99"; got != want {
+		t.Fatalf("A value = %q, want %q", got, want)
+	}
+	if len(res.failures) == 0 {
+		t.Fatal("platform fallback discarded direct nameserver failures")
+	}
+
+	p := core.TestPrinter(false)
+	status := Inspect(context.Background(), p, &Config{
+		SystemPolicy: &resolver.SystemResolverPolicy{
+			Nameservers: []string{"127.0.0.1:1"},
+			Attempts:    1,
+			Timeout:     50 * time.Millisecond,
+		},
+		URL: mustURL(t, "https://example.com"),
+	})
+	if status != 1 || !strings.Contains(string(p.Bytes()), "DNS inspection incomplete") {
+		t.Fatalf("platform fallback status/output = %d/%s, want status 1 and warning", status, p.Bytes())
+	}
+}
+
+// emptyResolvConf returns a resolv.conf path that lists no nameservers, so
+// lookup() takes the platform-resolver fallback path deterministically.
+func emptyResolvConf(t *testing.T) string {
+	t.Helper()
+	path := t.TempDir() + "/resolv.conf"
+	if err := os.WriteFile(path, []byte("search example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestResolverTargetUsesPlatformResolver(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/ryanfowler/fetch/internal/resolver"
 
 	"golang.org/x/net/dns/dnsmessage"
+	"golang.org/x/net/idna"
 )
 
 const dnsTypeCAA dnsmessage.Type = 257
@@ -56,6 +58,18 @@ type Config struct {
 	Timeout    time.Duration
 	URL        *url.URL
 	Silent     bool
+
+	// ResolvConfPath overrides the resolver configuration file consulted when
+	// no --dns-server is set. An empty value uses the platform default
+	// (/etc/resolv.conf on supported platforms). Tests use it to avoid
+	// depending on the host's resolver configuration.
+	ResolvConfPath string
+
+	// SystemPolicy supplies the system resolver policy directly. When set it
+	// takes precedence over ResolvConfPath. Production callers leave it nil so
+	// the policy is loaded from the resolver configuration file; tests use it
+	// to select a nameserver with an arbitrary port.
+	SystemPolicy *resolver.SystemResolverPolicy
 }
 
 type queryType struct {
@@ -102,6 +116,36 @@ type resolverTargetInfo struct {
 }
 
 var defaultLookupIPAddr = net.DefaultResolver.LookupIPAddr
+
+// systemResolvConfPath is the resolver configuration file used when no
+// --dns-server is set. It is a variable so tests can point it at a fixture.
+// Windows has no portable resolv.conf to enumerate.
+var systemResolvConfPath = func() string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	return "/etc/resolv.conf"
+}
+
+// loadSystemResolverPolicy reads the system resolver policy. It returns nil
+// when the file is unavailable or lists no nameservers.
+func loadSystemResolverPolicy(cfg *Config) *resolver.SystemResolverPolicy {
+	if cfg.SystemPolicy != nil {
+		return cfg.SystemPolicy
+	}
+	path := cfg.ResolvConfPath
+	if path == "" {
+		path = systemResolvConfPath()
+	}
+	if path == "" {
+		return nil
+	}
+	policy, err := resolver.LoadSystemResolverPolicy(path)
+	if err != nil {
+		return nil
+	}
+	return &policy
+}
 
 // Inspect resolves the configured URL hostname and renders DNS information to
 // the printer. It returns a non-zero exit code on failure.
@@ -166,32 +210,34 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		silent:   cfg.Silent,
 	}
 
-	// A missing --dns-server means the platform resolver, not the first
-	// nameserver listed in resolv.conf. The platform API exposes addresses but
-	// not per-record TTLs, and it cannot provide the additional record types.
-	if server == nil {
-		target = resolverTargetInfo{label: "system resolver", useDefault: true}
-		out.resolver = target.label
-		out.ttlUnavailable = true
+	// A missing --dns-server prefers the resolv.conf nameservers, which expose
+	// every record type and per-record TTLs. The platform API is only the
+	// fallback: it surfaces A/AAAA and no per-record TTLs.
+	systemDefault := server == nil
+	var systemPolicy *resolver.SystemResolverPolicy
+	if systemDefault {
+		policy := loadSystemResolverPolicy(cfg)
+		if policy != nil && len(policy.Nameservers) > 0 {
+			ordered := resolver.RotateSystemResolverPolicy(*policy)
+			systemPolicy = &ordered
+			target = resolverTargetInfo{label: "udp " + ordered.Nameservers[0], udpAddr: ordered.Nameservers[0]}
+			out.resolver = target.label
+			out.security = string(resolver.SecurityPlaintext)
+		} else {
+			systemPolicy = nil
+			target = resolverTargetInfo{label: "system resolver", useDefault: true}
+			out.resolver = target.label
+			out.ttlUnavailable = true
+		}
 	}
 
 	if cfg.Endpoint != nil && cfg.Endpoint.Transport != resolver.TransportUDP && cfg.Endpoint.Transport != resolver.TransportTCP && cfg.Endpoint.Transport != resolver.TransportTLS && cfg.Endpoint.Transport != resolver.TransportQUIC && cfg.Endpoint.Transport != resolver.TransportHTTPS {
 		return nil, fmt.Errorf("resolver transport %s is not implemented", cfg.Endpoint.Transport)
 	}
 
+	// No usable system policy: fall back to the platform resolver (A/AAAA only).
 	if target.useDefault {
-		records, err := lookupDefaultResolverRecords(ctx, host)
-		out.duration = time.Since(start)
-		if err != nil {
-			return nil, fmt.Errorf("lookup %s: %w", host, err)
-		}
-		for _, rec := range records {
-			out.records[rec.typ] = append(out.records[rec.typ], rec)
-		}
-		if recordCount(out) == 0 {
-			return nil, fmt.Errorf("lookup %s: no DNS records found", host)
-		}
-		return out, nil
+		return platformLookup(ctx, out, host, start)
 	}
 
 	var streamClient *resolver.StreamClient
@@ -248,6 +294,44 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		defer dohClient.Close()
 	}
 
+	queryHost, err := dnsQueryHost(host)
+	if err != nil {
+		return nil, fmt.Errorf("normalize hostname %s: %w", host, err)
+	}
+	queryCtx, cancelQuery := contextForDirectLookup(ctx, systemPolicy != nil)
+	defer cancelQuery()
+	results := runFanOut(queryCtx, queryHost, target, systemPolicy, streamClient, doqClient, dohClient)
+	firstResult := aggregate(out, results, start)
+	if systemPolicy != nil && (len(out.failures) > 0 || len(systemPolicy.Nameservers) > 1) {
+		// Different record types can come from different configured servers.
+		// With more than one server, the query layer may fail over silently,
+		// so do not claim one server supplied the complete result.
+		out.resolver = "system resolver (configured nameservers)"
+	}
+
+	// A system-nameserver query that returned no address records (for example a
+	// .local/mDNS or a host resolved only via NSS or the hosts file) falls back
+	// to the OS resolver so those names still resolve. Keep the original query
+	// context for this operation; contextForDirectLookup reserves time for it.
+	if systemPolicy != nil && !hasAddressRecords(out) {
+		if platformAddrs, err := lookupDefaultResolverRecords(ctx, host); err == nil && len(platformAddrs) > 0 {
+			return platformResult(out, platformAddrs, start), nil
+		}
+	}
+
+	if recordCount(out) > 0 || len(out.failures) > 0 {
+		return out, nil
+	}
+	if firstResult != nil {
+		return nil, fmt.Errorf("lookup %s: %w", host, firstResult)
+	}
+	return nil, fmt.Errorf("lookup %s: no DNS records found", host)
+}
+
+// runFanOut queries every inspection record type concurrently. Exactly one
+// backend is active: the system policy nameservers, or the selected stream,
+// DoQ, DoH, or UDP resolver.
+func runFanOut(ctx context.Context, host string, target resolverTargetInfo, systemPolicy *resolver.SystemResolverPolicy, streamClient *resolver.StreamClient, doqClient *resolver.DoQClient, dohClient *resolver.DOHClient) []queryResult {
 	results := make([]queryResult, len(inspectTypes))
 	var wg sync.WaitGroup
 	for i, qt := range inspectTypes {
@@ -255,31 +339,57 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		go func(i int, qt queryType) {
 			defer wg.Done()
 			results[i].label = qt.label
-			if streamClient != nil {
+			switch {
+			case systemPolicy != nil:
+				results[i].records, results[i].tcpFallback, results[i].err = lookupSystemRecords(ctx, systemPolicy, host, qt)
+			case streamClient != nil:
 				results[i].records, results[i].err = lookupStreamRecords(ctx, streamClient, host, qt)
-				return
-			}
-			if doqClient != nil {
+			case doqClient != nil:
 				results[i].records, results[i].err = lookupDoQRecords(ctx, doqClient, host, qt)
-				return
-			}
-			if dohClient != nil {
+			case dohClient != nil:
 				results[i].records, results[i].err = lookupDOHRecordsWithClient(ctx, dohClient, host, qt)
-				return
+			default:
+				results[i].records, results[i].tcpFallback, results[i].err = lookupUDPRecordsWithFallback(ctx, target.udpAddr, host, qt)
 			}
-			results[i].records, results[i].tcpFallback, results[i].err = lookupUDPRecordsWithFallback(ctx, target.udpAddr, host, qt)
 		}(i, qt)
 	}
 	wg.Wait()
+	return results
+}
 
-	var firstErr error
+// lookupSystemRecords resolves host for one record type through the system
+// nameservers, retrying across them per the resolv.conf policy.
+func lookupSystemRecords(ctx context.Context, policy *resolver.SystemResolverPolicy, host string, qt queryType) ([]record, bool, error) {
+	// resolvectl does not expose TTLs. DNS inspection must query the configured
+	// nameserver directly so every displayed record has authoritative TTL data.
+	inspectionPolicy := *policy
+	inspectionPolicy.UseSystemdResolved = false
+	resolved, fallback, err := resolver.QuerySystemType(ctx, inspectionPolicy, host, uint16(qt.dnsType))
+	if err != nil {
+		return nil, fallback, err
+	}
+	records := make([]record, 0, len(resolved))
+	for _, rec := range resolved {
+		value, ok := wireRecordValue(rec)
+		if !ok {
+			continue
+		}
+		records = append(records, record{typ: typeLabel(dnsmessage.Type(rec.Type)), value: value, ttl: rec.TTL, hasTTL: rec.TTLPresent})
+	}
+	return records, fallback, nil
+}
+
+// aggregate merges per-type query results into out. It returns the first
+// non-NODATA error so callers that produce nothing can explain the failure.
+func aggregate(out *result, results []queryResult, start time.Time) error {
+	var firstResult error
 	seen := make(map[string]int)
 	for _, query := range results {
 		out.tcpFallback = out.tcpFallback || query.tcpFallback
 		if query.err != nil && !errors.Is(query.err, resolver.ErrDNSNoData) {
 			out.failures = append(out.failures, queryFailure{label: query.label, err: query.err})
-			if firstErr == nil {
-				firstErr = query.err
+			if firstResult == nil {
+				firstResult = query.err
 			}
 		}
 		for _, rec := range query.records {
@@ -301,14 +411,112 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		}
 	}
 	out.duration = time.Since(start)
+	return firstResult
+}
 
-	if recordCount(out) > 0 || len(out.failures) > 0 {
-		return out, nil
+func hasAddressRecords(out *result) bool {
+	return len(out.records["A"]) > 0 || len(out.records["AAAA"]) > 0
+}
+
+// platformLookup resolves host through the platform resolver and fills out,
+// reporting per-record TTLs as unavailable.
+func platformLookup(ctx context.Context, out *result, host string, start time.Time) (*result, error) {
+	records, err := lookupDefaultResolverRecords(ctx, host)
+	out.duration = time.Since(start)
+	if err != nil {
+		return nil, fmt.Errorf("lookup %s: %w", host, err)
 	}
-	if firstErr != nil {
-		return nil, fmt.Errorf("lookup %s: %w", host, firstErr)
+	for _, rec := range records {
+		out.records[rec.typ] = append(out.records[rec.typ], rec)
 	}
-	return nil, fmt.Errorf("lookup %s: no DNS records found", host)
+	if recordCount(out) == 0 {
+		return nil, fmt.Errorf("lookup %s: no DNS records found", host)
+	}
+	return out, nil
+}
+
+// contextForDirectLookup reserves one quarter of a timed inspection for
+// the platform fallback. Direct queries remain concurrent, so this only
+// affects slow or unreachable system nameservers.
+func contextForDirectLookup(ctx context.Context, reserve bool) (context.Context, context.CancelFunc) {
+	if !reserve {
+		return ctx, func() {}
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, time.Now().Add(remaining*3/4))
+}
+
+func dnsQueryHost(host string) (string, error) {
+	trailingDot := strings.HasSuffix(host, ".")
+	base := strings.TrimSuffix(host, ".")
+	if base == "" {
+		if trailingDot {
+			return ".", nil
+		}
+		return "", errors.New("hostname is empty")
+	}
+	labels := strings.Split(base, ".")
+	for i, label := range labels {
+		if label == "" {
+			return "", errors.New("hostname contains an empty label")
+		}
+		if isASCII(label) {
+			// DNS service labels such as _acme-challenge are valid ASCII
+			// labels but are not valid IDNA labels.
+			continue
+		}
+		ascii, err := idna.Lookup.ToASCII(label)
+		if err != nil {
+			return "", err
+		}
+		labels[i] = ascii
+	}
+	ascii := strings.Join(labels, ".")
+	if trailingDot {
+		return ascii + ".", nil
+	}
+	return ascii, nil
+}
+
+func isASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// platformResult combines platform A/AAAA records with records already
+// returned by the system nameserver. This keeps useful non-address records
+// visible while making the mixed resolver provenance and unavailable TTLs
+// explicit.
+func platformResult(orig *result, records []record, start time.Time) *result {
+	out := &result{
+		host:           orig.host,
+		resolver:       orig.resolver + " (platform fallback)",
+		security:       "mixed (direct nameserver and platform resolver)",
+		records:        make(map[string][]record, len(orig.records)),
+		failures:       slices.Clone(orig.failures),
+		tcpFallback:    orig.tcpFallback,
+		silent:         orig.silent,
+		duration:       time.Since(start),
+		ttlUnavailable: true,
+	}
+	for typ, values := range orig.records {
+		out.records[typ] = slices.Clone(values)
+	}
+	for _, rec := range records {
+		out.records[rec.typ] = append(out.records[rec.typ], rec)
+	}
+	return out
 }
 
 func lookupDefaultResolverRecords(ctx context.Context, host string) ([]record, error) {

@@ -268,9 +268,7 @@ ca-cert = ca-cert.pem
 **Type**: Resolver endpoint
 **Default**: System default
 
-Use a custom DNS server for hostname resolution. Without this option, DNS
-inspection uses the platform resolver and shows only A and AAAA records; its
-per-record TTLs are unavailable. Supported custom forms are bare IPv4 or
+Use a custom DNS server for hostname resolution. Without this option, DNS inspection queries the nameservers listed in the system resolver configuration (`/etc/resolv.conf`) directly, including on macOS, and reports all supported record types with per-record TTLs. This does not apply macOS scoped, per-interface, VPN, or `/etc/resolver` routing. On platforms without a usable resolver file, or when a name is resolved only through OS mechanisms (the hosts file, NSS modules, or mDNS), it uses the platform resolver for A and AAAA records without per-record TTLs. Records already returned by direct DNS remain visible. Supported custom forms are bare IPv4 or
 bracketed IPv6 UDP addresses, `host:port`, `udp://`, `tcp://`,
 `tls://`/`dot://`, `quic://`/`doq://`, and HTTPS DoH URLs. UDP/TCP default to
 port 53, while DoT/DoQ default to 853. Non-DoH paths and queries, userinfo,
