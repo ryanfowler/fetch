@@ -617,4 +617,26 @@ func TestRender(t *testing.T) {
 			t.Errorf("expected 'SANs:' in output, got:\n%s", out)
 		}
 	})
+
+	t.Run("verified ConnectionState", func(t *testing.T) {
+		cs := &tls.ConnectionState{
+			VerifiedChains: [][]*x509.Certificate{{
+				{Subject: pkix.Name{CommonName: "Test Root"}},
+			}},
+		}
+
+		p := newTestPrinter()
+		render(p, cs)
+		out := string(p.Bytes())
+
+		if !strings.Contains(out, "Verification: verified") {
+			t.Errorf("expected successful verification status, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Trust anchor: not reported by verifier") {
+			t.Errorf("expected unavailable trust-anchor status, got:\n%s", out)
+		}
+		if strings.Contains(out, "platform verifier") {
+			t.Errorf("unexpected platform-specific wording in output:\n%s", out)
+		}
+	})
 }
