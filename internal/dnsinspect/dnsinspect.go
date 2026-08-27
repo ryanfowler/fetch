@@ -119,13 +119,9 @@ var defaultLookupIPAddr = net.DefaultResolver.LookupIPAddr
 
 // systemResolvConfPath is the resolver configuration file used when no
 // --dns-server is set. It is a variable so tests can point it at a fixture.
-// Windows has no portable resolv.conf to enumerate, and macOS has scoped
-// resolver configuration that is not represented by this file.
+// Windows has no portable resolv.conf to enumerate.
 var systemResolvConfPath = func() string {
-	// macOS can have per-interface and VPN-specific resolvers that are not
-	// represented by /etc/resolv.conf. Use its platform resolver API instead
-	// of sending those names to an unrelated nameserver.
-	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+	if runtime.GOOS == "windows" {
 		return ""
 	}
 	return "/etc/resolv.conf"
