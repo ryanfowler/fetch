@@ -538,7 +538,7 @@ func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool)
 		p.WriteString("skipped (--insecure)")
 	case len(cs.VerifiedChains) > 0:
 		p.Set(core.Green)
-		p.WriteString("verified by the platform verifier")
+		p.WriteString("verified")
 	default:
 		p.Set(core.Yellow)
 		p.WriteString("not verified")
@@ -551,10 +551,10 @@ func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool)
 	if insecure || len(cs.VerifiedChains) == 0 {
 		p.WriteString("not available")
 	} else {
-		// Go exposes the verified chain but not the trust-anchor selected by
-		// the platform verifier. Never infer that the final peer certificate
-		// is the anchor.
-		p.WriteString("details unavailable (platform verifier)")
+		// The selected trust anchor is local to the verifier and is not
+		// separately exposed by the TLS connection state. Never infer that the
+		// final peer certificate is the anchor.
+		p.WriteString("not reported by verifier")
 	}
 	p.WriteString("\n")
 }

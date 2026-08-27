@@ -325,7 +325,7 @@ Output includes:
 - **Remote IP, resolver provenance, and connection timing** for the selected TCP or QUIC path
 - **Certificate chain** with tree visualization and expiry status
 - **Subject Alternative Names** (DNS names and IP addresses)
-- **Verification result and trust-anchor status**; platform verifiers do not expose the selected trust anchor
+- **Verification result and trust-anchor status**; the selected trust anchor may not be reported by the verifier
 - **OCSP staple status**; unverified staples are shown neutrally and never claim responder, signature, or freshness validation
 
 Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
