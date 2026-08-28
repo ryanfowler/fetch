@@ -73,16 +73,24 @@ type quicInspectionResult struct {
 // Inspect performs a TLS handshake and renders the server chain and verified
 // path to the printer. It returns a non-zero exit code on failure.
 func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
+	return InspectWithError(ctx, p, p, cfg)
+}
+
+// InspectWithError performs a TLS handshake, writes the inspection result to
+// output, and writes setup errors to errorOutput. It returns a non-zero exit
+// code on failure. Keeping these streams separate lets callers pipe a
+// successful inspection without also receiving diagnostics.
+func InspectWithError(ctx context.Context, output, errorOutput *core.Printer, cfg *Config) int {
 	if err := core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax); err != nil {
-		writeTLSError(p, err)
+		writeTLSError(errorOutput, err)
 		return 1
 	}
 	if cfg.HTTP == core.HTTP3 && cfg.TLSMax != 0 && cfg.TLSMax < tls.VersionTLS13 {
-		writeTLSError(p, errors.New("HTTP/3 requires max-tls 1.3 or higher"))
+		writeTLSError(errorOutput, errors.New("HTTP/3 requires max-tls 1.3 or higher"))
 		return 1
 	}
 	if err := core.ValidateECHPolicy(cfg.ECH, cfg.HTTP, cfg.TLSMin, cfg.TLSMax); err != nil {
-		writeTLSError(p, err)
+		writeTLSError(errorOutput, err)
 		return 1
 	}
 	tlsDialCfg := &client.TLSDialConfig{
@@ -149,7 +157,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		echConfig, err = client.DiscoverECHForConnection(ctx, res, host, port, tlsConfig, cfg.ECH, cfg.HTTP)
 		echDiscoveryDuration = time.Since(echDiscoveryStart)
 		if err != nil {
-			writeTLSError(p, err)
+			writeTLSError(errorOutput, err)
 			return 1
 		}
 		tlsConfig = echConfig.TLSConfig()
@@ -165,7 +173,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		}
 		if override, ok, err := res.ResolveAddressOverride("udp", host, port); ok {
 			if err != nil {
-				writeTLSError(p, err)
+				writeTLSError(errorOutput, err)
 				return 1
 			}
 			quicAddr = addr
@@ -184,7 +192,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		})
 		quicResult.Timing.DNSDuration += echDiscoveryDuration
 		if err != nil {
-			writeTLSError(p, err)
+			writeTLSError(errorOutput, err)
 			return 1
 		}
 		var info *client.ECHHandshakeInfo
@@ -198,7 +206,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		}
 		verificationName := connectionVerificationName(quicResult.State, host)
 		verification := verifyConnection(quicResult.State, tlsConfig, verificationName)
-		renderConnection(p, quicResult.State, info, connectionInfo{
+		renderConnection(output, quicResult.State, info, connectionInfo{
 			RemoteIP:     quicResult.RemoteIP,
 			Resolver:     quicResult.Resolver,
 			Timing:       quicResult.Timing,
@@ -207,7 +215,9 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 			ServerName:   verificationName,
 			Verification: verification,
 		})
-		p.Flush()
+		if flushInspectionOutput(output, errorOutput) != 0 {
+			return 1
+		}
 		if verification.Err != nil && !cfg.Insecure {
 			return 1
 		}
@@ -247,12 +257,12 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		result, err = dialer.Dial(ctx, dialRequest)
 	}
 	if err != nil {
-		writeTLSError(p, err)
+		writeTLSError(errorOutput, err)
 		return 1
 	}
 	defer result.Conn.Close()
 	if result.TLSState == nil {
-		writeTLSError(p, errors.New("TLS dial completed without connection state"))
+		writeTLSError(errorOutput, errors.New("TLS dial completed without connection state"))
 		return 1
 	}
 	var echInfo *client.ECHHandshakeInfo
@@ -267,7 +277,7 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	}
 	verificationName := connectionVerificationName(result.TLSState, host)
 	verification := verifyConnection(result.TLSState, tlsConfig, verificationName)
-	renderConnection(p, result.TLSState, echInfo, connectionInfo{
+	renderConnection(output, result.TLSState, echInfo, connectionInfo{
 		RemoteIP:     result.RemoteIP,
 		Resolver:     result.Resolver,
 		Timing:       result.Timing,
@@ -275,7 +285,9 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		ServerName:   verificationName,
 		Verification: verification,
 	})
-	p.Flush()
+	if flushInspectionOutput(output, errorOutput) != 0 {
+		return 1
+	}
 	if verification.Err != nil && !cfg.Insecure {
 		return 1
 	}
@@ -422,6 +434,17 @@ func alpnProtocols(httpVersion core.HTTPVersion) []string {
 	default:
 		return []string{"h2", "http/1.1"}
 	}
+}
+
+func flushInspectionOutput(output, errorOutput *core.Printer) int {
+	if err := output.Flush(); err != nil {
+		if core.IsBrokenPipe(err) {
+			return 0
+		}
+		writeTLSError(errorOutput, err)
+		return 1
+	}
+	return 0
 }
 
 // writeTLSError writes a TLS setup error. Certificate verification failures

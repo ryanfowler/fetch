@@ -887,7 +887,7 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		return 1
 	}
 
-	return tlsinspect.Inspect(ctx, p, &tlsinspect.Config{
+	return tlsinspect.InspectWithError(ctx, handle.Stdout(), p, &tlsinspect.Config{
 		CACerts:          app.Cfg.CACerts,
 		ClientCert:       clientCert,
 		ResolverEndpoint: app.Cfg.DNSEndpoint,

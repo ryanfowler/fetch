@@ -23,6 +23,8 @@ fails; the command warns that results are incomplete and exits nonzero.
 fetch --inspect-tls https://example.com
 ```
 
+TLS inspection output goes to stdout. Warnings and errors go to stderr, so preserve the streams separately when collecting or piping the inspection result.
+
 Inspect certificate names, server chain, verified path, validity, and negotiated
 TLS protocol, key-exchange group, and ALPN before changing trust settings. The server chain contains only
 certificates supplied by the server. The verified path includes the selected

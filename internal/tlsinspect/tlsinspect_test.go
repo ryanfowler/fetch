@@ -30,6 +30,44 @@ func newTestPrinter() *core.Printer {
 	return core.TestPrinter(false)
 }
 
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) {
+	return 0, io.ErrShortWrite
+}
+
+func TestFlushInspectionOutputReportsWriteErrors(t *testing.T) {
+	output := core.TestPrinter(false).NewWriter(failingWriter{})
+	errors := newTestPrinter()
+	output.WriteString("inspection")
+
+	if code := flushInspectionOutput(output, errors); code != 1 {
+		t.Fatalf("flushInspectionOutput() exit code = %d, want 1", code)
+	}
+	if !strings.Contains(string(errors.Bytes()), "short write") {
+		t.Fatalf("error output = %q, want write error", errors.Bytes())
+	}
+}
+
+func TestFlushInspectionOutputIgnoresBrokenPipe(t *testing.T) {
+	output := core.TestPrinter(false).NewWriter(brokenPipeWriter{})
+	errors := newTestPrinter()
+	output.WriteString("inspection")
+
+	if code := flushInspectionOutput(output, errors); code != 0 {
+		t.Fatalf("flushInspectionOutput() exit code = %d, want 0", code)
+	}
+	if len(errors.Bytes()) != 0 {
+		t.Fatalf("error output = %q, want empty", errors.Bytes())
+	}
+}
+
+type brokenPipeWriter struct{}
+
+func (brokenPipeWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
+
 func TestCertDisplayName(t *testing.T) {
 	tests := []struct {
 		name string
@@ -129,6 +167,25 @@ func TestVerifyConnectionUsesPeerChainAndHostname(t *testing.T) {
 	}
 	if !strings.Contains(mismatch.Err.Error(), "is valid for") {
 		t.Fatalf("hostname mismatch error = %v", mismatch.Err)
+	}
+}
+
+func TestInspectWithErrorSeparatesSetupErrors(t *testing.T) {
+	output := newTestPrinter()
+	errors := newTestPrinter()
+
+	code := InspectWithError(context.Background(), output, errors, &Config{
+		TLSMin: tls.VersionTLS13,
+		TLSMax: tls.VersionTLS12,
+	})
+	if code != 1 {
+		t.Fatalf("InspectWithError() exit code = %d, want 1", code)
+	}
+	if len(output.Bytes()) != 0 {
+		t.Fatalf("inspection output = %q, want empty", output.Bytes())
+	}
+	if !strings.Contains(string(errors.Bytes()), "TLS minimum version is greater than maximum version") {
+		t.Fatalf("error output = %q, want setup error", errors.Bytes())
 	}
 }
 
