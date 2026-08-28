@@ -10,12 +10,11 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 
 	"github.com/mattn/go-runewidth"
-	"github.com/yuin/goldmark"
-	"github.com/yuin/goldmark/ast"
-	"github.com/yuin/goldmark/extension"
-	east "github.com/yuin/goldmark/extension/ast"
-	"github.com/yuin/goldmark/text"
-	"github.com/yuin/goldmark/util"
+	"github.com/yuin/goldmark/v2/ast"
+	"github.com/yuin/goldmark/v2/extension"
+	east "github.com/yuin/goldmark/v2/extension/ast"
+	"github.com/yuin/goldmark/v2/parser"
+	"github.com/yuin/goldmark/v2/util"
 )
 
 const (
@@ -66,8 +65,11 @@ func FormatMarkdownWithOptions(buf []byte, p *core.Printer, options MarkdownOpti
 	}
 	rest = truncateMarkdownBlockquoteOpeners(rest)
 
-	md := goldmark.New(goldmark.WithExtensions(extension.Strikethrough, extension.Table))
-	doc := md.Parser().Parse(text.NewReader(rest))
+	mdParser := parser.New(parser.WithExtensions(
+		extension.StrikethroughParser,
+		extension.TableParser,
+	))
+	doc := mdParser.Parse(rest)
 
 	width := 0
 	if p.IsTerminal() {
@@ -499,12 +501,22 @@ func (r *mdRenderer) reapplyStyles() {
 	}
 }
 
-// nodeText returns the concatenated text content of a node's children segments.
+// nodeText returns the raw text content of a block node.
 func (r *mdRenderer) nodeText(n ast.Node) string {
+	switch v := n.(type) {
+	case *ast.CodeBlock:
+		return string(v.Value.Bytes(r.source))
+	case *ast.HTMLBlock:
+		return string(v.Value.Bytes(r.source))
+	}
+
+	block, ok := n.(ast.BlockNode)
+	if !ok {
+		return ""
+	}
 	var sb strings.Builder
-	for i := 0; i < n.Lines().Len(); i++ {
-		seg := n.Lines().At(i)
-		sb.Write(seg.Value(r.source))
+	for _, seg := range block.Source() {
+		sb.Write(seg.Bytes(r.source))
 	}
 	return sb.String()
 }
@@ -562,15 +574,6 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			}
 		}
 
-	case *ast.TextBlock:
-		if entering {
-			if _, inList := n.Parent().(*ast.ListItem); !inList {
-				r.writeBqPrefix()
-			}
-		} else {
-			r.writeString("\n")
-		}
-
 	case *ast.ThematicBreak:
 		if entering {
 			r.writeBqPrefix()
@@ -586,6 +589,18 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.CodeBlock:
 		if entering {
+			if v.CodeBlockKind == ast.CodeBlockKindFenced {
+				status, err := r.renderFencedCodeBlock(v)
+				if err != nil {
+					return status, err
+				}
+				if n.NextSibling() != nil {
+					r.writeBqPrefix()
+					r.writeString("\n")
+				}
+				return status, nil
+			}
+
 			// Indented code block — render as cyan, skip children.
 			content := r.nodeText(v)
 			content = strings.TrimRight(content, "\n")
@@ -602,20 +617,6 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			}
 			return ast.WalkSkipChildren, nil
 		}
-
-	case *ast.FencedCodeBlock:
-		if entering {
-			status, err := r.renderFencedCodeBlock(v)
-			if err != nil {
-				return status, err
-			}
-			if n.NextSibling() != nil {
-				r.writeBqPrefix()
-				r.writeString("\n")
-			}
-			return status, nil
-		}
-
 	case *ast.Blockquote:
 		if entering {
 			// Keep quoted prose visually subordinate to the document around it.
@@ -698,7 +699,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.Text:
 		if entering {
-			r.writeWrappedUntrusted(string(v.Segment.Value(r.source)))
+			r.writeWrappedUntrusted(v.Value.Value(r.source))
 			if v.SoftLineBreak() {
 				r.writeLineBreak()
 			}
@@ -710,39 +711,45 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 	case *ast.CodeSpan:
 		if entering {
 			r.printer.Set(core.Cyan)
-			for c := v.FirstChild(); c != nil; c = c.NextSibling() {
-				if t, ok := c.(*ast.Text); ok {
-					seg := t.Segment
-					// Restore leading whitespace that paragraph parsing
-					// stripped from continuation lines.
-					start := seg.Start
-					for start > 0 && (r.source[start-1] == ' ' || r.source[start-1] == '\t') {
-						start--
-					}
-					if start < seg.Start && start > 0 && r.source[start-1] == '\n' {
-						r.writeUntrusted(string(r.source[start:seg.Start]))
-					}
-					r.writeUntrusted(string(seg.Value(r.source)))
+			indices := v.Value.Indices()
+			var raw strings.Builder
+			lastStop := -1
+			for _, index := range indices {
+				if index.Start == index.Stop {
+					continue
 				}
+				if lastStop >= 0 {
+					raw.Write(r.source[lastStop:index.Start])
+				}
+				raw.Write(r.source[index.Start:index.Stop])
+				lastStop = index.Stop
 			}
+			code := raw.String()
+			if len(code) >= 2 && markdownSpace(code[0]) && markdownSpace(code[len(code)-1]) && strings.Trim(code, " \t\r\n") != "" {
+				code = code[1 : len(code)-1]
+			}
+			r.writeUntrusted(code)
 			r.popAllAndRestore()
 			return ast.WalkSkipChildren, nil
 		}
 
 	case *ast.Emphasis:
 		if entering {
-			if v.Level == 2 {
-				r.pushStyle(core.Bold)
-			} else {
-				r.pushStyle(core.Italic)
-			}
+			r.pushStyle(core.Italic)
+		} else {
+			r.popStyle()
+		}
+
+	case *ast.Strong:
+		if entering {
+			r.pushStyle(core.Bold)
 		} else {
 			r.popStyle()
 		}
 
 	case *ast.Link:
 		if entering {
-			target := markdownLinkDestination(v.Destination)
+			target := markdownLinkDestination(v.Destination.Value(r.source))
 			r.flushPendingSpace()
 			active := r.printer.StartHyperlink(target)
 			r.links = append(r.links, active)
@@ -765,7 +772,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 				r.writeString("](")
 				r.popAllAndRestore()
 				r.printer.Set(core.Cyan)
-				r.writeWrappedUntrusted(string(v.Destination))
+				r.writeWrappedUntrusted(v.Destination.Str(r.source))
 				r.popAllAndRestore()
 				r.printer.Set(core.Dim)
 				r.writeString(")")
@@ -779,7 +786,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			return ast.WalkSkipChildren, nil
 		}
 		if entering {
-			target := markdownLinkDestination(v.Destination)
+			target := markdownLinkDestination(v.Destination.Value(r.source))
 			if r.tty && r.imageRenderer != nil {
 				r.flushPendingSpace()
 				if r.lineWidth > 0 {
@@ -818,7 +825,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 				r.writeString("](")
 				r.popAllAndRestore()
 				r.printer.Set(core.Cyan)
-				r.writeWrappedUntrusted(string(v.Destination))
+				r.writeWrappedUntrusted(v.Destination.Str(r.source))
 				r.popAllAndRestore()
 				r.printer.Set(core.Dim)
 				r.writeString(")")
@@ -828,7 +835,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 
 	case *ast.AutoLink:
 		if entering {
-			label := string(v.Label(r.source))
+			label := v.Label.Value(r.source)
 			target := markdownAutoLinkTarget(v, r.source)
 			r.flushPendingSpace()
 			active := r.printer.StartHyperlink(target)
@@ -855,17 +862,9 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 	case *ast.RawHTML:
 		if entering {
 			r.printer.Set(core.Dim)
-			for i := 0; i < v.Segments.Len(); i++ {
-				seg := v.Segments.At(i)
-				r.writeUntrusted(string(seg.Value(r.source)))
-			}
+			r.writeUntrusted(v.Value.Value(r.source))
 			r.popAllAndRestore()
 			return ast.WalkSkipChildren, nil
-		}
-
-	case *ast.String:
-		if entering {
-			r.writeWrappedUntrusted(string(v.Value))
 		}
 
 	// Extension: Strikethrough
@@ -894,21 +893,26 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 	return ast.WalkContinue, nil
 }
 
+func markdownSpace(b byte) bool {
+	switch b {
+	case ' ', '\t', '\r', '\n':
+		return true
+	default:
+		return false
+	}
+}
+
 // markdownLinkDestination resolves Markdown escapes and entities before the
 // value is placed in a terminal hyperlink target. Goldmark keeps the source
 // spelling in the AST, while a terminal link needs the actual URL.
-func markdownLinkDestination(destination []byte) string {
-	return string(util.URLEscape(destination, true))
+func markdownLinkDestination(destination string) string {
+	return string(util.URLEscape([]byte(destination)))
 }
 
 // markdownAutoLinkTarget returns the normalized target for an autolink. Email
 // autolinks display their address but need an explicit mailto: target.
 func markdownAutoLinkTarget(link *ast.AutoLink, source []byte) string {
-	target := string(link.URL(source))
-	if link.AutoLinkType == ast.AutoLinkEmail && !strings.HasPrefix(strings.ToLower(target), "mailto:") {
-		target = "mailto:" + target
-	}
-	return string(util.URLEscape([]byte(target), false))
+	return string(util.URLEscape([]byte(link.Destination.Value(source))))
 }
 
 // listIndent returns indentation string based on list nesting depth.
@@ -923,10 +927,10 @@ func (r *mdRenderer) listIndent(item *ast.ListItem) string {
 }
 
 // renderFencedCodeBlock renders a fenced code block, delegating to known formatters.
-func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStatus, error) {
+func (r *mdRenderer) renderFencedCodeBlock(v *ast.CodeBlock) (ast.WalkStatus, error) {
 	lang := ""
-	if v.Info != nil {
-		lang = strings.TrimSpace(string(v.Info.Segment.Value(r.source)))
+	if !v.Info.IsEmpty() {
+		lang = strings.TrimSpace(v.Info.Value(r.source))
 		// Strip anything after a space (e.g. "js title=foo" → "js").
 		if idx := strings.IndexByte(lang, ' '); idx >= 0 {
 			lang = lang[:idx]
@@ -945,9 +949,8 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.FencedCodeBlock) (ast.WalkStat
 
 	// Collect body lines.
 	var lines []string
-	for i := 0; i < v.Lines().Len(); i++ {
-		seg := v.Lines().At(i)
-		line := string(seg.Value(r.source))
+	for _, seg := range v.Value.Segments() {
+		line := string(seg.Bytes(r.source))
 		line = strings.TrimRight(line, "\n")
 		lines = append(lines, line)
 	}
@@ -1204,7 +1207,7 @@ func (r *mdRenderer) renderTableCell(cell ast.Node) {
 	for child := cell.FirstChild(); child != nil; child = child.NextSibling() {
 		_ = ast.Walk(child, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 			if t, ok := n.(*ast.Text); ok && entering {
-				text := strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(string(t.Segment.Value(r.source)))
+				text := strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(t.Value.Value(r.source))
 				r.writeUntrusted(text)
 				if t.SoftLineBreak() || t.HardLineBreak() {
 					r.writeString(" ")
@@ -1242,13 +1245,10 @@ func (r *mdRenderer) inlineText(n ast.Node) string {
 
 func (r *mdRenderer) collectText(sb *strings.Builder, n ast.Node) {
 	if t, ok := n.(*ast.Text); ok {
-		sb.Write(t.Segment.Value(r.source))
-	}
-	if s, ok := n.(*ast.String); ok {
-		sb.Write(s.Value)
+		sb.WriteString(t.Value.Value(r.source))
 	}
 	if a, ok := n.(*ast.AutoLink); ok {
-		sb.Write(a.Label(r.source))
+		sb.WriteString(a.Label.Value(r.source))
 	}
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		r.collectText(sb, c)
