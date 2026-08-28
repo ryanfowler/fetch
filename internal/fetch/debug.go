@@ -309,6 +309,11 @@ func newDebugTrace(p *core.Printer) (*httptrace.ClientTrace, *connectionMetrics)
 				p.Reset()
 				p.WriteString("\n")
 
+				p.WriteInfoPrefix()
+				p.WriteString("  Key exchange: ")
+				p.WriteString(core.TLSKeyExchangeName(cs.CurveID))
+				p.WriteString("\n")
+
 				// Print ALPN negotiated protocol
 				if cs.NegotiatedProtocol != "" {
 					p.WriteInfoPrefix()

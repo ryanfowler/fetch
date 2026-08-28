@@ -322,7 +322,7 @@ fetch --inspect-tls example.com
 
 Output includes:
 
-- **TLS version and cipher suite** (e.g., TLS 1.3: TLS_AES_256_GCM_SHA384); QUIC reports `cipher suite unavailable` only when the transport does not expose it
+- **TLS version, cipher suite, and key exchange** (e.g., TLS 1.3: TLS_AES_256_GCM_SHA384, X25519MLKEM768); QUIC reports `cipher suite unavailable` only when the transport does not expose it
 - **ALPN negotiated protocol** (e.g., h2)
 - **Remote IP, resolver provenance, and connection timing** for the selected TCP or QUIC path
 - **Certificate subject, issuer, validity window, and SHA-256 fingerprint**

@@ -540,6 +540,7 @@ func TestRenderConnectionMetadata(t *testing.T) {
 	state := &tls.ConnectionState{
 		Version:            tls.VersionTLS13,
 		CipherSuite:        0,
+		CurveID:            tls.X25519MLKEM768,
 		NegotiatedProtocol: http3.NextProtoH3,
 		PeerCertificates: []*x509.Certificate{{
 			Subject:  pkix.Name{CommonName: "quic.example"},
@@ -559,6 +560,7 @@ func TestRenderConnectionMetadata(t *testing.T) {
 	out := string(p.Bytes())
 	for _, want := range []string{
 		"TLS 1.3: cipher suite unavailable",
+		"Key exchange: X25519MLKEM768",
 		"ALPN: h3",
 		"Remote IP: 2001:db8::1",
 		"Resolver: tls://resolver.example:853",
@@ -617,6 +619,7 @@ func TestRender(t *testing.T) {
 		cs := &tls.ConnectionState{
 			Version:            tls.VersionTLS13,
 			CipherSuite:        tls.TLS_AES_256_GCM_SHA384,
+			CurveID:            tls.X25519MLKEM768,
 			NegotiatedProtocol: "h2",
 			PeerCertificates: []*x509.Certificate{
 				{
@@ -634,6 +637,9 @@ func TestRender(t *testing.T) {
 
 		if !strings.Contains(out, "TLS 1.3") {
 			t.Errorf("expected 'TLS 1.3' in output, got:\n%s", out)
+		}
+		if !strings.Contains(out, "* Key exchange: X25519MLKEM768") {
+			t.Errorf("expected negotiated key exchange in output, got:\n%s", out)
 		}
 		if !strings.Contains(out, "* ALPN: h2") {
 			t.Errorf("expected '* ALPN: h2' in output, got:\n%s", out)
