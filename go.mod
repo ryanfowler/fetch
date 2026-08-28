@@ -5,10 +5,12 @@ go 1.27.0
 require (
 	github.com/andybalholm/brotli v1.2.2
 	github.com/coder/websocket v1.8.15
+	github.com/dunglas/httpsfv v1.1.0
 	github.com/goccy/go-yaml v1.19.2
 	github.com/klauspost/compress v1.19.2
 	github.com/mattn/go-runewidth v0.0.28
 	github.com/quic-go/quic-go v0.61.0
+	github.com/quic-go/webtransport-go v0.12.0
 	github.com/ryanfowler/readability v0.1.1
 	github.com/tinylib/msgp v1.6.4
 	github.com/yuin/goldmark v1.8.5

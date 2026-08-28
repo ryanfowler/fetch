@@ -99,7 +99,18 @@ func main() {
 		os.Exit(1)
 	}
 	handle := core.NewHandle(app.Cfg.Color)
-	if err := app.Cfg.Validate(); err != nil {
+	// WebTransport preflight includes proxy selection and must run before
+	// certificate loading, update work, DNS, or stdin access.
+	if err := cli.ValidateWebTransport(app); err != nil {
+		p := handle.Stderr()
+		core.WriteErrorMsg(p, err)
+		os.Exit(1)
+	}
+	validateConfig := app.Cfg.Validate
+	if app.WebTransport {
+		validateConfig = app.Cfg.ValidateForWebTransport
+	}
+	if err := validateConfig(); err != nil {
 		p := handle.Stderr()
 		core.WriteErrorMsg(p, err)
 		os.Exit(1)
@@ -225,6 +236,7 @@ func main() {
 		Image:            app.Cfg.Image,
 		Insecure:         getValue(app.Cfg.Insecure),
 		Method:           app.Method,
+		MethodExplicit:   app.OptionWasExplicit("method"),
 		Multipart:        multipart.NewMultipart(app.Multipart),
 		NoEncode:         getValue(app.Cfg.NoEncode),
 		NoPager:          app.Cfg.Pager == core.PagerUnknown && getValue(app.Cfg.NoPager),
@@ -253,6 +265,10 @@ func main() {
 		URL:              app.URL,
 		Verbosity:        verbosity,
 		WS:               app.WS,
+		WebTransport:     app.WebTransport,
+		WTMode:           app.WTMode,
+		WTDgramMode:      app.WTDgramMode,
+		WTProtocols:      app.WTProtocols,
 		WSInteractive:    app.WSInteractive,
 		WSMessageMode:    app.WSMessageMode,
 		SchemelessURL:    app.SchemelessURL,
@@ -289,6 +305,7 @@ func handleSkillCommand(ctx context.Context, app *cli.App) int {
 		{Path: "references/grpc.md", Data: mustReadEmbeddedSkill("skills/fetch/references/grpc.md")},
 		{Path: "references/http.md", Data: mustReadEmbeddedSkill("skills/fetch/references/http.md")},
 		{Path: "references/websocket.md", Data: mustReadEmbeddedSkill("skills/fetch/references/websocket.md")},
+		{Path: "references/webtransport.md", Data: mustReadEmbeddedSkill("skills/fetch/references/webtransport.md")},
 		{Path: "evals/evals.json", Data: mustReadEmbeddedSkill("skills/fetch/evals/evals.json")},
 	}
 	bundle, err := skill.NewBundle(core.Version, files)

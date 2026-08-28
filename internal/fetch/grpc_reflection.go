@@ -830,6 +830,9 @@ func newClient(r *Request) *client.Client {
 	if r.WS {
 		httpVersion = core.HTTP1
 	}
+	if r.WebTransport {
+		httpVersion = core.HTTP3
+	}
 	return client.NewClient(client.ClientConfig{
 		CACerts:          r.CACerts,
 		ClientCert:       r.ClientCert,
@@ -846,6 +849,7 @@ func newClient(r *Request) *client.Client {
 		TLSMax:           r.TLSMax,
 		TLSMin:           r.TLSMin,
 		UnixSocket:       r.UnixSocket,
+		WebTransport:     r.WebTransport,
 	})
 }
 

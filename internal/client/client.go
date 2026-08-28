@@ -34,13 +34,19 @@ import (
 
 // Client represents a wrapped HTTP client.
 type Client struct {
-	c            *http.Client
-	maxRedirects int
-	initErr      error
-	proxy        *url.URL
-	httpVersion  core.HTTPVersion
-	echMode      core.ECHMode
-	resolver     *resolver.Resolver
+	c              *http.Client
+	maxRedirects   int
+	initErr        error
+	proxy          *url.URL
+	httpVersion    core.HTTPVersion
+	echMode        core.ECHMode
+	resolver       *resolver.Resolver
+	tlsConfig      *tls.Config
+	connectTimeout time.Duration
+	webTransport   bool
+	wtMu           sync.Mutex
+	wtClosed       bool
+	wtPackets      []net.PacketConn
 }
 
 // RedirectHop represents a single redirect in the chain.
@@ -193,6 +199,7 @@ type ClientConfig struct {
 	TLSMin             uint16
 	UnixSocket         string
 	ECH                core.ECHMode
+	WebTransport       bool
 }
 
 // NewClient returns an initialized Client given the provided configuration.
@@ -230,121 +237,127 @@ func NewClient(cfg ClientConfig) *Client {
 		}
 	}
 
-	// Create the http.RoundTripper based on the configured HTTP version.
+	// Create the http.RoundTripper based on the configured HTTP version. A
+	// WebTransport client uses this Client only for request construction and
+	// cookie policy; its QUIC transport is created lazily by NewWebTransport.
 	var transport http.RoundTripper
-	switch cfg.HTTP {
-	case core.HTTP2:
-		if cfg.H2C {
-			transport = getH2CTransport(baseDial, res, cfg.Proxy, cfg.ConnectTimeout)
-		} else {
-			transport = getHTTP2Transport(baseDial, res, cfg.Proxy, tlsConfig, cfg.ConnectTimeout, cfg.ECH)
-		}
-	case core.HTTP3:
-		transport = getHTTP3Transport(res, tlsConfig, cfg.ConnectTimeout, cfg.ECH)
-	default:
-		if useUnifiedProxyTransport(cfg.Proxy) {
-			transport = newUnifiedProxyTransport(cfg, baseDial, res, tlsConfig)
-			break
-		}
-		rt := &http.Transport{
-			DisableCompression: true,
-			ForceAttemptHTTP2:  cfg.HTTP != core.HTTP1,
-			Protocols:          &http.Protocols{},
-			TLSClientConfig:    tlsConfig.Clone(),
-		}
-		if cfg.ECH != core.ECHUnknown && cfg.ECH != core.ECHOff && cfg.Proxy == nil {
-			// A custom TLS dial is required because net/http otherwise creates
-			// the tls.Config before the resolver can supply the origin's ECH
-			// configuration. Proxy-specific ECH wiring belongs to the proxy
-			// transport integration and must not weaken its certificate checks.
-			rt.DialTLSContext = newECHHTTPDialTLS(baseDial, res, tlsConfig, cfg.ECH, cfg.ConnectTimeout, cfg.HTTP)
-		}
+	if cfg.WebTransport {
+		transport = &http.Transport{}
+	} else {
+		switch cfg.HTTP {
+		case core.HTTP2:
+			if cfg.H2C {
+				transport = getH2CTransport(baseDial, res, cfg.Proxy, cfg.ConnectTimeout)
+			} else {
+				transport = getHTTP2Transport(baseDial, res, cfg.Proxy, tlsConfig, cfg.ConnectTimeout, cfg.ECH)
+			}
+		case core.HTTP3:
+			transport = getHTTP3Transport(res, tlsConfig, cfg.ConnectTimeout, cfg.ECH)
+		default:
+			if useUnifiedProxyTransport(cfg.Proxy) {
+				transport = newUnifiedProxyTransport(cfg, baseDial, res, tlsConfig)
+				break
+			}
+			rt := &http.Transport{
+				DisableCompression: true,
+				ForceAttemptHTTP2:  cfg.HTTP != core.HTTP1,
+				Protocols:          &http.Protocols{},
+				TLSClientConfig:    tlsConfig.Clone(),
+			}
+			if cfg.ECH != core.ECHUnknown && cfg.ECH != core.ECHOff && cfg.Proxy == nil {
+				// A custom TLS dial is required because net/http otherwise creates
+				// the tls.Config before the resolver can supply the origin's ECH
+				// configuration. Proxy-specific ECH wiring belongs to the proxy
+				// transport integration and must not weaken its certificate checks.
+				rt.DialTLSContext = newECHHTTPDialTLS(baseDial, res, tlsConfig, cfg.ECH, cfg.ConnectTimeout, cfg.HTTP)
+			}
 
-		// net/http provides the HTTP proxy CONNECT machinery, but its SOCKS
-		// implementation treats socks5 and socks5h identically. It also uses
-		// the origin TLS configuration for an HTTPS proxy. Keep the transport
-		// as the single HTTP implementation, and replace only the first-hop
-		// dial for the schemes whose semantics need to be explicit.
-		transportProxy := func(req *http.Request) (*url.URL, error) {
-			selected, ok := selectedProxy(req.Context())
-			if !ok {
-				var err error
-				selected, err = proxy(req)
-				if err != nil {
-					return nil, err
-				}
-			}
-			if selected == nil {
-				return nil, nil
-			}
-			switch strings.ToLower(selected.Scheme) {
-			case "https":
-				return httpsProxyAsHTTP(selected), nil
-			case "socks5", "socks5h":
-				// SOCKS destinations are carried by DialContext rather than
-				// net/http's SOCKS implementation so socks5 can resolve
-				// locally and socks5h can preserve the hostname.
-				return nil, nil
-			default:
-				return selected, nil
-			}
-		}
-		dial := wrapDialWithConnectTimeout(baseDial, cfg.ConnectTimeout)
-		if cfg.ConnectTimeout <= 0 {
-			dial = baseDial
-		}
-		if cfg.Proxy != nil {
-			switch strings.ToLower(cfg.Proxy.Scheme) {
-			case "socks5", "socks5h":
-				transportProxy = func(*http.Request) (*url.URL, error) { return nil, nil }
-				dial = newSOCKS5Dialer(baseDial, res, cfg.Proxy, strings.EqualFold(cfg.Proxy.Scheme, "socks5"), cfg.ConnectTimeout)
-			case "https":
-				transportProxy = func(*http.Request) (*url.URL, error) {
-					return httpsProxyAsHTTP(cfg.Proxy), nil
-				}
-				dial = newHTTPSProxyDialer(baseDial, cfg.Proxy, cfg.ConnectTimeout)
-			default:
-				transportProxy = proxy
-			}
-		}
-		if cfg.Proxy == nil {
-			// The selected environment proxy is carried in the request context.
-			// http.Transport passes that context to DialContext, so concurrent
-			// requests cannot change one another's first hop.
-			wrappedDial := dial
-			dial = func(ctx context.Context, network, address string) (net.Conn, error) {
-				selected, ok := selectedProxy(ctx)
-				if ok && selected != nil {
-					switch strings.ToLower(selected.Scheme) {
-					case "socks5", "socks5h":
-						return newSOCKS5Dialer(baseDial, res, selected, strings.EqualFold(selected.Scheme, "socks5"), cfg.ConnectTimeout)(ctx, network, address)
-					case "https":
-						return newHTTPSProxyDialer(baseDial, selected, cfg.ConnectTimeout)(ctx, network, address)
+			// net/http provides the HTTP proxy CONNECT machinery, but its SOCKS
+			// implementation treats socks5 and socks5h identically. It also uses
+			// the origin TLS configuration for an HTTPS proxy. Keep the transport
+			// as the single HTTP implementation, and replace only the first-hop
+			// dial for the schemes whose semantics need to be explicit.
+			transportProxy := func(req *http.Request) (*url.URL, error) {
+				selected, ok := selectedProxy(req.Context())
+				if !ok {
+					var err error
+					selected, err = proxy(req)
+					if err != nil {
+						return nil, err
 					}
 				}
-				return wrappedDial(ctx, network, address)
+				if selected == nil {
+					return nil, nil
+				}
+				switch strings.ToLower(selected.Scheme) {
+				case "https":
+					return httpsProxyAsHTTP(selected), nil
+				case "socks5", "socks5h":
+					// SOCKS destinations are carried by DialContext rather than
+					// net/http's SOCKS implementation so socks5 can resolve
+					// locally and socks5h can preserve the hostname.
+					return nil, nil
+				default:
+					return selected, nil
+				}
 			}
-		}
-		rt.Proxy = transportProxy
-		rt.DialContext = dial
-		rt.Protocols.SetHTTP1(true)
-		rt.Protocols.SetHTTP2(cfg.HTTP != core.HTTP1)
-		transport = rt
-		if cfg.Proxy == nil {
-			transport = &proxyTransport{base: rt, selectProxy: proxy}
-		}
-		// Automatic HTTP/3 is only safe for direct HTTPS requests. The
-		// wrapper delegates HTTP, proxy, and Unix-socket requests to this
-		// ordinary transport, and prepares exactly one complete TCP/TLS or
-		// QUIC connection before sending an eligible request.
-		if cfg.HTTP == core.HTTPDefault && cfg.Proxy == nil && cfg.UnixSocket == "" {
-			// Environment-selected proxies are not eligible for automatic H3.
-			// Keep the ordinary transport visible in that case so proxy setup
-			// remains the single source of truth.
-			autoHTTPSProxy, httpsProxyErr := ProxyForURL(nil, &url.URL{Scheme: "https", Host: "example.com"})
-			autoHTTPProxy, httpProxyErr := ProxyForURL(nil, &url.URL{Scheme: "http", Host: "example.com"})
-			if httpsProxyErr == nil && httpProxyErr == nil && autoHTTPSProxy == nil && autoHTTPProxy == nil {
-				transport = newAutomaticHTTP3Transport(rt, res, cfg.ConnectTimeout, tlsConfig, cfg.ECH)
+			dial := wrapDialWithConnectTimeout(baseDial, cfg.ConnectTimeout)
+			if cfg.ConnectTimeout <= 0 {
+				dial = baseDial
+			}
+			if cfg.Proxy != nil {
+				switch strings.ToLower(cfg.Proxy.Scheme) {
+				case "socks5", "socks5h":
+					transportProxy = func(*http.Request) (*url.URL, error) { return nil, nil }
+					dial = newSOCKS5Dialer(baseDial, res, cfg.Proxy, strings.EqualFold(cfg.Proxy.Scheme, "socks5"), cfg.ConnectTimeout)
+				case "https":
+					transportProxy = func(*http.Request) (*url.URL, error) {
+						return httpsProxyAsHTTP(cfg.Proxy), nil
+					}
+					dial = newHTTPSProxyDialer(baseDial, cfg.Proxy, cfg.ConnectTimeout)
+				default:
+					transportProxy = proxy
+				}
+			}
+			if cfg.Proxy == nil {
+				// The selected environment proxy is carried in the request context.
+				// http.Transport passes that context to DialContext, so concurrent
+				// requests cannot change one another's first hop.
+				wrappedDial := dial
+				dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+					selected, ok := selectedProxy(ctx)
+					if ok && selected != nil {
+						switch strings.ToLower(selected.Scheme) {
+						case "socks5", "socks5h":
+							return newSOCKS5Dialer(baseDial, res, selected, strings.EqualFold(selected.Scheme, "socks5"), cfg.ConnectTimeout)(ctx, network, address)
+						case "https":
+							return newHTTPSProxyDialer(baseDial, selected, cfg.ConnectTimeout)(ctx, network, address)
+						}
+					}
+					return wrappedDial(ctx, network, address)
+				}
+			}
+			rt.Proxy = transportProxy
+			rt.DialContext = dial
+			rt.Protocols.SetHTTP1(true)
+			rt.Protocols.SetHTTP2(cfg.HTTP != core.HTTP1)
+			transport = rt
+			if cfg.Proxy == nil {
+				transport = &proxyTransport{base: rt, selectProxy: proxy}
+			}
+			// Automatic HTTP/3 is only safe for direct HTTPS requests. The
+			// wrapper delegates HTTP, proxy, and Unix-socket requests to this
+			// ordinary transport, and prepares exactly one complete TCP/TLS or
+			// QUIC connection before sending an eligible request.
+			if cfg.HTTP == core.HTTPDefault && cfg.Proxy == nil && cfg.UnixSocket == "" {
+				// Environment-selected proxies are not eligible for automatic H3.
+				// Keep the ordinary transport visible in that case so proxy setup
+				// remains the single source of truth.
+				autoHTTPSProxy, httpsProxyErr := ProxyForURL(nil, &url.URL{Scheme: "https", Host: "example.com"})
+				autoHTTPProxy, httpProxyErr := ProxyForURL(nil, &url.URL{Scheme: "http", Host: "example.com"})
+				if httpsProxyErr == nil && httpProxyErr == nil && autoHTTPSProxy == nil && autoHTTPProxy == nil {
+					transport = newAutomaticHTTP3Transport(rt, res, cfg.ConnectTimeout, tlsConfig, cfg.ECH)
+				}
 			}
 		}
 	}
@@ -466,7 +479,7 @@ func NewClient(cfg ClientConfig) *Client {
 			initErr = setErr
 		}
 	}
-	if cfg.HTTP == core.HTTP3 && cfg.Proxy != nil {
+	if (cfg.HTTP == core.HTTP3 || cfg.WebTransport) && cfg.Proxy != nil {
 		initErr = errors.New("HTTP/3 cannot be used with a proxy")
 	}
 	if initErr == nil {
@@ -476,19 +489,26 @@ func NewClient(cfg ClientConfig) *Client {
 		initErr = errors.New("ECH cannot be used with cleartext HTTP/2")
 	}
 	if initErr == nil {
-		initErr = core.ValidateECHPolicy(cfg.ECH, cfg.HTTP, cfg.TLSMin, cfg.TLSMax)
+		version := cfg.HTTP
+		if cfg.WebTransport {
+			version = core.HTTPDefault
+		}
+		initErr = core.ValidateECHPolicy(cfg.ECH, version, cfg.TLSMin, cfg.TLSMax)
 	}
 	if initErr == nil && cfg.HTTP == core.HTTP3 && cfg.TLSMax != 0 && cfg.TLSMax < tls.VersionTLS13 {
 		initErr = errors.New("HTTP/3 requires max-tls 1.3 or higher")
 	}
 	return &Client{
-		c:            client,
-		maxRedirects: maxRedirects,
-		initErr:      initErr,
-		proxy:        cfg.Proxy,
-		httpVersion:  cfg.HTTP,
-		echMode:      cfg.ECH,
-		resolver:     res,
+		c:              client,
+		maxRedirects:   maxRedirects,
+		initErr:        initErr,
+		proxy:          cfg.Proxy,
+		httpVersion:    cfg.HTTP,
+		echMode:        cfg.ECH,
+		resolver:       res,
+		tlsConfig:      tlsConfig.Clone(),
+		connectTimeout: cfg.ConnectTimeout,
+		webTransport:   cfg.WebTransport,
 	}
 }
 
@@ -868,6 +888,14 @@ func (t *http3TimingTransport) Close() error {
 // Close closes the underlying transport, releasing any resources.
 func (c *Client) Close() error {
 	var closeErr error
+	c.wtMu.Lock()
+	c.wtClosed = true
+	packets := c.wtPackets
+	c.wtPackets = nil
+	c.wtMu.Unlock()
+	for _, packet := range packets {
+		closeErr = errors.Join(closeErr, packet.Close())
+	}
 	if idleCloser, ok := c.c.Transport.(interface{ CloseIdleConnections() }); ok {
 		idleCloser.CloseIdleConnections()
 	}
@@ -929,6 +957,18 @@ func (c *Client) SetJar(jar http.CookieJar) {
 // before sending a request. It is intended for dry-run metadata, which is
 // rendered before Client.Do would normally apply the jar. The caller must not
 // call it more than once for the same request.
+// SetResponseCookies applies cookies returned by a direct protocol handshake.
+// net/http normally performs this step inside Client.Do.
+func (c *Client) SetResponseCookies(reqURL *url.URL, resp *http.Response) {
+	if c == nil || c.c == nil || c.c.Jar == nil || reqURL == nil || resp == nil {
+		return
+	}
+	cookies := resp.Cookies()
+	if len(cookies) > 0 {
+		c.c.Jar.SetCookies(reqURL, cookies)
+	}
+}
+
 func (c *Client) ApplyJarCookies(req *http.Request) *http.Request {
 	if c.c.Jar == nil {
 		return req

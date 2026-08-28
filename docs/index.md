@@ -20,6 +20,7 @@ reference by task.
 - [DNS, proxy, HTTP versions, and TLS/ECH](advanced-features.md)
 - [Encrypted ClientHello](ech.md)
 - [WebSockets](websocket.md)
+- [WebTransport](webtransport.md)
 - [gRPC](grpc.md)
 - [Image rendering](image-rendering.md)
 - [Self-update and installation](updates.md)

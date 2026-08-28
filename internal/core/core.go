@@ -99,6 +99,36 @@ const (
 	ImageOff
 )
 
+// WTMode selects the WebTransport data path.
+type WTMode int
+
+const (
+	WTStream WTMode = iota
+	WTDatagram
+)
+
+func (m WTMode) String() string {
+	if m == WTDatagram {
+		return "datagram"
+	}
+	return "stream"
+}
+
+// WTDatagramMode selects how stdin is split into datagrams.
+type WTDatagramMode int
+
+const (
+	WTDatagramLines WTDatagramMode = iota
+	WTDatagramBinary
+)
+
+func (m WTDatagramMode) String() string {
+	if m == WTDatagramBinary {
+		return "binary"
+	}
+	return "lines"
+}
+
 // WSMessageMode controls how WebSocket payloads are interpreted.
 type WSMessageMode int
 

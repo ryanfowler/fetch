@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/dunglas/httpsfv"
 	"github.com/ryanfowler/fetch/internal/aws"
 	"github.com/ryanfowler/fetch/internal/config"
 	"github.com/ryanfowler/fetch/internal/core"
@@ -52,7 +53,12 @@ type App struct {
 	Force            bool
 	SortHeaders      bool
 	WS               bool // set when URL scheme is ws:// or wss://
+	WebTransport     bool
+	WTMode           core.WTMode
+	WTDgramMode      core.WTDatagramMode
+	WTProtocols      []string
 	Method           string
+	MethodExplicit   bool
 	Multipart        []core.KeyVal[string]
 	Output           string
 	ProtoDesc        string
@@ -78,6 +84,9 @@ type App struct {
 	pagerSet         bool
 	noPagerSet       bool
 	wsMessageModeSet bool
+	wsInteractiveSet bool
+	wtDgramModeSet   bool
+	wtModeSet        bool
 
 	provenance map[string]OptionProvenance
 }
@@ -571,12 +580,13 @@ func (a *App) CLI() *CLI {
 			},
 
 			boolFlag(&a.Version, "version", "V", "Print version"),
+			boolFlag(&a.WebTransport, "webtransport", "", "Use WebTransport over HTTP/3"),
 
 			Flag{
 				Long:        "ws-interactive",
 				Args:        "MODE",
 				Description: "WebSocket prompt mode",
-				IsSet:       func() bool { return a.WSInteractive != core.WSInteractiveAuto },
+				IsSet:       func() bool { return a.wsInteractiveSet },
 				Fn:          a.parseWSInteractiveFlag,
 			}.WithValues([]core.KeyVal[string]{
 				{Key: "auto", Val: "Use interactive prompt when attached to a terminal"},
@@ -598,6 +608,14 @@ func (a *App) CLI() *CLI {
 				{Key: "text", Val: "Require UTF-8 text messages"},
 				{Key: "binary", Val: "Send binary messages"},
 			}),
+
+			Flag{Long: "wt-datagram-mode", Args: "MODE", Description: "WT datagram stdin mode", IsSet: func() bool { return a.wtDgramModeSet }, Fn: a.parseWTDgramModeFlag}.WithValues([]core.KeyVal[string]{
+				{Key: "lines", Val: "One datagram per line"}, {Key: "binary", Val: "One datagram per 1 KiB"},
+			}),
+			Flag{Long: "wt-mode", Args: "MODE", Description: "WT data mode", IsSet: func() bool { return a.wtModeSet }, Fn: a.parseWTModeFlag}.WithValues([]core.KeyVal[string]{
+				{Key: "stream", Val: "Reliable bidirectional stream"}, {Key: "datagram", Val: "Unreliable datagrams"},
+			}),
+			{Long: "wt-protocol", Args: "PROTOCOL", Description: "WT application protocol (repeatable)", IsSet: func() bool { return len(a.WTProtocols) > 0 }, Fn: a.parseWTProtocolFlag},
 
 			// Custom: XML body
 			{
@@ -676,9 +694,15 @@ func (a *App) parseDataFlag(value string) error {
 	if err != nil {
 		return err
 	}
-	a.Data, a.ContentType, err = core.DetectContentType(r, path)
-	if err != nil {
-		return err
+	// Stdin is one-shot. Do not sniff it while parsing: WebTransport defers
+	// application input until after its handshake, and dry-run must not read it.
+	if value == "@-" && a.WebTransport {
+		a.Data, a.ContentType = r, "application/octet-stream"
+	} else {
+		a.Data, a.ContentType, err = core.DetectContentType(r, path)
+		if err != nil {
+			return err
+		}
 	}
 	a.dataSet = true
 	return nil
@@ -811,7 +835,58 @@ func (a *App) parseXMLFlag(value string) error {
 	return nil
 }
 
+func (a *App) parseWTModeFlag(value string) error {
+	switch value {
+	case "stream":
+		a.WTMode = core.WTStream
+	case "datagram":
+		a.WTMode = core.WTDatagram
+	default:
+		return core.NewValueError("wt-mode", value, "must be one of [stream, datagram]", false)
+	}
+	a.wtModeSet = true
+	return nil
+}
+
+func validateWTProtocol(value string) error {
+	_, err := httpsfv.Marshal(httpsfv.NewItem(value))
+	return err
+}
+
+func (a *App) parseWTProtocolFlag(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return core.NewValueError("wt-protocol", value, "must not be empty", false)
+	}
+	for _, protocol := range a.WTProtocols {
+		if protocol == value {
+			return core.NewValueError("wt-protocol", value, "duplicate protocol", false)
+		}
+	}
+	// Validate with the same Structured Fields encoder used by webtransport-go.
+	// Keep this dependency out of normal parsing by validating the item syntax
+	// through the small shared helper.
+	if err := validateWTProtocol(value); err != nil {
+		return core.NewValueError("wt-protocol", value, err.Error(), false)
+	}
+	a.WTProtocols = append(a.WTProtocols, value)
+	return nil
+}
+
+func (a *App) parseWTDgramModeFlag(value string) error {
+	switch value {
+	case "lines":
+		a.WTDgramMode = core.WTDatagramLines
+	case "binary":
+		a.WTDgramMode = core.WTDatagramBinary
+	default:
+		return core.NewValueError("wt-datagram-mode", value, "must be one of [lines, binary]", false)
+	}
+	a.wtDgramModeSet = true
+	return nil
+}
+
 func (a *App) parseWSInteractiveFlag(value string) error {
+	a.wsInteractiveSet = true
 	switch value {
 	case "auto":
 		a.WSInteractive = core.WSInteractiveAuto

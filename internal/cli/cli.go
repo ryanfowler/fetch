@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -12,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanfowler/fetch/internal/client"
 	"github.com/ryanfowler/fetch/internal/core"
 	"github.com/ryanfowler/fetch/internal/curl"
 )
@@ -241,6 +244,14 @@ func isFlagVisibleOnOS(flagOS []string) bool {
 
 func Parse(args []string) (*App, error) {
 	var app App
+	// Mark this before parsing so a one-shot stdin body can skip MIME sniffing
+	// even when --webtransport appears after -d @-.
+	for _, arg := range args {
+		if arg == "--webtransport" {
+			app.WebTransport = true
+			break
+		}
+	}
 
 	cli := app.CLI()
 	long, err := parseWithFlags(cli, args)
@@ -273,6 +284,9 @@ func Parse(args []string) (*App, error) {
 	if app.wsMessageModeSet && !app.WS {
 		return &app, fmt.Errorf("'--ws-message-mode' requires a ws:// or wss:// URL")
 	}
+	if err := ValidateWebTransport(&app); err != nil {
+		return &app, err
+	}
 
 	if err := validateSchemeExclusives(&app, cli, long); err != nil {
 		return &app, err
@@ -288,6 +302,81 @@ func Parse(args []string) (*App, error) {
 	}
 
 	return &app, nil
+}
+
+// ValidateWebTransport validates mode-specific options after CLI and config
+// values have been merged. It performs no I/O and is safe to call preflight.
+func ValidateWebTransport(app *App) error {
+	if app == nil || !app.WebTransport {
+		if app != nil && (app.wtModeSet || app.wtDgramModeSet || len(app.WTProtocols) > 0) {
+			return errors.New("WebTransport options require --webtransport")
+		}
+		return nil
+	}
+	if app.WS {
+		return errors.New("WebSocket and WebTransport cannot be used together")
+	}
+	if app.InspectDNS || app.InspectTLS || app.Update || app.CheckUpdate || app.Skill || app.InstallSkill != "" || app.UninstallSkill != "" {
+		return errors.New("WebTransport cannot be combined with an inspection, update, or skill command")
+	}
+	if app.wtDgramModeSet && app.WTMode != core.WTDatagram {
+		return errors.New("--wt-datagram-mode requires --wt-mode datagram")
+	}
+	if name, ok := app.CLI().Options().Unsupported(ModeWebTransport); ok {
+		return fmt.Errorf("--%s cannot be used with WebTransport", name)
+	}
+	if app.URL == nil {
+		return nil
+	}
+	if !strings.EqualFold(app.URL.Scheme, "https") {
+		return errors.New("WebTransport requires an https:// URL")
+	}
+	if app.Cfg.HTTP == core.HTTP1 || app.Cfg.HTTP == core.HTTP2 {
+		return fmt.Errorf("WebTransport requires HTTP/3; cannot use %s", app.Cfg.HTTP.String())
+	}
+	if app.Cfg.Format != core.FormatUnknown {
+		return errors.New("--format cannot be used with WebTransport")
+	}
+	if app.Cfg.TLSMax != nil && *app.Cfg.TLSMax < tls.VersionTLS13 {
+		return errors.New("WebTransport requires max-tls 1.3 or higher")
+	}
+	// These values can come from a merged config file, so registry IsSet
+	// checks alone are not sufficient here.
+	for _, unsupported := range []struct {
+		name string
+		set  bool
+	}{
+		{"compress", app.Cfg.Compress != core.CompressionUnknown},
+		{"copy", app.Cfg.Copy != nil}, {"ignore-status", app.Cfg.IgnoreStatus != nil},
+		{"no-encode", app.Cfg.NoEncode != nil}, {"redirects", app.Cfg.Redirects != nil},
+		{"retry", app.Cfg.Retry != nil}, {"retry-delay", app.Cfg.RetryDelay != nil},
+		{"retry-unsafe", app.Cfg.RetryUnsafe != nil},
+	} {
+		if unsupported.set {
+			return fmt.Errorf("--%s cannot be used with WebTransport", unsupported.name)
+		}
+	}
+	if app.UnixSocket != "" {
+		return errors.New("WebTransport cannot be used with a unix socket")
+	}
+	if app.URL != nil {
+		decision, err := client.SelectProxy(app.Cfg.Proxy, app.URL)
+		if err != nil {
+			return err
+		}
+		if decision.URL != nil {
+			return errors.New("WebTransport cannot be used with a proxy")
+		}
+	}
+	for _, h := range app.Cfg.Headers {
+		if strings.EqualFold(h.Key, "Host") {
+			return errors.New("host header cannot be used with WebTransport")
+		}
+		if strings.EqualFold(h.Key, "WT-Available-Protocols") || strings.EqualFold(h.Key, "WT-Protocol") {
+			return fmt.Errorf("header %q cannot be supplied with WebTransport", h.Key)
+		}
+	}
+	return nil
 }
 
 func validateEquivalentAliases(app *App) error {
