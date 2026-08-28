@@ -464,6 +464,11 @@ func renderConnection(p *core.Printer, cs *tls.ConnectionState, info *client.ECH
 	}
 	p.WriteString("\n")
 
+	p.WriteInfoPrefix()
+	p.WriteString("Key exchange: ")
+	p.WriteString(core.TLSKeyExchangeName(cs.CurveID))
+	p.WriteString("\n")
+
 	// ALPN negotiated protocol. An empty value is still a useful inspection
 	// result and must not be confused with omitted output.
 	p.WriteInfoPrefix()

@@ -4,8 +4,11 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http/httptrace"
+	"strings"
 	"sync"
 	"testing"
+
+	"github.com/ryanfowler/fetch/internal/core"
 )
 
 // TestDebugTrace_ConcurrentHappyEyeballs simulates Go's default Happy
@@ -81,6 +84,21 @@ func TestDebugTrace_ConcurrentHappyEyeballs(t *testing.T) {
 	m.mu.Unlock()
 	if outstanding != 0 {
 		t.Errorf("expected no outstanding dial starts, got %d", outstanding)
+	}
+}
+
+func TestDebugTraceReportsKeyExchange(t *testing.T) {
+	p := core.TestPrinter(false)
+	trace, _ := newDebugTrace(p)
+
+	trace.TLSHandshakeStart()
+	trace.TLSHandshakeDone(tls.ConnectionState{
+		Version: tls.VersionTLS13,
+		CurveID: tls.X25519MLKEM768,
+	}, nil)
+
+	if got := string(p.Bytes()); !strings.Contains(got, "Key exchange: X25519MLKEM768") {
+		t.Fatalf("debug output omitted negotiated key exchange: %q", got)
 	}
 }
 

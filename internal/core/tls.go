@@ -51,6 +51,15 @@ func ValidateECHPolicy(mode ECHMode, httpVersion HTTPVersion, min, max uint16) e
 	return nil
 }
 
+// TLSKeyExchangeName returns the negotiated TLS key-exchange mechanism.
+// CurveID zero denotes the legacy RSA key exchange in a completed handshake.
+func TLSKeyExchangeName(id tls.CurveID) string {
+	if id == 0 {
+		return "RSA"
+	}
+	return id.String()
+}
+
 func ValidateTLSVersions(min, max uint16) error {
 	valid := func(version uint16) bool {
 		return version == 0 || version == tls.VersionTLS12 || version == tls.VersionTLS13

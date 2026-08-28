@@ -24,7 +24,7 @@ fetch --inspect-tls https://example.com
 ```
 
 Inspect certificate names, server chain, verified path, validity, and negotiated
-protocol before changing trust settings. The server chain contains only
+TLS protocol, key-exchange group, and ALPN before changing trust settings. The server chain contains only
 certificates supplied by the server. The verified path includes the selected
 trust anchor when verification succeeds. Inspection completes the handshake even
 when certificate verification fails, then reports the verification error and
