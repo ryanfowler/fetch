@@ -189,6 +189,40 @@ func TestInspectWithErrorSeparatesSetupErrors(t *testing.T) {
 	}
 }
 
+type staticRemoteConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c staticRemoteConn) RemoteAddr() net.Addr { return c.remote }
+
+func TestEffectiveConnectionPort(t *testing.T) {
+	conn := staticRemoteConn{remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 8443}}
+	if got := effectiveConnectionPort(conn.RemoteAddr(), "443"); got != "8443" {
+		t.Fatalf("effectiveConnectionPort() = %q, want 8443", got)
+	}
+	if got := effectiveConnectionPort(nil, "443"); got != "443" {
+		t.Fatalf("effectiveConnectionPort(nil) = %q, want 443", got)
+	}
+	if !sameTLSHost("Example.COM.", "example.com") {
+		t.Fatal("sameTLSHost() did not normalize case and the DNS root dot")
+	}
+}
+
+func TestAcceptedECHUsesOriginSNI(t *testing.T) {
+	state := &tls.ConnectionState{ServerName: "outer.example", ECHAccepted: true}
+	p := newTestPrinter()
+	renderConnection(p, state, &client.ECHHandshakeInfo{
+		Offered: true, Real: true, Accepted: true, OuterServerName: "outer.example",
+	}, connectionInfo{
+		OriginHost: "inner.example", ServerName: "inner.example", Verbosity: core.VVerbose,
+	})
+	out := string(p.Bytes())
+	if !strings.Contains(out, "SNI: inner.example") || !strings.Contains(out, "Outer SNI: outer.example") {
+		t.Fatalf("accepted ECH SNI output = %q", out)
+	}
+}
+
 func TestALPNProtocols(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -264,17 +298,17 @@ func TestInspectHTTP3UsesQUICAndH3ALPN(t *testing.T) {
 	}
 
 	out := string(p.Bytes())
-	if !strings.Contains(out, "ALPN: h3") {
-		t.Fatalf("expected h3 ALPN in output, got:\n%s", out)
+	if !strings.Contains(out, "· h3") {
+		t.Fatalf("expected h3 ALPN in compact output, got:\n%s", out)
 	}
 	if !strings.Contains(out, "TLS_AES_128_GCM_SHA256") {
 		t.Fatalf("expected negotiated QUIC cipher suite in output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Remote IP: 127.0.0.1") {
-		t.Fatalf("expected remote IP in output, got:\n%s", out)
+	if !strings.Contains(out, "127.0.0.1 → 127.0.0.1:") {
+		t.Fatalf("expected remote address in output, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Resolver: system") {
-		t.Fatalf("expected resolver provenance in output, got:\n%s", out)
+	if strings.Contains(out, "Resolver: system") {
+		t.Fatalf("default output should defer resolver provenance to -v, got:\n%s", out)
 	}
 	if !strings.Contains(out, "quic-server") {
 		t.Fatalf("expected server chain in output, got:\n%s", out)
@@ -613,15 +647,16 @@ func TestRenderConnectionMetadata(t *testing.T) {
 			DNSDuration:     2 * time.Millisecond,
 			ConnectDuration: 3 * time.Millisecond,
 		},
+		OriginHost: "quic.example",
+		Port:       "443",
+		Verbosity:  core.VVerbose,
 	})
 	out := string(p.Bytes())
 	for _, want := range []string{
-		"TLS 1.3: cipher suite unavailable",
-		"Key exchange: X25519MLKEM768",
-		"ALPN: h3",
-		"Remote IP: 2001:db8::1",
+		"TLS 1.3 · cipher suite unavailable · X25519MLKEM768 · h3",
+		"quic.example → [2001:db8::1]:443",
 		"Resolver: tls://resolver.example:853",
-		"Timing: DNS 2.0ms, QUIC 3.0ms",
+		"Timing: DNS 2.0ms · QUIC 3.0ms",
 		"Verification: not verified",
 		"Trust anchor: not available",
 		"Server chain",
@@ -650,10 +685,100 @@ func TestOCSPStapleRequiresMatchingCertificate(t *testing.T) {
 	if !strings.Contains(status, "good") || !strings.Contains(status, "unverified") {
 		t.Fatalf("matching staple status = %q", status)
 	}
+	compact := compactOCSPStatus(staple, []*x509.Certificate{leaf, caCert})
+	if !strings.Contains(compact, "good · stapled") || !strings.Contains(compact, "unverified") {
+		t.Fatalf("compact staple status = %q", compact)
+	}
 	status, _ = inspectOCSPStaple(staple, []*x509.Certificate{other, caCert})
 	if status != "staple present, unverified" {
 		t.Fatalf("mismatched staple status = %q", status)
 	}
+}
+
+func TestRenderInspectionVerbosity(t *testing.T) {
+	fixedNow := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	origNow := tlsInspectNow
+	tlsInspectNow = func() time.Time { return fixedNow }
+	t.Cleanup(func() { tlsInspectNow = origNow })
+
+	leaf := &x509.Certificate{
+		Subject:            pkix.Name{CommonName: "example.com"},
+		Issuer:             pkix.Name{CommonName: "R13", Organization: []string{"Let's Encrypt"}},
+		NotBefore:          fixedNow.Add(-time.Hour),
+		NotAfter:           fixedNow.Add(83 * 24 * time.Hour),
+		SerialNumber:       big.NewInt(42),
+		DNSNames:           []string{"example.com", "www.example.com"},
+		SignatureAlgorithm: x509.SHA256WithRSA,
+		PublicKeyAlgorithm: x509.RSA,
+	}
+	state := &tls.ConnectionState{
+		Version:                     tls.VersionTLS13,
+		CipherSuite:                 tls.TLS_AES_128_GCM_SHA256,
+		CurveID:                     tls.X25519MLKEM768,
+		NegotiatedProtocol:          "h2",
+		PeerCertificates:            []*x509.Certificate{leaf},
+		SignedCertificateTimestamps: [][]byte{{1}},
+	}
+	// Use a synthetic verification result so this rendering test does not
+	// depend on the platform trust store.
+	anchor := &x509.Certificate{Subject: pkix.Name{CommonName: "ISRG Root X1"}}
+	verification := &verificationResult{Chains: [][]*x509.Certificate{{leaf, anchor}}}
+
+	t.Run("normal output is compact", func(t *testing.T) {
+		p := newTestPrinter()
+		renderConnection(p, state, nil, connectionInfo{
+			OriginHost: "example.com", Port: "443", RemoteIP: net.ParseIP("104.18.26.120"),
+			Timing:     client.DialTiming{DNSDuration: 8 * time.Millisecond, ConnectDuration: 21 * time.Millisecond, TLSDuration: 34 * time.Millisecond},
+			ServerName: "example.com", Verification: verification, Verbosity: core.VNormal,
+		})
+		out := string(p.Bytes())
+		for _, want := range []string{
+			"example.com → 104.18.26.120:443",
+			"TLS 1.3 · TLS_AES_128_GCM_SHA256 · X25519MLKEM768 · h2",
+			"✓ Verified for example.com · ISRG Root X1",
+			"Certificate: example.com",
+			"Let's Encrypt R13 · expires Aug 23, 2025 (83 days)",
+			"SANs: example.com, www.example.com",
+			"OCSP: not stapled",
+			"Timing: DNS 8.0ms · TCP 21.0ms · TLS 34.0ms",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected %q in output, got:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "Server chain") || strings.Contains(out, "SHA-256:") || strings.Contains(out, "Resolver:") {
+			t.Errorf("normal output contains verbose details:\n%s", out)
+		}
+		if !strings.Contains(out, "\n*   SANs:") || !strings.Contains(out, "\n*   OCSP:") {
+			t.Errorf("normal output should put SANs and OCSP on separate lines:\n%s", out)
+		}
+	})
+
+	t.Run("verbose output includes certificate diagnostics", func(t *testing.T) {
+		p := newTestPrinter()
+		renderConnection(p, state, nil, connectionInfo{
+			OriginHost: "example.com", Port: "443", Resolver: "system", ServerName: "example.com",
+			Verification: verification, Verbosity: core.VVerbose,
+		})
+		out := string(p.Bytes())
+		for _, want := range []string{"Server chain", "Verified path", "Subject:", "NotBefore:", "NotAfter:", "Serial number: 42", "Public key: unavailable", "Signature algorithm: SHA256-RSA", "SNI: example.com", "Resolver: system", "SCTs: 1"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected %q in output, got:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("extra verbose output includes certificate infrastructure", func(t *testing.T) {
+		leaf.OCSPServer = []string{"http://ocsp.example"}
+		leaf.CRLDistributionPoints = []string{"http://crl.example/root.crl"}
+		p := newTestPrinter()
+		renderConnection(p, state, nil, connectionInfo{Verification: verification, Verbosity: core.VExtraVerbose})
+		out := string(p.Bytes())
+		if !strings.Contains(out, "AIA OCSP: http://ocsp.example") || !strings.Contains(out, "CRL distribution points: http://crl.example/root.crl") {
+			t.Errorf("expected niche certificate details, got:\n%s", out)
+		}
+	})
+
 }
 
 func TestRender(t *testing.T) {
@@ -695,17 +820,11 @@ func TestRender(t *testing.T) {
 		if !strings.Contains(out, "TLS 1.3") {
 			t.Errorf("expected 'TLS 1.3' in output, got:\n%s", out)
 		}
-		if !strings.Contains(out, "* Key exchange: X25519MLKEM768") {
-			t.Errorf("expected negotiated key exchange in output, got:\n%s", out)
+		if !strings.Contains(out, "TLS 1.3 · TLS_AES_256_GCM_SHA384 · X25519MLKEM768 · h2") {
+			t.Errorf("expected negotiated TLS details in output, got:\n%s", out)
 		}
-		if !strings.Contains(out, "* ALPN: h2") {
-			t.Errorf("expected '* ALPN: h2' in output, got:\n%s", out)
-		}
-		if strings.Contains(out, "*   ALPN: h2") {
-			t.Errorf("expected ALPN line to align with TLS line, got:\n%s", out)
-		}
-		if !strings.Contains(out, "Server chain") {
-			t.Errorf("expected 'Server chain' in output, got:\n%s", out)
+		if strings.Contains(out, "Server chain") {
+			t.Errorf("default output should defer chain details to -v, got:\n%s", out)
 		}
 		if !strings.Contains(out, "example.com") {
 			t.Errorf("expected 'example.com' in output, got:\n%s", out)
@@ -728,17 +847,11 @@ func TestRender(t *testing.T) {
 		render(p, cs)
 		out := string(p.Bytes())
 
-		if !strings.Contains(out, "Verification: verified for example.com") {
-			t.Errorf("expected successful verification status with hostname, got:\n%s", out)
+		if !strings.Contains(out, "✓ Verified for example.com · Test Root") {
+			t.Errorf("expected compact successful verification status, got:\n%s", out)
 		}
-		if !strings.Contains(out, "Trust anchor: Test Root") {
-			t.Errorf("expected selected trust-anchor name, got:\n%s", out)
-		}
-		if !strings.Contains(out, "Verified path") {
-			t.Errorf("expected verified path in output, got:\n%s", out)
-		}
-		if strings.Contains(out, "not reported by verifier") {
-			t.Errorf("unexpected unavailable trust-anchor status in output:\n%s", out)
+		if strings.Contains(out, "Verified path") {
+			t.Errorf("default output should defer verified path to -v, got:\n%s", out)
 		}
 	})
 
@@ -756,6 +869,7 @@ func TestRender(t *testing.T) {
 		renderConnection(p, state, nil, connectionInfo{
 			ServerName:   "example.com",
 			Verification: verification,
+			Verbosity:    core.VVerbose,
 		})
 		out := string(p.Bytes())
 

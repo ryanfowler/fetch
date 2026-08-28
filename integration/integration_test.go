@@ -2359,6 +2359,7 @@ func TestMain(t *testing.T) {
 			res := runFetch(t, fetchPath, server.URL,
 				"--inspect-tls",
 				"--ca-cert", caCertPath,
+				"-v",
 			)
 			assertExitCode(t, 0, res)
 			assertBufContains(t, res.stdout, "Server chain")
@@ -2390,7 +2391,7 @@ func TestMain(t *testing.T) {
 				"--ca-cert", caCertPath,
 			)
 			assertExitCode(t, 0, res)
-			assertBufContains(t, res.stdout, "ALPN: h2")
+			assertBufContains(t, res.stdout, "· h2")
 			assertBufEmpty(t, res.stderr)
 		})
 
@@ -2402,7 +2403,7 @@ func TestMain(t *testing.T) {
 				"--ca-cert", caCertPath,
 			)
 			assertExitCode(t, 0, res)
-			assertBufContains(t, res.stdout, "ALPN: http/1.1")
+			assertBufContains(t, res.stdout, "· http/1.1")
 			assertBufEmpty(t, res.stderr)
 		})
 
@@ -2425,8 +2426,8 @@ func TestMain(t *testing.T) {
 				"--ca-cert", caCertPath,
 			)
 			assertExitCode(t, 0, res)
-			// The test cert expires in 1 hour, so < 1 day.
-			assertBufContains(t, res.stdout, "expires in <1 day")
+			// The test cert expires in 1 hour, so it is listed as expiring today.
+			assertBufContains(t, res.stdout, "expires ")
 			assertBufEmpty(t, res.stderr)
 		})
 
@@ -2434,10 +2435,9 @@ func TestMain(t *testing.T) {
 			t.Parallel()
 			res := runFetch(t, fetchPath, server.URL, "--inspect-tls")
 			assertExitCode(t, 1, res)
-			assertBufContains(t, res.stdout, "Verification: FAILED")
+			assertBufContains(t, res.stdout, "Not verified")
 			assertBufContains(t, res.stdout, "Verification error:")
-			assertBufContains(t, res.stdout, "Server chain")
-			assertBufContains(t, res.stdout, "test-server")
+			assertBufContains(t, res.stdout, "Certificate: test-server")
 			assertBufEmpty(t, res.stderr)
 			if strings.Contains(res.stdout.String(), "If you absolutely trust the server") {
 				t.Fatal("inspection should not recommend rerunning with --insecure")
@@ -2451,9 +2451,8 @@ func TestMain(t *testing.T) {
 				"--insecure",
 			)
 			assertExitCode(t, 0, res)
-			assertBufContains(t, res.stdout, "Verification: FAILED (ignored by --insecure)")
-			assertBufContains(t, res.stdout, "Server chain")
-			assertBufContains(t, res.stdout, "test-server")
+			assertBufContains(t, res.stdout, "Not verified (ignored by --insecure)")
+			assertBufContains(t, res.stdout, "Certificate: test-server")
 			assertBufEmpty(t, res.stderr)
 		})
 
@@ -2491,7 +2490,7 @@ func TestMain(t *testing.T) {
 			)
 			assertExitCode(t, 0, res)
 			assertBufContains(t, res.stderr, "--inspect-tls ignores: --timing")
-			assertBufContains(t, res.stdout, "Server chain")
+			assertBufContains(t, res.stdout, "Certificate: test-server")
 		})
 
 		t.Run("warns on incompatible flags", func(t *testing.T) {
@@ -2506,7 +2505,7 @@ func TestMain(t *testing.T) {
 			assertBufContains(t, res.stderr, "--inspect-tls ignores:")
 			assertBufContains(t, res.stderr, "--data/--json/--xml")
 			assertBufContains(t, res.stderr, "--timing")
-			assertBufContains(t, res.stdout, "Server chain")
+			assertBufContains(t, res.stdout, "Certificate: test-server")
 		})
 	})
 

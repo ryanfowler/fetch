@@ -900,6 +900,7 @@ func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		TLSMin:           getValue(app.Cfg.TLSMin),
 		Timeout:          getValue(app.Cfg.Timeout),
 		ConnectTimeout:   getValue(app.Cfg.ConnectTimeout),
+		Verbosity:        getVerbosity(app),
 		URL:              app.URL,
 	})
 }
