@@ -43,7 +43,12 @@ func TestClipboardCommandHelper(t *testing.T) {
 		return
 	}
 	if os.Getenv("FETCH_TEST_CLIPBOARD_DESCENDANT") == "1" {
-		select {}
+		// Keep the descendant alive without triggering the Go runtime's
+		// deadlock detector on platforms where it exits a blocked test
+		// process with status 2.
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	if os.Getenv("FETCH_TEST_CLIPBOARD_FORK") == "1" {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestClipboardCommandHelper$")
@@ -54,7 +59,9 @@ func TestClipboardCommandHelper(t *testing.T) {
 		}
 	}
 	if os.Getenv("FETCH_TEST_CLIPBOARD_BLOCK") == "1" {
-		select {}
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
