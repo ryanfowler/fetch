@@ -332,7 +332,7 @@ Output includes:
 - **Hostname match, verification result, and verification error**; successful verification reports the selected trust anchor
 - **OCSP staple status**; unverified staples are shown neutrally and never claim responder, signature, or freshness validation
 
-Inspection completes the handshake even when certificate verification fails. It returns a nonzero status for a verification failure unless `--insecure` is explicit; `--insecure` reports the failure as ignored and returns success. Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
+Inspection completes the handshake even when certificate verification fails. It returns a nonzero status for a verification failure unless `--insecure` is explicit; `--insecure` reports the failure as ignored and returns success. Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise. The inspection result is written to stdout. Warnings and errors are written to stderr, so the result can be redirected or piped without diagnostic output.
 
 HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning when used with `--inspect-tls`.
 
