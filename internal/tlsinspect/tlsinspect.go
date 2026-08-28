@@ -602,10 +602,14 @@ func renderCompactCertificate(p *core.Printer, cert *x509.Certificate, rawOCSP [
 	p.WriteString(" · ")
 	p.WriteString(compactExpiryText(cert))
 	if sans := compactSANs(cert); len(sans) > 0 {
-		p.WriteString(" SANs: ")
+		p.WriteString("\n")
+		p.WriteInfoPrefix()
+		p.WriteString("  SANs: ")
 		p.WriteString(core.TerminalSafeText(strings.Join(sans, ", ")))
 	}
-	p.WriteString(" OCSP: ")
+	p.WriteString("\n")
+	p.WriteInfoPrefix()
+	p.WriteString("  OCSP: ")
 	p.WriteString(compactOCSPStatus(rawOCSP, chain))
 	p.WriteString("\n")
 }

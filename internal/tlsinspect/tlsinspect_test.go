@@ -749,6 +749,9 @@ func TestRenderInspectionVerbosity(t *testing.T) {
 		if strings.Contains(out, "Server chain") || strings.Contains(out, "SHA-256:") || strings.Contains(out, "Resolver:") {
 			t.Errorf("normal output contains verbose details:\n%s", out)
 		}
+		if !strings.Contains(out, "\n*   SANs:") || !strings.Contains(out, "\n*   OCSP:") {
+			t.Errorf("normal output should put SANs and OCSP on separate lines:\n%s", out)
+		}
 	})
 
 	t.Run("verbose output includes certificate diagnostics", func(t *testing.T) {
