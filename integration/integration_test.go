@@ -2354,18 +2354,20 @@ func TestMain(t *testing.T) {
 		server.StartTLS()
 		t.Cleanup(func() { server.Close() })
 
-		t.Run("shows certificate chain", func(t *testing.T) {
+		t.Run("shows server chain and verified path", func(t *testing.T) {
 			t.Parallel()
 			res := runFetch(t, fetchPath, server.URL,
 				"--inspect-tls",
 				"--ca-cert", caCertPath,
 			)
 			assertExitCode(t, 0, res)
-			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufContains(t, res.stderr, "Server chain")
 			assertBufContains(t, res.stderr, "test-server")
-			assertBufContains(t, res.stderr, "Verification: verified")
-			// Only certificates sent by the peer are shown. The local trust
-			// anchor is reported separately when the platform exposes it.
+			assertBufContains(t, res.stderr, "Verification: verified for")
+			assertBufContains(t, res.stderr, "Trust anchor: Test CA")
+			assertBufContains(t, res.stderr, "Verified path")
+			// The server chain contains only certificates sent by the peer.
+			// The verified path also includes the local trust anchor.
 			// Body should NOT be printed.
 			assertBufEmpty(t, res.stdout)
 		})
@@ -2429,7 +2431,7 @@ func TestMain(t *testing.T) {
 			assertExitCode(t, 1, res)
 			assertBufContains(t, res.stderr, "Verification: FAILED")
 			assertBufContains(t, res.stderr, "Verification error:")
-			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufContains(t, res.stderr, "Server chain")
 			assertBufContains(t, res.stderr, "test-server")
 			if strings.Contains(res.stderr.String(), "If you absolutely trust the server") {
 				t.Fatal("inspection should not recommend rerunning with --insecure")
@@ -2444,7 +2446,7 @@ func TestMain(t *testing.T) {
 			)
 			assertExitCode(t, 0, res)
 			assertBufContains(t, res.stderr, "Verification: FAILED (ignored by --insecure)")
-			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufContains(t, res.stderr, "Server chain")
 			assertBufContains(t, res.stderr, "test-server")
 		})
 
@@ -2469,7 +2471,7 @@ func TestMain(t *testing.T) {
 			)
 			assertExitCode(t, 0, res)
 			// No HTTP request is made, so no response metadata.
-			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufContains(t, res.stderr, "Server chain")
 			assertBufEmpty(t, res.stdout)
 		})
 
@@ -2482,7 +2484,7 @@ func TestMain(t *testing.T) {
 			)
 			assertExitCode(t, 0, res)
 			assertBufContains(t, res.stderr, "--inspect-tls ignores: --timing")
-			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufContains(t, res.stderr, "Server chain")
 		})
 
 		t.Run("warns on incompatible flags", func(t *testing.T) {
@@ -2497,7 +2499,7 @@ func TestMain(t *testing.T) {
 			assertBufContains(t, res.stderr, "--inspect-tls ignores:")
 			assertBufContains(t, res.stderr, "--data/--json/--xml")
 			assertBufContains(t, res.stderr, "--timing")
-			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufContains(t, res.stderr, "Server chain")
 			assertBufEmpty(t, res.stdout)
 		})
 	})

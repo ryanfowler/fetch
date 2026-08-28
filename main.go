@@ -854,7 +854,7 @@ func (err errSelfUpdateDisabled) PrintTo(p *core.Printer) {
 	}
 }
 
-// inspectTLS performs a TLS-only handshake and renders the certificate chain.
+// inspectTLS performs a TLS-only handshake and renders the server chain and verified path.
 func inspectTLS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 	p := handle.Stderr()
 
