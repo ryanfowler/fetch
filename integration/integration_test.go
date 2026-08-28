@@ -2363,6 +2363,7 @@ func TestMain(t *testing.T) {
 			assertExitCode(t, 0, res)
 			assertBufContains(t, res.stderr, "Certificate chain")
 			assertBufContains(t, res.stderr, "test-server")
+			assertBufContains(t, res.stderr, "Verification: verified")
 			// Only certificates sent by the peer are shown. The local trust
 			// anchor is reported separately when the platform exposes it.
 			// Body should NOT be printed.
@@ -2422,13 +2423,27 @@ func TestMain(t *testing.T) {
 			assertBufContains(t, res.stderr, "expires in <1 day")
 		})
 
-		t.Run("works with insecure flag", func(t *testing.T) {
+		t.Run("reports untrusted certificate after handshake", func(t *testing.T) {
+			t.Parallel()
+			res := runFetch(t, fetchPath, server.URL, "--inspect-tls")
+			assertExitCode(t, 1, res)
+			assertBufContains(t, res.stderr, "Verification: FAILED")
+			assertBufContains(t, res.stderr, "Verification error:")
+			assertBufContains(t, res.stderr, "Certificate chain")
+			assertBufContains(t, res.stderr, "test-server")
+			if strings.Contains(res.stderr.String(), "If you absolutely trust the server") {
+				t.Fatal("inspection should not recommend rerunning with --insecure")
+			}
+		})
+
+		t.Run("insecure ignores verification failure", func(t *testing.T) {
 			t.Parallel()
 			res := runFetch(t, fetchPath, server.URL,
 				"--inspect-tls",
 				"--insecure",
 			)
 			assertExitCode(t, 0, res)
+			assertBufContains(t, res.stderr, "Verification: FAILED (ignored by --insecure)")
 			assertBufContains(t, res.stderr, "Certificate chain")
 			assertBufContains(t, res.stderr, "test-server")
 		})

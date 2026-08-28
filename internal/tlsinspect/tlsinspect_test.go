@@ -103,6 +103,35 @@ func TestCertDisplayName(t *testing.T) {
 	}
 }
 
+func TestVerifyConnectionUsesPeerChainAndHostname(t *testing.T) {
+	caCert, caKey := generateTestCACert(t)
+	leaf, _ := generateTestCert(t, caCert, caKey, "tls.example")
+	state := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf, caCert}}
+
+	roots := x509.NewCertPool()
+	roots.AddCert(caCert)
+	trusted := verifyConnection(state, &tls.Config{RootCAs: roots}, "tls.example")
+	if trusted.Err != nil {
+		t.Fatalf("trusted certificate verification failed: %v", trusted.Err)
+	}
+	if len(trusted.Chains) != 1 || len(trusted.Chains[0]) != 2 {
+		t.Fatalf("trusted verification chains = %v, want leaf and CA", trusted.Chains)
+	}
+
+	untrusted := verifyConnection(state, &tls.Config{RootCAs: x509.NewCertPool()}, "tls.example")
+	if untrusted.Err == nil {
+		t.Fatal("untrusted certificate verification unexpectedly succeeded")
+	}
+
+	mismatch := verifyConnection(state, &tls.Config{RootCAs: roots}, "other.example")
+	if mismatch.Err == nil {
+		t.Fatal("hostname mismatch unexpectedly succeeded")
+	}
+	if !strings.Contains(mismatch.Err.Error(), "is valid for") {
+		t.Fatalf("hostname mismatch error = %v", mismatch.Err)
+	}
+}
+
 func TestALPNProtocols(t *testing.T) {
 	tests := []struct {
 		name        string

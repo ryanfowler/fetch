@@ -262,7 +262,9 @@ proxies or cleartext HTTP/2. Real ECH uses Go's `crypto/tls`; auto mode sends a
 fresh randomized GREASE configuration when discovery has no usable config and
 falls back to ordinary TLS after a verified rejection. WSS and `--inspect-tls`
 use the same host-scoped discovery and report whether real ECH was accepted,
-rejected, or followed by fallback. At `-vvv`, fetch warns once when discovery
+rejected, or followed by fallback. HTTP/3 inspection fails closed when a
+rejected handshake does not expose certificate state for verification, unless
+`--insecure` is explicit. At `-vvv`, fetch warns once when discovery
 uses system/plaintext DNS or encrypted DNS without certificate verification.
 
 ### TLS Version Bounds
@@ -323,12 +325,13 @@ Output includes:
 - **TLS version and cipher suite** (e.g., TLS 1.3: TLS_AES_256_GCM_SHA384); QUIC reports `cipher suite unavailable` only when the transport does not expose it
 - **ALPN negotiated protocol** (e.g., h2)
 - **Remote IP, resolver provenance, and connection timing** for the selected TCP or QUIC path
+- **Certificate subject, issuer, validity window, and SHA-256 fingerprint**
 - **Certificate chain** with tree visualization and expiry status
 - **Subject Alternative Names** (DNS names and IP addresses)
-- **Verification result and trust-anchor status**; the selected trust anchor may not be reported by the verifier
+- **Hostname match, verification result, and verification error**; the selected trust anchor may not be reported by the verifier
 - **OCSP staple status**; unverified staples are shown neutrally and never claim responder, signature, or freshness validation
 
-Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
+Inspection completes the handshake even when certificate verification fails. It returns a nonzero status for a verification failure unless `--insecure` is explicit; `--insecure` reports the failure as ignored and returns success. Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
 
 HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning when used with `--inspect-tls`.
 

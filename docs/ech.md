@@ -39,8 +39,10 @@ fetch --inspect-tls --ech auto https://example.com
 ```
 
 TLS inspection reports real ECH acceptance or rejection, GREASE offer and
-rejection, outer SNI, and final fallback. DNS inspection displays ECH bytes as
-base64. Terminal diagnostics escape untrusted values.
+rejection, outer SNI, and final fallback when the rejection can be verified. If
+QUIC cannot expose a rejected handshake's certificate state, inspection fails
+closed instead of downgrading (unless `--insecure` is explicit). DNS inspection
+displays ECH bytes as base64. Terminal diagnostics escape untrusted values.
 
 See [Advanced Features](advanced-features.md) for resolver, TLS, proxy, and
 HTTP/3 details and [Limits and safety](limits.md) for shared bounds.

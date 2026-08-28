@@ -595,7 +595,7 @@ fetch --min-tls 1.2 --max-tls 1.2 example.com
 
 ### `--inspect-tls`
 
-Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). Displays the TLS version, cipher suite, ALPN protocol, full certificate chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Requires an HTTPS URL. With `--http 3`, inspection uses a QUIC handshake and offers `h3` ALPN. When ECH is enabled, inspection also reports the real or GREASE offer, acceptance or rejection, fallback status, and outer SNI. HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning.
+Inspect the TLS certificate chain by performing a TLS handshake only (no HTTP request is made). The handshake does not stop for certificate errors. Inspection then verifies the peer certificate with the configured hostname, system and custom roots, and peer intermediates. It displays the verification result and error, certificate subject, issuer, validity window, SHA-256 fingerprint, chain with expiry status, Subject Alternative Names (SANs), and OCSP staple status. Certificate verification failure returns a nonzero status unless `--insecure` is explicit; `--insecure` marks the failure as ignored and returns success. Requires an HTTPS URL. With `--http 3`, inspection uses a QUIC handshake and offers `h3` ALPN. When ECH is enabled, inspection also reports the real or GREASE offer, acceptance or rejection, fallback status, and outer SNI. HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning.
 
 ```sh
 fetch --inspect-tls example.com
@@ -605,7 +605,7 @@ fetch --inspect-tls --insecure expired.badssl.com
 
 ### `--insecure`
 
-Accept invalid TLS certificates. Use with caution.
+Accept invalid TLS certificates. In `--inspect-tls` mode, verification still runs and reports its result, but a verification failure is ignored for the exit status. Use with caution.
 
 ```sh
 fetch --insecure https://self-signed.example.com
