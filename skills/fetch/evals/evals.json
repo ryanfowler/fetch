@@ -30,6 +30,26 @@
         "The call uses --grpc and -j @request.json",
         "The method URL contains package.Inventory/GetItem"
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "Connect to an HTTPS WebTransport endpoint and receive datagrams that a script can parse.",
+      "expected_output": "Use HTTP/3 WebTransport datagram mode and keep stdout as JSON Lines.",
+      "assertions": [
+        "The command includes --webtransport and --wt-mode datagram",
+        "The response does not recommend WebSocket-only flags",
+        "The response mentions JSON Lines datagram output"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Send two lines over a WebTransport stream and make sure binary response bytes are not formatted.",
+      "expected_output": "Use stream mode with direct stdin and explain raw redirected output and cancellation behavior.",
+      "assertions": [
+        "The command uses --webtransport with stream mode",
+        "The response distinguishes streams from datagrams",
+        "The response mentions cancellation or peer closure"
+      ]
     }
   ]
 }

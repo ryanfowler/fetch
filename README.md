@@ -9,6 +9,7 @@ A modern HTTP(S) client for the command line, implemented in Go.
 - **Response formatting** - Automatic formatting and syntax highlighting for JSON, XML, YAML, HTML, CSS, CSV, Markdown, MessagePack, Protocol Buffers, and more
 - **Image rendering** - Display images directly in your terminal
 - **WebSocket support** - Bidirectional WebSocket connections with automatic JSON formatting
+- **WebTransport support** - HTTP/3 stream and datagram sessions over direct UDP
 - **gRPC support** - Make gRPC calls with automatic reflection, discovery, and JSON-to-protobuf conversion
 - **Authentication** - Built-in support for Basic Auth, Bearer Token, AWS Signature V4, and mTLS
 - **Compression** - Select automatic, Brotli, gzip, zstd, or disabled response decoding
@@ -58,6 +59,7 @@ fetch picsum.photos/1024/1024
 - **[Output Formatting](docs/output-formatting.md)** - Supported content types and formatting options
 - **[Image Rendering](docs/image-rendering.md)** - Terminal image protocols and formats
 - **[WebSocket](docs/websocket.md)** - Bidirectional WebSocket connections
+- **[WebTransport](docs/webtransport.md)** - HTTP/3 stream and datagram sessions
 - **[gRPC](docs/grpc.md)** - Making gRPC requests with Protocol Buffers
 - **[Advanced Features](docs/advanced-features.md)** - DNS, proxies, TLS, HTTP versions, and more
 - **[Encrypted ClientHello](docs/ech.md)** - ECH modes, discovery, and downgrade safety

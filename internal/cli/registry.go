@@ -31,6 +31,7 @@ const (
 	ModeGRPC          OptionMode = "grpc"
 	ModeGRPCDiscovery OptionMode = "grpc-discovery"
 	ModeWebSocket     OptionMode = "websocket"
+	ModeWebTransport  OptionMode = "webtransport"
 	ModeDNSInspection OptionMode = "dns-inspection"
 	ModeTLSInspection OptionMode = "tls-inspection"
 	ModeUpdate        OptionMode = "update"
@@ -288,6 +289,9 @@ func applyFlagDefinition(flag *Flag) {
 	if schemes := websocketExcluded[flag.Long]; len(schemes) > 0 {
 		flag.Schemes = append([]string(nil), schemes...)
 	}
+	if webtransportExcluded[flag.Long] {
+		flag.UnsupportedIn = append(flag.UnsupportedIn, ModeWebTransport)
+	}
 	if fromCurlOptions[flag.Long] {
 		flag.FromCurl = true
 	}
@@ -295,7 +299,7 @@ func applyFlagDefinition(flag *Flag) {
 	// existing flags useful to callers while specialized definitions below
 	// narrow the modes where appropriate.
 	if len(flag.Modes) == 0 {
-		flag.Modes = []OptionMode{ModeHTTP, ModeGRPC, ModeGRPCDiscovery, ModeWebSocket, ModeDNSInspection, ModeTLSInspection, ModeMetadata, ModeUpdate, ModeSkill}
+		flag.Modes = []OptionMode{ModeHTTP, ModeGRPC, ModeGRPCDiscovery, ModeWebSocket, ModeWebTransport, ModeDNSInspection, ModeTLSInspection, ModeMetadata, ModeUpdate, ModeSkill}
 	}
 	if flag.Default != "" {
 		// The default is represented by the Flag.Default field; this branch is
@@ -327,6 +331,9 @@ func applyFlagDefinition(flag *Flag) {
 		flag.IgnoreLabel = def.IgnoreLabel
 		flag.FromCurl = flag.FromCurl || def.FromCurl
 	}
+	if webtransportExcluded[flag.Long] && !slices.Contains(flag.UnsupportedIn, ModeWebTransport) {
+		flag.UnsupportedIn = append(flag.UnsupportedIn, ModeWebTransport)
+	}
 }
 
 var websocketExcluded = map[string][]string{
@@ -337,6 +344,17 @@ var websocketExcluded = map[string][]string{
 	"output":    {"ws", "wss"}, "range": {"ws", "wss"}, "remote-header-name": {"ws", "wss"}, "remote-name": {"ws", "wss"},
 	"retry": {"ws", "wss"}, "retry-delay": {"ws", "wss"}, "retry-unsafe": {"ws", "wss"}, "xml": {"ws", "wss"},
 	"digest": {"ws", "wss"}, "har": {"ws", "wss"},
+}
+
+var webtransportExcluded = map[string]bool{
+	"article": true, "clobber": true, "compress": true, "copy": true, "discard": true,
+	"digest": true, "edit": true, "form": true, "grpc": true, "grpc-describe": true,
+	"grpc-list": true, "har": true, "ignore-status": true, "multipart": true,
+	"no-encode": true, "output": true, "proto-desc": true, "proto-file": true,
+	"proto-import": true, "range": true, "redirects": true, "remote-header-name": true,
+	"remote-name": true, "retry": true, "retry-delay": true, "retry-unsafe": true,
+	"unix": true, "xml": true, "format": true, "ws-message-mode": true,
+	"ws-interactive": true,
 }
 
 var fromCurlOptions = map[string]bool{
@@ -375,11 +393,15 @@ var flagDefinitions = map[string]Flag{
 	"uninstall-skill": {
 		Conflicts: []string{"skill", "install-skill"},
 	},
-	"scope":           {Requires: []string{"install-skill", "uninstall-skill"}},
-	"force":           {Requires: []string{"install-skill", "uninstall-skill"}},
-	"ws-message-mode": {Modes: []OptionMode{ModeWebSocket}},
-	"check-update":    {Conflicts: []string{"update"}},
-	"update":          {Conflicts: []string{"check-update"}},
+	"scope":            {Requires: []string{"install-skill", "uninstall-skill"}},
+	"force":            {Requires: []string{"install-skill", "uninstall-skill"}},
+	"ws-message-mode":  {Modes: []OptionMode{ModeWebSocket}},
+	"ws-interactive":   {Modes: []OptionMode{ModeWebSocket}},
+	"wt-mode":          {Modes: []OptionMode{ModeWebTransport}},
+	"wt-protocol":      {Modes: []OptionMode{ModeWebTransport}, Repeatable: true},
+	"wt-datagram-mode": {Modes: []OptionMode{ModeWebTransport}},
+	"check-update":     {Conflicts: []string{"update"}},
+	"update":           {Conflicts: []string{"check-update"}},
 
 	"aws-sigv4": {Conflicts: []string{"basic", "bearer", "digest"}, IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},
 	"basic":     {Conflicts: []string{"aws-sigv4", "bearer", "digest"}, IgnoredIn: []OptionMode{ModeDNSInspection}, FromCurl: true},

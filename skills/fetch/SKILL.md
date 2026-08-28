@@ -3,7 +3,7 @@ name: fetch
 description: >
   Use the fetch CLI to call and debug HTTP APIs, inspect JSON responses,
   test authentication, diagnose DNS and TLS, measure request timing, extract
-  readable articles, call gRPC services, and interact with WebSockets. Prefer
+  readable articles, call gRPC services, and interact with WebSockets or WebTransport. Prefer
   this skill when a task requires making or troubleshooting a network request
   from the terminal.
 license: MIT
@@ -16,7 +16,7 @@ metadata:
 # fetch
 
 Use `fetch` for terminal-native HTTP, API, article extraction, DNS/TLS, gRPC,
-and WebSocket work.
+WebSocket, and WebTransport work.
 
 ## Agent-safe defaults
 
@@ -78,8 +78,8 @@ fetch --grpc -j @request.json URL/SERVICE/METHOD
 ```
 
 Read [HTTP recipes](references/http.md), [diagnostics](references/diagnostics.md),
-[gRPC](references/grpc.md), or [WebSockets](references/websocket.md) only when the
-task needs that detail.
+[gRPC](references/grpc.md), [WebSockets](references/websocket.md), or
+[WebTransport](references/webtransport.md) only when the task needs that detail.
 
 ## Article extraction
 
@@ -107,7 +107,7 @@ streaming calls.
 Use `--http 1`, `--http 2`, or `--http 3` to force a protocol. Automatic HTTP/3
 is opportunistic for direct HTTPS and never sends the request twice. `--ech
 auto` uses Encrypted ClientHello when DNS advertises a valid configuration;
-`--ech on` requires accepted ECH and cannot be combined with forced HTTP/3.
+`--ech on` requires accepted ECH for ordinary HTTP/3. WebTransport supports mandatory ECH through its HTTP/3 dial path.
 ECH is not used through proxies or cleartext HTTP/2. Inspect DNS and TLS before
 changing trust or transport settings. The repository's `docs/limits.md`
 describes the shared body and protocol caps.
@@ -124,6 +124,13 @@ WebSocket text lines, binary messages, and interactive entries are limited to
 16 MiB. After piped stdin reaches EOF, the client sends a bounded normal close
 handshake and continues receiving until the peer closes. Use
 `--ws-message-mode text|binary|auto` when message type matters.
+
+WebTransport uses `--webtransport https://HOST/PATH`. It requires direct HTTP/3
+UDP and does not use WebSocket flags or message types. Stream mode sends raw
+bytes on one reliable bidirectional stream. Datagram mode uses
+`--wt-datagram-mode lines|binary`; received datagrams are base64 JSON Lines
+records. Datagram input EOF does not close the session, so cancellation may be
+required.
 
 ## Security
 

@@ -85,6 +85,7 @@ type Request struct {
 	NoPager          bool
 	Pager            core.PagerMode
 	Method           string
+	MethodExplicit   bool
 	Multipart        *multipart.Multipart
 	Output           string
 	PrinterHandle    *core.Handle
@@ -111,6 +112,10 @@ type Request struct {
 	URL              *url.URL
 	Verbosity        core.Verbosity
 	WS               bool
+	WebTransport     bool
+	WTMode           core.WTMode
+	WTDgramMode      core.WTDatagramMode
+	WTProtocols      []string
 	WSInteractive    core.WSInteractiveMode
 	WSMessageMode    core.WSMessageMode
 	SchemelessURL    bool
@@ -293,7 +298,14 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		}
 	}()
 
-	// 4. WebSocket: branch to handleWebSocket before edit/gRPC/retry. The
+	// 4. WebTransport and WebSocket are persistent protocol branches. Their
+	// request body is application data and must remain deferred until after
+	// their handshakes.
+	if r.WebTransport {
+		return handleWebTransport(ctx, r, c, req)
+	}
+
+	// 5. WebSocket: branch to handleWebSocket before edit/gRPC/retry. The
 	// session save is deferred above, so handshake cookie changes persist even
 	// when the message loop or a later validation step fails.
 	if r.WS {

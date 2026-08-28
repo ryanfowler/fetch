@@ -379,7 +379,13 @@ func (c *Config) Merge(c2 *Config) []string {
 
 // Validate checks cross-option constraints that can only be evaluated after
 // CLI, global, and host-specific configuration have been merged.
-func (c *Config) Validate() error {
+func (c *Config) Validate() error { return c.validate(false) }
+
+// ValidateForWebTransport applies the same config checks while allowing
+// mandatory ECH on WebTransport's explicit HTTP/3 transport.
+func (c *Config) ValidateForWebTransport() error { return c.validate(true) }
+
+func (c *Config) validate(webTransport bool) error {
 	var tlsMin, tlsMax uint16
 	if c.TLSMin != nil {
 		tlsMin = *c.TLSMin
@@ -393,10 +399,14 @@ func (c *Config) Validate() error {
 	if err := core.ValidateTLSVersions(tlsMin, tlsMax); err != nil {
 		return err
 	}
-	if c.HTTP == core.HTTP3 && c.TLSMax != nil && *c.TLSMax < tls.VersionTLS13 {
+	if (c.HTTP == core.HTTP3 || webTransport) && c.TLSMax != nil && *c.TLSMax < tls.VersionTLS13 {
 		return fmt.Errorf("HTTP/3 requires max-tls 1.3 or higher")
 	}
-	if err := core.ValidateECHPolicy(c.ECH, c.HTTP, tlsMin, tlsMax); err != nil {
+	echHTTP := c.HTTP
+	if webTransport {
+		echHTTP = core.HTTPDefault
+	}
+	if err := core.ValidateECHPolicy(c.ECH, echHTTP, tlsMin, tlsMax); err != nil {
 		return err
 	}
 	if c.KeyData != nil && c.CertData == nil {

@@ -354,6 +354,18 @@ valid only with a `ws://` or `wss://` URL. Text lines, interactive entries, and
 incoming messages are bounded to 16 MiB; binary stdin is streamed in bounded
 chunks. See [WebSocket](websocket.md).
 
+### WebTransport options
+
+`--webtransport URL` opens an HTTPS WebTransport session over HTTP/3 and direct
+UDP. The default `--wt-mode stream` uses one reliable bidirectional stream.
+`--wt-mode datagram` uses unreliable datagrams. Use `--wt-datagram-mode
+lines|binary` to split piped input, and repeat `--wt-protocol PROTOCOL` to offer
+application protocols. Received datagrams are compact JSON Lines records with
+base64 data. WebTransport does not support proxies, redirects, retries,
+formatting, HAR, output files, Unix sockets, or Digest authentication. EOF on
+datagram input does not close the session; use Ctrl+C when the peer remains
+open. `--dry-run` does not access the network or consume stdin.
+
 ## Agent Skill Options
 
 ### `--skill`
