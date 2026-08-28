@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -46,11 +47,18 @@ type Config struct {
 }
 
 type connectionInfo struct {
-	RemoteIP net.IP
-	Resolver string
-	Timing   client.DialTiming
-	QUIC     bool
-	Insecure bool
+	RemoteIP     net.IP
+	Resolver     string
+	Timing       client.DialTiming
+	QUIC         bool
+	Insecure     bool
+	ServerName   string
+	Verification *verificationResult
+}
+
+type verificationResult struct {
+	Err    error
+	Chains [][]*x509.Certificate
 }
 
 type quicInspectionResult struct {
@@ -59,6 +67,7 @@ type quicInspectionResult struct {
 	Resolver        string
 	Timing          client.DialTiming
 	OuterServerName string
+	Fallback        bool
 }
 
 // Inspect performs a TLS handshake and renders the certificate chain to the
@@ -84,6 +93,16 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		TLSMin:     cfg.TLSMin,
 	}
 	tlsConfig := tlsDialCfg.BuildTLSConfig()
+	// Certificate verification is deliberately deferred until after the
+	// handshake. Inspection must be able to show the peer certificates and
+	// the verification failure that caused a normal client to stop.
+	tlsConfig.InsecureSkipVerify = true
+	// Go verifies the outer certificate before it reports an ECH rejection,
+	// even when InsecureSkipVerify is set. Let inspection handle that
+	// certificate in verifyConnection, like any other peer certificate.
+	tlsConfig.EncryptedClientHelloRejectionVerify = func(tls.ConnectionState) error {
+		return nil
+	}
 	tlsConfig.NextProtos = alpnProtocols(cfg.HTTP)
 	res := resolver.New(resolver.Config{
 		Endpoint:   cfg.ResolverEndpoint,
@@ -157,7 +176,12 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 			fallbackTLS = tlsConfig.Clone()
 			fallbackTLS.EncryptedClientHelloConfigList = nil
 		}
-		quicResult, err := inspectQUICWithECHFallback(ctx, res, quicAddr, quicCandidates, tlsConfig, fallbackTLS)
+		quicResult, err := inspectQUICWithECHFallback(ctx, res, quicAddr, quicCandidates, tlsConfig, fallbackTLS, func(state *tls.ConnectionState) bool {
+			if cfg.Insecure {
+				return true
+			}
+			return verifyConnection(state, tlsConfig, connectionVerificationName(state, host)).Err == nil
+		})
 		quicResult.Timing.DNSDuration += echDiscoveryDuration
 		if err != nil {
 			writeTLSError(p, err)
@@ -170,16 +194,23 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 			if quicResult.OuterServerName != "" {
 				outerName = quicResult.OuterServerName
 			}
-			info = &client.ECHHandshakeInfo{Offered: echConfig.Offered(), Real: echConfig.Real(), Accepted: state, Rejected: echConfig.Offered() && !state, Fallback: echConfig.Offered() && !state, OuterServerName: outerName}
+			info = &client.ECHHandshakeInfo{Offered: echConfig.Offered(), Real: echConfig.Real(), Accepted: state, Rejected: echConfig.Offered() && !state, Fallback: quicResult.Fallback, OuterServerName: outerName}
 		}
+		verificationName := connectionVerificationName(quicResult.State, host)
+		verification := verifyConnection(quicResult.State, tlsConfig, verificationName)
 		renderConnection(p, quicResult.State, info, connectionInfo{
-			RemoteIP: quicResult.RemoteIP,
-			Resolver: quicResult.Resolver,
-			Timing:   quicResult.Timing,
-			QUIC:     true,
-			Insecure: cfg.Insecure,
+			RemoteIP:     quicResult.RemoteIP,
+			Resolver:     quicResult.Resolver,
+			Timing:       quicResult.Timing,
+			QUIC:         true,
+			Insecure:     cfg.Insecure,
+			ServerName:   verificationName,
+			Verification: verification,
 		})
 		p.Flush()
+		if verification.Err != nil && !cfg.Insecure {
+			return 1
+		}
 		return 0
 	}
 
@@ -194,6 +225,12 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		Resolver:   res,
 		TLSConfig:  tlsConfig,
 		ALPN:       tlsConfig.NextProtos,
+		ECHRejectionAllowsFallback: func(state tls.ConnectionState) bool {
+			if cfg.Insecure {
+				return true
+			}
+			return verifyConnection(&state, tlsConfig, connectionVerificationName(&state, host)).Err == nil
+		},
 	}
 	if echConfig != nil {
 		targetHost, targetPort := echConfig.Target()
@@ -228,17 +265,24 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 		result.Timing.ConnectDuration = value.TCPDuration
 		result.Timing.TLSDuration = value.TLSDuration
 	}
+	verificationName := connectionVerificationName(result.TLSState, host)
+	verification := verifyConnection(result.TLSState, tlsConfig, verificationName)
 	renderConnection(p, result.TLSState, echInfo, connectionInfo{
-		RemoteIP: result.RemoteIP,
-		Resolver: result.Resolver,
-		Timing:   result.Timing,
-		Insecure: cfg.Insecure,
+		RemoteIP:     result.RemoteIP,
+		Resolver:     result.Resolver,
+		Timing:       result.Timing,
+		Insecure:     cfg.Insecure,
+		ServerName:   verificationName,
+		Verification: verification,
 	})
 	p.Flush()
+	if verification.Err != nil && !cfg.Insecure {
+		return 1
+	}
 	return 0
 }
 
-func inspectQUICWithECHFallback(ctx context.Context, res *resolver.Resolver, addr string, candidates []net.IPAddr, tlsConfig, fallbackTLS *tls.Config) (quicInspectionResult, error) {
+func inspectQUICWithECHFallback(ctx context.Context, res *resolver.Resolver, addr string, candidates []net.IPAddr, tlsConfig, fallbackTLS *tls.Config, allowsFallback func(*tls.ConnectionState) bool) (quicInspectionResult, error) {
 	result, err := inspectQUICAttempt(ctx, res, addr, candidates, tlsConfig)
 	if err == nil && result.State != nil && result.State.ECHAccepted {
 		return result, nil
@@ -276,10 +320,20 @@ func inspectQUICWithECHFallback(ctx context.Context, res *resolver.Resolver, add
 	if fallbackTLS == nil {
 		return result, err
 	}
+	if err != nil && allowsFallback != nil && !allowsFallback(nil) {
+		// QUIC does not expose a ConnectionState when its TLS handshake
+		// fails. Do not turn an uninspectable ECH rejection into a downgrade.
+		return result, err
+	}
+	if err == nil && result.State != nil && allowsFallback != nil && !allowsFallback(result.State) {
+		return result, nil
+	}
 	// A server may reject ECH with an explicit TLS error, or complete the
 	// outer handshake without accepting a GREASE offer. Auto mode retries the
 	// same inspection target without ECH, while preserving the shared context.
-	return inspectQUICAttempt(ctx, res, addr, candidates, fallbackTLS)
+	fallbackResult, fallbackErr := inspectQUICAttempt(ctx, res, addr, candidates, fallbackTLS)
+	fallbackResult.Fallback = true
+	return fallbackResult, fallbackErr
 }
 
 func looksLikeECHRejection(err error) bool {
@@ -370,22 +424,11 @@ func alpnProtocols(httpVersion core.HTTPVersion) []string {
 	}
 }
 
-// writeTLSError writes a TLS connection error, suggesting --insecure for cert errors.
+// writeTLSError writes a TLS setup error. Certificate verification failures
+// are rendered by the inspection result, so this path is reserved for errors
+// that prevented a handshake or a valid inspection configuration.
 func writeTLSError(p *core.Printer, err error) {
 	core.WriteErrorMsgNoFlush(p, err)
-
-	_, certInvalid := errors.AsType[x509.CertificateInvalidError](err)
-	_, hostErr := errors.AsType[x509.HostnameError](err)
-	_, unknownErr := errors.AsType[x509.UnknownAuthorityError](err)
-	if certInvalid || hostErr || unknownErr {
-		p.WriteString("\n")
-		p.WriteString("If you absolutely trust the server, try '")
-		p.Set(core.Bold)
-		p.WriteString("--insecure")
-		p.Reset()
-		p.WriteString("'.\n")
-	}
-
 	p.Flush()
 }
 
@@ -467,12 +510,16 @@ func renderConnection(p *core.Printer, cs *tls.ConnectionState, info *client.ECH
 	}
 
 	renderConnectionDetails(p, meta)
-	renderVerification(p, cs, meta.Insecure)
+	renderVerification(p, cs, meta.Insecure, meta.Verification)
+
+	peerChain := getChain(cs)
+	if len(peerChain) > 0 {
+		renderCertificateDetails(p, peerChain[0], meta.ServerName)
+	}
 
 	// Certificate chain. Only certificates supplied by the peer belong in
 	// this section. The platform's locally built verification path may contain
 	// a trust anchor that was never sent by the server.
-	peerChain := getChain(cs)
 	if len(peerChain) > 0 {
 		p.WriteInfoPrefix()
 		p.WriteString("\n")
@@ -529,14 +576,24 @@ func formatDuration(value time.Duration) string {
 	return fmt.Sprintf("%.1fms", float64(value)/float64(time.Millisecond))
 }
 
-func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool) {
+func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool, result *verificationResult) {
+	// Keep the state-only behavior for callers that render a synthetic
+	// ConnectionState in tests. Live inspections always provide a result from
+	// the explicit verifier below.
+	if result == nil {
+		result = &verificationResult{Chains: cs.VerifiedChains}
+	}
+
 	p.WriteInfoPrefix()
 	p.WriteString("Verification: ")
 	switch {
-	case insecure:
+	case result.Err != nil && insecure:
 		p.Set(core.Yellow)
-		p.WriteString("skipped (--insecure)")
-	case len(cs.VerifiedChains) > 0:
+		p.WriteString("FAILED (ignored by --insecure)")
+	case result.Err != nil:
+		p.Set(core.Red)
+		p.WriteString("FAILED")
+	case len(result.Chains) > 0:
 		p.Set(core.Green)
 		p.WriteString("verified")
 	default:
@@ -546,17 +603,107 @@ func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool)
 	p.Reset()
 	p.WriteString("\n")
 
+	if result.Err != nil {
+		p.WriteInfoPrefix()
+		p.WriteString("Verification error: ")
+		p.WriteString(core.TerminalSafeText(result.Err.Error()))
+		p.WriteString("\n")
+	}
+
 	p.WriteInfoPrefix()
 	p.WriteString("Trust anchor: ")
-	if insecure || len(cs.VerifiedChains) == 0 {
+	if len(result.Chains) == 0 {
 		p.WriteString("not available")
 	} else {
 		// The selected trust anchor is local to the verifier and is not
-		// separately exposed by the TLS connection state. Never infer that the
-		// final peer certificate is the anchor.
+		// separately exposed by the TLS connection state.
 		p.WriteString("not reported by verifier")
 	}
 	p.WriteString("\n")
+}
+
+func connectionVerificationName(state *tls.ConnectionState, origin string) string {
+	// A rejected ECH handshake presents the outer provider certificate. Go
+	// records that certificate's SNI in ConnectionState.ServerName; use it for
+	// the rejection decision and report the origin name for accepted ECH.
+	if state != nil && !state.ECHAccepted && state.ServerName != "" {
+		return state.ServerName
+	}
+	return origin
+}
+
+// verifyConnection repeats the checks that crypto/tls normally performs. The
+// handshake itself runs with InsecureSkipVerify so that invalid peer data is
+// still available for inspection.
+func verifyConnection(cs *tls.ConnectionState, tlsConfig *tls.Config, serverName string) *verificationResult {
+	result := &verificationResult{}
+	if cs == nil || len(cs.PeerCertificates) == 0 || cs.PeerCertificates[0] == nil {
+		result.Err = errors.New("server did not present a certificate")
+		return result
+	}
+
+	leaf := cs.PeerCertificates[0]
+	intermediates := x509.NewCertPool()
+	for _, cert := range cs.PeerCertificates[1:] {
+		if cert != nil {
+			intermediates.AddCert(cert)
+		}
+	}
+
+	opts := x509.VerifyOptions{
+		Roots:         tlsConfig.RootCAs,
+		Intermediates: intermediates,
+		DNSName:       core.TLSVerificationName(serverName),
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		CurrentTime:   tlsInspectNow(),
+	}
+	result.Chains, result.Err = leaf.Verify(opts)
+	return result
+}
+
+func renderCertificateDetails(p *core.Printer, cert *x509.Certificate, serverName string) {
+	p.WriteInfoPrefix()
+	p.WriteString("Certificate: ")
+	p.Set(core.Bold)
+	p.WriteString(core.TerminalSafeText(certDisplayName(cert)))
+	p.Reset()
+	p.WriteString("\n")
+
+	p.WriteInfoPrefix()
+	p.WriteString("Issuer: ")
+	p.WriteString(core.TerminalSafeText(certDisplayName(&x509.Certificate{Subject: cert.Issuer})))
+	p.WriteString("\n")
+
+	p.WriteInfoPrefix()
+	p.WriteString("Valid: ")
+	p.WriteString(cert.NotBefore.Format(time.RFC3339))
+	p.WriteString(" → ")
+	p.WriteString(cert.NotAfter.Format(time.RFC3339))
+	p.WriteString("\n")
+
+	fingerprint := sha256.Sum256(cert.Raw)
+	parts := make([]string, len(fingerprint))
+	for i, value := range fingerprint {
+		parts[i] = fmt.Sprintf("%02x", value)
+	}
+	p.WriteInfoPrefix()
+	p.WriteString("SHA-256: ")
+	p.WriteString(strings.Join(parts, ":"))
+	p.WriteString("\n")
+
+	if serverName != "" {
+		p.WriteInfoPrefix()
+		p.WriteString("Hostname: ")
+		if cert.VerifyHostname(core.TLSVerificationName(serverName)) == nil {
+			p.Set(core.Green)
+			p.WriteString("matches")
+		} else {
+			p.Set(core.Red)
+			p.WriteString("does not match")
+		}
+		p.Reset()
+		p.WriteString("\n")
+	}
 }
 
 func getChain(cs *tls.ConnectionState) []*x509.Certificate {

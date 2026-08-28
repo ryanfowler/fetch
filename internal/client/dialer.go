@@ -110,9 +110,10 @@ type DialRequest struct {
 	Attempt   func(context.Context, string, net.IPAddr) (net.Conn, error)
 	// AttemptWithInfo associates protocol negotiation metadata with the
 	// connection that wins the address race.
-	AttemptWithInfo func(context.Context, string, net.IPAddr) (net.Conn, any, error)
-	Recorder        DialTimingRecorder
-	Selector        DialTimingSelector
+	AttemptWithInfo            func(context.Context, string, net.IPAddr) (net.Conn, any, error)
+	ECHRejectionAllowsFallback func(tls.ConnectionState) bool
+	Recorder                   DialTimingRecorder
+	Selector                   DialTimingSelector
 }
 
 // DialResult is the successful connection and the metadata selected during
