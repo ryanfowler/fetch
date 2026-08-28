@@ -262,7 +262,7 @@ proxies or cleartext HTTP/2. Real ECH uses Go's `crypto/tls`; auto mode sends a
 fresh randomized GREASE configuration when discovery has no usable config and
 falls back to ordinary TLS after a verified rejection. WSS and `--inspect-tls`
 use the same host-scoped discovery and report whether real ECH was accepted,
-rejected, or followed by fallback. HTTP/3 inspection fails closed when a
+rejected, or followed by fallback at `-v` and above. HTTP/3 inspection fails closed when a
 rejected handshake does not expose certificate state for verification, unless
 `--insecure` is explicit. At `-vvv`, fetch warns once when discovery
 uses system/plaintext DNS or encrypted DNS without certificate verification.
@@ -314,25 +314,17 @@ Use cases:
 
 ### TLS Certificate Inspection
 
-`--inspect-tls` performs a TLS handshake only (no HTTP request is made) and provides a focused view of the server certificates and their verified path, useful as a standalone diagnostic tool:
+`--inspect-tls` performs a TLS handshake only (no HTTP request is made) and provides a focused view of the server certificate. Use `-v` to see the full server certificates and their verified path. This makes it useful as a standalone diagnostic tool:
 
 ```sh
 fetch --inspect-tls example.com
 ```
 
-Output includes:
+The default output answers three questions: where the connection went, what TLS was negotiated, and whether the certificate is valid. It includes the remote address, negotiated TLS, cipher, key exchange, ALPN, verification status, leaf certificate, SANs, OCSP staple status, and connection timing.
 
-- **TLS version, cipher suite, and key exchange** (e.g., TLS 1.3: TLS_AES_256_GCM_SHA384, X25519MLKEM768); QUIC reports `cipher suite unavailable` only when the transport does not expose it
-- **ALPN negotiated protocol** (e.g., h2)
-- **Remote IP, resolver provenance, and connection timing** for the selected TCP or QUIC path
-- **Certificate subject, issuer, validity window, and SHA-256 fingerprint**
-- **Server chain** with tree visualization and expiry status; this contains only certificates supplied by the server
-- **Verified path** with tree visualization, including the selected trust anchor when verification succeeds
-- **Subject Alternative Names** (DNS names and IP addresses)
-- **Hostname match, verification result, and verification error**; successful verification reports the selected trust anchor
-- **OCSP staple status**; unverified staples are shown neutrally and never claim responder, signature, or freshness validation
+Use `-v` for the diagnostic view. It adds the exact certificate validity window, subject, issuer, serial number, public-key description, signature algorithm, SHA-256 fingerprint, server and verified chains, all parsed SAN types, OCSP timestamps, SCT count, SNI, resolver provenance, and ECH details. OCSP staple status checks the matching certificate and response signature, but not responder authorization or freshness. Use `-vv` for AIA, CRL, policy, and other niche X.509 details. QUIC reports `cipher suite unavailable` only when the transport does not expose it.
 
-Inspection completes the handshake even when certificate verification fails. It returns a nonzero status for a verification failure unless `--insecure` is explicit; `--insecure` reports the failure as ignored and returns success. Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise. The inspection result is written to stdout. Warnings and errors are written to stderr, so the result can be redirected or piped without diagnostic output.
+Inspection completes the handshake even when certificate verification fails. It returns a nonzero status for a verification failure unless `--insecure` is explicit; `--insecure` reports the failure as ignored and returns success. Expiry is color-coded in the verbose certificate view: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise. The inspection result is written to stdout. Warnings and errors are written to stderr, so the result can be redirected or piped without diagnostic output.
 
 HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning when used with `--inspect-tls`.
 
@@ -340,7 +332,7 @@ When combined with `--http 3`, TLS inspection uses a QUIC handshake and offers `
 
 ```sh
 # Check server chain and verified path
-fetch --inspect-tls example.com
+fetch --inspect-tls -v example.com
 
 # Inspect certificates even if invalid
 fetch --inspect-tls --insecure expired.badssl.com
