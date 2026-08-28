@@ -13,7 +13,7 @@ A modern HTTP(S) client for the command line, implemented in Go.
 - **gRPC support** - Make gRPC calls with automatic reflection, discovery, and JSON-to-protobuf conversion
 - **Authentication** - Built-in support for Basic Auth, Bearer Token, AWS Signature V4, and mTLS
 - **Compression** - Select automatic, Brotli, gzip, zstd, or disabled response decoding
-- **TLS inspection** - Inspect TLS certificate chains, expiry, SANs, and OCSP status
+- **TLS inspection** - Inspect server chains and verified paths, expiry, SANs, and OCSP status
 - **DNS inspection** - Inspect hostname resolution, record families, TTLs, and resolver timing
 - **Timing waterfall** - Visualize request timing phases (DNS, TCP, TLS, TTFB, transfer) with a waterfall chart
 - **Configuration** - Global and per-host configuration file support

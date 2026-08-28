@@ -220,7 +220,7 @@ func TestInspectHTTP3UsesQUICAndH3ALPN(t *testing.T) {
 		t.Fatalf("expected resolver provenance in output, got:\n%s", out)
 	}
 	if !strings.Contains(out, "quic-server") {
-		t.Fatalf("expected certificate chain in output, got:\n%s", out)
+		t.Fatalf("expected server chain in output, got:\n%s", out)
 	}
 }
 
@@ -380,7 +380,7 @@ func TestCertExpiryInfo(t *testing.T) {
 	}
 }
 
-func TestRenderCertChain(t *testing.T) {
+func TestRenderCertificateChain(t *testing.T) {
 	fixedNow := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
 	origNow := tlsInspectNow
 	tlsInspectNow = func() time.Time { return fixedNow }
@@ -408,8 +408,12 @@ func TestRenderCertChain(t *testing.T) {
 	}
 
 	p := newTestPrinter()
-	renderCertChain(p, chain)
+	renderCertificateChain(p, "Server chain", chain)
 	out := string(p.Bytes())
+
+	if !strings.Contains(out, "Server chain") {
+		t.Errorf("expected server-chain label in output, got:\n%s", out)
+	}
 
 	// Verify all cert names appear.
 	for _, want := range []string{"example.com", "R3, Let's Encrypt", "ISRG Root X1, Internet Security Research Group"} {
@@ -444,7 +448,7 @@ func TestRenderSANs(t *testing.T) {
 			t.Errorf("expected '* SANs:' in output, got:\n%s", out)
 		}
 		if strings.Contains(out, "*   SANs:") {
-			t.Errorf("expected SANs line to align with Certificate chain line, got:\n%s", out)
+			t.Errorf("expected SANs line to align with Server chain line, got:\n%s", out)
 		}
 		if !strings.Contains(out, "example.com") {
 			t.Errorf("expected 'example.com' in output, got:\n%s", out)
@@ -561,6 +565,7 @@ func TestRenderConnectionMetadata(t *testing.T) {
 		"Timing: DNS 2.0ms, QUIC 3.0ms",
 		"Verification: not verified",
 		"Trust anchor: not available",
+		"Server chain",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in output, got:\n%s", want, out)
@@ -636,8 +641,8 @@ func TestRender(t *testing.T) {
 		if strings.Contains(out, "*   ALPN: h2") {
 			t.Errorf("expected ALPN line to align with TLS line, got:\n%s", out)
 		}
-		if !strings.Contains(out, "Certificate chain") {
-			t.Errorf("expected 'Certificate chain' in output, got:\n%s", out)
+		if !strings.Contains(out, "Server chain") {
+			t.Errorf("expected 'Server chain' in output, got:\n%s", out)
 		}
 		if !strings.Contains(out, "example.com") {
 			t.Errorf("expected 'example.com' in output, got:\n%s", out)
@@ -649,7 +654,9 @@ func TestRender(t *testing.T) {
 
 	t.Run("verified ConnectionState", func(t *testing.T) {
 		cs := &tls.ConnectionState{
+			ServerName: "example.com",
 			VerifiedChains: [][]*x509.Certificate{{
+				{Subject: pkix.Name{CommonName: "example.com"}},
 				{Subject: pkix.Name{CommonName: "Test Root"}},
 			}},
 		}
@@ -658,14 +665,51 @@ func TestRender(t *testing.T) {
 		render(p, cs)
 		out := string(p.Bytes())
 
-		if !strings.Contains(out, "Verification: verified") {
-			t.Errorf("expected successful verification status, got:\n%s", out)
+		if !strings.Contains(out, "Verification: verified for example.com") {
+			t.Errorf("expected successful verification status with hostname, got:\n%s", out)
 		}
-		if !strings.Contains(out, "Trust anchor: not reported by verifier") {
-			t.Errorf("expected unavailable trust-anchor status, got:\n%s", out)
+		if !strings.Contains(out, "Trust anchor: Test Root") {
+			t.Errorf("expected selected trust-anchor name, got:\n%s", out)
 		}
-		if strings.Contains(out, "platform verifier") {
-			t.Errorf("unexpected platform-specific wording in output:\n%s", out)
+		if !strings.Contains(out, "Verified path") {
+			t.Errorf("expected verified path in output, got:\n%s", out)
+		}
+		if strings.Contains(out, "not reported by verifier") {
+			t.Errorf("unexpected unavailable trust-anchor status in output:\n%s", out)
+		}
+	})
+
+	t.Run("verified path is separate from server chain", func(t *testing.T) {
+		caCert, caKey := generateTestCACert(t)
+		leaf, _ := generateTestCert(t, caCert, caKey, "example.com")
+		state := &tls.ConnectionState{
+			PeerCertificates: []*x509.Certificate{leaf},
+		}
+		roots := x509.NewCertPool()
+		roots.AddCert(caCert)
+		verification := verifyConnection(state, &tls.Config{RootCAs: roots}, "example.com")
+
+		p := newTestPrinter()
+		renderConnection(p, state, nil, connectionInfo{
+			ServerName:   "example.com",
+			Verification: verification,
+		})
+		out := string(p.Bytes())
+
+		if !strings.Contains(out, "Verification: verified for example.com") {
+			t.Errorf("expected successful verification status with hostname, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Trust anchor: Test CA") {
+			t.Errorf("expected selected trust-anchor name, got:\n%s", out)
+		}
+		if !strings.Contains(out, "Server chain") || !strings.Contains(out, "Verified path") {
+			t.Errorf("expected separate chain labels, got:\n%s", out)
+		}
+		if strings.Index(out, "Server chain") > strings.Index(out, "Verified path") {
+			t.Errorf("expected server chain before verified path, got:\n%s", out)
+		}
+		if strings.Count(out, "example.com") < 3 {
+			t.Errorf("expected leaf in certificate details and both paths, got:\n%s", out)
 		}
 	})
 }

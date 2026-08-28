@@ -23,9 +23,12 @@ fails; the command warns that results are incomplete and exits nonzero.
 fetch --inspect-tls https://example.com
 ```
 
-Inspect certificate names, chain, validity, and negotiated protocol before
-changing trust settings. Inspection completes the handshake even when certificate
-verification fails, then reports the verification error and returns nonzero. Use
+Inspect certificate names, server chain, verified path, validity, and negotiated
+protocol before changing trust settings. The server chain contains only
+certificates supplied by the server. The verified path includes the selected
+trust anchor when verification succeeds. Inspection completes the handshake even
+when certificate verification fails, then reports the verification error and
+returns nonzero. Use
 `--insecure` only when you want to ignore that reported failure. With `--http 3`,
 TLS inspection uses QUIC and reports an unavailable cipher suite rather than
 guessing. ECH inspection reports real or GREASE acceptance and fallback. Do not

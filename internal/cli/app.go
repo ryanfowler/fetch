@@ -341,7 +341,7 @@ func (a *App) CLI() *CLI {
 			ptrBoolFlag(&a.Cfg.Insecure, "insecure", "", "Accept invalid TLS certs (!)"),
 
 			boolFlag(&a.InspectDNS, "inspect-dns", "", "Inspect DNS resolution"),
-			boolFlag(&a.InspectTLS, "inspect-tls", "", "Inspect the TLS certificate chain"),
+			boolFlag(&a.InspectTLS, "inspect-tls", "", "Inspect TLS certificate paths"),
 
 			{
 				Long:        "install-skill",

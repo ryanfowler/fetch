@@ -314,7 +314,7 @@ Use cases:
 
 ### TLS Certificate Inspection
 
-`--inspect-tls` performs a TLS handshake only (no HTTP request is made) and provides a focused view of the TLS certificate chain, useful as a standalone diagnostic tool:
+`--inspect-tls` performs a TLS handshake only (no HTTP request is made) and provides a focused view of the server certificates and their verified path, useful as a standalone diagnostic tool:
 
 ```sh
 fetch --inspect-tls example.com
@@ -326,9 +326,10 @@ Output includes:
 - **ALPN negotiated protocol** (e.g., h2)
 - **Remote IP, resolver provenance, and connection timing** for the selected TCP or QUIC path
 - **Certificate subject, issuer, validity window, and SHA-256 fingerprint**
-- **Certificate chain** with tree visualization and expiry status
+- **Server chain** with tree visualization and expiry status; this contains only certificates supplied by the server
+- **Verified path** with tree visualization, including the selected trust anchor when verification succeeds
 - **Subject Alternative Names** (DNS names and IP addresses)
-- **Hostname match, verification result, and verification error**; the selected trust anchor may not be reported by the verifier
+- **Hostname match, verification result, and verification error**; successful verification reports the selected trust anchor
 - **OCSP staple status**; unverified staples are shown neutrally and never claim responder, signature, or freshness validation
 
 Inspection completes the handshake even when certificate verification fails. It returns a nonzero status for a verification failure unless `--insecure` is explicit; `--insecure` reports the failure as ignored and returns success. Expiry is color-coded: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise.
@@ -338,7 +339,7 @@ HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning
 When combined with `--http 3`, TLS inspection uses a QUIC handshake and offers `h3` ALPN instead of dialing TCP. Custom DNS, address-family racing, and `--connect-timeout` apply to both paths. QUIC closes the inspection connection before rendering the result.
 
 ```sh
-# Check certificate chain
+# Check server chain and verified path
 fetch --inspect-tls example.com
 
 # Inspect certificates even if invalid

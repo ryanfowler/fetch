@@ -70,8 +70,8 @@ type quicInspectionResult struct {
 	Fallback        bool
 }
 
-// Inspect performs a TLS handshake and renders the certificate chain to the
-// printer. It returns a non-zero exit code on failure.
+// Inspect performs a TLS handshake and renders the server chain and verified
+// path to the printer. It returns a non-zero exit code on failure.
 func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	if err := core.ValidateTLSVersions(cfg.TLSMin, cfg.TLSMax); err != nil {
 		writeTLSError(p, err)
@@ -432,7 +432,7 @@ func writeTLSError(p *core.Printer, err error) {
 	p.Flush()
 }
 
-// render displays TLS certificate chain inspection output to the printer.
+// render displays TLS certificate inspection output to the printer.
 func render(p *core.Printer, cs *tls.ConnectionState) {
 	renderConnection(p, cs, nil, connectionInfo{})
 }
@@ -510,30 +510,39 @@ func renderConnection(p *core.Printer, cs *tls.ConnectionState, info *client.ECH
 	}
 
 	renderConnectionDetails(p, meta)
-	renderVerification(p, cs, meta.Insecure, meta.Verification)
+	verification := meta.Verification
+	if verification == nil {
+		verification = &verificationResult{Chains: cs.VerifiedChains}
+	}
+	renderVerification(p, cs, meta.Insecure, verification, meta.ServerName)
 
-	peerChain := getChain(cs)
-	if len(peerChain) > 0 {
-		renderCertificateDetails(p, peerChain[0], meta.ServerName)
+	serverChain := getServerChain(cs)
+	if len(serverChain) > 0 {
+		renderCertificateDetails(p, serverChain[0], meta.ServerName)
 	}
 
-	// Certificate chain. Only certificates supplied by the peer belong in
-	// this section. The platform's locally built verification path may contain
-	// a trust anchor that was never sent by the server.
-	if len(peerChain) > 0 {
+	// The server chain contains only certificates supplied by the peer. The
+	// verified path is rendered separately because it can include locally
+	// trusted certificates that the server did not send.
+	if len(serverChain) > 0 {
 		p.WriteInfoPrefix()
 		p.WriteString("\n")
-		renderCertChain(p, peerChain)
+		renderCertificateChain(p, "Server chain", serverChain)
+	}
+	if verifiedPath := getVerifiedPath(verification); len(verifiedPath) > 0 {
+		p.WriteInfoPrefix()
+		p.WriteString("\n")
+		renderCertificateChain(p, "Verified path", verifiedPath)
 	}
 
 	// SANs and OCSP belong to the leaf and issuer actually supplied by the
 	// peer. A locally completed chain is not a valid OCSP issuer substitute.
-	if len(peerChain) > 0 {
-		renderSANs(p, peerChain[0])
+	if len(serverChain) > 0 {
+		renderSANs(p, serverChain[0])
 	}
 
 	// OCSP stapled response.
-	renderOCSPStatus(p, cs.OCSPResponse, peerChain)
+	renderOCSPStatus(p, cs.OCSPResponse, serverChain)
 }
 
 func renderConnectionDetails(p *core.Printer, meta connectionInfo) {
@@ -576,12 +585,17 @@ func formatDuration(value time.Duration) string {
 	return fmt.Sprintf("%.1fms", float64(value)/float64(time.Millisecond))
 }
 
-func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool, result *verificationResult) {
+func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool, result *verificationResult, serverNames ...string) {
 	// Keep the state-only behavior for callers that render a synthetic
 	// ConnectionState in tests. Live inspections always provide a result from
 	// the explicit verifier below.
 	if result == nil {
 		result = &verificationResult{Chains: cs.VerifiedChains}
+	}
+
+	serverName := firstString(serverNames)
+	if serverName == "" && cs != nil {
+		serverName = cs.ServerName
 	}
 
 	p.WriteInfoPrefix()
@@ -596,6 +610,10 @@ func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool,
 	case len(result.Chains) > 0:
 		p.Set(core.Green)
 		p.WriteString("verified")
+		if serverName != "" {
+			p.WriteString(" for ")
+			p.WriteString(core.TerminalSafeText(serverName))
+		}
 	default:
 		p.Set(core.Yellow)
 		p.WriteString("not verified")
@@ -612,12 +630,10 @@ func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool,
 
 	p.WriteInfoPrefix()
 	p.WriteString("Trust anchor: ")
-	if len(result.Chains) == 0 {
-		p.WriteString("not available")
+	if anchor := verifiedTrustAnchor(result); anchor != nil {
+		p.WriteString(core.TerminalSafeText(certDisplayName(anchor)))
 	} else {
-		// The selected trust anchor is local to the verifier and is not
-		// separately exposed by the TLS connection state.
-		p.WriteString("not reported by verifier")
+		p.WriteString("not available")
 	}
 	p.WriteString("\n")
 }
@@ -706,14 +722,36 @@ func renderCertificateDetails(p *core.Printer, cert *x509.Certificate, serverNam
 	}
 }
 
-func getChain(cs *tls.ConnectionState) []*x509.Certificate {
+func getServerChain(cs *tls.ConnectionState) []*x509.Certificate {
 	return cs.PeerCertificates
 }
 
-func renderCertChain(p *core.Printer, chain []*x509.Certificate) {
+func getVerifiedPath(result *verificationResult) []*x509.Certificate {
+	if result == nil || result.Err != nil || len(result.Chains) == 0 {
+		return nil
+	}
+	return result.Chains[0]
+}
+
+func verifiedTrustAnchor(result *verificationResult) *x509.Certificate {
+	path := getVerifiedPath(result)
+	if len(path) == 0 {
+		return nil
+	}
+	return path[len(path)-1]
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func renderCertificateChain(p *core.Printer, label string, chain []*x509.Certificate) {
 	p.WriteInfoPrefix()
 	p.Set(core.Bold)
-	p.WriteString("Certificate chain")
+	p.WriteString(label)
 	p.Reset()
 	p.WriteString(":\n")
 
