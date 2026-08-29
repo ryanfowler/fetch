@@ -818,7 +818,7 @@ func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		TLSMin:     getValue(app.Cfg.TLSMin),
 	}).BuildTLSConfig()
 
-	return dnsinspect.Inspect(ctx, p, &dnsinspect.Config{
+	return dnsinspect.InspectWithError(ctx, handle.Stdout(), p, &dnsinspect.Config{
 		Endpoint:   app.Cfg.DNSEndpoint,
 		DNSServer:  app.Cfg.DNSServer,
 		Proxy:      app.Cfg.Proxy,
