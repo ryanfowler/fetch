@@ -274,17 +274,18 @@ func TestReplacementRecoveryChildInheritsParentHandle(t *testing.T) {
 
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		info, err := os.Stat(target)
-		if err == nil && info.Size() > 0 {
+		info, targetErr := os.Stat(target)
+		_, journalErr := os.Lstat(journalPath)
+		if targetErr == nil && info.Size() > 0 && os.IsNotExist(journalErr) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("recovery child did not install staged executable: %v", err)
+			if targetErr == nil && info.Size() > 0 {
+				t.Fatalf("replacement journal remains, stat error = %v", journalErr)
+			}
+			t.Fatalf("recovery child did not finish replacement: target stat error = %v, journal stat error = %v", targetErr, journalErr)
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-	if _, err := os.Lstat(journalPath); !os.IsNotExist(err) {
-		t.Fatalf("replacement journal remains, stat error = %v", err)
 	}
 	for {
 		helpers, err := filepath.Glob(helperPattern)
