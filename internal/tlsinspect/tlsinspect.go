@@ -487,7 +487,7 @@ func writeTLSError(p *core.Printer, err error) {
 	p.Flush()
 }
 
-// render displays the normal TLS certificate inspection output to the
+// render displays the default TLS certificate inspection output to the
 // printer. It is used by package-level rendering tests.
 func render(p *core.Printer, cs *tls.ConnectionState) {
 	renderConnection(p, cs, nil, connectionInfo{Verbosity: core.VNormal})
@@ -504,117 +504,38 @@ func renderInspection(p *core.Printer, cs *tls.ConnectionState, info *client.ECH
 		return
 	}
 
-	if meta.OriginHost != "" && meta.RemoteIP != nil {
-		p.WriteInfoPrefix()
-		p.Set(core.Bold)
-		p.WriteString(core.TerminalSafeText(meta.OriginHost))
-		p.Reset()
-		p.WriteString(" → ")
-		address := meta.RemoteIP.String()
-		if meta.Port != "" {
-			address = net.JoinHostPort(address, meta.Port)
-		}
-		p.WriteString(core.TerminalSafeText(address))
-		p.WriteString("\n")
-	}
-
-	p.WriteInfoPrefix()
-	p.WriteString(tls.VersionName(cs.Version))
-	parts := make([]string, 0, 3)
-	if cs.CipherSuite != 0 {
-		parts = append(parts, tls.CipherSuiteName(cs.CipherSuite))
-	} else {
-		parts = append(parts, "cipher suite unavailable")
-	}
-	parts = append(parts, core.TLSKeyExchangeName(cs.CurveID))
-	if cs.NegotiatedProtocol != "" {
-		parts = append(parts, core.TerminalSafeText(cs.NegotiatedProtocol))
-	} else {
-		parts = append(parts, "ALPN not negotiated")
-	}
-	p.WriteString(" · ")
-	p.WriteString(strings.Join(parts, " · "))
-	p.WriteString("\n")
-
-	renderCompactVerification(p, cs, meta)
-	if chain := getServerChain(cs); len(chain) > 0 && chain[0] != nil {
-		renderCompactCertificate(p, chain[0], cs.OCSPResponse, chain)
-	}
-	renderCompactTiming(p, meta)
-
-	if meta.Verbosity >= core.VVerbose {
-		renderVerboseDetails(p, cs, info, meta)
-	}
+	// TLS inspection always uses the structured diagnostic view. Keep the
+	// verbosity value for the extra certificate infrastructure details, but
+	// do not require -v for the main inspection output.
+	renderVerboseInspection(p, cs, info, meta)
 }
 
-func renderCompactVerification(p *core.Printer, cs *tls.ConnectionState, meta connectionInfo) {
-	result := meta.Verification
-	if result == nil {
-		result = &verificationResult{Chains: cs.VerifiedChains}
+func inspectionVerification(cs *tls.ConnectionState, meta connectionInfo) *verificationResult {
+	if meta.Verification != nil {
+		return meta.Verification
 	}
-
-	serverName := meta.ServerName
-	if serverName == "" {
-		serverName = cs.ServerName
-	}
-	p.WriteInfoPrefix()
-	switch {
-	case result.Err == nil && len(result.Chains) > 0:
-		p.Set(core.Green)
-		p.WriteString("✓ Verified")
-		if serverName != "" {
-			p.WriteString(" for ")
-			p.WriteString(core.TerminalSafeText(serverName))
-		}
-		if anchor := verifiedTrustAnchor(result); anchor != nil {
-			p.WriteString(" · ")
-			p.WriteString(core.TerminalSafeText(compactCertName(anchor)))
-		}
-	case result.Err != nil && meta.Insecure:
-		p.Set(core.Yellow)
-		p.WriteString("⚠ Not verified (ignored by --insecure)")
-	default:
-		p.Set(core.Red)
-		p.WriteString("✗ Not verified")
-	}
-	p.Reset()
-	p.WriteString("\n")
-
-	if result.Err != nil {
-		p.WriteInfoPrefix()
-		p.WriteString("Verification error: ")
-		p.WriteString(core.TerminalSafeText(result.Err.Error()))
-		p.WriteString("\n")
-	}
+	return &verificationResult{Chains: cs.VerifiedChains}
 }
 
-func renderCompactCertificate(p *core.Printer, cert *x509.Certificate, rawOCSP []byte, chain []*x509.Certificate) {
-	p.WriteInfoPrefix()
-	p.WriteString("Certificate: ")
-	p.Set(core.Bold)
-	p.WriteString(core.TerminalSafeText(compactCertName(cert)))
-	p.Reset()
-	p.WriteString("\n")
-
-	p.WriteInfoPrefix()
-	p.WriteString("  ")
-	p.WriteString(core.TerminalSafeText(compactIssuerName(cert.Issuer)))
-	p.WriteString(" · ")
-	p.WriteString(compactExpiryText(cert))
-	if sans := compactSANs(cert); len(sans) > 0 {
-		p.WriteString("\n")
-		p.WriteInfoPrefix()
-		p.WriteString("  SANs: ")
-		p.WriteString(core.TerminalSafeText(strings.Join(sans, ", ")))
+func inspectionLeaf(cs *tls.ConnectionState) *x509.Certificate {
+	if chain := getServerChain(cs); len(chain) > 0 {
+		return chain[0]
 	}
-	p.WriteString("\n")
-	p.WriteInfoPrefix()
-	p.WriteString("  OCSP: ")
-	p.WriteString(compactOCSPStatus(rawOCSP, chain))
-	p.WriteString("\n")
+	return nil
 }
 
-func renderCompactTiming(p *core.Printer, meta connectionInfo) {
+func inspectionTarget(meta connectionInfo) string {
+	if meta.OriginHost == "" || meta.RemoteIP == nil {
+		return ""
+	}
+	address := meta.RemoteIP.String()
+	if meta.Port != "" {
+		address = net.JoinHostPort(address, meta.Port)
+	}
+	return core.TerminalSafeText(meta.OriginHost) + " → " + core.TerminalSafeText(address)
+}
+
+func inspectionTimingParts(meta connectionInfo) []string {
 	parts := make([]string, 0, 3)
 	if meta.Timing.DNSDuration > 0 {
 		parts = append(parts, "DNS "+formatDuration(meta.Timing.DNSDuration))
@@ -629,13 +550,7 @@ func renderCompactTiming(p *core.Printer, meta connectionInfo) {
 	if meta.Timing.TLSDuration > 0 {
 		parts = append(parts, "TLS "+formatDuration(meta.Timing.TLSDuration))
 	}
-	if len(parts) == 0 {
-		return
-	}
-	p.WriteInfoPrefix()
-	p.WriteString("Timing: ")
-	p.WriteString(strings.Join(parts, " · "))
-	p.WriteString("\n")
+	return parts
 }
 
 func compactCertName(cert *x509.Certificate) string {
@@ -654,37 +569,6 @@ func compactCertName(cert *x509.Certificate) string {
 	return cert.Subject.String()
 }
 
-func compactIssuerName(issuer pkix.Name) string {
-	if issuer.CommonName != "" && len(issuer.Organization) > 0 {
-		return issuer.Organization[0] + " " + issuer.CommonName
-	}
-	if issuer.CommonName != "" {
-		return issuer.CommonName
-	}
-	if len(issuer.Organization) > 0 {
-		return issuer.Organization[0]
-	}
-	return issuer.String()
-}
-
-func compactExpiryText(cert *x509.Certificate) string {
-	now := tlsInspectNow()
-	if now.After(cert.NotAfter) {
-		return "expired " + cert.NotAfter.Format("Jan 2, 2006")
-	}
-	days := int(cert.NotAfter.Sub(now).Hours() / 24)
-	return fmt.Sprintf("expires %s (%d days)", cert.NotAfter.Format("Jan 2, 2006"), days)
-}
-
-func compactSANs(cert *x509.Certificate) []string {
-	var sans []string
-	sans = append(sans, cert.DNSNames...)
-	for _, ip := range cert.IPAddresses {
-		sans = append(sans, ip.String())
-	}
-	return sans
-}
-
 func compactOCSPStatus(raw []byte, chain []*x509.Certificate) string {
 	if len(raw) == 0 {
 		return "not stapled"
@@ -692,19 +576,23 @@ func compactOCSPStatus(raw []byte, chain []*x509.Certificate) string {
 	status, _ := inspectOCSPStaple(raw, chain)
 	switch {
 	case strings.HasPrefix(status, "good"):
-		return "good · stapled (unverified freshness)"
+		return "good, stapled; freshness not checked"
 	case strings.HasPrefix(status, "revoked"):
-		return "revoked · stapled (unverified freshness)"
+		return "revoked, stapled; freshness not checked"
 	case strings.HasPrefix(status, "unknown"):
-		return "unknown · stapled (unverified freshness)"
+		return "unknown, stapled; freshness not checked"
 	default:
 		return "stapled, unverified"
 	}
 }
 
-func renderVerboseDetails(p *core.Printer, cs *tls.ConnectionState, info *client.ECHHandshakeInfo, meta connectionInfo) {
+func renderVerboseInspection(p *core.Printer, cs *tls.ConnectionState, info *client.ECHHandshakeInfo, meta connectionInfo) {
+	renderInspectionSection(p, "Connection")
+	if target := inspectionTarget(meta); target != "" {
+		writeVerboseInspectionField(p, "Target", target)
+	}
 	if meta.Resolver != "" {
-		writeInspectionField(p, "Resolver", meta.Resolver)
+		writeVerboseInspectionField(p, "Resolver", meta.Resolver)
 	}
 	sni := cs.ServerName
 	if cs.ECHAccepted && meta.OriginHost != "" {
@@ -714,55 +602,178 @@ func renderVerboseDetails(p *core.Printer, cs *tls.ConnectionState, info *client
 		sni = meta.ServerName
 	}
 	if sni != "" {
-		writeInspectionField(p, "SNI", sni)
+		writeVerboseInspectionField(p, "SNI", sni)
 	}
 	if info != nil && info.Offered {
-		status := "offered"
-		switch {
-		case info.Accepted && info.Real:
-			status = "accepted (real)"
-		case info.Accepted:
-			status = "accepted (GREASE)"
-		case info.Fallback && info.Real:
-			status = "rejected (real/fallback)"
-		case info.Fallback:
-			status = "rejected (GREASE/fallback)"
-		case info.Rejected:
-			status = "rejected"
-		}
-		writeInspectionField(p, "ECH", status)
+		writeVerboseInspectionField(p, "ECH", echInspectionStatus(info))
 	}
 	if info != nil && info.OuterServerName != "" {
-		writeInspectionField(p, "Outer SNI", info.OuterServerName)
+		writeVerboseInspectionField(p, "Outer SNI", info.OuterServerName)
+	}
+	writeVerboseInspectionField(p, "Protocol", tls.VersionName(cs.Version))
+	if cs.NegotiatedProtocol != "" {
+		writeVerboseInspectionField(p, "ALPN", cs.NegotiatedProtocol)
+	} else {
+		writeVerboseInspectionField(p, "ALPN", "not negotiated")
+	}
+	cipher := "unavailable"
+	if cs.CipherSuite != 0 {
+		cipher = tls.CipherSuiteName(cs.CipherSuite)
+	}
+	writeVerboseInspectionField(p, "Cipher", cipher)
+	writeVerboseInspectionField(p, "Key exchange", core.TLSKeyExchangeName(cs.CurveID))
+	if parts := inspectionTimingParts(meta); len(parts) > 0 {
+		writeVerboseInspectionField(p, "Timing", strings.Join(parts, " · "))
 	}
 
-	verification := meta.Verification
-	if verification == nil {
-		verification = &verificationResult{Chains: cs.VerifiedChains}
+	verification := inspectionVerification(cs, meta)
+	leaf := inspectionLeaf(cs)
+	writeInspectionBlankLine(p)
+	certificateHeading := "Certificate"
+	if leaf != nil {
+		certificateHeading += ": " + compactCertName(leaf)
 	}
-	renderVerification(p, cs, meta.Insecure, verification, meta.ServerName)
-	if chain := getServerChain(cs); len(chain) > 0 && chain[0] != nil {
-		renderCertificateDetails(p, chain[0], meta.ServerName)
-		renderExtendedCertificateDetails(p, chain[0])
+	renderInspectionSection(p, certificateHeading)
+	renderVerboseVerification(p, verification, meta.Insecure, meta.ServerName)
+	if leaf != nil {
+		writeVerboseInspectionField(p, "Subject", leaf.Subject.String())
+		writeVerboseInspectionField(p, "Issuer", leaf.Issuer.String())
+		writeVerboseInspectionField(p, "Valid from", leaf.NotBefore.Format(time.RFC3339))
+		writeVerboseInspectionField(p, "Valid until", leaf.NotAfter.Format(time.RFC3339)+" ("+certificateValidityStatus(leaf)+")")
+		serial := "unavailable"
+		if leaf.SerialNumber != nil {
+			serial = leaf.SerialNumber.String()
+		}
+		writeVerboseInspectionField(p, "Serial number", serial)
+		writeVerboseInspectionField(p, "Public key", publicKeyDescription(leaf.PublicKey))
+		writeVerboseInspectionField(p, "Signature algorithm", leaf.SignatureAlgorithm.String())
+		writeVerboseInspectionField(p, "SHA-256", certificateFingerprint(leaf))
+		if sans := certificateSANs(leaf); len(sans) > 0 {
+			writeVerboseInspectionField(p, "SANs", strings.Join(sans, ", "))
+		}
 	}
-	if serverChain := getServerChain(cs); len(serverChain) > 0 {
-		p.WriteInfoPrefix()
-		p.WriteString("\n")
-		renderCertificateChain(p, "Server chain", serverChain)
+	writeVerboseInspectionField(p, "SCTs", strconv.Itoa(len(cs.SignedCertificateTimestamps)))
+	chain := getServerChain(cs)
+	writeVerboseInspectionField(p, "OCSP", compactOCSPStatus(cs.OCSPResponse, chain))
+	if thisUpdate, nextUpdate, ok := ocspStapleTimes(cs.OCSPResponse, chain); ok {
+		writeVerboseInspectionField(p, "OCSP ThisUpdate", thisUpdate.Format(time.RFC3339))
+		if !nextUpdate.IsZero() {
+			writeVerboseInspectionField(p, "OCSP NextUpdate", nextUpdate.Format(time.RFC3339))
+		}
+	}
+
+	if len(chain) > 0 {
+		writeInspectionBlankLine(p)
+		renderCertificateChain(p, "Server chain", chain)
 	}
 	if verifiedPath := getVerifiedPath(verification); len(verifiedPath) > 0 {
-		p.WriteInfoPrefix()
-		p.WriteString("\n")
+		writeInspectionBlankLine(p)
 		renderCertificateChain(p, "Verified path", verifiedPath)
 	}
-	if chain := getServerChain(cs); len(chain) > 0 {
-		renderSANs(p, chain[0])
-		renderOCSPStatusDetailed(p, cs.OCSPResponse, chain)
-	}
-	writeInspectionField(p, "SCTs", strconv.Itoa(len(cs.SignedCertificateTimestamps)))
 	if meta.Verbosity >= core.VExtraVerbose {
-		renderNicheCertificateDetails(p, getServerChain(cs))
+		writeInspectionBlankLine(p)
+		renderInspectionSection(p, "Certificate infrastructure")
+		renderNicheCertificateDetails(p, chain)
 	}
+}
+
+func renderInspectionSection(p *core.Printer, heading string) {
+	p.WriteInfoPrefix()
+	p.Set(core.Bold)
+	p.WriteString(core.TerminalSafeText(heading))
+	p.Reset()
+	p.WriteString("\n")
+}
+
+func writeInspectionBlankLine(p *core.Printer) {
+	p.WriteInfoPrefix()
+	p.WriteString("\n")
+}
+
+func writeVerboseInspectionField(p *core.Printer, label, value string) {
+	p.WriteInfoPrefix()
+	p.WriteString("  ")
+	p.WriteString(label)
+	p.WriteString(": ")
+	p.WriteString(core.TerminalSafeText(value))
+	p.WriteString("\n")
+}
+
+func echInspectionStatus(info *client.ECHHandshakeInfo) string {
+	status := "offered"
+	switch {
+	case info.Accepted && info.Real:
+		status = "accepted (real)"
+	case info.Accepted:
+		status = "accepted (GREASE)"
+	case info.Fallback && info.Real:
+		status = "rejected (real/fallback)"
+	case info.Fallback:
+		status = "rejected (GREASE/fallback)"
+	case info.Rejected:
+		status = "rejected"
+	}
+	return status
+}
+
+func renderVerboseVerification(p *core.Printer, result *verificationResult, insecure bool, serverName string) {
+	status := "not verified"
+	switch {
+	case result.Err != nil && insecure:
+		status = "FAILED (ignored by --insecure)"
+	case result.Err != nil:
+		status = "FAILED"
+	case len(result.Chains) > 0 && serverName != "":
+		status = "verified for " + serverName
+	case len(result.Chains) > 0:
+		status = "verified"
+	}
+	writeVerboseInspectionField(p, "Verification", status)
+	if result.Err != nil {
+		writeVerboseInspectionField(p, "Verification error", result.Err.Error())
+	}
+	anchor := "not available"
+	if cert := verifiedTrustAnchor(result); cert != nil {
+		anchor = certDisplayName(cert)
+	}
+	writeVerboseInspectionField(p, "Trust anchor", anchor)
+}
+
+func certificateValidityStatus(cert *x509.Certificate) string {
+	now := tlsInspectNow()
+	if now.After(cert.NotAfter) {
+		return "expired"
+	}
+	days := int(cert.NotAfter.Sub(now).Hours() / 24)
+	if days == 0 {
+		return "less than 1 day remaining"
+	}
+	if days == 1 {
+		return "1 day remaining"
+	}
+	return fmt.Sprintf("%d days remaining", days)
+}
+
+func certificateFingerprint(cert *x509.Certificate) string {
+	fingerprint := sha256.Sum256(cert.Raw)
+	parts := make([]string, len(fingerprint))
+	for i, value := range fingerprint {
+		parts[i] = fmt.Sprintf("%02x", value)
+	}
+	return strings.Join(parts, ":")
+}
+
+func certificateSANs(cert *x509.Certificate) []string {
+	var sans []string
+	sans = append(sans, cert.DNSNames...)
+	for _, ip := range cert.IPAddresses {
+		sans = append(sans, ip.String())
+	}
+	sans = append(sans, cert.EmailAddresses...)
+	for _, uri := range cert.URIs {
+		sans = append(sans, uri.String())
+	}
+	return sans
 }
 
 func writeInspectionField(p *core.Printer, label, value string) {
@@ -779,59 +790,6 @@ func renderConnection(p *core.Printer, cs *tls.ConnectionState, info *client.ECH
 
 func formatDuration(value time.Duration) string {
 	return fmt.Sprintf("%.1fms", float64(value)/float64(time.Millisecond))
-}
-
-func renderVerification(p *core.Printer, cs *tls.ConnectionState, insecure bool, result *verificationResult, serverNames ...string) {
-	// Keep the state-only behavior for callers that render a synthetic
-	// ConnectionState in tests. Live inspections always provide a result from
-	// the explicit verifier below.
-	if result == nil {
-		result = &verificationResult{Chains: cs.VerifiedChains}
-	}
-
-	serverName := firstString(serverNames)
-	if serverName == "" && cs != nil {
-		serverName = cs.ServerName
-	}
-
-	p.WriteInfoPrefix()
-	p.WriteString("Verification: ")
-	switch {
-	case result.Err != nil && insecure:
-		p.Set(core.Yellow)
-		p.WriteString("FAILED (ignored by --insecure)")
-	case result.Err != nil:
-		p.Set(core.Red)
-		p.WriteString("FAILED")
-	case len(result.Chains) > 0:
-		p.Set(core.Green)
-		p.WriteString("verified")
-		if serverName != "" {
-			p.WriteString(" for ")
-			p.WriteString(core.TerminalSafeText(serverName))
-		}
-	default:
-		p.Set(core.Yellow)
-		p.WriteString("not verified")
-	}
-	p.Reset()
-	p.WriteString("\n")
-
-	if result.Err != nil {
-		p.WriteInfoPrefix()
-		p.WriteString("Verification error: ")
-		p.WriteString(core.TerminalSafeText(result.Err.Error()))
-		p.WriteString("\n")
-	}
-
-	p.WriteInfoPrefix()
-	p.WriteString("Trust anchor: ")
-	if anchor := verifiedTrustAnchor(result); anchor != nil {
-		p.WriteString(core.TerminalSafeText(certDisplayName(anchor)))
-	} else {
-		p.WriteString("not available")
-	}
-	p.WriteString("\n")
 }
 
 func connectionVerificationName(state *tls.ConnectionState, origin string) string {
@@ -873,15 +831,6 @@ func verifyConnection(cs *tls.ConnectionState, tlsConfig *tls.Config, serverName
 	return result
 }
 
-func renderExtendedCertificateDetails(p *core.Printer, cert *x509.Certificate) {
-	writeInspectionField(p, "Subject", cert.Subject.String())
-	writeInspectionField(p, "NotBefore", cert.NotBefore.Format(time.RFC3339))
-	writeInspectionField(p, "NotAfter", cert.NotAfter.Format(time.RFC3339))
-	writeInspectionField(p, "Serial number", cert.SerialNumber.String())
-	writeInspectionField(p, "Public key", publicKeyDescription(cert.PublicKey))
-	writeInspectionField(p, "Signature algorithm", cert.SignatureAlgorithm.String())
-}
-
 func publicKeyDescription(key crypto.PublicKey) string {
 	switch key := key.(type) {
 	case *rsa.PublicKey:
@@ -898,51 +847,6 @@ func publicKeyDescription(key crypto.PublicKey) string {
 			return "unavailable"
 		}
 		return fmt.Sprintf("%T", key)
-	}
-}
-
-func renderCertificateDetails(p *core.Printer, cert *x509.Certificate, serverName string) {
-	p.WriteInfoPrefix()
-	p.WriteString("Certificate: ")
-	p.Set(core.Bold)
-	p.WriteString(core.TerminalSafeText(certDisplayName(cert)))
-	p.Reset()
-	p.WriteString("\n")
-
-	p.WriteInfoPrefix()
-	p.WriteString("Issuer: ")
-	p.WriteString(core.TerminalSafeText(certDisplayName(&x509.Certificate{Subject: cert.Issuer})))
-	p.WriteString("\n")
-
-	p.WriteInfoPrefix()
-	p.WriteString("Valid: ")
-	p.WriteString(cert.NotBefore.Format(time.RFC3339))
-	p.WriteString(" → ")
-	p.WriteString(cert.NotAfter.Format(time.RFC3339))
-	p.WriteString("\n")
-
-	fingerprint := sha256.Sum256(cert.Raw)
-	parts := make([]string, len(fingerprint))
-	for i, value := range fingerprint {
-		parts[i] = fmt.Sprintf("%02x", value)
-	}
-	p.WriteInfoPrefix()
-	p.WriteString("SHA-256: ")
-	p.WriteString(strings.Join(parts, ":"))
-	p.WriteString("\n")
-
-	if serverName != "" {
-		p.WriteInfoPrefix()
-		p.WriteString("Hostname: ")
-		if cert.VerifyHostname(core.TLSVerificationName(serverName)) == nil {
-			p.Set(core.Green)
-			p.WriteString("matches")
-		} else {
-			p.Set(core.Red)
-			p.WriteString("does not match")
-		}
-		p.Reset()
-		p.WriteString("\n")
 	}
 }
 
@@ -963,13 +867,6 @@ func verifiedTrustAnchor(result *verificationResult) *x509.Certificate {
 		return nil
 	}
 	return path[len(path)-1]
-}
-
-func firstString(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
 }
 
 func renderCertificateChain(p *core.Printer, label string, chain []*x509.Certificate) {
@@ -1066,35 +963,13 @@ func renderSANs(p *core.Printer, leaf *x509.Certificate) {
 		return
 	}
 
-	p.WriteInfoPrefix()
-	p.WriteString("\n")
+	writeInspectionBlankLine(p)
 	p.WriteInfoPrefix()
 	p.WriteString("SANs: ")
 	p.Set(core.Italic)
 	p.WriteString(core.TerminalSafeText(strings.Join(sans, ", ")))
 	p.Reset()
 	p.WriteString("\n")
-}
-
-func renderOCSPStatusDetailed(p *core.Printer, raw []byte, chain []*x509.Certificate) {
-	if len(raw) == 0 {
-		return
-	}
-	status, _ := inspectOCSPStaple(raw, chain)
-	writeInspectionField(p, "OCSP status", status)
-	if !ocspStatusIsValidated(status) {
-		return
-	}
-	if thisUpdate, nextUpdate, ok := ocspStapleTimes(raw, chain); ok {
-		writeInspectionField(p, "OCSP ThisUpdate", thisUpdate.Format(time.RFC3339))
-		if !nextUpdate.IsZero() {
-			writeInspectionField(p, "OCSP NextUpdate", nextUpdate.Format(time.RFC3339))
-		}
-	}
-}
-
-func ocspStatusIsValidated(status string) bool {
-	return strings.HasPrefix(status, "good (") || strings.HasPrefix(status, "revoked (") || strings.HasPrefix(status, "unknown (")
 }
 
 func renderNicheCertificateDetails(p *core.Printer, chain []*x509.Certificate) {

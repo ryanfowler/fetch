@@ -20,16 +20,17 @@ fails; the command warns that results are incomplete and exits nonzero.
 ## TLS
 
 ```sh
-fetch --inspect-tls -v https://example.com
+fetch --inspect-tls https://example.com
 ```
 
 TLS inspection output goes to stdout. Warnings and errors go to stderr, so preserve the streams separately when collecting or piping the inspection result.
 
-The default output shows the connection destination, negotiated TLS, certificate
-status, leaf certificate, SANs, OCSP status, and timing. Use `-v` to inspect
-certificate names, the server chain, verified path, exact validity, and
-negotiated TLS protocol, key-exchange group, and ALPN before changing trust
-settings. The server chain contains only certificates supplied by the server.
+The default output uses the structured connection and certificate view. It
+includes the connection destination, negotiated TLS, certificate status, leaf
+certificate, issuer, exact validity, SANs, OCSP status, certificate names, the
+server chain, verified path, key-exchange group, and ALPN before changing trust
+settings. The `-v` flag has no effect in TLS inspection mode. The server chain
+contains only certificates supplied by the server.
 The verified path includes the selected trust anchor when verification succeeds.
 Inspection completes the handshake even when certificate verification fails,
 then reports the verification error and returns nonzero. Use
