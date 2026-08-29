@@ -35,12 +35,12 @@ Use these commands to inspect the path before changing trust settings:
 
 ```sh
 fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
-fetch --inspect-tls --ech auto -v https://example.com
+fetch --inspect-tls --ech auto https://example.com
 ```
 
-With `-v`, TLS inspection reports real ECH acceptance or rejection, GREASE
-offer and rejection, outer SNI, and final fallback when the rejection can be
-verified. The default output remains compact. If
+TLS inspection reports real ECH acceptance or rejection, GREASE offer and
+rejection, outer SNI, and final fallback when the rejection can be verified.
+The `-v` flag has no effect in TLS inspection mode. If
 QUIC cannot expose a rejected handshake's certificate state, inspection fails
 closed instead of downgrading (unless `--insecure` is explicit). DNS inspection
 displays ECH bytes as base64. Terminal diagnostics escape untrusted values.

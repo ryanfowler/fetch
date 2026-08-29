@@ -2354,12 +2354,11 @@ func TestMain(t *testing.T) {
 		server.StartTLS()
 		t.Cleanup(func() { server.Close() })
 
-		t.Run("shows server chain and verified path", func(t *testing.T) {
+		t.Run("shows verbose output by default", func(t *testing.T) {
 			t.Parallel()
 			res := runFetch(t, fetchPath, server.URL,
 				"--inspect-tls",
 				"--ca-cert", caCertPath,
-				"-v",
 			)
 			assertExitCode(t, 0, res)
 			assertBufContains(t, res.stdout, "Server chain")
@@ -2380,7 +2379,7 @@ func TestMain(t *testing.T) {
 				"--ca-cert", caCertPath,
 			)
 			assertExitCode(t, 0, res)
-			assertBufContains(t, res.stdout, "TLS 1.3")
+			assertBufContains(t, res.stdout, "Protocol: TLS 1.3")
 			assertBufEmpty(t, res.stderr)
 		})
 
@@ -2391,7 +2390,7 @@ func TestMain(t *testing.T) {
 				"--ca-cert", caCertPath,
 			)
 			assertExitCode(t, 0, res)
-			assertBufContains(t, res.stdout, "· h2")
+			assertBufContains(t, res.stdout, "ALPN: h2")
 			assertBufEmpty(t, res.stderr)
 		})
 
@@ -2403,11 +2402,11 @@ func TestMain(t *testing.T) {
 				"--ca-cert", caCertPath,
 			)
 			assertExitCode(t, 0, res)
-			assertBufContains(t, res.stdout, "· http/1.1")
+			assertBufContains(t, res.stdout, "ALPN: http/1.1")
 			assertBufEmpty(t, res.stderr)
 		})
 
-		t.Run("shows SANs", func(t *testing.T) {
+		t.Run("shows SANs by default", func(t *testing.T) {
 			t.Parallel()
 			res := runFetch(t, fetchPath, server.URL,
 				"--inspect-tls",
@@ -2435,7 +2434,7 @@ func TestMain(t *testing.T) {
 			t.Parallel()
 			res := runFetch(t, fetchPath, server.URL, "--inspect-tls")
 			assertExitCode(t, 1, res)
-			assertBufContains(t, res.stdout, "Not verified")
+			assertBufContains(t, res.stdout, "Verification: FAILED")
 			assertBufContains(t, res.stdout, "Verification error:")
 			assertBufContains(t, res.stdout, "Certificate: test-server")
 			assertBufEmpty(t, res.stderr)
@@ -2451,7 +2450,7 @@ func TestMain(t *testing.T) {
 				"--insecure",
 			)
 			assertExitCode(t, 0, res)
-			assertBufContains(t, res.stdout, "Not verified (ignored by --insecure)")
+			assertBufContains(t, res.stdout, "Verification: FAILED (ignored by --insecure)")
 			assertBufContains(t, res.stdout, "Certificate: test-server")
 			assertBufEmpty(t, res.stderr)
 		})
@@ -2468,7 +2467,7 @@ func TestMain(t *testing.T) {
 			assertBufContains(t, res.stderr, "--inspect-tls requires an HTTPS URL")
 		})
 
-		t.Run("works with verbose flag", func(t *testing.T) {
+		t.Run("verbose flag does not change inspection output", func(t *testing.T) {
 			t.Parallel()
 			res := runFetch(t, fetchPath, server.URL,
 				"--inspect-tls",

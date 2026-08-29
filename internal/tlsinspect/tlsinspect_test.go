@@ -298,8 +298,8 @@ func TestInspectHTTP3UsesQUICAndH3ALPN(t *testing.T) {
 	}
 
 	out := string(p.Bytes())
-	if !strings.Contains(out, "· h3") {
-		t.Fatalf("expected h3 ALPN in compact output, got:\n%s", out)
+	if !strings.Contains(out, "ALPN: h3") {
+		t.Fatalf("expected h3 ALPN in inspection output, got:\n%s", out)
 	}
 	if !strings.Contains(out, "TLS_AES_128_GCM_SHA256") {
 		t.Fatalf("expected negotiated QUIC cipher suite in output, got:\n%s", out)
@@ -307,8 +307,8 @@ func TestInspectHTTP3UsesQUICAndH3ALPN(t *testing.T) {
 	if !strings.Contains(out, "127.0.0.1 → 127.0.0.1:") {
 		t.Fatalf("expected remote address in output, got:\n%s", out)
 	}
-	if strings.Contains(out, "Resolver: system") {
-		t.Fatalf("default output should defer resolver provenance to -v, got:\n%s", out)
+	if !strings.Contains(out, "Resolver: system") {
+		t.Fatalf("expected resolver provenance in default output, got:\n%s", out)
 	}
 	if !strings.Contains(out, "quic-server") {
 		t.Fatalf("expected server chain in output, got:\n%s", out)
@@ -653,7 +653,10 @@ func TestRenderConnectionMetadata(t *testing.T) {
 	})
 	out := string(p.Bytes())
 	for _, want := range []string{
-		"TLS 1.3 · cipher suite unavailable · X25519MLKEM768 · h3",
+		"Protocol: TLS 1.3",
+		"ALPN: h3",
+		"Cipher: unavailable",
+		"Key exchange: X25519MLKEM768",
 		"quic.example → [2001:db8::1]:443",
 		"Resolver: tls://resolver.example:853",
 		"Timing: DNS 2.0ms · QUIC 3.0ms",
@@ -686,7 +689,7 @@ func TestOCSPStapleRequiresMatchingCertificate(t *testing.T) {
 		t.Fatalf("matching staple status = %q", status)
 	}
 	compact := compactOCSPStatus(staple, []*x509.Certificate{leaf, caCert})
-	if !strings.Contains(compact, "good · stapled") || !strings.Contains(compact, "unverified") {
+	if !strings.Contains(compact, "good, stapled") || !strings.Contains(compact, "freshness not checked") {
 		t.Fatalf("compact staple status = %q", compact)
 	}
 	status, _ = inspectOCSPStaple(staple, []*x509.Certificate{other, caCert})
@@ -724,7 +727,7 @@ func TestRenderInspectionVerbosity(t *testing.T) {
 	anchor := &x509.Certificate{Subject: pkix.Name{CommonName: "ISRG Root X1"}}
 	verification := &verificationResult{Chains: [][]*x509.Certificate{{leaf, anchor}}}
 
-	t.Run("normal output is compact", func(t *testing.T) {
+	t.Run("normal output is structured diagnostics", func(t *testing.T) {
 		p := newTestPrinter()
 		renderConnection(p, state, nil, connectionInfo{
 			OriginHost: "example.com", Port: "443", RemoteIP: net.ParseIP("104.18.26.120"),
@@ -733,24 +736,25 @@ func TestRenderInspectionVerbosity(t *testing.T) {
 		})
 		out := string(p.Bytes())
 		for _, want := range []string{
-			"example.com → 104.18.26.120:443",
-			"TLS 1.3 · TLS_AES_128_GCM_SHA256 · X25519MLKEM768 · h2",
-			"✓ Verified for example.com · ISRG Root X1",
+			"Connection",
+			"Target: example.com → 104.18.26.120:443",
+			"Protocol: TLS 1.3",
+			"Verification: verified for example.com",
 			"Certificate: example.com",
-			"Let's Encrypt R13 · expires Aug 23, 2025 (83 days)",
+			"Server chain",
+			"Verified path",
 			"SANs: example.com, www.example.com",
-			"OCSP: not stapled",
 			"Timing: DNS 8.0ms · TCP 21.0ms · TLS 34.0ms",
 		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("expected %q in output, got:\n%s", want, out)
 			}
 		}
-		if strings.Contains(out, "Server chain") || strings.Contains(out, "SHA-256:") || strings.Contains(out, "Resolver:") {
-			t.Errorf("normal output contains verbose details:\n%s", out)
+		if strings.Contains(out, "Certificate infrastructure") {
+			t.Errorf("normal output contains extra certificate infrastructure:\n%s", out)
 		}
-		if !strings.Contains(out, "\n*   SANs:") || !strings.Contains(out, "\n*   OCSP:") {
-			t.Errorf("normal output should put SANs and OCSP on separate lines:\n%s", out)
+		if strings.Contains(out, "\n\n") || !strings.Contains(out, "* \n") {
+			t.Errorf("section blank lines should have an info prefix:\n%s", out)
 		}
 	})
 
@@ -761,7 +765,7 @@ func TestRenderInspectionVerbosity(t *testing.T) {
 			Verification: verification, Verbosity: core.VVerbose,
 		})
 		out := string(p.Bytes())
-		for _, want := range []string{"Server chain", "Verified path", "Subject:", "NotBefore:", "NotAfter:", "Serial number: 42", "Public key: unavailable", "Signature algorithm: SHA256-RSA", "SNI: example.com", "Resolver: system", "SCTs: 1"} {
+		for _, want := range []string{"Connection", "Certificate: example.com", "Server chain", "Verified path", "Subject:", "Valid from:", "Valid until:", "Serial number: 42", "Public key: unavailable", "Signature algorithm: SHA256-RSA", "SNI: example.com", "Resolver: system", "SANs: example.com, www.example.com", "OCSP: not stapled", "SCTs: 1"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("expected %q in output, got:\n%s", want, out)
 			}
@@ -817,20 +821,19 @@ func TestRender(t *testing.T) {
 		render(p, cs)
 		out := string(p.Bytes())
 
-		if !strings.Contains(out, "TLS 1.3") {
-			t.Errorf("expected 'TLS 1.3' in output, got:\n%s", out)
+		if !strings.Contains(out, "Protocol: TLS 1.3") {
+			t.Errorf("expected TLS 1.3 in output, got:\n%s", out)
 		}
-		if !strings.Contains(out, "TLS 1.3 · TLS_AES_256_GCM_SHA384 · X25519MLKEM768 · h2") {
+		if !strings.Contains(out, "ALPN: h2") || !strings.Contains(out, "Cipher: TLS_AES_256_GCM_SHA384") || !strings.Contains(out, "Key exchange: X25519MLKEM768") {
 			t.Errorf("expected negotiated TLS details in output, got:\n%s", out)
 		}
-		if strings.Contains(out, "Server chain") {
-			t.Errorf("default output should defer chain details to -v, got:\n%s", out)
+		for _, want := range []string{"Connection", "Certificate: example.com", "Server chain", "SANs: example.com, *.example.com"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("expected %q in default output, got:\n%s", want, out)
+			}
 		}
-		if !strings.Contains(out, "example.com") {
-			t.Errorf("expected 'example.com' in output, got:\n%s", out)
-		}
-		if !strings.Contains(out, "SANs:") {
-			t.Errorf("expected 'SANs:' in output, got:\n%s", out)
+		if strings.Contains(out, "\n\n") {
+			t.Errorf("section blank lines should have an info prefix, got:\n%s", out)
 		}
 	})
 
@@ -847,11 +850,11 @@ func TestRender(t *testing.T) {
 		render(p, cs)
 		out := string(p.Bytes())
 
-		if !strings.Contains(out, "✓ Verified for example.com · Test Root") {
-			t.Errorf("expected compact successful verification status, got:\n%s", out)
+		if !strings.Contains(out, "Verification: verified") {
+			t.Errorf("expected successful verification status, got:\n%s", out)
 		}
-		if strings.Contains(out, "Verified path") {
-			t.Errorf("default output should defer verified path to -v, got:\n%s", out)
+		if !strings.Contains(out, "Verified path") {
+			t.Errorf("default output should include the verified path, got:\n%s", out)
 		}
 	})
 

@@ -314,17 +314,15 @@ Use cases:
 
 ### TLS Certificate Inspection
 
-`--inspect-tls` performs a TLS handshake only (no HTTP request is made) and provides a focused view of the server certificate. Use `-v` to see the full server certificates and their verified path. This makes it useful as a standalone diagnostic tool:
+`--inspect-tls` performs a TLS handshake only (no HTTP request is made) and provides a focused view of the server certificate and its verification. This makes it useful as a standalone diagnostic tool:
 
 ```sh
 fetch --inspect-tls example.com
 ```
 
-The default output answers three questions: where the connection went, what TLS was negotiated, and whether the certificate is valid. It includes the remote address, negotiated TLS, cipher, key exchange, ALPN, verification status, leaf certificate, SANs, OCSP staple status, and connection timing.
+The default output uses the structured diagnostic view. It shows separate connection and certificate sections with the remote address, negotiated TLS, verification status, leaf certificate, issuer, exact validity window, serial number, public-key description, signature algorithm, SHA-256 fingerprint, server and verified chains, all parsed SAN types, OCSP status and timestamps, SCT count, SNI, resolver provenance, and ECH details. The `-v` flag has no effect in TLS inspection mode. Use `-vv` for AIA, CRL, policy, and other niche X.509 details. OCSP staple status checks the matching certificate and response signature, but not responder authorization or freshness. QUIC reports `cipher suite unavailable` only when the transport does not expose it.
 
-Use `-v` for the diagnostic view. It adds the exact certificate validity window, subject, issuer, serial number, public-key description, signature algorithm, SHA-256 fingerprint, server and verified chains, all parsed SAN types, OCSP timestamps, SCT count, SNI, resolver provenance, and ECH details. OCSP staple status checks the matching certificate and response signature, but not responder authorization or freshness. Use `-vv` for AIA, CRL, policy, and other niche X.509 details. QUIC reports `cipher suite unavailable` only when the transport does not expose it.
-
-Inspection completes the handshake even when certificate verification fails. It returns a nonzero status for a verification failure unless `--insecure` is explicit; `--insecure` reports the failure as ignored and returns success. Expiry is color-coded in the verbose certificate view: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise. The inspection result is written to stdout. Warnings and errors are written to stderr, so the result can be redirected or piped without diagnostic output.
+Inspection completes the handshake even when certificate verification fails. It returns a nonzero status for a verification failure unless `--insecure` is explicit; `--insecure` reports the failure as ignored and returns success. Expiry is color-coded in the certificate view: red if expired or less than 7 days remaining, yellow if less than 30 days, green otherwise. The inspection result is written to stdout. Warnings and errors are written to stderr, so the result can be redirected or piped without diagnostic output.
 
 HTTP-only flags (e.g. `--data`, `--timing`, `--grpc`) are ignored with a warning when used with `--inspect-tls`.
 
@@ -332,7 +330,7 @@ When combined with `--http 3`, TLS inspection uses a QUIC handshake and offers `
 
 ```sh
 # Check server chain and verified path
-fetch --inspect-tls -v example.com
+fetch --inspect-tls example.com
 
 # Inspect certificates even if invalid
 fetch --inspect-tls --insecure expired.badssl.com
