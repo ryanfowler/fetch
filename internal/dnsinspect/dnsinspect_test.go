@@ -19,6 +19,80 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, io.ErrShortWrite
+}
+
+type brokenPipeWriter struct{}
+
+func (brokenPipeWriter) Write([]byte) (int, error) {
+	return 0, io.ErrClosedPipe
+}
+
+func TestInspectWithErrorSeparatesOutput(t *testing.T) {
+	output := core.TestPrinter(false)
+	errors := core.TestPrinter(false)
+
+	status := InspectWithError(context.Background(), output, errors, &Config{
+		URL: mustURL(t, "http://192.0.2.1"),
+	})
+	if status != 0 {
+		t.Fatalf("status = %d, want 0", status)
+	}
+	if !strings.Contains(string(output.Bytes()), "IP literal: 192.0.2.1") {
+		t.Fatalf("inspection output = %q, want IP literal", output.Bytes())
+	}
+	if len(errors.Bytes()) != 0 {
+		t.Fatalf("error output = %q, want empty", errors.Bytes())
+	}
+}
+
+func TestInspectWithErrorSeparatesSetupErrors(t *testing.T) {
+	output := core.TestPrinter(false)
+	errors := core.TestPrinter(false)
+
+	status := InspectWithError(context.Background(), output, errors, &Config{
+		URL: mustURL(t, "https:///missing-host"),
+	})
+	if status != 1 {
+		t.Fatalf("status = %d, want 1", status)
+	}
+	if len(output.Bytes()) != 0 {
+		t.Fatalf("inspection output = %q, want empty", output.Bytes())
+	}
+	if !strings.Contains(string(errors.Bytes()), "--inspect-dns requires a hostname") {
+		t.Fatalf("error output = %q, want setup error", errors.Bytes())
+	}
+}
+
+func TestFlushInspectionOutputReportsWriteErrors(t *testing.T) {
+	output := core.TestPrinter(false).NewWriter(failingWriter{})
+	errors := core.TestPrinter(false)
+	output.WriteString("inspection")
+
+	if code := flushInspectionOutput(output, errors); code != 1 {
+		t.Fatalf("flushInspectionOutput() exit code = %d, want 1", code)
+	}
+	if !strings.Contains(string(errors.Bytes()), "short write") {
+		t.Fatalf("error output = %q, want write error", errors.Bytes())
+	}
+}
+
+func TestFlushInspectionOutputIgnoresBrokenPipe(t *testing.T) {
+	output := core.TestPrinter(false).NewWriter(brokenPipeWriter{})
+	errors := core.TestPrinter(false)
+	output.WriteString("inspection")
+
+	if code := flushInspectionOutput(output, errors); code != 0 {
+		t.Fatalf("flushInspectionOutput() exit code = %d, want 0", code)
+	}
+	if len(errors.Bytes()) != 0 {
+		t.Fatalf("error output = %q, want empty", errors.Bytes())
+	}
+}
+
 func TestInspectDOHShowsAAndAAAATTLs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("type") {
@@ -178,24 +252,25 @@ func TestInspectKeepsRecordsAndFailsOnPartialQueryError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	p := core.TestPrinter(false)
-	status := Inspect(context.Background(), p, &Config{
+	output := core.TestPrinter(false)
+	errors := core.TestPrinter(false)
+	status := InspectWithError(context.Background(), output, errors, &Config{
 		DNSServer: mustURL(t, server.URL+"/dns-query"),
 		URL:       mustURL(t, "https://example.com"),
 	})
 	if status != 1 {
-		t.Fatalf("status = %d, want partial-result status 1\n%s", status, p.Bytes())
+		t.Fatalf("status = %d, want partial-result status 1\n%s", status, output.Bytes())
 	}
-	out := string(p.Bytes())
+	out := string(output.Bytes())
 	for _, want := range []string{
 		"192.0.2.1",
-		"DNS inspection incomplete",
-		"TXT",
-		"ServFail",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("partial output missing %q:\n%s", want, out)
 		}
+	}
+	if got := string(errors.Bytes()); !strings.Contains(got, "DNS inspection incomplete") || !strings.Contains(got, "ServFail") {
+		t.Fatalf("partial warning = %q, want incomplete record warning", got)
 	}
 }
 
@@ -452,6 +527,19 @@ func TestResolverTargetUsesPlatformResolver(t *testing.T) {
 	}
 	if strings.Contains(target.label, "127.0.0.1") || strings.Contains(target.udpAddr, "127.0.0.1") {
 		t.Fatalf("resolver target silently used loopback: %#v", target)
+	}
+}
+
+func TestRenderSeparatesWarnings(t *testing.T) {
+	output := core.TestPrinter(false)
+	errors := core.TestPrinter(false)
+	renderWithWarning(output, errors, &result{tcpFallback: true})
+
+	if strings.Contains(string(output.Bytes()), "UDP response was truncated") {
+		t.Fatalf("output contains TCP fallback warning: %q", output.Bytes())
+	}
+	if !strings.Contains(string(errors.Bytes()), "UDP response was truncated") {
+		t.Fatalf("error output missing TCP fallback warning: %q", errors.Bytes())
 	}
 }
 

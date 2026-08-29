@@ -12,10 +12,14 @@ fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 
 Use DNS inspection to distinguish resolution failures, record-family issues, and
 resolver-specific behavior. It performs inspection rather than an HTTP request.
-Without `--dns-server`, only platform A/AAAA records are shown and TTLs are not
-available. With an explicit UDP, TCP, DoT, DoQ, or DoH resolver, supported record
-types are queried concurrently. Successful records remain visible when one query
-fails; the command warns that results are incomplete and exits nonzero.
+Without `--dns-server`, nameservers from the system resolver configuration are
+queried directly when available. This shows supported record types and TTLs. If
+that configuration is unavailable, the platform resolver provides A/AAAA records
+without TTLs. With an explicit UDP, TCP, DoT, DoQ, or DoH resolver, supported
+record types are queried concurrently. Successful records remain visible when
+one query fails; the command warns that results are incomplete and exits
+nonzero. Inspection output goes to stdout. Warnings, configuration errors, and
+resolver errors go to stderr.
 
 ## TLS
 

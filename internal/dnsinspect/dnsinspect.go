@@ -150,13 +150,21 @@ func loadSystemResolverPolicy(cfg *Config) *resolver.SystemResolverPolicy {
 // Inspect resolves the configured URL hostname and renders DNS information to
 // the printer. It returns a non-zero exit code on failure.
 func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
+	return InspectWithError(ctx, p, p, cfg)
+}
+
+// InspectWithError resolves the configured URL hostname, writes the inspection
+// result to output, and writes setup errors to errorOutput. It returns a
+// non-zero exit code on failure. Keeping these streams separate lets callers
+// pipe a successful inspection without also receiving diagnostics.
+func InspectWithError(ctx context.Context, output, errorOutput *core.Printer, cfg *Config) int {
 	server := cfg.DNSServer
 	if cfg.Endpoint != nil {
 		server = cfg.Endpoint.URL()
 	}
 	host := cfg.URL.Hostname()
 	if host == "" {
-		writeDNSError(p, errors.New("--inspect-dns requires a hostname"))
+		writeDNSError(errorOutput, errors.New("--inspect-dns requires a hostname"))
 		return 1
 	}
 
@@ -174,22 +182,23 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 	start := time.Now()
 	if ip := net.ParseIP(host); ip != nil {
 		target := resolverTarget(server)
-		renderIPLiteral(p, host, ip, target.label, time.Since(start))
-		p.Flush()
-		return 0
+		renderIPLiteral(output, host, ip, target.label, time.Since(start))
+		return flushInspectionOutput(output, errorOutput)
 	}
 
 	res, err := lookup(ctx, cfg, host, start)
 	if err != nil {
-		writeDNSError(p, err)
+		writeDNSError(errorOutput, err)
 		return 1
 	}
-	render(p, res)
+	renderWithWarning(output, errorOutput, res)
 	partial := len(res.failures) > 0
 	if partial {
-		core.WriteWarningMsgIf(p, formatPartialWarning(res.failures), res.silent)
+		core.WriteWarningMsgIf(errorOutput, formatPartialWarning(res.failures), res.silent)
 	}
-	p.Flush()
+	if flushInspectionOutput(output, errorOutput) != 0 {
+		return 1
+	}
 	if partial {
 		return 1
 	}
@@ -972,6 +981,10 @@ func formatPartialWarning(failures []queryFailure) string {
 }
 
 func render(p *core.Printer, res *result) {
+	renderWithWarning(p, p, res)
+}
+
+func renderWithWarning(p, warningOutput *core.Printer, res *result) {
 	p.WriteInfoPrefix()
 	p.Set(core.Bold)
 	p.Set(core.Cyan)
@@ -998,7 +1011,7 @@ func render(p *core.Printer, res *result) {
 		p.WriteString("TTL: unavailable (platform resolver does not provide per-record TTLs)\n")
 	}
 	if res.tcpFallback {
-		core.WriteWarningMsgIf(p, "UDP response was truncated; used TCP fallback", res.silent)
+		core.WriteWarningMsgIf(warningOutput, "UDP response was truncated; used TCP fallback", res.silent)
 	}
 	p.WriteInfoPrefix()
 	p.WriteString("\n")
@@ -1122,6 +1135,17 @@ func formatTTL(ttl uint32) string {
 	}
 	text := strings.TrimSuffix(d.String(), "0s")
 	return strings.TrimSuffix(text, "0m")
+}
+
+func flushInspectionOutput(output, errorOutput *core.Printer) int {
+	if err := output.Flush(); err != nil {
+		if core.IsBrokenPipe(err) {
+			return 0
+		}
+		writeDNSError(errorOutput, err)
+		return 1
+	}
+	return 0
 }
 
 func writeDNSError(p *core.Printer, err error) {
