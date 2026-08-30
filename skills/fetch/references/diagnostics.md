@@ -27,7 +27,7 @@ failover occurs, `Resolver` or `Resolvers` identifies the nameserver(s) that
 actually answered. The default output is complete, and `-v` has no effect in DNS
 inspection mode. Use `-vv` for resolver and query internals, including the configured
 nameserver list, policy limits, normalization, caveats, responders, transport, duration,
-and failover attempts. Successful records remain visible when one query fails;
+and failover attempts. For direct DNS lookups, when IDNA normalization changes the name, normal output includes `Query name` with the absolute punycode name sent to DNS. Single-label names also show their absolute query name; the root terminator is omitted for ordinary multi-label hostnames when it is the only difference. Successful records remain visible when one query fails;
 the `Lookup` section reports an incomplete status and the `Failures` section
 identifies the failed types. The
 command exits nonzero. Inspection output, including the `Failures` section, goes

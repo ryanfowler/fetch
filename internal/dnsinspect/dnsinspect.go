@@ -676,11 +676,16 @@ func dnsQueryHost(host string) (string, error) {
 		}
 		labels[i] = ascii
 	}
-	ascii := strings.Join(labels, ".")
-	if trailingDot {
-		return ascii + ".", nil
+
+	// DNS wire names are absolute. Keep the trailing root label in the
+	// inspection result so it describes the name sent to a raw resolver. The
+	// resolver parser also enforces the DNS label and total-name size limits
+	// after IDNA expansion.
+	queryName := strings.Join(labels, ".") + "."
+	if _, err := resolver.ParseName(queryName); err != nil {
+		return "", err
 	}
-	return ascii, nil
+	return queryName, nil
 }
 
 func isASCII(value string) bool {
@@ -1843,10 +1848,9 @@ func renderResolverDetails(p *core.Printer, res *result) {
 		writeInspectionField(p, label, value)
 	}
 
-	// The normal view only shows a query name when normalization changed the
-	// input. Extra verbosity also records the ordinary case so the exact name
-	// sent to the resolver is always visible when debugging.
-	if res.queryName != "" && res.queryName == res.host {
+	// Extra verbosity always records the exact absolute name sent to the
+	// resolver, including when it is equivalent to the user-facing name.
+	if res.queryName != "" {
 		write("Query name", res.queryName)
 	}
 	if len(res.configuredNameservers) > 0 {
@@ -1908,7 +1912,7 @@ func renderQueryDetails(p *core.Printer, queries []queryResult) {
 func renderInspection(p *core.Printer, res *result) {
 	renderInspectionSection(p, "Lookup")
 	writeInspectionField(p, "Name", res.host)
-	if res.queryName != "" && res.queryName != res.host {
+	if queryNameDiffers(res.host, res.queryName) {
 		writeInspectionField(p, "Query name", res.queryName)
 	}
 	if res.platformFallback {
@@ -2060,6 +2064,25 @@ func compareInspectionLabels(a, b string) int {
 		return 1
 	}
 	return strings.Compare(a, b)
+}
+
+// queryNameDiffers reports whether the absolute DNS name is meaningfully
+// different from the name supplied by the user. The root terminator is
+// implicit for ordinary multi-label hostnames, so it is not useful to repeat
+// it in normal output. Single-label names are different: adding the root
+// terminator makes the qualification explicit and avoids implying search
+// domain behavior.
+func queryNameDiffers(host, queryName string) bool {
+	if queryName == "" {
+		return false
+	}
+	if host == "." || strings.HasSuffix(host, ".") {
+		return !strings.EqualFold(host, queryName)
+	}
+	if !strings.Contains(host, ".") && strings.EqualFold(absoluteName(host), queryName) {
+		return true
+	}
+	return !strings.EqualFold(absoluteName(host), queryName)
 }
 
 func renderInspectionSection(p *core.Printer, heading string) {
