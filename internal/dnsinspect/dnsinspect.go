@@ -95,22 +95,22 @@ type record struct {
 }
 
 type result struct {
-	host           string
-	queryName      string
-	resolver       string
-	transport      string
-	security       string
-	source         string
-	records        map[string][]record
-	queries        []queryResult
-	failures       []queryFailure
-	queryTotal     int
-	queryWithData  int
-	queryNoData    int
-	duration       time.Duration
-	tcpFallback    bool
-	ttlUnavailable bool
-	silent         bool
+	host             string
+	queryName        string
+	resolver         string
+	transport        string
+	security         string
+	source           string
+	records          map[string][]record
+	queries          []queryResult
+	failures         []queryFailure
+	queryTotal       int
+	queryWithData    int
+	queryNoData      int
+	duration         time.Duration
+	tcpFallback      bool
+	platformFallback bool
+	silent           bool
 }
 
 type queryStatus uint8
@@ -256,11 +256,10 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		} else {
 			systemPolicy = nil
 			target = resolverTargetInfo{label: "system resolver", useDefault: true}
-			out.resolver = target.label
+			out.resolver = "platform resolver"
 			out.transport = "platform resolver"
 			out.security = "platform resolver (OS-managed security)"
 			out.source = "platform resolver"
-			out.ttlUnavailable = true
 		}
 	}
 
@@ -558,22 +557,22 @@ func isASCII(value string) bool {
 // explicit.
 func platformResult(orig *result, records []record, start time.Time) *result {
 	out := &result{
-		host:           orig.host,
-		queryName:      orig.queryName,
-		resolver:       orig.resolver + " (platform fallback)",
-		transport:      "mixed",
-		security:       "mixed (direct nameserver and platform resolver)",
-		source:         "system resolver configuration with platform fallback",
-		records:        make(map[string][]record, len(orig.records)),
-		queries:        slices.Clone(orig.queries),
-		failures:       slices.Clone(orig.failures),
-		queryTotal:     orig.queryTotal,
-		queryWithData:  orig.queryWithData,
-		queryNoData:    orig.queryNoData,
-		tcpFallback:    orig.tcpFallback,
-		silent:         orig.silent,
-		duration:       time.Since(start),
-		ttlUnavailable: true,
+		host:             orig.host,
+		queryName:        orig.queryName,
+		resolver:         "system nameservers + platform resolver",
+		transport:        "mixed",
+		security:         "mixed",
+		source:           "system resolver configuration + platform resolver",
+		records:          make(map[string][]record, len(orig.records)),
+		queries:          slices.Clone(orig.queries),
+		failures:         slices.Clone(orig.failures),
+		queryTotal:       orig.queryTotal,
+		queryWithData:    orig.queryWithData,
+		queryNoData:      orig.queryNoData,
+		tcpFallback:      orig.tcpFallback,
+		platformFallback: true,
+		silent:           orig.silent,
+		duration:         time.Since(start),
 	}
 	for typ, values := range orig.records {
 		out.records[typ] = slices.Clone(values)
@@ -1116,6 +1115,9 @@ func renderInspection(p *core.Printer, res *result) {
 	if res.source != "" {
 		writeInspectionField(p, "Source", res.source)
 	}
+	if res.platformFallback {
+		writeInspectionField(p, "Fallback", "platform resolver used for addresses")
+	}
 	writeInspectionField(p, "Status", inspectionStatus(res))
 	if summary := resultSummary(res); summary != "" {
 		writeInspectionField(p, "Results", summary)
@@ -1371,13 +1373,17 @@ func renderSection(p *core.Printer, name string, records []record) {
 		p.Reset()
 		p.WriteString(" ")
 		p.Set(core.Dim)
-		if rec.hasTTL {
-			p.WriteString("(TTL ")
-			p.WriteString(formatTTL(rec.ttl))
-			p.WriteString(")")
-		} else {
-			p.WriteString("(TTL unavailable)")
+		p.WriteString("(")
+		if rec.source == recordSourcePlatform {
+			p.WriteString("platform resolver; ")
 		}
+		if rec.hasTTL {
+			p.WriteString("TTL ")
+			p.WriteString(formatTTL(rec.ttl))
+		} else {
+			p.WriteString("TTL unavailable")
+		}
+		p.WriteString(")")
 		p.Reset()
 		p.WriteString("\n")
 	}
