@@ -819,6 +819,43 @@ func TestLookupUsesPlatformResolver(t *testing.T) {
 	}
 }
 
+func TestPlatformResolverPreservesIPv6ZonesAndDeduplicatesAddresses(t *testing.T) {
+	origDefaultLookupIPAddr := defaultLookupIPAddr
+	t.Cleanup(func() {
+		defaultLookupIPAddr = origDefaultLookupIPAddr
+	})
+
+	defaultLookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return []net.IPAddr{
+			{IP: net.ParseIP("192.0.2.44")},
+			{IP: net.ParseIP("192.0.2.44")},
+			{IP: net.ParseIP("fe80::1"), Zone: "en0"},
+			{IP: net.ParseIP("fe80::1"), Zone: "en0"},
+			{IP: net.ParseIP("fe80::1"), Zone: "en1"},
+		}, nil
+	}
+
+	res, err := lookup(context.Background(), &Config{ResolvConfPath: emptyResolvConf(t)}, "printer.local", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(res.records["A"]), 1; got != want {
+		t.Fatalf("A record count = %d, want %d", got, want)
+	}
+	if got, want := len(res.records["AAAA"]), 2; got != want {
+		t.Fatalf("AAAA record count = %d, want %d", got, want)
+	}
+
+	p := core.TestPrinter(false)
+	render(p, res)
+	out := string(p.Bytes())
+	for _, want := range []string{"fe80::1%en0", "fe80::1%en1"} {
+		if strings.Count(out, want) != 1 {
+			t.Fatalf("output count for %q = %d, want 1:\n%s", want, strings.Count(out, want), out)
+		}
+	}
+}
+
 func TestLookupSystemNameserverReturnsTTL(t *testing.T) {
 	addr, stop := startUDPServer(t)
 	defer stop()

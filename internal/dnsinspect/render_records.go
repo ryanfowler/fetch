@@ -31,7 +31,7 @@ func (rec record) renderValue() string {
 	switch rec.typ {
 	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
 		if len(rec.address) > 0 {
-			return rec.address.String()
+			return (&net.IPAddr{IP: rec.address, Zone: rec.zone}).String()
 		}
 	case dnsmessage.TypeCNAME, dnsmessage.TypeNS:
 		if rec.target != "" {

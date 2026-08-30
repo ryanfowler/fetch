@@ -300,6 +300,10 @@ func (rec record) semanticKey() string {
 	switch rec.typ {
 	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
 		fmt.Fprintf(&b, "%x", []byte(rec.address))
+		if rec.zone != "" {
+			b.WriteByte('%')
+			b.WriteString(rec.zone)
+		}
 	case dnsmessage.TypeCNAME, dnsmessage.TypeNS:
 		if rec.target == "" && rec.presentation != "" {
 			return rec.presentation
