@@ -145,7 +145,7 @@ func TestInspectDOHShowsAAndAAAATTLs(t *testing.T) {
 func TestLookupDOHJSONPreservesTypedRecordData(t *testing.T) {
 	answers := map[string]string{
 		"NS":  `{"Status":0,"Answer":[{"name":"example.com.","type":2,"TTL":60,"data":"ns1.example.com."}]}`,
-		"TXT": `{"Status":0,"Answer":[{"name":"example.com.","type":16,"TTL":60,"data":"\"first\" \"second\""}]}`,
+		"TXT": `{"Status":0,"Answer":[{"name":"example.com.","type":16,"TTL":60,"data":"\"first\" \" second\" \"\""}]}`,
 		"MX":  `{"Status":0,"Answer":[{"name":"example.com.","type":15,"TTL":60,"data":"10 mail.example.com."}]}`,
 		"SOA": `{"Status":0,"Answer":[{"name":"example.com.","type":6,"TTL":60,"data":"ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"}]}`,
 		"SRV": `{"Status":0,"Answer":[{"name":"example.com.","type":33,"TTL":60,"data":"10 5 443 service.example.com."}]}`,
@@ -168,7 +168,7 @@ func TestLookupDOHJSONPreservesTypedRecordData(t *testing.T) {
 	if got := res.records["NS"][0].target; got != "ns1.example.com." {
 		t.Fatalf("NS target = %q", got)
 	}
-	if got := res.records["TXT"][0].txt; len(got) != 2 || string(got[0]) != "first" || string(got[1]) != "second" {
+	if got := res.records["TXT"][0].txt; len(got) != 3 || string(got[0]) != "first" || string(got[1]) != " second" || len(got[2]) != 0 {
 		t.Fatalf("TXT chunks = %#v", got)
 	}
 	if got := res.records["MX"][0]; got.preference != 10 || got.target != "mail.example.com." {
@@ -537,6 +537,40 @@ func TestLookupUDPRecordsReturnsTTL(t *testing.T) {
 	}
 	if got, want := records[0].ttl, uint32(42); got != want {
 		t.Fatalf("TTL = %d, want %d", got, want)
+	}
+}
+
+func TestLookupUDPRecordsPreservesTXTChunks(t *testing.T) {
+	addr, stop := startUDPServerWithAnswers(t, func(question dnsmessage.Question) []dnsmessage.Resource {
+		if question.Type != dnsmessage.TypeTXT {
+			return nil
+		}
+		return []dnsmessage.Resource{{
+			Header: dnsmessage.ResourceHeader{
+				Name:  question.Name,
+				Type:  dnsmessage.TypeTXT,
+				Class: dnsmessage.ClassINET,
+				TTL:   300,
+			},
+			Body: &dnsmessage.TXTResource{TXT: []string{"first", " second", ""}},
+		}}
+	})
+	defer stop()
+
+	records, err := lookupUDPRecords(context.Background(), addr, "example.com", queryType{
+		label:   "TXT",
+		dohType: "TXT",
+		dnsType: dnsmessage.TypeTXT,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want one TXT record", len(records))
+	}
+	got := records[0].txt
+	if len(got) != 3 || string(got[0]) != "first" || string(got[1]) != " second" || len(got[2]) != 0 {
+		t.Fatalf("TXT chunks = %#v, want preserved boundaries", got)
 	}
 }
 
@@ -1124,7 +1158,7 @@ func TestRenderUsesTypedDNSRecordData(t *testing.T) {
 	render(p, &result{host: "example.com", records: records})
 	out := string(p.Bytes())
 	for _, want := range []string{
-		"192.0.2.1", "2001:db8::1", "alias.example.", `"first" "second"`,
+		"192.0.2.1", "2001:db8::1", "alias.example.", "\"first\"\n", "\"second\"\n",
 		"10 mail.example.", "ns1.example.",
 		"ns1.example. hostmaster.example. serial=2026082901 refresh=3600 retry=600 expire=604800 minttl=300",
 		"10 5 443 service.example.", `0 issue "letsencrypt.org"`, "0 .", "1 . ALPN=h2",
@@ -1166,8 +1200,13 @@ func TestRenderTXTChunksAreQuotedAndCannotInjectLines(t *testing.T) {
 		"TXT": {{typ: dnsmessage.TypeTXT, txt: [][]byte{[]byte("line\nnext"), {0x1b, '[', 'A'}}}},
 	}})
 	out := string(p.Bytes())
-	if !strings.Contains(out, `"line\nnext" "\x1b[A"`) {
-		t.Fatalf("TXT chunks were not safely quoted:\n%s", out)
+	for _, want := range []string{"\"line\\nnext\"\n", "\"\\x1b[A\"\n"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("TXT chunk was not safely quoted: missing %q\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `"line\nnext" "\x1b[A"`) {
+		t.Fatalf("TXT chunks were rendered as one space-joined value: %q", out)
 	}
 	if strings.Contains(out, "line\nnext") || strings.ContainsRune(out, '\x1b') {
 		t.Fatalf("TXT data injected terminal layout or controls: %q", out)

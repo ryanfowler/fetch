@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -247,12 +248,8 @@ func TestLookupWireTypeAcceptsResponseAfterMalformedMatchingBurst(t *testing.T) 
 }
 
 func TestLookupWireTypeFallsBackToTCPWhenUDPIsTruncated(t *testing.T) {
-	server := newUDPTestServer(t)
+	server, tcp := newUDPAndTCPTestServer(t)
 	defer server.close()
-	tcp, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: server.port()})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer tcp.Close()
 
 	done := make(chan error, 1)
@@ -363,8 +360,32 @@ func newUDPTestServer(t *testing.T) *udpTestServer {
 	return &udpTestServer{udp: conn}
 }
 
+// newUDPAndTCPTestServer reserves the TCP port before binding UDP. A UDP and
+// TCP listener must share a port for fallback tests, but independently asking
+// the kernel for port zero can race with TCP listeners in other test packages.
+// Retry if a concurrent UDP listener takes the selected port.
+func newUDPAndTCPTestServer(t *testing.T) (*udpTestServer, *net.TCPListener) {
+	t.Helper()
+	for range 100 {
+		tcp, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := tcp.Addr().(*net.TCPAddr).Port
+		udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port})
+		if err == nil {
+			return &udpTestServer{udp: udp}, tcp
+		}
+		_ = tcp.Close()
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatal(err)
+		}
+	}
+	t.Fatal("could not reserve matching UDP and TCP test listeners")
+	return nil, nil
+}
+
 func (s *udpTestServer) addr() string { return s.udp.LocalAddr().String() }
-func (s *udpTestServer) port() int    { return s.udp.LocalAddr().(*net.UDPAddr).Port }
 
 func (s *udpTestServer) readQuery() ([]byte, *net.UDPAddr, error) {
 	if err := s.udp.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
