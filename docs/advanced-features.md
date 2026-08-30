@@ -87,7 +87,46 @@ perform a resolver query. It reports `Status: IP literal — DNS not performed`,
 and omits resolver, transport, security, and DNS timing fields. The command
 returns success.
 
-Without `--dns-server`, inspection queries the nameservers listed in the system resolver configuration (`/etc/resolv.conf`) directly, including on macOS. It reports every record type (A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and HTTPS) with per-record TTLs, but does not apply macOS scoped, per-interface, VPN, or `/etc/resolver` routing. On platforms without a usable resolver file (notably Windows), or when the name is resolved only through OS mechanisms (the hosts file, NSS modules, or mDNS), it uses the platform resolver for A and AAAA records without per-record TTLs. Platform-resolver records show their source and `TTL unavailable` individually. If direct DNS returns no address records, platform-resolver addresses are added while any records already returned by direct DNS remain visible. The `Lookup` section identifies this mixed resolver path and reports the platform fallback. With an explicit resolver, inspection queries the same record types concurrently. When system failover occurs, `Resolver` or `Resolvers` reports the nameserver(s) that actually answered. The default output is complete, and `-v` has no effect in DNS inspection mode. Use `-vv` for resolver and query internals, including the configured nameserver list, policy limits, normalization, caveats, responders, transport, duration, and failover attempts. For direct DNS lookups, when IDNA normalization changes the name, normal output includes `Query name` with the absolute punycode name sent to DNS. Single-label names also show their absolute query name; the root terminator is omitted for ordinary multi-label hostnames when it is the only difference. The default output uses `Lookup` and `Records` sections with the inspected name, resolver path, transport, transport security, source, status, result counts, query counts, and duration. Each record shows its normalized, fully qualified owner name before its value. Inspection output is written to stdout; invocation warnings and setup/configuration errors are written to stderr. If a query fails, successful records are retained, a `Failures` section reports the incomplete record types on stdout, and the command exits with status 1. `Transport security` describes encryption and certificate verification between fetch and the resolver; it does not indicate DNSSEC validation, which fetch does not perform. If a UDP response is truncated, fetch retries the query over TCP and reports the normal protocol fallback as `Transport: UDP → TCP fallback`, not as a warning. Use `-vv` to see which record-type queries used the fallback.
+The default result is a complete structured diagnostic on stdout. `Lookup`
+reports the inspected and normalized query names, resolver path, DNS transport,
+transport security, completion status, counts, and timing. An optional
+`Failures` section describes failed record-type queries, and `Records` contains
+the successful answers. Invocation warnings and setup/configuration errors go
+to stderr. A partial result keeps useful records on stdout, reports
+`Status: incomplete`, and exits with status 1; do not treat that nonzero status
+as proof that stdout is empty.
+
+Inspection queries A, AAAA, CNAME, TXT, MX, NS, SOA, SRV, CAA, SVCB, and
+HTTPS concurrently. Records retain their owner and per-record TTL and are
+rendered according to their DNS semantics. Ordering is deterministic and
+type-aware: addresses use numeric bytes, MX and SRV use their numeric priority
+fields, and HTTPS/SVCB parameters use a canonical representation.
+
+Without `--dns-server`, fetch first queries the nameservers listed in the
+system resolver configuration (`/etc/resolv.conf`) directly, including on
+macOS. `Resolver` or `Resolvers` identifies the nameserver(s) that actually
+answered. Direct queries do not apply macOS scoped, per-interface, VPN, or
+`/etc/resolver` routing. On platforms without a usable resolver file (notably
+Windows), or for names supplied only through the hosts file, NSS, or mDNS, the
+platform resolver supplies A and AAAA records. If direct DNS returned other
+records but no addresses, those records remain visible and platform addresses
+are added. Platform records identify their source and show `TTL unavailable`;
+the `Lookup` section identifies a platform-only or mixed path.
+
+An explicit resolver uses the same concurrent record queries over UDP, TCP,
+DoT, DoQ, or DoH. `Transport security` describes encryption and certificate
+verification only between fetch and that resolver. It does not indicate
+DNSSEC validation; fetch does not validate DNSSEC chains locally. A truncated
+UDP response is retried over TCP and reported as normal transport metadata
+(`Transport: UDP → TCP fallback`), not as a warning.
+
+The default output is complete, and `-v` has no effect in DNS inspection mode.
+Use `-vv` for configured nameservers, policy limits, normalization, resolver
+caveats, responders, transport, per-query duration, failover attempts, and the
+record types that required TCP fallback. When IDNA normalization changes a
+direct DNS name, normal output includes the absolute punycode `Query name`.
+Single-label names also show their absolute query name; the root terminator is
+omitted for ordinary multi-label hostnames when it is the only difference.
 
 At `-vv`, the `System resolver` section describes the direct system path. It shows the resolver configuration file, direct nameserver routing, and that search domains are not applied. On macOS it also reports that scoped, VPN, per-interface, and `/etc/resolver` routing is not applied. On other platforms it reports that OS resolver routing is not applied by direct queries. These caveats describe the direct DNS portion only; a platform fallback uses the OS resolver for addresses.
 
