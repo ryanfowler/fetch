@@ -603,6 +603,18 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("dns inspection skips IP literals", func(t *testing.T) {
+		t.Parallel()
+		for _, target := range []string{"http://127.0.0.1", "http://[2001:db8::1]"} {
+			t.Run(target, func(t *testing.T) {
+				res := runFetch(t, fetchPath, "--inspect-dns", target)
+				assertExitCode(t, 0, res)
+				assertBufEmpty(t, res.stderr)
+				assertBufContains(t, res.stdout, "Status: IP literal — DNS not performed")
+			})
+		}
+	})
+
 	t.Run("dns over https", func(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {

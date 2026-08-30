@@ -355,26 +355,60 @@ func TestInspectNormalizesIDNForDNSQueries(t *testing.T) {
 }
 
 func TestInspectIPLiteralSkipsLookup(t *testing.T) {
-	p := core.TestPrinter(false)
-	status := Inspect(context.Background(), p, &Config{
-		URL: mustURL(t, "http://127.0.0.1"),
-	})
-	if status != 0 {
-		t.Fatalf("status = %d, want 0\n%s", status, p.Bytes())
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "IPv4", url: "http://127.0.0.1", want: "127.0.0.1"},
+		{name: "IPv6", url: "http://[2001:db8::1]", want: "2001:db8::1"},
+		{name: "scoped IPv6", url: "http://[fe80::1%25lo0]", want: "fe80::1%lo0"},
+		{name: "scoped IPv6 with encoded zone percent", url: "http://[fe80::1%25en%25foo]", want: "fe80::1%en%foo"},
+		{name: "scoped IPv4-mapped IPv6", url: "http://[::ffff:192.0.2.1%25lo0]", want: "::ffff:192.0.2.1%lo0"},
 	}
-	out := string(p.Bytes())
-	for _, want := range []string{
-		"Lookup\n",
-		"Name: 127.0.0.1",
-		"Status: IP literal — DNS not performed",
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := core.TestPrinter(false)
+			status := Inspect(context.Background(), p, &Config{URL: mustURL(t, tt.url)})
+			if status != 0 {
+				t.Fatalf("status = %d, want 0\n%s", status, p.Bytes())
+			}
+			out := string(p.Bytes())
+			for _, want := range []string{
+				"Lookup\n",
+				"Name: " + tt.want,
+				"Status: IP literal — DNS not performed",
+			} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("output missing %q:\n%s", want, out)
+				}
+			}
+			for _, unwanted := range []string{"Resolver:", "Transport:", "Transport security:", "Timing:"} {
+				if strings.Contains(out, unwanted) {
+					t.Fatalf("IP literal output contains DNS field %q:\n%s", unwanted, out)
+				}
+			}
+		})
+	}
+}
+
+func TestIsIPLiteral(t *testing.T) {
+	for _, tt := range []struct {
+		host string
+		want bool
+	}{
+		{host: "127.0.0.1", want: true},
+		{host: "2001:db8::1", want: true},
+		{host: "fe80::1%lo0", want: true},
+		{host: "fe80::1%en%foo", want: true},
+		{host: "127.0.0.1%bad", want: false},
+		{host: "::ffff:192.0.2.1%lo0", want: true},
+		{host: "example.com", want: false},
+		{host: "2001:db8::1%", want: false},
 	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("output missing %q:\n%s", want, out)
-		}
-	}
-	for _, unwanted := range []string{"Resolver:", "Transport:", "Transport security:", "Timing:"} {
-		if strings.Contains(out, unwanted) {
-			t.Fatalf("IP literal output contains DNS field %q:\n%s", unwanted, out)
+		if got := isIPLiteral(tt.host); got != tt.want {
+			t.Errorf("isIPLiteral(%q) = %t, want %t", tt.host, got, tt.want)
 		}
 	}
 }
