@@ -1159,14 +1159,72 @@ func TestRenderUsesTypedDNSRecordData(t *testing.T) {
 	out := string(p.Bytes())
 	for _, want := range []string{
 		"192.0.2.1", "2001:db8::1", "alias.example.", "\"first\"\n", "\"second\"\n",
-		"10 mail.example.", "ns1.example.",
-		"ns1.example. hostmaster.example. serial=2026082901 refresh=3600 retry=600 expire=604800 minttl=300",
-		"10 5 443 service.example.", `0 issue "letsencrypt.org"`, "0 .", "1 . ALPN=h2",
+		"Priority: 10", "mail.example.", "ns1.example.",
+		"Primary NS: ns1.example.", "Responsible: hostmaster.example.",
+		"Serial: 2026082901", "Refresh: 1h", "Retry: 10m", "Expire: 1w", "Minimum TTL: 5m",
+		"Weight: 5", "service.example.:443",
+		"Flags: 0", "Tag: issue", "Value: letsencrypt.org", "0 .", "1 . ALPN=h2",
 		"TYPE99", "0xdead",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("typed record output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestRenderComplexRecordsUseLabeledFields(t *testing.T) {
+	p := core.TestPrinter(false)
+	rawCAA := append([]byte{1, 5}, []byte("issueacme.org")...)
+	render(p, &result{host: "example.com", records: map[string][]record{
+		"MX": {{
+			owner: "example.com.", typ: dnsmessage.TypeMX, preference: 10,
+			target: "mail.example.com.", ttl: 3600, hasTTL: true,
+		}},
+		"SRV": {{
+			owner: "_https._tcp.example.com.", typ: dnsmessage.TypeSRV,
+			priority: 20, weight: 5, port: 443, target: "service.example.com.",
+			ttl: 300, hasTTL: true,
+		}},
+		"SOA": {{
+			owner: "example.com.", typ: dnsmessage.TypeSOA,
+			target: "ns1.example.com.", target2: "hostmaster.example.com.",
+			soa: [5]uint32{2026082901, 3600, 600, 604800, 300}, ttl: 3600, hasTTL: true,
+		}},
+		"CAA": {{
+			owner: "example.com.", typ: dnsTypeCAA, rawRData: rawCAA,
+			ttl: 3600, hasTTL: true,
+		}},
+	}})
+
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"example.com. → mail.example.com.", "     Priority: 10", "     TTL: 1h",
+		"_https._tcp.example.com. → service.example.com.:443", "     Weight: 5",
+		"example.com.\n", "Primary NS: ns1.example.com.", "Responsible: hostmaster.example.com.",
+		"Serial: 2026082901", "Refresh: 1h", "Retry: 10m", "Expire: 1w", "Minimum TTL: 5m",
+		"Flags: 1", "Tag: issue", "Value: acme.org",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("complex record output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderComplexRecordTreeContinuationStopsAtLastRecord(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{host: "example.com", records: map[string][]record{
+		"MX": {
+			{typ: dnsmessage.TypeMX, preference: 2, target: "first.example."},
+			{typ: dnsmessage.TypeMX, preference: 10, target: "last.example."},
+		},
+	}})
+
+	out := string(p.Bytes())
+	if !strings.Contains(out, "  │  Priority: 2") {
+		t.Fatalf("non-final record details lost tree continuation:\n%s", out)
+	}
+	if strings.Contains(out, "  │  Priority: 10") || !strings.Contains(out, "     Priority: 10") {
+		t.Fatalf("final record details retained tree continuation:\n%s", out)
 	}
 }
 
@@ -1265,8 +1323,8 @@ func TestRenderSortsTypedNumericFieldsNumerically(t *testing.T) {
 		},
 	}})
 	out := string(p.Bytes())
-	two := strings.Index(out, "2 two.example.")
-	ten := strings.Index(out, "10 ten.example.")
+	two := strings.Index(out, "two.example.")
+	ten := strings.Index(out, "ten.example.")
 	if two < 0 || ten < 0 || two > ten {
 		t.Fatalf("MX records are not sorted by numeric preference:\n%s", out)
 	}
