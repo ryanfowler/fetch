@@ -1012,6 +1012,41 @@ func TestDNSInspectionVerboseParity(t *testing.T) {
 	}
 }
 
+func TestDirectSystemResolverCaveatsArePlatformSpecific(t *testing.T) {
+	generic := directSystemResolverCaveats("linux")
+	if generic.routing != "direct nameserver queries" || generic.searchDomains != "not applied" {
+		t.Fatalf("generic resolver caveats = %#v", generic)
+	}
+	if generic.osRouting != "not applied by direct queries" || generic.platformRouting != "" {
+		t.Fatalf("generic platform caveat = %#v", generic)
+	}
+
+	macOS := directSystemResolverCaveats("darwin")
+	if macOS.osRouting != "" {
+		t.Fatalf("macOS unexpectedly has generic OS caveat = %q", macOS.osRouting)
+	}
+	if want := "scoped/VPN/per-interface and /etc/resolver routing not applied"; macOS.platformRouting != want {
+		t.Fatalf("macOS platform caveat = %q, want %q", macOS.platformRouting, want)
+	}
+}
+
+func TestSetSystemResolverDetailsReportsDirectQueryCaveats(t *testing.T) {
+	out := &result{}
+	setSystemResolverDetails(out, resolver.SystemResolverPolicy{
+		Nameservers:    []string{"192.0.2.53:53"},
+		ResolvConfPath: "/etc/resolv.conf",
+	})
+	if out.resolverConfiguration != "/etc/resolv.conf" {
+		t.Fatalf("configuration = %q, want /etc/resolv.conf", out.resolverConfiguration)
+	}
+	if out.resolverRouting != "direct nameserver queries" || out.resolverSearchDomains != "not applied" {
+		t.Fatalf("direct resolver path = %#v", out)
+	}
+	if out.resolverOSRouting == "" && out.resolverPlatformRouting == "" {
+		t.Fatalf("direct resolver caveat is missing: %#v", out)
+	}
+}
+
 func TestRenderExtraVerboseIncludesResolverInternals(t *testing.T) {
 	p := core.TestPrinter(false)
 	render(p, &result{
@@ -1038,7 +1073,7 @@ func TestRenderExtraVerboseIncludesResolverInternals(t *testing.T) {
 	})
 	out := string(p.Bytes())
 	for _, want := range []string{
-		"Resolver details",
+		"System resolver",
 		"Query name: example.com",
 		"Configured nameservers: 192.0.2.53:53, 192.0.2.54:53",
 		"Resolver attempts: 3 per nameserver",
