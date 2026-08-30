@@ -927,6 +927,76 @@ func TestSystemResolverSummaryUsesActualResponders(t *testing.T) {
 	}
 }
 
+func TestDNSInspectionVerboseParity(t *testing.T) {
+	base := &result{
+		host:      "example.com",
+		queryName: "example.com",
+		transport: "UDP",
+		security:  string(resolver.SecurityPlaintext),
+		records: map[string][]record{
+			"A": {{owner: "example.com.", typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1"), hasTTL: true, ttl: 60}},
+		},
+	}
+
+	rendered := func(verbosity core.Verbosity) string {
+		res := *base
+		res.verbosity = verbosity
+		p := core.TestPrinter(false)
+		render(p, &res)
+		return string(p.Bytes())
+	}
+	if normal, verbose := rendered(core.VNormal), rendered(core.VVerbose); normal != verbose {
+		t.Fatalf("-v changed DNS inspection output:\nnormal:\n%s\nverbose:\n%s", normal, verbose)
+	}
+	if silent := rendered(core.VSilent); silent != rendered(core.VNormal) {
+		t.Fatalf("silent mode changed structured DNS inspection output")
+	}
+}
+
+func TestRenderExtraVerboseIncludesResolverInternals(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{
+		host:                  "example.com",
+		queryName:             "example.com",
+		verbosity:             core.VExtraVerbose,
+		configuredNameservers: []string{"192.0.2.53:53", "192.0.2.54:53"},
+		resolverAttempts:      3,
+		resolverTimeout:       2 * time.Second,
+		resolverRotation:      "enabled",
+		resolverConfiguration: "/etc/resolv.conf",
+		resolverRouting:       "direct nameserver queries",
+		resolverSearchDomains: "not applied",
+		resolverOSRouting:     "not applied by direct queries",
+		queries: []queryResult{{
+			typ:       inspectTypes[0],
+			status:    queryStatusNoData,
+			responder: "192.0.2.54:53",
+			transport: resolver.TransportUDP,
+			duration:  4 * time.Millisecond,
+			attempts:  2,
+		}},
+		records: map[string][]record{},
+	})
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"Resolver details",
+		"Query name: example.com",
+		"Configured nameservers: 192.0.2.53:53, 192.0.2.54:53",
+		"Resolver attempts: 3 per nameserver",
+		"Resolver timeout: 2s",
+		"Resolver rotation: enabled",
+		"Configuration: /etc/resolv.conf",
+		"Routing: direct nameserver queries",
+		"Search domains: not applied",
+		"OS resolver routing: not applied by direct queries",
+		"A: no data · UDP · 192.0.2.54:53 · 4ms · 2 attempts",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("extra verbose output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderQueryDetailsIncludesResponderMetadata(t *testing.T) {
 	p := core.TestPrinter(false)
 	render(p, &result{

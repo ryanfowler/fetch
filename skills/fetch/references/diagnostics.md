@@ -24,7 +24,9 @@ record types are queried concurrently. The default output uses `Lookup` and
 security, source, status, result counts, query counts, and timing. Each record
 shows its normalized, fully qualified owner name before its value. When system
 failover occurs, `Resolver` or `Resolvers` identifies the nameserver(s) that
-actually answered. Use `-vv` for each query's responder, transport, duration,
+actually answered. The default output is complete, and `-v` has no effect in DNS
+inspection mode. Use `-vv` for resolver and query internals, including the configured
+nameserver list, policy limits, normalization, caveats, responders, transport, duration,
 and failover attempts. Successful records remain visible when one query fails;
 the `Lookup` section reports an incomplete status and the `Failures` section
 identifies the failed types. The
