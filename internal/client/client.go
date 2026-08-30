@@ -2128,7 +2128,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	// Decode only the encodings permitted by the request's compression mode.
 	// Keep this outside net/http's transport so all HTTP versions use the same
 	// streaming decoders and malformed encodings produce the same error.
-	if resp.Body != nil {
+	if responseCanHaveBody(resp) {
 		if policy, ok := responseEncodingPolicyFromRequest(req); ok {
 			if !policy.enabled {
 				return resp, nil
@@ -2154,6 +2154,31 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	return resp, nil
+}
+
+// responseCanHaveBody reports whether HTTP semantics permit a response body.
+// Servers commonly include representation metadata such as Content-Encoding
+// on HEAD and 304 responses even though no encoded bytes follow. Constructing
+// a streaming decoder for those responses would incorrectly turn valid
+// metadata-only responses into errors such as "gzip: EOF".
+func responseCanHaveBody(resp *http.Response) bool {
+	if resp == nil || resp.Body == nil || resp.Body == http.NoBody {
+		return false
+	}
+	if resp.Request != nil {
+		switch resp.Request.Method {
+		case http.MethodHead:
+			return false
+		case http.MethodConnect:
+			if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+				return false
+			}
+		}
+	}
+	return resp.StatusCode >= http.StatusOK &&
+		resp.StatusCode != http.StatusNoContent &&
+		resp.StatusCode != http.StatusResetContent &&
+		resp.StatusCode != http.StatusNotModified
 }
 
 type responseBodyDecoder func(io.ReadCloser) (io.ReadCloser, error)

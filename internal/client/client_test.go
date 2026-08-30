@@ -2690,6 +2690,57 @@ func TestDoOnlyDecodesAllowedCompression(t *testing.T) {
 	}
 }
 
+func TestDoDoesNotDecodeMetadataOnlyResponses(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		statusCode int
+	}{
+		{name: "HEAD", method: http.MethodHead, statusCode: http.StatusOK},
+		{name: "successful CONNECT", method: http.MethodConnect, statusCode: http.StatusOK},
+		{name: "informational", method: http.MethodGet, statusCode: http.StatusSwitchingProtocols},
+		{name: "no content", method: http.MethodGet, statusCode: http.StatusNoContent},
+		{name: "reset content", method: http.MethodGet, statusCode: http.StatusResetContent},
+		{name: "not modified", method: http.MethodGet, statusCode: http.StatusNotModified},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			closed := false
+			c := &Client{c: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    tt.statusCode,
+					ContentLength: 128,
+					Header:        http.Header{"Content-Encoding": {"gzip"}},
+					Body:          &closeFlagReadCloser{Reader: bytes.NewReader(nil), closedPtr: &closed},
+					Request:       req,
+				}, nil
+			})}}
+			req, err := c.NewRequest(context.Background(), RequestConfig{
+				Compression: core.CompressionGzip,
+				Method:      tt.method,
+				URL:         mustURL(t, "https://example.com"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := c.Do(req)
+			if err != nil {
+				t.Fatalf("Do returned an error for a response without a body: %v", err)
+			}
+			if resp.ContentLength != 128 || WireContentLength(resp) != 128 {
+				t.Fatalf("content lengths = %d and %d, want encoded metadata length 128", resp.ContentLength, WireContentLength(resp))
+			}
+			if err := resp.Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if !closed {
+				t.Fatal("response body was not closed")
+			}
+		})
+	}
+}
+
 func TestDoRejectsDisallowedAndMalformedContentEncoding(t *testing.T) {
 	tests := []struct {
 		name     string
