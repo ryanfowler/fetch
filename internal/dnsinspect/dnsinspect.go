@@ -391,6 +391,7 @@ func runFanOut(ctx context.Context, host string, target resolverTargetInfo, syst
 		wg.Add(1)
 		go func(i int, qt queryType) {
 			defer wg.Done()
+			queryStart := time.Now()
 			results[i].typ = qt
 			switch {
 			case systemPolicy != nil:
@@ -409,6 +410,14 @@ func runFanOut(ctx context.Context, host string, target resolverTargetInfo, syst
 				results[i].records, results[i].err = lookupDOHRecordsWithClient(ctx, dohClient, host, qt)
 			default:
 				results[i].records, results[i].tcpFallback, results[i].err = lookupUDPRecordsWithFallback(ctx, target.udpAddr, host, qt)
+			}
+			// System-nameserver queries expose resolver metadata that includes
+			// failover and retry time. The other backends do not, so measure
+			// their query operation here. This starts after shared resolver
+			// setup, which prevents bootstrap/connect time from being charged
+			// to every concurrently issued query.
+			if results[i].duration <= 0 {
+				results[i].duration = time.Since(queryStart)
 			}
 		}(i, qt)
 	}
