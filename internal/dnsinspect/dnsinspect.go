@@ -87,10 +87,16 @@ type record struct {
 
 type result struct {
 	host           string
+	queryName      string
 	resolver       string
+	transport      string
 	security       string
+	source         string
 	records        map[string][]record
 	failures       []queryFailure
+	queryTotal     int
+	queryWithData  int
+	queryNoData    int
 	duration       time.Duration
 	tcpFallback    bool
 	ttlUnavailable bool
@@ -158,10 +164,6 @@ func Inspect(ctx context.Context, p *core.Printer, cfg *Config) int {
 // non-zero exit code on failure. Keeping these streams separate lets callers
 // pipe a successful inspection without also receiving diagnostics.
 func InspectWithError(ctx context.Context, output, errorOutput *core.Printer, cfg *Config) int {
-	server := cfg.DNSServer
-	if cfg.Endpoint != nil {
-		server = cfg.Endpoint.URL()
-	}
 	host := cfg.URL.Hostname()
 	if host == "" {
 		writeDNSError(errorOutput, errors.New("--inspect-dns requires a hostname"))
@@ -180,9 +182,8 @@ func InspectWithError(ctx context.Context, output, errorOutput *core.Printer, cf
 	defer cancel()
 
 	start := time.Now()
-	if ip := net.ParseIP(host); ip != nil {
-		target := resolverTarget(server)
-		renderIPLiteral(output, host, ip, target.label, time.Since(start))
+	if net.ParseIP(host) != nil {
+		renderIPLiteral(output, host)
 		return flushInspectionOutput(output, errorOutput)
 	}
 
@@ -193,9 +194,6 @@ func InspectWithError(ctx context.Context, output, errorOutput *core.Printer, cf
 	}
 	renderWithWarning(output, errorOutput, res)
 	partial := len(res.failures) > 0
-	if partial {
-		core.WriteWarningMsgIf(errorOutput, formatPartialWarning(res.failures), res.silent)
-	}
 	if flushInspectionOutput(output, errorOutput) != 0 {
 		return 1
 	}
@@ -212,11 +210,13 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	}
 	target := resolverTarget(server)
 	out := &result{
-		host:     host,
-		resolver: target.label,
-		security: resolverSecurity(cfg, server),
-		records:  make(map[string][]record),
-		silent:   cfg.Silent,
+		host:      host,
+		resolver:  target.label,
+		transport: inspectionTransport(cfg, server),
+		security:  resolverSecurity(cfg, server),
+		source:    inspectionSource(server),
+		records:   make(map[string][]record),
+		silent:    cfg.Silent,
 	}
 
 	// A missing --dns-server prefers the resolv.conf nameservers, which expose
@@ -229,13 +229,18 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		if policy != nil && len(policy.Nameservers) > 0 {
 			ordered := resolver.RotateSystemResolverPolicy(*policy)
 			systemPolicy = &ordered
-			target = resolverTargetInfo{label: "udp " + ordered.Nameservers[0], udpAddr: ordered.Nameservers[0]}
+			target = resolverTargetInfo{label: ordered.Nameservers[0], udpAddr: ordered.Nameservers[0]}
 			out.resolver = target.label
+			out.transport = "UDP"
 			out.security = string(resolver.SecurityPlaintext)
+			out.source = "system resolver configuration"
 		} else {
 			systemPolicy = nil
 			target = resolverTargetInfo{label: "system resolver", useDefault: true}
 			out.resolver = target.label
+			out.transport = "platform resolver"
+			out.security = "platform resolver (OS-managed security)"
+			out.source = "platform resolver"
 			out.ttlUnavailable = true
 		}
 	}
@@ -307,6 +312,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	if err != nil {
 		return nil, fmt.Errorf("normalize hostname %s: %w", host, err)
 	}
+	out.queryName = queryHost
 	queryCtx, cancelQuery := contextForDirectLookup(ctx, systemPolicy != nil)
 	defer cancelQuery()
 	results := runFanOut(queryCtx, queryHost, target, systemPolicy, streamClient, doqClient, dohClient)
@@ -328,7 +334,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		}
 	}
 
-	if recordCount(out) > 0 || len(out.failures) > 0 {
+	if recordCount(out) > 0 || len(out.failures) > 0 || out.queryTotal > 0 {
 		return out, nil
 	}
 	if firstResult != nil {
@@ -393,13 +399,21 @@ func lookupSystemRecords(ctx context.Context, policy *resolver.SystemResolverPol
 func aggregate(out *result, results []queryResult, start time.Time) error {
 	var firstResult error
 	seen := make(map[string]int)
+	out.queryTotal = len(results)
 	for _, query := range results {
 		out.tcpFallback = out.tcpFallback || query.tcpFallback
-		if query.err != nil && !errors.Is(query.err, resolver.ErrDNSNoData) {
+		switch {
+		case query.err != nil && !errors.Is(query.err, resolver.ErrDNSNoData):
 			out.failures = append(out.failures, queryFailure{label: query.label, err: query.err})
 			if firstResult == nil {
 				firstResult = query.err
 			}
+		case query.err != nil && errors.Is(query.err, resolver.ErrDNSNoData):
+			out.queryNoData++
+		case len(query.records) > 0:
+			out.queryWithData++
+		default:
+			out.queryNoData++
 		}
 		for _, rec := range query.records {
 			key := rec.typ + "\x00" + rec.value
@@ -510,10 +524,16 @@ func isASCII(value string) bool {
 func platformResult(orig *result, records []record, start time.Time) *result {
 	out := &result{
 		host:           orig.host,
+		queryName:      orig.queryName,
 		resolver:       orig.resolver + " (platform fallback)",
+		transport:      "mixed",
 		security:       "mixed (direct nameserver and platform resolver)",
+		source:         "system resolver configuration with platform fallback",
 		records:        make(map[string][]record, len(orig.records)),
 		failures:       slices.Clone(orig.failures),
+		queryTotal:     orig.queryTotal,
+		queryWithData:  orig.queryWithData,
+		queryNoData:    orig.queryNoData,
 		tcpFallback:    orig.tcpFallback,
 		silent:         orig.silent,
 		duration:       time.Since(start),
@@ -879,9 +899,67 @@ func resolverTarget(server *url.URL) resolverTargetInfo {
 	case server == nil:
 		return resolverTargetInfo{label: "system resolver", useDefault: true}
 	case server.Scheme == "":
-		return resolverTargetInfo{label: "udp " + server.Host, udpAddr: server.Host}
+		return resolverTargetInfo{label: server.Host, udpAddr: server.Host}
 	default:
 		return resolverTargetInfo{label: server.String()}
+	}
+}
+
+func inspectionSource(server *url.URL) string {
+	if server == nil {
+		return "system resolver configuration"
+	}
+	return "configured resolver endpoint"
+}
+
+func inspectionTransport(cfg *Config, server *url.URL) string {
+	if cfg.Endpoint != nil {
+		return displayTransport(cfg.Endpoint.Transport)
+	}
+	if server == nil {
+		return "platform resolver"
+	}
+	switch strings.ToLower(server.Scheme) {
+	case "tcp":
+		return "TCP"
+	case "tls", "dot":
+		return "TLS (DoT)"
+	case "quic", "doq":
+		return "QUIC (DoQ)"
+	case "http", "https":
+		return "HTTPS (DoH)"
+	default:
+		return "UDP"
+	}
+}
+
+func displayTransport(transport resolver.Transport) string {
+	switch transport {
+	case resolver.TransportTCP:
+		return "TCP"
+	case resolver.TransportTLS:
+		return "TLS (DoT)"
+	case resolver.TransportQUIC:
+		return "QUIC (DoQ)"
+	case resolver.TransportHTTPS:
+		return "HTTPS (DoH)"
+	default:
+		return "UDP"
+	}
+}
+
+func displaySecurity(security string) string {
+	switch security {
+	case string(resolver.SecurityPlaintext):
+		return "plaintext"
+	case string(resolver.SecurityVerifiedEncrypted):
+		return "verified TLS"
+	case string(resolver.SecurityUnverifiedEncrypt):
+		return "encrypted, certificate verification disabled"
+	case "platform resolver (OS-managed security)":
+		return "OS-managed / unknown to fetch"
+	default:
+		return security
 	}
 }
 
@@ -921,38 +999,10 @@ func typeLabel(typ dnsmessage.Type) string {
 	}
 }
 
-func renderIPLiteral(p *core.Printer, host string, ip net.IP, resolver string, duration time.Duration) {
-	p.WriteInfoPrefix()
-	p.Set(core.Bold)
-	p.Set(core.Cyan)
-	p.WriteString("DNS lookup")
-	p.Reset()
-	p.WriteString(": ")
-	p.Set(core.Bold)
-	p.WriteString(core.TerminalSafeText(host))
-	p.Reset()
-	p.WriteString("\n")
-
-	p.WriteInfoPrefix()
-	p.WriteString("Resolver: ")
-	p.Set(core.Italic)
-	p.WriteString(core.TerminalSafeText(resolver))
-	p.Reset()
-	p.WriteString("\n\n")
-
-	p.WriteInfoPrefix()
-	p.WriteString("  IP literal: ")
-	p.Set(core.Green)
-	p.WriteString(ip.String())
-	p.Reset()
-	p.WriteString(" (no DNS query needed)\n")
-
-	p.WriteInfoPrefix()
-	p.WriteString("  Duration: ")
-	p.Set(core.Dim)
-	p.WriteString(formatDuration(duration))
-	p.Reset()
-	p.WriteString("\n")
+func renderIPLiteral(p *core.Printer, host string) {
+	renderInspectionSection(p, "Lookup")
+	writeInspectionField(p, "Name", host)
+	writeInspectionField(p, "Status", "IP literal — DNS not performed")
 }
 
 const maxPartialErrorBytes = 256
@@ -968,79 +1018,169 @@ func conciseDiagnostic(text string) string {
 	return text[:cut] + "..."
 }
 
-func formatPartialWarning(failures []queryFailure) string {
-	parts := make([]string, 0, len(failures))
-	for _, failure := range failures {
-		if failure.err == nil {
-			parts = append(parts, failure.label)
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%s (%s)", failure.label, conciseDiagnostic(failure.err.Error())))
-	}
-	return "DNS inspection incomplete; failed record types: " + strings.Join(parts, ", ")
-}
-
 func render(p *core.Printer, res *result) {
 	renderWithWarning(p, p, res)
 }
 
 func renderWithWarning(p, warningOutput *core.Printer, res *result) {
-	p.WriteInfoPrefix()
-	p.Set(core.Bold)
-	p.Set(core.Cyan)
-	p.WriteString("DNS lookup")
-	p.Reset()
-	p.WriteString(": ")
-	p.Set(core.Bold)
-	p.WriteString(core.TerminalSafeText(res.host))
-	p.Reset()
-	p.WriteString("\n")
-
-	p.WriteInfoPrefix()
-	p.WriteString("Resolver: ")
-	p.Set(core.Italic)
-	p.WriteString(core.TerminalSafeText(res.resolver))
-	p.Reset()
-	p.WriteString("\n")
-	p.WriteInfoPrefix()
-	p.WriteString("Security: ")
-	p.WriteString(core.TerminalSafeText(res.security))
-	p.WriteString("\n")
-	if res.ttlUnavailable {
-		p.WriteInfoPrefix()
-		p.WriteString("TTL: unavailable (platform resolver does not provide per-record TTLs)\n")
-	}
+	renderInspection(p, res)
 	if res.tcpFallback {
 		core.WriteWarningMsgIf(warningOutput, "UDP response was truncated; used TCP fallback", res.silent)
 	}
-	p.WriteInfoPrefix()
-	p.WriteString("\n")
+}
 
+// renderInspection writes the structured DNS diagnostic view. The lookup
+// summary is deliberately separate from record rendering so that the output
+// remains useful even when no record data is available.
+func renderInspection(p *core.Printer, res *result) {
+	renderInspectionSection(p, "Lookup")
+	writeInspectionField(p, "Name", res.host)
+	if res.queryName != "" && res.queryName != res.host {
+		writeInspectionField(p, "Query name", res.queryName)
+	}
+	if res.resolver != "" {
+		writeInspectionField(p, "Resolver", res.resolver)
+	}
+	if res.transport != "" {
+		writeInspectionField(p, "Transport", res.transport)
+	}
+	if res.security != "" {
+		writeInspectionField(p, "Transport security", displaySecurity(res.security))
+	}
+	if res.source != "" {
+		writeInspectionField(p, "Source", res.source)
+	}
+	writeInspectionField(p, "Status", inspectionStatus(res))
+	if summary := resultSummary(res); summary != "" {
+		writeInspectionField(p, "Results", summary)
+	}
+	if summary := querySummary(res); summary != "" {
+		writeInspectionField(p, "Queries", summary)
+	}
+	if res.duration > 0 {
+		writeInspectionField(p, "Timing", formatDuration(res.duration))
+	}
+
+	if len(res.failures) > 0 {
+		writeInspectionBlankLine(p)
+		renderInspectionSection(p, "Failures")
+		renderFailures(p, res.failures)
+	}
+	writeInspectionBlankLine(p)
+	renderInspectionSection(p, "Records")
+	if recordCount(res) == 0 {
+		return
+	}
 	for _, qt := range inspectTypes {
 		renderSection(p, qt.label, res.records[qt.label])
 	}
 	renderOtherSections(p, res.records)
+}
 
+func renderFailures(p *core.Printer, failures []queryFailure) {
+	type failureGroup struct {
+		labels []string
+		err    string
+	}
+	groups := make([]failureGroup, 0, len(failures))
+	indices := make(map[string]int, len(failures))
+	for _, failure := range failures {
+		errText := "query failed"
+		if failure.err != nil {
+			errText = conciseDiagnostic(failure.err.Error())
+		}
+		idx, ok := indices[errText]
+		if !ok {
+			indices[errText] = len(groups)
+			groups = append(groups, failureGroup{err: errText})
+			idx = len(groups) - 1
+		}
+		groups[idx].labels = append(groups[idx].labels, failure.label)
+	}
+	for _, group := range groups {
+		label := strings.Join(group.labels, ", ")
+		if len(group.labels) == len(inspectTypes) {
+			label = "All record types"
+		}
+		writeInspectionField(p, label, group.err)
+	}
+}
+
+func renderInspectionSection(p *core.Printer, heading string) {
 	p.WriteInfoPrefix()
-	p.WriteString("  Addresses: ")
 	p.Set(core.Bold)
-	p.WriteString(fmt.Sprintf("%d", len(res.records["A"])+len(res.records["AAAA"])))
+	p.WriteString(core.TerminalSafeText(heading))
 	p.Reset()
 	p.WriteString("\n")
+}
 
+func writeInspectionField(p *core.Printer, label, value string) {
 	p.WriteInfoPrefix()
-	p.WriteString("  Records: ")
-	p.Set(core.Bold)
-	p.WriteString(fmt.Sprintf("%d", recordCount(res)))
-	p.Reset()
+	p.WriteString("  ")
+	p.WriteString(label)
+	p.WriteString(": ")
+	p.WriteString(core.TerminalSafeText(value))
 	p.WriteString("\n")
+}
 
+func writeInspectionBlankLine(p *core.Printer) {
 	p.WriteInfoPrefix()
-	p.WriteString("  Duration: ")
-	p.Set(core.Dim)
-	p.WriteString(formatDuration(res.duration))
-	p.Reset()
 	p.WriteString("\n")
+}
+
+func inspectionStatus(res *result) string {
+	if len(res.failures) == 0 {
+		return "complete"
+	}
+	if res.queryTotal > 0 {
+		return fmt.Sprintf("incomplete — %d of %d queries failed", len(res.failures), res.queryTotal)
+	}
+	return "incomplete"
+}
+
+func resultSummary(res *result) string {
+	addresses := len(res.records["A"]) + len(res.records["AAAA"])
+	return strings.Join([]string{
+		countPhrase(addresses, "address", "addresses"),
+		countPhrase(recordCount(res), "record", "records"),
+		countPhrase(recordTypeCount(res), "record type", "record types"),
+	}, " · ")
+}
+
+func querySummary(res *result) string {
+	if res.queryTotal == 0 {
+		return ""
+	}
+	parts := []string{
+		queryCountPhrase(res.queryTotal, "total"),
+		queryCountPhrase(res.queryWithData, "with data"),
+		queryCountPhrase(res.queryNoData, "no data"),
+	}
+	if len(res.failures) > 0 {
+		parts = append(parts, queryCountPhrase(len(res.failures), "failed"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func countPhrase(count int, singular, plural string) string {
+	if count == 1 {
+		return fmt.Sprintf("1 %s", singular)
+	}
+	return fmt.Sprintf("%d %s", count, plural)
+}
+
+func queryCountPhrase(count int, label string) string {
+	return fmt.Sprintf("%d %s", count, label)
+}
+
+func recordTypeCount(res *result) int {
+	count := 0
+	for _, records := range res.records {
+		if len(records) > 0 {
+			count++
+		}
+	}
+	return count
 }
 
 func renderOtherSections(p *core.Printer, records map[string][]record) {
@@ -1095,14 +1235,16 @@ func renderSection(p *core.Printer, name string, records []record) {
 		p.Set(core.Green)
 		p.WriteString(core.TerminalSafeText(rec.value))
 		p.Reset()
+		p.WriteString(" ")
+		p.Set(core.Dim)
 		if rec.hasTTL {
-			p.WriteString(" ")
-			p.Set(core.Dim)
 			p.WriteString("(TTL ")
 			p.WriteString(formatTTL(rec.ttl))
 			p.WriteString(")")
-			p.Reset()
+		} else {
+			p.WriteString("(TTL unavailable)")
 		}
+		p.Reset()
 		p.WriteString("\n")
 	}
 

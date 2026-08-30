@@ -16,10 +16,13 @@ Without `--dns-server`, nameservers from the system resolver configuration are
 queried directly when available. This shows supported record types and TTLs. If
 that configuration is unavailable, the platform resolver provides A/AAAA records
 without TTLs. With an explicit UDP, TCP, DoT, DoQ, or DoH resolver, supported
-record types are queried concurrently. Successful records remain visible when
-one query fails; the command warns that results are incomplete and exits
-nonzero. Inspection output goes to stdout. Warnings, configuration errors, and
-resolver errors go to stderr.
+record types are queried concurrently. The default output uses `Lookup` and
+`Records` sections and reports the name, resolver path, transport, transport
+security, source, status, result counts, query counts, and timing. Successful
+records remain visible when one query fails; the `Lookup` section reports an
+incomplete status and the `Failures` section identifies the failed types. The
+command exits nonzero. Inspection output, including the `Failures` section, goes
+to stdout. Invocation warnings and setup/configuration errors go to stderr.
 
 ## TLS
 

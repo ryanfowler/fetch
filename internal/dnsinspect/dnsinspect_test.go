@@ -41,8 +41,8 @@ func TestInspectWithErrorSeparatesOutput(t *testing.T) {
 	if status != 0 {
 		t.Fatalf("status = %d, want 0", status)
 	}
-	if !strings.Contains(string(output.Bytes()), "IP literal: 192.0.2.1") {
-		t.Fatalf("inspection output = %q, want IP literal", output.Bytes())
+	if !strings.Contains(string(output.Bytes()), "Status: IP literal — DNS not performed") {
+		t.Fatalf("inspection output = %q, want IP literal status", output.Bytes())
 	}
 	if len(errors.Bytes()) != 0 {
 		t.Fatalf("error output = %q, want empty", errors.Bytes())
@@ -118,17 +118,21 @@ func TestInspectDOHShowsAAndAAAATTLs(t *testing.T) {
 	}
 	out := string(p.Bytes())
 	for _, want := range []string{
-		"DNS lookup: example.com",
+		"* Lookup\n",
+		"Name: example.com",
 		"Resolver: " + server.URL + "/dns-query",
-		"A\n",
+		"Transport: HTTPS (DoH)",
+		"Transport security: plaintext",
+		"Source: configured resolver endpoint",
+		"Status: complete",
+		"Results: 2 addresses · 4 records · 4 record types",
+		"Queries: 11 total · 3 with data · 8 no data",
+		"Timing: ",
+		"* Records\n",
 		"\u2514\u2500 192.0.2.1 (TTL 1m)",
-		"AAAA\n",
 		"\u2514\u2500 2001:db8::1 (TTL 5m)",
-		"CNAME\n",
 		"alias.example.com. (TTL 2m)",
-		"TXT\n",
 		"v=spf1 -all (TTL 3m)",
-		"Addresses: 2",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
@@ -186,8 +190,19 @@ func TestInspectIPLiteralSkipsLookup(t *testing.T) {
 		t.Fatalf("status = %d, want 0\n%s", status, p.Bytes())
 	}
 	out := string(p.Bytes())
-	if !strings.Contains(out, "IP literal: 127.0.0.1 (no DNS query needed)") {
-		t.Fatalf("output missing IP literal message:\n%s", out)
+	for _, want := range []string{
+		"Lookup\n",
+		"Name: 127.0.0.1",
+		"Status: IP literal — DNS not performed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"Resolver:", "Transport:", "Transport security:", "Timing:"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("IP literal output contains DNS field %q:\n%s", unwanted, out)
+		}
 	}
 }
 
@@ -269,8 +284,13 @@ func TestInspectKeepsRecordsAndFailsOnPartialQueryError(t *testing.T) {
 			t.Fatalf("partial output missing %q:\n%s", want, out)
 		}
 	}
-	if got := string(errors.Bytes()); !strings.Contains(got, "DNS inspection incomplete") || !strings.Contains(got, "ServFail") {
-		t.Fatalf("partial warning = %q, want incomplete record warning", got)
+	if got := string(errors.Bytes()); got != "" {
+		t.Fatalf("partial error output = %q, want empty", got)
+	}
+	for _, want := range []string{"Status: incomplete", "Failures", "TXT:", "ServFail"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("partial output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -442,8 +462,8 @@ func TestLookupSystemNameserverReturnsTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.resolver != "udp "+addr {
-		t.Fatalf("resolver label = %q, want %q", res.resolver, "udp "+addr)
+	if res.resolver != addr {
+		t.Fatalf("resolver label = %q, want %q", res.resolver, addr)
 	}
 	if res.ttlUnavailable {
 		t.Fatal("ttlUnavailable = true, want false for a direct nameserver query")
@@ -504,8 +524,8 @@ func TestLookupSystemFallsBackToPlatform(t *testing.T) {
 		},
 		URL: mustURL(t, "https://example.com"),
 	})
-	if status != 1 || !strings.Contains(string(p.Bytes()), "DNS inspection incomplete") {
-		t.Fatalf("platform fallback status/output = %d/%s, want status 1 and warning", status, p.Bytes())
+	if status != 1 || !strings.Contains(string(p.Bytes()), "Status: incomplete") {
+		t.Fatalf("platform fallback status/output = %d/%s, want status 1 and incomplete result", status, p.Bytes())
 	}
 }
 
@@ -543,6 +563,69 @@ func TestRenderSeparatesWarnings(t *testing.T) {
 	}
 }
 
+func TestRenderStructuredLookupOmitsUnavailableFields(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{host: "example.com", records: map[string][]record{}})
+
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"Lookup\n",
+		"Name: example.com",
+		"Status: complete",
+		"Results: 0 addresses · 0 records · 0 record types",
+		"Records\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("structured output missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"Resolver:", "Transport:", "Source:", "Queries:", "Timing:"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("structured output contains empty field %q:\n%s", unwanted, out)
+		}
+	}
+}
+
+func TestRenderStructuredLookupShowsNormalizedQueryName(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{
+		host:      "münich.example",
+		queryName: "xn--mnich-kva.example",
+		records:   map[string][]record{},
+	})
+
+	if out := string(p.Bytes()); !strings.Contains(out, "Query name: xn--mnich-kva.example") {
+		t.Fatalf("structured output missing normalized query name:\n%s", out)
+	}
+}
+
+func TestRenderStructuredLookupUsesSingularGrammar(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{
+		host:          "example.com",
+		resolver:      "192.0.2.53:53",
+		transport:     "UDP",
+		security:      string(resolver.SecurityPlaintext),
+		source:        "system resolver configuration",
+		queryTotal:    1,
+		queryWithData: 1,
+		duration:      time.Millisecond,
+		records: map[string][]record{
+			"A": {{typ: "A", value: "192.0.2.1", hasTTL: true, ttl: 60}},
+		},
+	})
+
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"Results: 1 address · 1 record · 1 record type",
+		"Queries: 1 total · 1 with data · 0 no data",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("structured output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderShowsUnavailableTTLPerRecord(t *testing.T) {
 	p := core.TestPrinter(false)
 	render(p, &result{
@@ -556,6 +639,20 @@ func TestRenderShowsUnavailableTTLPerRecord(t *testing.T) {
 	out := string(p.Bytes())
 	if !strings.Contains(out, "\u2514\u2500 192.0.2.1 (TTL 1m)") {
 		t.Fatalf("output missing tree-formatted TTL:\n%s", out)
+	}
+}
+
+func TestRenderShowsUnavailableTTLOnRecord(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{
+		host: "printer.local",
+		records: map[string][]record{
+			"A": {{typ: "A", value: "192.0.2.1"}},
+		},
+	})
+
+	if out := string(p.Bytes()); !strings.Contains(out, "192.0.2.1 (TTL unavailable)") {
+		t.Fatalf("output missing unavailable record TTL:\n%s", out)
 	}
 }
 
@@ -620,6 +717,33 @@ func TestNormalizeDOHCAAGenericRDATA(t *testing.T) {
 	got := normalizeDOHValue(dnsTypeCAA, `\# 22 000569737375656c657473656e63727970742e6f7267`)
 	if want := `0 issue "letsencrypt.org"`; got != want {
 		t.Fatalf("decoded CAA = %q, want %q", got, want)
+	}
+}
+
+func TestInspectAllNODATAIsSuccessful(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"Status":0}`)
+	}))
+	defer server.Close()
+
+	p := core.TestPrinter(false)
+	status := Inspect(context.Background(), p, &Config{
+		DNSServer: mustURL(t, server.URL),
+		URL:       mustURL(t, "https://empty.example"),
+	})
+	if status != 0 {
+		t.Fatalf("status = %d, want 0\n%s", status, p.Bytes())
+	}
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"Status: complete",
+		"Results: 0 addresses · 0 records · 0 record types",
+		"Queries: 11 total · 0 with data · 11 no data",
+		"Records\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("all-NODATA output missing %q:\n%s", want, out)
+		}
 	}
 }
 
