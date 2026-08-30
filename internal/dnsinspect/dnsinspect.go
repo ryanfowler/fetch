@@ -61,6 +61,7 @@ type Config struct {
 	Timeout    time.Duration
 	URL        *url.URL
 	Silent     bool
+	Verbosity  core.Verbosity
 
 	// ResolvConfPath overrides the resolver configuration file consulted when
 	// no --dns-server is set. An empty value uses the platform default
@@ -127,7 +128,7 @@ type result struct {
 	duration         time.Duration
 	tcpFallback      bool
 	platformFallback bool
-	silent           bool
+	verbosity        core.Verbosity
 }
 
 type queryStatus uint8
@@ -228,7 +229,7 @@ func InspectWithError(ctx context.Context, output, errorOutput *core.Printer, cf
 		writeDNSError(errorOutput, err)
 		return 1
 	}
-	renderWithWarning(output, errorOutput, res)
+	render(output, res)
 	partial := len(res.failures) > 0
 	if flushInspectionOutput(output, errorOutput) != 0 {
 		return 1
@@ -252,7 +253,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		security:  resolverTransportSecurity(cfg, server),
 		source:    inspectionSource(server),
 		records:   make(map[string][]record),
-		silent:    cfg.Silent,
+		verbosity: cfg.Verbosity,
 	}
 
 	// A missing --dns-server prefers the resolv.conf nameservers, which expose
@@ -590,7 +591,7 @@ func platformResult(orig *result, records []record, start time.Time) *result {
 		queryNoData:      orig.queryNoData,
 		tcpFallback:      orig.tcpFallback,
 		platformFallback: true,
-		silent:           orig.silent,
+		verbosity:        orig.verbosity,
 		duration:         time.Since(start),
 	}
 	for typ, values := range orig.records {
@@ -1667,13 +1668,38 @@ func conciseDiagnostic(text string) string {
 }
 
 func render(p *core.Printer, res *result) {
-	renderWithWarning(p, p, res)
+	renderInspection(p, res)
 }
 
-func renderWithWarning(p, warningOutput *core.Printer, res *result) {
-	renderInspection(p, res)
-	if res.tcpFallback {
-		core.WriteWarningMsgIf(warningOutput, "UDP response was truncated; used TCP fallback", res.silent)
+func inspectionTransportSummary(res *result) string {
+	if res.tcpFallback && res.transport == "UDP" {
+		return "UDP → TCP fallback"
+	}
+	return res.transport
+}
+
+func renderFallbackQueries(p *core.Printer, queries []queryResult) {
+	fallbacks := make([]queryResult, 0)
+	for _, query := range queries {
+		if query.tcpFallback {
+			fallbacks = append(fallbacks, query)
+		}
+	}
+	if len(fallbacks) == 0 {
+		return
+	}
+
+	writeInspectionBlankLine(p)
+	renderInspectionSection(p, "Queries")
+	for _, query := range fallbacks {
+		status := "no data"
+		switch query.status {
+		case queryStatusData:
+			status = countPhrase(len(query.records), "record", "records")
+		case queryStatusFailed:
+			status = "failed"
+		}
+		writeInspectionField(p, query.typ.label, status+" · UDP → TCP fallback")
 	}
 }
 
@@ -1689,8 +1715,8 @@ func renderInspection(p *core.Printer, res *result) {
 	if res.resolver != "" {
 		writeInspectionField(p, "Resolver", res.resolver)
 	}
-	if res.transport != "" {
-		writeInspectionField(p, "Transport", res.transport)
+	if transport := inspectionTransportSummary(res); transport != "" {
+		writeInspectionField(p, "Transport", transport)
 	}
 	if res.security != "" {
 		writeInspectionField(p, "Transport security", displaySecurity(res.security))
@@ -1711,11 +1737,17 @@ func renderInspection(p *core.Printer, res *result) {
 	if res.duration > 0 {
 		writeInspectionField(p, "Timing", formatDuration(res.duration))
 	}
+	if res.tcpFallback && res.transport != "UDP" {
+		writeInspectionField(p, "TCP fallback", "used for truncated UDP response")
+	}
 
 	if len(res.failures) > 0 {
 		writeInspectionBlankLine(p)
 		renderInspectionSection(p, "Failures")
 		renderFailures(p, res.failures)
+	}
+	if res.verbosity >= core.VExtraVerbose {
+		renderFallbackQueries(p, res.queries)
 	}
 	writeInspectionBlankLine(p)
 	renderInspectionSection(p, "Records")

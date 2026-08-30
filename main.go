@@ -831,6 +831,7 @@ func inspectDNS(ctx context.Context, app *cli.App, handle *core.Handle) int {
 		Timeout:    getValue(app.Cfg.Timeout),
 		URL:        app.URL,
 		Silent:     getValue(app.Cfg.Silent),
+		Verbosity:  getVerbosity(app),
 	})
 }
 

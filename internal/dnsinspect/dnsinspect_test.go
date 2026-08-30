@@ -896,16 +896,89 @@ func TestResolverTargetUsesPlatformResolver(t *testing.T) {
 	}
 }
 
-func TestRenderSeparatesWarnings(t *testing.T) {
-	output := core.TestPrinter(false)
-	errors := core.TestPrinter(false)
-	renderWithWarning(output, errors, &result{tcpFallback: true})
-
-	if strings.Contains(string(output.Bytes()), "UDP response was truncated") {
-		t.Fatalf("output contains TCP fallback warning: %q", output.Bytes())
+func TestRenderTCPFallbackAsTransportMetadata(t *testing.T) {
+	res := &result{
+		host:      "example.com",
+		transport: "UDP",
+		records:   make(map[string][]record),
 	}
-	if !strings.Contains(string(errors.Bytes()), "UDP response was truncated") {
-		t.Fatalf("error output missing TCP fallback warning: %q", errors.Bytes())
+	aggregate(res, []queryResult{{
+		typ:         inspectTypes[0],
+		records:     []record{{typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1")}},
+		tcpFallback: true,
+	}}, time.Now())
+
+	p := core.TestPrinter(false)
+	render(p, res)
+	out := string(p.Bytes())
+	if !strings.Contains(out, "Transport: UDP → TCP fallback") {
+		t.Fatalf("fallback transport metadata missing:\n%s", out)
+	}
+	if strings.Contains(out, "warning:") || strings.Contains(out, "truncated") {
+		t.Fatalf("fallback was rendered as a warning:\n%s", out)
+	}
+}
+
+func TestAggregateFailedTCPFallbackRemainsFailure(t *testing.T) {
+	res := &result{transport: "UDP", records: make(map[string][]record)}
+	if err := aggregate(res, []queryResult{{
+		typ:         inspectTypes[3],
+		err:         errors.New("DNS TCP fallback: connection refused"),
+		tcpFallback: true,
+	}}, time.Now()); err == nil {
+		t.Fatal("aggregate() error = nil, want failed TCP retry error")
+	}
+	if len(res.failures) != 1 || res.queries[0].status != queryStatusFailed {
+		t.Fatalf("failed fallback result = %#v, want one failed query", res)
+	}
+
+	p := core.TestPrinter(false)
+	render(p, res)
+	out := string(p.Bytes())
+	if !strings.Contains(out, "Status: incomplete — 1 of 1 queries failed") || !strings.Contains(out, "DNS TCP fallback: connection refused") {
+		t.Fatalf("failed fallback was not rendered as a failure:\n%s", out)
+	}
+}
+
+func TestRenderTCPFallbackDetailsAtExtraVerbose(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{
+		host:      "example.com",
+		transport: "UDP",
+		verbosity: core.VExtraVerbose,
+		queries: []queryResult{
+			{typ: inspectTypes[0], status: queryStatusData, records: []record{{typ: dnsmessage.TypeA}}, tcpFallback: true},
+			{typ: inspectTypes[3], status: queryStatusNoData, tcpFallback: true},
+		},
+		records: map[string][]record{},
+	})
+
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"Queries\n",
+		"A: 1 record · UDP → TCP fallback",
+		"TXT: no data · UDP → TCP fallback",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("verbose fallback details missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderWithoutTCPFallbackKeepsTransportUnchanged(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{
+		host:      "example.com",
+		transport: "UDP",
+		records:   map[string][]record{},
+	})
+
+	out := string(p.Bytes())
+	if !strings.Contains(out, "Transport: UDP\n") {
+		t.Fatalf("transport changed without fallback:\n%s", out)
+	}
+	if strings.Contains(out, "TCP fallback") {
+		t.Fatalf("output mentions fallback when none was used:\n%s", out)
 	}
 }
 
