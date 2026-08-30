@@ -247,7 +247,7 @@ func TestLookupWireTypeAcceptsResponseAfterMalformedMatchingBurst(t *testing.T) 
 	}
 }
 
-func TestLookupWireTypeFallsBackToTCPWhenUDPIsTruncated(t *testing.T) {
+func TestQuerySystemTypeDetailedReportsTCPFallback(t *testing.T) {
 	server, tcp := newUDPAndTCPTestServer(t)
 	defer server.close()
 	defer tcp.Close()
@@ -309,12 +309,19 @@ func TestLookupWireTypeFallsBackToTCPWhenUDPIsTruncated(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	addrs, err := lookupWireType(ctx, server.addr(), "example.com", dnsTypeA)
+	records, metadata, err := QuerySystemTypeDetailed(ctx, SystemResolverPolicy{
+		Nameservers: []string{server.addr()},
+		Attempts:    1,
+		Timeout:     time.Second,
+	}, "example.com", dnsTypeA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(addrs) != 1 || !addrs[0].IP.Equal(net.IPv4(192, 0, 2, 13)) {
-		t.Fatalf("addresses = %v", addrs)
+	if len(records) != 1 || !net.IP(records[0].RData).Equal(net.IPv4(192, 0, 2, 13)) {
+		t.Fatalf("records = %v", records)
+	}
+	if metadata.Server != server.addr() || metadata.Transport != TransportTCP || !metadata.TCPFallback || metadata.Attempts != 1 || metadata.Duration <= 0 {
+		t.Fatalf("query metadata = %+v, want successful TCP fallback from %s", metadata, server.addr())
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)

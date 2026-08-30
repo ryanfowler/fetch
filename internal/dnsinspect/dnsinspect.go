@@ -116,6 +116,7 @@ type result struct {
 	host             string
 	queryName        string
 	resolver         string
+	responders       []string
 	transport        string
 	security         string
 	source           string
@@ -144,6 +145,10 @@ type queryResult struct {
 	status      queryStatus
 	records     []record
 	err         error
+	responder   string
+	transport   resolver.Transport
+	attempts    int
+	duration    time.Duration
 	tcpFallback bool
 }
 
@@ -353,11 +358,8 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	defer cancelQuery()
 	results := runFanOut(queryCtx, queryHost, target, systemPolicy, streamClient, doqClient, dohClient)
 	firstResult := aggregate(out, results, start)
-	if systemPolicy != nil && (len(out.failures) > 0 || len(systemPolicy.Nameservers) > 1) {
-		// Different record types can come from different configured servers.
-		// With more than one server, the query layer may fail over silently,
-		// so do not claim one server supplied the complete result.
-		out.resolver = "system resolver (configured nameservers)"
+	if systemPolicy != nil {
+		setSystemResponderSummary(out)
 	}
 
 	// A system-nameserver query that returned no address records (for example a
@@ -392,7 +394,13 @@ func runFanOut(ctx context.Context, host string, target resolverTargetInfo, syst
 			results[i].typ = qt
 			switch {
 			case systemPolicy != nil:
-				results[i].records, results[i].tcpFallback, results[i].err = lookupSystemRecords(ctx, systemPolicy, host, qt)
+				var metadata resolver.QueryMetadata
+				results[i].records, metadata, results[i].err = lookupSystemRecords(ctx, systemPolicy, host, qt)
+				results[i].responder = metadata.Server
+				results[i].transport = metadata.Transport
+				results[i].attempts = metadata.Attempts
+				results[i].duration = metadata.Duration
+				results[i].tcpFallback = metadata.TCPFallback
 			case streamClient != nil:
 				results[i].records, results[i].err = lookupStreamRecords(ctx, streamClient, host, qt)
 			case doqClient != nil:
@@ -409,15 +417,17 @@ func runFanOut(ctx context.Context, host string, target resolverTargetInfo, syst
 }
 
 // lookupSystemRecords resolves host for one record type through the system
-// nameservers, retrying across them per the resolv.conf policy.
-func lookupSystemRecords(ctx context.Context, policy *resolver.SystemResolverPolicy, host string, qt queryType) ([]record, bool, error) {
+// nameservers, retrying across them per the resolv.conf policy. The metadata
+// identifies the nameserver that produced the response, not merely the first
+// configured nameserver.
+func lookupSystemRecords(ctx context.Context, policy *resolver.SystemResolverPolicy, host string, qt queryType) ([]record, resolver.QueryMetadata, error) {
 	// resolvectl does not expose TTLs. DNS inspection must query the configured
 	// nameserver directly so every displayed record has authoritative TTL data.
 	inspectionPolicy := *policy
 	inspectionPolicy.UseSystemdResolved = false
-	resolved, fallback, err := resolver.QuerySystemType(ctx, inspectionPolicy, host, uint16(qt.dnsType))
+	resolved, metadata, err := resolver.QuerySystemTypeDetailed(ctx, inspectionPolicy, host, uint16(qt.dnsType))
 	if err != nil {
-		return nil, fallback, err
+		return nil, metadata, err
 	}
 	records := make([]record, 0, len(resolved))
 	for _, rec := range resolved {
@@ -425,7 +435,36 @@ func lookupSystemRecords(ctx context.Context, policy *resolver.SystemResolverPol
 			records = append(records, converted)
 		}
 	}
-	return records, fallback, nil
+	return records, metadata, nil
+}
+
+// setSystemResponderSummary replaces the configured-nameserver placeholder
+// with the exact responders observed during this inspection. A failed query
+// has no responder, so it cannot make the summary claim that a server replied.
+func setSystemResponderSummary(out *result) {
+	responders := make([]string, 0, len(out.queries))
+	seen := make(map[string]struct{}, len(out.queries))
+	for _, query := range out.queries {
+		if query.responder == "" {
+			continue
+		}
+		if _, ok := seen[query.responder]; ok {
+			continue
+		}
+		seen[query.responder] = struct{}{}
+		responders = append(responders, query.responder)
+	}
+	slices.Sort(responders)
+	out.responders = responders
+	switch len(responders) {
+	case 0:
+		out.resolver = "system resolver (configured nameservers)"
+	case 1:
+		out.resolver = responders[0]
+	default:
+		out.resolver = ""
+		out.responders = responders
+	}
 }
 
 // aggregate merges per-type query results into out. It returns the first
@@ -583,6 +622,7 @@ func platformResult(orig *result, records []record, start time.Time) *result {
 		transport:        "mixed",
 		security:         "mixed",
 		source:           "system resolver configuration + platform resolver",
+		responders:       append(slices.Clone(orig.responders), "platform resolver"),
 		records:          make(map[string][]record, len(orig.records)),
 		queries:          slices.Clone(orig.queries),
 		failures:         slices.Clone(orig.failures),
@@ -1592,6 +1632,8 @@ func displayTransport(transport resolver.Transport) string {
 		return "QUIC (DoQ)"
 	case resolver.TransportHTTPS:
 		return "HTTPS (DoH)"
+	case resolver.TransportSystem:
+		return "platform resolver"
 	default:
 		return "UDP"
 	}
@@ -1678,20 +1720,14 @@ func inspectionTransportSummary(res *result) string {
 	return res.transport
 }
 
-func renderFallbackQueries(p *core.Printer, queries []queryResult) {
-	fallbacks := make([]queryResult, 0)
-	for _, query := range queries {
-		if query.tcpFallback {
-			fallbacks = append(fallbacks, query)
-		}
-	}
-	if len(fallbacks) == 0 {
+func renderQueryDetails(p *core.Printer, queries []queryResult) {
+	if len(queries) == 0 {
 		return
 	}
 
 	writeInspectionBlankLine(p)
 	renderInspectionSection(p, "Queries")
-	for _, query := range fallbacks {
+	for _, query := range queries {
 		status := "no data"
 		switch query.status {
 		case queryStatusData:
@@ -1699,7 +1735,24 @@ func renderFallbackQueries(p *core.Printer, queries []queryResult) {
 		case queryStatusFailed:
 			status = "failed"
 		}
-		writeInspectionField(p, query.typ.label, status+" · UDP → TCP fallback")
+		parts := []string{status}
+		// Keep the fallback immediately after the status so the legacy focused
+		// output remains easy to scan, then append the exact responder details.
+		if query.tcpFallback {
+			parts = append(parts, "UDP → TCP fallback")
+		} else if query.transport != "" {
+			parts = append(parts, displayTransport(query.transport))
+		}
+		if query.responder != "" {
+			parts = append(parts, query.responder)
+		}
+		if query.duration > 0 {
+			parts = append(parts, formatDuration(query.duration))
+		}
+		if query.attempts > 0 {
+			parts = append(parts, countPhrase(query.attempts, "attempt", "attempts"))
+		}
+		writeInspectionField(p, query.typ.label, strings.Join(parts, " · "))
 	}
 }
 
@@ -1712,7 +1765,16 @@ func renderInspection(p *core.Printer, res *result) {
 	if res.queryName != "" && res.queryName != res.host {
 		writeInspectionField(p, "Query name", res.queryName)
 	}
-	if res.resolver != "" {
+	if res.platformFallback {
+		if res.resolver != "" {
+			writeInspectionField(p, "Resolver", res.resolver)
+		}
+		if len(res.responders) > 0 {
+			writeInspectionField(p, "Resolvers", strings.Join(res.responders, ", "))
+		}
+	} else if len(res.responders) > 1 {
+		writeInspectionField(p, "Resolvers", strings.Join(res.responders, ", "))
+	} else if res.resolver != "" {
 		writeInspectionField(p, "Resolver", res.resolver)
 	}
 	if transport := inspectionTransportSummary(res); transport != "" {
@@ -1747,7 +1809,7 @@ func renderInspection(p *core.Printer, res *result) {
 		renderFailures(p, res.failures)
 	}
 	if res.verbosity >= core.VExtraVerbose {
-		renderFallbackQueries(p, res.queries)
+		renderQueryDetails(p, res.queries)
 	}
 	writeInspectionBlankLine(p)
 	renderInspectionSection(p, "Records")

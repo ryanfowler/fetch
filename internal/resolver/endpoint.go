@@ -12,11 +12,12 @@ import (
 type Transport string
 
 const (
-	TransportUDP   Transport = "udp"
-	TransportTCP   Transport = "tcp"
-	TransportTLS   Transport = "tls"
-	TransportQUIC  Transport = "quic"
-	TransportHTTPS Transport = "https"
+	TransportUDP    Transport = "udp"
+	TransportTCP    Transport = "tcp"
+	TransportTLS    Transport = "tls"
+	TransportQUIC   Transport = "quic"
+	TransportHTTPS  Transport = "https"
+	TransportSystem Transport = "system"
 )
 
 // Security describes the transport's protection against network observers and
