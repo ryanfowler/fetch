@@ -1163,7 +1163,7 @@ func TestRenderUsesTypedDNSRecordData(t *testing.T) {
 		"Primary NS: ns1.example.", "Responsible: hostmaster.example.",
 		"Serial: 2026082901", "Refresh: 1h", "Retry: 10m", "Expire: 1w", "Minimum TTL: 5m",
 		"Weight: 5", "service.example.:443",
-		"Flags: 0", "Tag: issue", "Value: letsencrypt.org", "0 .", "1 . ALPN=h2",
+		"Flags: 0", "Tag: issue", "Value: letsencrypt.org", "priority 0 → .", "priority 1 → .", "ALPN: h2",
 		"TYPE99", "0xdead",
 	} {
 		if !strings.Contains(out, want) {
@@ -1304,13 +1304,95 @@ func TestRenderEscapesCAAAndSVCBFields(t *testing.T) {
 		}},
 	}})
 	out := string(p.Bytes())
-	for _, want := range []string{`"bad\nname"`, `ALPN="bad\nname"`} {
+	for _, want := range []string{`"bad\nname"`, `ALPN: "bad\nname"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("record field was not escaped as %q:\n%s", want, out)
 		}
 	}
 	if strings.Contains(out, "bad\nname") {
 		t.Fatalf("record field injected an output line: %q", out)
+	}
+}
+
+func TestRenderHTTPSExpandsServiceBindingParameters(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{host: "example.com", records: map[string][]record{
+		"HTTPS": {{
+			owner: "example.com.", typ: dnsmessage.TypeHTTPS, priority: 1, target: ".",
+			params: []resolver.SVCParam{
+				{Key: uint16(dnsmessage.SVCParamMandatory), Value: []byte{0, 1, 0, 4}},
+				{Key: uint16(dnsmessage.SVCParamDOHPath), Value: []byte("/dns-query{?dns}")},
+				{Key: uint16(dnsmessage.SVCParamECH), Value: []byte{1, 2, 3}},
+				{Key: uint16(dnsmessage.SVCParamIPv6Hint), Value: net.ParseIP("2001:db8::1")},
+				{Key: uint16(dnsmessage.SVCParamPort), Value: []byte{1, 0xbb}},
+				{Key: uint16(dnsmessage.SVCParamIPv4Hint), Value: []byte{192, 0, 2, 1, 192, 0, 2, 2}},
+				{Key: uint16(dnsmessage.SVCParamALPN), Value: []byte{2, 'h', '2', 2, 'h', '3'}},
+				{Key: uint16(dnsmessage.SVCParamOHTTP)},
+				{Key: uint16(dnsmessage.SVCParamTLSSupportedGroups), Value: []byte{0, 23, 0, 29}},
+				{Key: 10, Value: []byte{0xde, 0xad}},
+			},
+			ttl: 300, hasTTL: true,
+		}},
+	}})
+
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"example.com. priority 1 → .",
+		"Mandatory: alpn, ipv4hint",
+		"ALPN: h2, h3",
+		"Port: 443",
+		"IPv4 hints: 192.0.2.1, 192.0.2.2",
+		"IPv6 hints: 2001:db8::1",
+		"ECH: AQID",
+		"DoH path: /dns-query{?dns}",
+		"OHTTP: true",
+		"TLS supported groups: 23, 29",
+		"key10: 0xdead",
+		"TTL: 5m",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("HTTPS output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "ALPN=h2") || strings.Contains(out, "IPv4Hint=") {
+		t.Fatalf("HTTPS parameters were flattened:\n%s", out)
+	}
+}
+
+func TestRenderSVCBAliasModeAndMalformedParameters(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{host: "example.com", records: map[string][]record{
+		"SVCB": {{
+			owner: "example.com.", typ: dnsmessage.TypeSVCB, priority: 0, target: ".",
+		}},
+		"HTTPS": {{
+			owner: "example.com.", typ: dnsmessage.TypeHTTPS, priority: 1, target: ".",
+			params: []resolver.SVCParam{{Key: uint16(dnsmessage.SVCParamALPN), Value: []byte{3, 'h', '2'}}},
+		}},
+	}})
+
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"example.com. priority 0 → .",
+		"Mode: AliasMode",
+		"ALPN: 0x036832",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("SVCB output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderSVCBUnknownRawDataWhenMalformed(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{host: "example.com", records: map[string][]record{
+		"HTTPS": {{
+			owner: "example.com.", typ: dnsmessage.TypeHTTPS, priority: 1, target: ".",
+			rawRData: []byte{0, 1, 1, 'x', 0, 9, 0, 4, 0xde},
+		}},
+	}})
+	if out := string(p.Bytes()); !strings.Contains(out, "Raw RDATA: 0x0001017800090004de") {
+		t.Fatalf("malformed HTTPS RDATA was not retained:\n%s", out)
 	}
 }
 
