@@ -11,6 +11,7 @@ import (
 	"io"
 	"unicode/utf8"
 
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/webtransport-go"
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -45,7 +46,10 @@ func Run(ctx context.Context, cfg Config) error {
 	return runStream(ctx, cfg)
 }
 
-type streamResult struct{ err error }
+type streamResult struct {
+	err               error
+	initiatedShutdown bool
+}
 
 func runStream(ctx context.Context, cfg Config) error {
 	stream, err := cfg.Session.OpenStream(ctx)
@@ -71,11 +75,12 @@ func runStream(ctx context.Context, cfg Config) error {
 	writeDone := make(chan streamResult, 1)
 	go func() {
 		err := writeStream(workCtx, stream, cfg)
-		if err != nil {
+		initiatedShutdown := err != nil && workCtx.Err() == nil
+		if initiatedShutdown {
 			_ = cfg.Session.Close()
 			cancel()
 		}
-		writeDone <- streamResult{err}
+		writeDone <- streamResult{err: err, initiatedShutdown: initiatedShutdown}
 	}()
 
 	reader := io.Reader(stream)
@@ -87,11 +92,17 @@ func runStream(ctx context.Context, cfg Config) error {
 	}
 	buf := make([]byte, 32*1024)
 	readErr := error(nil)
+	outputErr := false
 	for {
 		n, read := reader.Read(buf)
 		if n > 0 {
-			if _, write := output.Write(buf[:n]); write != nil {
-				readErr = write
+			written, write := output.Write(buf[:n])
+			if write == nil && written != n {
+				write = io.ErrShortWrite
+			}
+			if write != nil {
+				readErr = fmt.Errorf("write WebTransport stream output: %w", write)
+				outputErr = true
 				cancel()
 				_ = cfg.Session.Close()
 				break
@@ -107,33 +118,45 @@ func runStream(ctx context.Context, cfg Config) error {
 		}
 	}
 	if safe != nil && readErr == nil {
-		readErr = safe.Flush()
+		if err := safe.Flush(); err != nil {
+			readErr = fmt.Errorf("write WebTransport stream output: %w", err)
+			outputErr = true
+			cancel()
+			_ = cfg.Session.Close()
+		}
 	}
-	write := (<-writeDone).err
+	write := <-writeDone
+	if outputErr {
+		_ = cfg.Session.Close()
+		return readErr
+	}
+	if write.initiatedShutdown {
+		return write.err
+	}
 	if readErr != nil && !isCleanClose(readErr) {
 		_ = cfg.Session.Close()
 		return fmt.Errorf("read WebTransport stream: %w", readErr)
 	}
-	if write != nil {
+	if write.err != nil {
 		_ = cfg.Session.Close()
-		return write
+		return write.err
 	}
 	return nil
 }
 
 func writeStream(ctx context.Context, stream io.WriteCloser, cfg Config) error {
+	buf := make([]byte, 32*1024)
 	write := func(r io.Reader) error {
 		if r == nil {
 			return nil
 		}
-		_, err := io.CopyBuffer(stream, r, make([]byte, 32*1024))
-		if err != nil {
+		if err := copyContext(ctx, stream, r, buf); err != nil {
 			return fmt.Errorf("write WebTransport stream: %w", err)
 		}
 		return nil
 	}
 	if cfg.InitialPayloadSet {
-		if _, err := stream.Write(cfg.InitialPayload); err != nil {
+		if err := writeFull(ctx, stream, cfg.InitialPayload); err != nil {
 			return fmt.Errorf("write initial WebTransport payload: %w", err)
 		}
 	}
@@ -145,7 +168,7 @@ func writeStream(ctx context.Context, stream io.WriteCloser, cfg Config) error {
 		closeInput(cfg.InitialReader)
 	}
 	if cfg.Stdin != nil {
-		if err := writeContext(ctx, stream, cfg.Stdin); err != nil {
+		if err := write(cfg.Stdin); err != nil {
 			closeInput(cfg.Stdin)
 			return err
 		}
@@ -157,8 +180,7 @@ func writeStream(ctx context.Context, stream io.WriteCloser, cfg Config) error {
 	return nil
 }
 
-func writeContext(ctx context.Context, dst io.Writer, src io.Reader) error {
-	buf := make([]byte, 32*1024)
+func copyContext(ctx context.Context, dst io.Writer, src io.Reader, buf []byte) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -167,7 +189,7 @@ func writeContext(ctx context.Context, dst io.Writer, src io.Reader) error {
 		}
 		n, err := src.Read(buf)
 		if n > 0 {
-			if _, e := dst.Write(buf[:n]); e != nil {
+			if e := writeFull(ctx, dst, buf[:n]); e != nil {
 				return e
 			}
 		}
@@ -178,6 +200,30 @@ func writeContext(ctx context.Context, dst io.Writer, src io.Reader) error {
 			return err
 		}
 	}
+}
+
+func writeFull(ctx context.Context, dst io.Writer, p []byte) error {
+	for len(p) > 0 {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		default:
+		}
+		n, err := dst.Write(p)
+		if n < 0 || n > len(p) {
+			return fmt.Errorf("invalid write result %d for %d-byte buffer", n, len(p))
+		}
+		if n > 0 {
+			p = p[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	return nil
 }
 
 func runDatagrams(ctx context.Context, cfg Config) error {
@@ -205,7 +251,7 @@ func runDatagrams(ctx context.Context, cfg Config) error {
 
 	var sendErr error
 	if cfg.InitialPayloadSet {
-		sendErr = sendDatagram(cfg.Session, cfg.InitialPayload)
+		sendErr = sendDatagramContext(workCtx, cfg.Session, cfg.InitialPayload)
 	}
 	if sendErr == nil && cfg.InitialReader != nil {
 		data, err := core.ReadAllLimited(cfg.InitialReader, core.MaxCompositeMaterialization, "WebTransport initial datagram")
@@ -213,7 +259,7 @@ func runDatagrams(ctx context.Context, cfg Config) error {
 		if err != nil {
 			sendErr = err
 		} else {
-			sendErr = sendDatagram(cfg.Session, data)
+			sendErr = sendDatagramContext(workCtx, cfg.Session, data)
 		}
 	}
 	if sendErr == nil && cfg.Stdin != nil {
@@ -221,9 +267,13 @@ func runDatagrams(ctx context.Context, cfg Config) error {
 		closeInput(cfg.Stdin)
 	}
 	if sendErr != nil {
+		receiveEnded := workCtx.Err() != nil
 		cancel()
 		_ = cfg.Session.Close()
-		<-receiveDone
+		receiveErr := <-receiveDone
+		if receiveEnded {
+			return normalizeDatagramClose(ctx, receiveErr)
+		}
 		return sendErr
 	}
 	return normalizeDatagramClose(ctx, <-receiveDone)
@@ -242,9 +292,13 @@ func receiveDatagrams(ctx context.Context, cfg Config) error {
 			Data     string `json:"data"`
 		}{seq, len(data), base64.StdEncoding.EncodeToString(data)})
 		record = append(record, '\n')
-		if _, err := cfg.Stdout.Write(record); err != nil {
+		n, err := cfg.Stdout.Write(record)
+		if err == nil && n != len(record) {
+			err = io.ErrShortWrite
+		}
+		if err != nil {
 			_ = cfg.Session.Close()
-			return err
+			return fmt.Errorf("write WebTransport datagram output: %w", err)
 		}
 		seq++
 	}
@@ -278,18 +332,36 @@ func normalizeDatagramClose(parent context.Context, err error) error {
 
 func sendDatagram(s Session, data []byte) error {
 	if err := s.SendDatagram(data); err != nil {
+		var sizeErr *quic.DatagramTooLargeError
+		if errors.As(err, &sizeErr) && sizeErr.MaxDatagramPayloadSize > 0 {
+			return fmt.Errorf("send WebTransport datagram (%d bytes; current QUIC limit %d bytes before HTTP/3 overhead): %w", len(data), sizeErr.MaxDatagramPayloadSize, err)
+		}
 		return fmt.Errorf("send WebTransport datagram (%d bytes): %w", len(data), err)
 	}
 	return nil
+}
+
+func sendDatagramContext(ctx context.Context, s Session, data []byte) error {
+	select {
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	default:
+		return sendDatagram(s, data)
+	}
 }
 
 func sendInputDatagrams(ctx context.Context, s Session, r io.Reader, mode core.WTDatagramMode) error {
 	if mode == core.WTDatagramBinary {
 		buf := make([]byte, core.MaxWebTransportBinaryChunk)
 		for {
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			default:
+			}
 			n, err := r.Read(buf)
 			if n > 0 {
-				if e := sendDatagram(s, append([]byte(nil), buf[:n]...)); e != nil {
+				if e := sendDatagramContext(ctx, s, append([]byte(nil), buf[:n]...)); e != nil {
 					return e
 				}
 			}
@@ -308,7 +380,7 @@ func sendInputDatagrams(ctx context.Context, s Session, r io.Reader, mode core.W
 			return core.LimitError{Subsystem: "WebTransport datagram line", Limit: core.MaxWebTransportDatagramLine}
 		}
 		if len(line) > 0 || err != io.EOF {
-			if e := sendDatagram(s, line); e != nil {
+			if e := sendDatagramContext(ctx, s, line); e != nil {
 				return e
 			}
 		}
@@ -317,11 +389,6 @@ func sendInputDatagrams(ctx context.Context, s Session, r io.Reader, mode core.W
 		}
 		if err != nil {
 			return fmt.Errorf("read WebTransport datagram input: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			return context.Cause(ctx)
-		default:
 		}
 	}
 }
@@ -366,7 +433,7 @@ func (w *terminalWriter) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	out := core.AppendTerminalSafeBytes(nil, w.pending[:cut])
-	if _, err := w.dst.Write(out); err != nil {
+	if err := writeFull(context.Background(), w.dst, out); err != nil {
 		return 0, err
 	}
 	w.pending = append(w.pending[:0], w.pending[cut:]...)
@@ -391,6 +458,5 @@ func (w *terminalWriter) Flush() error {
 	}
 	out := core.AppendTerminalSafeBytes(nil, w.pending)
 	w.pending = nil
-	_, err := w.dst.Write(out)
-	return err
+	return writeFull(context.Background(), w.dst, out)
 }

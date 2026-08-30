@@ -10,6 +10,7 @@ raw when redirected and terminal-safe when displayed.
 `--wt-mode datagram` sends datagrams. `--wt-datagram-mode lines` sends one
 line per datagram, and `binary` sends 1 KiB chunks. Received datagrams are
 compact JSON Lines records containing `sequence`, `length`, and base64 `data`.
+Oversized outgoing datagram errors include the current underlying QUIC limit.
 Input EOF does not close a datagram session; cancellation or peer closure does.
 
 Repeat `--wt-protocol` for application protocol offers. WebTransport v1 does
