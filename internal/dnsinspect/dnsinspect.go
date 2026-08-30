@@ -842,6 +842,18 @@ func populateRecordFromRaw(rec *record) {
 				rec.target = target
 			}
 		}
+	case dnsmessage.TypeSVCB, dnsmessage.TypeHTTPS:
+		// DoH JSON and wire responses normally provide Params directly. Parse
+		// raw RDATA as well so records from generic fixtures remain semantic
+		// and malformed values can still be shown safely by the renderer.
+		priority, target, params, _ := parseRawSVCB(rec.rawRData)
+		if target != "" {
+			rec.priority = priority
+			rec.target = target
+		}
+		if len(params) > 0 {
+			rec.params = params
+		}
 	}
 }
 
@@ -1126,6 +1138,221 @@ func formatSVCBValue(priority uint16, target string, params []dnsmessage.SVCPara
 	return strings.Join(parts, " ")
 }
 
+func svcParamRenderOrder(key uint16) int {
+	// This order follows the diagnostic fields rather than the wire key order:
+	// address hints stay together and ECH remains easy to find after them.
+	switch key {
+	case uint16(dnsmessage.SVCParamMandatory):
+		return 0
+	case uint16(dnsmessage.SVCParamALPN):
+		return 1
+	case uint16(dnsmessage.SVCParamNoDefaultALPN):
+		return 2
+	case uint16(dnsmessage.SVCParamPort):
+		return 3
+	case uint16(dnsmessage.SVCParamIPv4Hint):
+		return 4
+	case uint16(dnsmessage.SVCParamIPv6Hint):
+		return 5
+	case uint16(dnsmessage.SVCParamECH):
+		return 6
+	case uint16(dnsmessage.SVCParamDOHPath):
+		return 7
+	case uint16(dnsmessage.SVCParamOHTTP):
+		return 8
+	case uint16(dnsmessage.SVCParamTLSSupportedGroups):
+		return 9
+	default:
+		return 10
+	}
+}
+
+func formatStructuredSVCParam(param resolver.SVCParam) (label, value string) {
+	switch dnsmessage.SVCParamKey(param.Key) {
+	case dnsmessage.SVCParamMandatory:
+		return "Mandatory", formatSVCBKeyList(param.Value)
+	case dnsmessage.SVCParamALPN:
+		if value, ok := formatSVCBALPN(param.Value); ok {
+			return "ALPN", value
+		}
+		return "ALPN", formatSVCBBytes(param.Value)
+	case dnsmessage.SVCParamNoDefaultALPN:
+		if len(param.Value) == 0 {
+			return "No default ALPN", "true"
+		}
+		return "No default ALPN", formatSVCBBytes(param.Value)
+	case dnsmessage.SVCParamPort:
+		if len(param.Value) == 2 {
+			return "Port", strconv.Itoa(int(binary.BigEndian.Uint16(param.Value)))
+		}
+		return "Port", formatSVCBBytes(param.Value)
+	case dnsmessage.SVCParamIPv4Hint:
+		if value, ok := formatSVCBHints(param.Value, 4); ok {
+			return "IPv4 hints", value
+		}
+		return "IPv4 hints", formatSVCBBytes(param.Value)
+	case dnsmessage.SVCParamIPv6Hint:
+		if value, ok := formatSVCBHints(param.Value, 16); ok {
+			return "IPv6 hints", value
+		}
+		return "IPv6 hints", formatSVCBBytes(param.Value)
+	case dnsmessage.SVCParamECH:
+		// ECH is already an opaque, length-prefixed binary value. Preserve its
+		// complete base64 representation; do not expose only a preview.
+		return "ECH", base64.StdEncoding.EncodeToString(param.Value)
+	case dnsmessage.SVCParamDOHPath:
+		return "DoH path", string(param.Value)
+	case dnsmessage.SVCParamOHTTP:
+		if len(param.Value) == 0 {
+			return "OHTTP", "true"
+		}
+		return "OHTTP", formatSVCBBytes(param.Value)
+	case dnsmessage.SVCParamTLSSupportedGroups:
+		if value, ok := formatSVCBUint16List(param.Value); ok {
+			return "TLS supported groups", value
+		}
+		return "TLS supported groups", formatSVCBBytes(param.Value)
+	default:
+		return formatSVCBParamName(param.Key), formatSVCBBytes(param.Value)
+	}
+}
+
+func formatSVCBParamName(key uint16) string {
+	name := dnsmessage.SVCParamKey(key).String()
+	// x/net prints unknown SvcParam keys as bare numbers. The key prefix makes
+	// those values unambiguous and matches DNS presentation terminology.
+	if _, err := strconv.ParseUint(name, 10, 16); err == nil {
+		return "key" + name
+	}
+	return name
+}
+
+func formatSVCBBytes(value []byte) string {
+	return "0x" + hex.EncodeToString(value)
+}
+
+func formatSVCBALPN(value []byte) (string, bool) {
+	var values []string
+	for offset := 0; offset < len(value); {
+		length := int(value[offset])
+		offset++
+		if length == 0 || length > len(value)-offset {
+			return "", false
+		}
+		values = append(values, string(value[offset:offset+length]))
+		offset += length
+	}
+	if len(values) == 0 {
+		return "", false
+	}
+	return strings.Join(values, ", "), true
+}
+
+func formatSVCBUint16List(value []byte) (string, bool) {
+	if len(value) == 0 || len(value)%2 != 0 {
+		return "", false
+	}
+	values := make([]string, 0, len(value)/2)
+	for offset := 0; offset < len(value); offset += 2 {
+		values = append(values, strconv.Itoa(int(binary.BigEndian.Uint16(value[offset:]))))
+	}
+	return strings.Join(values, ", "), true
+}
+
+func formatSVCBHints(value []byte, width int) (string, bool) {
+	if len(value) == 0 || len(value)%width != 0 {
+		return "", false
+	}
+	values := make([]string, 0, len(value)/width)
+	for offset := 0; offset < len(value); offset += width {
+		values = append(values, net.IP(value[offset:offset+width]).String())
+	}
+	return strings.Join(values, ", "), true
+}
+
+func formatSVCBKeyList(value []byte) string {
+	if len(value) == 0 || len(value)%2 != 0 {
+		return formatSVCBBytes(value)
+	}
+	keys := make([]string, 0, len(value)/2)
+	for offset := 0; offset < len(value); offset += 2 {
+		key := binary.BigEndian.Uint16(value[offset:])
+		keys = append(keys, formatSVCBKey(key))
+	}
+	return strings.Join(keys, ", ")
+}
+
+func formatSVCBKey(key uint16) string {
+	switch dnsmessage.SVCParamKey(key) {
+	case dnsmessage.SVCParamMandatory:
+		return "mandatory"
+	case dnsmessage.SVCParamALPN:
+		return "alpn"
+	case dnsmessage.SVCParamNoDefaultALPN:
+		return "no-default-alpn"
+	case dnsmessage.SVCParamPort:
+		return "port"
+	case dnsmessage.SVCParamIPv4Hint:
+		return "ipv4hint"
+	case dnsmessage.SVCParamECH:
+		return "ech"
+	case dnsmessage.SVCParamIPv6Hint:
+		return "ipv6hint"
+	case dnsmessage.SVCParamDOHPath:
+		return "dohpath"
+	case dnsmessage.SVCParamOHTTP:
+		return "ohttp"
+	case dnsmessage.SVCParamTLSSupportedGroups:
+		return "tls-supported-groups"
+	default:
+		return formatSVCBParamName(key)
+	}
+}
+
+// parseRawSVCB returns as much of a generic SVCB/HTTPS RDATA value as can be
+// safely decoded. The final boolean reports whether the complete value is
+// well-formed, which lets the renderer retain malformed data as raw hex.
+func parseRawSVCB(raw []byte) (priority uint16, target string, params []resolver.SVCParam, ok bool) {
+	if len(raw) < 3 {
+		return 0, "", nil, false
+	}
+
+	// Use the resolver's strict parser for the validity bit. It checks more
+	// than framing, including parameter ordering, duplicate keys, reserved
+	// keys, and the semantics of known values. The local decode below still
+	// recovers a target and any complete parameters for a useful fallback.
+	if parsed, err := resolver.ParseSVCBRData(raw); err == nil {
+		params = make([]resolver.SVCParam, len(parsed.Params))
+		for i, param := range parsed.Params {
+			params[i] = resolver.SVCParam{Key: param.Key, Value: append([]byte(nil), param.Value...)}
+		}
+		return parsed.Priority, parsed.Target.String(), params, true
+	}
+
+	priority = binary.BigEndian.Uint16(raw)
+	var offset int
+	target, offset, ok = unpackDNSName(raw, 2)
+	if !ok {
+		return priority, "", nil, false
+	}
+	for offset < len(raw) {
+		if len(raw)-offset < 4 {
+			return priority, target, params, false
+		}
+		key := binary.BigEndian.Uint16(raw[offset:])
+		length := int(binary.BigEndian.Uint16(raw[offset+2:]))
+		offset += 4
+		if length > len(raw)-offset {
+			return priority, target, params, false
+		}
+		params = append(params, resolver.SVCParam{Key: key, Value: append([]byte(nil), raw[offset:offset+length]...)})
+		offset += length
+	}
+	// Reaching this point means strict semantic validation failed. Keep the
+	// recovered fields for display, but make the caller retain the raw value.
+	return priority, target, params, false
+}
+
 func formatSVCParam(param dnsmessage.SVCParam) string {
 	switch param.Key {
 	case dnsmessage.SVCParamALPN:
@@ -1238,6 +1465,7 @@ func parseSVCBRDATA(raw []byte) (string, bool) {
 
 func unpackDNSName(raw []byte, off int) (string, int, bool) {
 	var labels []string
+	wireSize := 1
 	for {
 		if off >= len(raw) {
 			return "", 0, false
@@ -1250,7 +1478,11 @@ func unpackDNSName(raw []byte, off int) (string, int, bool) {
 			}
 			return strings.Join(labels, ".") + ".", off, true
 		}
-		if ln&0xc0 != 0 || off+ln > len(raw) {
+		if ln&0xc0 != 0 || ln > 63 || off+ln > len(raw) {
+			return "", 0, false
+		}
+		wireSize += 1 + ln
+		if wireSize > 255 {
 			return "", 0, false
 		}
 		labels = append(labels, dnsLabelPresentation(raw[off:off+ln]))
@@ -1794,6 +2026,8 @@ func (rec record) hasComplexRendering() bool {
 	case dnsTypeCAA:
 		_, _, _, ok := caaFields(rec.rawRData)
 		return ok
+	case dnsmessage.TypeSVCB, dnsmessage.TypeHTTPS:
+		return rec.target != ""
 	default:
 		return false
 	}
@@ -1807,7 +2041,9 @@ func renderComplexRecord(p *core.Printer, rec record, last bool) {
 	p.Set(core.Green)
 	if rec.owner != "" {
 		p.WriteString(core.TerminalSafeText(rec.owner))
-		if rec.typ != dnsmessage.TypeSOA && rec.typ != dnsTypeCAA {
+		if rec.typ == dnsmessage.TypeSVCB || rec.typ == dnsmessage.TypeHTTPS {
+			p.WriteString(" ")
+		} else if rec.typ != dnsmessage.TypeSOA && rec.typ != dnsTypeCAA {
 			p.WriteString(" → ")
 		}
 	}
@@ -1817,6 +2053,9 @@ func renderComplexRecord(p *core.Printer, rec record, last bool) {
 	case dnsmessage.TypeSRV:
 		p.WriteString(core.TerminalSafeText(rec.target))
 		p.WriteString(fmt.Sprintf(":%d", rec.port))
+	case dnsmessage.TypeSVCB, dnsmessage.TypeHTTPS:
+		p.WriteString(fmt.Sprintf("priority %d → ", rec.priority))
+		p.WriteString(core.TerminalSafeText(safeRecordText(rec.target)))
 	case dnsmessage.TypeSOA, dnsTypeCAA:
 		// These records list their semantic values on indented lines below.
 	}
@@ -1847,6 +2086,44 @@ func renderComplexRecord(p *core.Printer, rec record, last bool) {
 		writeRecordDetail(p, "Flags", strconv.Itoa(int(flags)), continued)
 		writeRecordDetail(p, "Tag", tag, continued)
 		writeRecordDetail(p, "Value", value, continued)
+	case dnsmessage.TypeSVCB, dnsmessage.TypeHTTPS:
+		renderServiceBindingDetails(p, rec, continued)
+		return
+	}
+	writeRecordSourceAndTTL(p, rec, continued)
+}
+
+// renderServiceBindingDetails expands HTTPS/SVCB parameters into stable,
+// human-readable fields. Parameter values stay bytes until this point so the
+// renderer can distinguish valid values from malformed or unknown ones.
+func renderServiceBindingDetails(p *core.Printer, rec record, continued bool) {
+	if rec.priority == 0 {
+		writeRecordDetail(p, "Mode", "AliasMode", continued)
+	}
+
+	params := slices.Clone(rec.params)
+	slices.SortStableFunc(params, func(a, b resolver.SVCParam) int {
+		if order := cmp.Compare(svcParamRenderOrder(a.Key), svcParamRenderOrder(b.Key)); order != 0 {
+			return order
+		}
+		if order := cmp.Compare(a.Key, b.Key); order != 0 {
+			return order
+		}
+		return bytes.Compare(a.Value, b.Value)
+	})
+	for _, param := range params {
+		label, value := formatStructuredSVCParam(param)
+		writeRecordDetail(p, label, value, continued)
+	}
+
+	// A malformed generic RDATA must remain inspectable. Valid responses have
+	// already been decoded into Params, but a generic fixture or an unusual
+	// provider can still leave only raw bytes available.
+	if len(rec.rawRData) > 0 {
+		_, _, _, valid := parseRawSVCB(rec.rawRData)
+		if !valid {
+			writeRecordDetail(p, "Raw RDATA", "0x"+hex.EncodeToString(rec.rawRData), continued)
+		}
 	}
 	writeRecordSourceAndTTL(p, rec, continued)
 }
