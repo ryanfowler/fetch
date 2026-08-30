@@ -2,6 +2,7 @@ package dnsinspect
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -514,6 +515,14 @@ func TestLookupSystemFallsBackToPlatform(t *testing.T) {
 	if len(res.failures) == 0 {
 		t.Fatal("platform fallback discarded direct nameserver failures")
 	}
+	if got, want := len(res.queries), len(inspectTypes); got != want {
+		t.Fatalf("platform fallback query results = %d, want %d", got, want)
+	}
+	for i, query := range res.queries {
+		if query.status != queryStatusFailed {
+			t.Errorf("platform fallback query %d status = %d, want failed", i, query.status)
+		}
+	}
 
 	p := core.TestPrinter(false)
 	status := Inspect(context.Background(), p, &Config{
@@ -717,6 +726,48 @@ func TestNormalizeDOHCAAGenericRDATA(t *testing.T) {
 	got := normalizeDOHValue(dnsTypeCAA, `\# 22 000569737375656c657473656e63727970742e6f7267`)
 	if want := `0 issue "letsencrypt.org"`; got != want {
 		t.Fatalf("decoded CAA = %q, want %q", got, want)
+	}
+}
+
+func TestAggregatePreservesEveryQueryStatus(t *testing.T) {
+	out := &result{records: make(map[string][]record)}
+	results := []queryResult{
+		{typ: inspectTypes[0], records: []record{{typ: "A", value: "192.0.2.1"}}},
+		{typ: inspectTypes[1], err: resolver.ErrDNSNoData},
+		{typ: inspectTypes[2], err: errors.New("SERVFAIL")},
+		{typ: inspectTypes[3]},
+	}
+
+	if err := aggregate(out, results, time.Now()); err == nil {
+		t.Fatal("aggregate() error = nil, want query failure")
+	}
+	if got, want := len(out.queries), len(results); got != want {
+		t.Fatalf("preserved query results = %d, want %d", got, want)
+	}
+	for i, want := range []queryStatus{
+		queryStatusData,
+		queryStatusNoData,
+		queryStatusFailed,
+		queryStatusNoData,
+	} {
+		if got := out.queries[i].status; got != want {
+			t.Errorf("query %d status = %d, want %d", i, got, want)
+		}
+		if got, wantType := out.queries[i].typ, results[i].typ; got != wantType {
+			t.Errorf("query %d type = %#v, want %#v", i, got, wantType)
+		}
+	}
+	if got, want := out.queryTotal, 4; got != want {
+		t.Errorf("query total = %d, want %d", got, want)
+	}
+	if got, want := out.queryWithData, 1; got != want {
+		t.Errorf("queries with data = %d, want %d", got, want)
+	}
+	if got, want := out.queryNoData, 2; got != want {
+		t.Errorf("queries with no data = %d, want %d", got, want)
+	}
+	if got, want := len(out.failures), 1; got != want {
+		t.Errorf("query failures = %d, want %d", got, want)
 	}
 }
 

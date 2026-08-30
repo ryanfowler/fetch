@@ -93,6 +93,7 @@ type result struct {
 	security       string
 	source         string
 	records        map[string][]record
+	queries        []queryResult
 	failures       []queryFailure
 	queryTotal     int
 	queryWithData  int
@@ -103,8 +104,17 @@ type result struct {
 	silent         bool
 }
 
+type queryStatus uint8
+
+const (
+	queryStatusData queryStatus = iota
+	queryStatusNoData
+	queryStatusFailed
+)
+
 type queryResult struct {
-	label       string
+	typ         queryType
+	status      queryStatus
 	records     []record
 	err         error
 	tcpFallback bool
@@ -353,7 +363,7 @@ func runFanOut(ctx context.Context, host string, target resolverTargetInfo, syst
 		wg.Add(1)
 		go func(i int, qt queryType) {
 			defer wg.Done()
-			results[i].label = qt.label
+			results[i].typ = qt
 			switch {
 			case systemPolicy != nil:
 				results[i].records, results[i].tcpFallback, results[i].err = lookupSystemRecords(ctx, systemPolicy, host, qt)
@@ -400,20 +410,21 @@ func aggregate(out *result, results []queryResult, start time.Time) error {
 	var firstResult error
 	seen := make(map[string]int)
 	out.queryTotal = len(results)
+	out.queries = make([]queryResult, 0, len(results))
 	for _, query := range results {
+		query.status = classifyQuery(query)
+		out.queries = append(out.queries, query)
 		out.tcpFallback = out.tcpFallback || query.tcpFallback
-		switch {
-		case query.err != nil && !errors.Is(query.err, resolver.ErrDNSNoData):
-			out.failures = append(out.failures, queryFailure{label: query.label, err: query.err})
+		switch query.status {
+		case queryStatusFailed:
+			out.failures = append(out.failures, queryFailure{label: query.typ.label, err: query.err})
 			if firstResult == nil {
 				firstResult = query.err
 			}
-		case query.err != nil && errors.Is(query.err, resolver.ErrDNSNoData):
+		case queryStatusNoData:
 			out.queryNoData++
-		case len(query.records) > 0:
+		case queryStatusData:
 			out.queryWithData++
-		default:
-			out.queryNoData++
 		}
 		for _, rec := range query.records {
 			key := rec.typ + "\x00" + rec.value
@@ -435,6 +446,19 @@ func aggregate(out *result, results []queryResult, start time.Time) error {
 	}
 	out.duration = time.Since(start)
 	return firstResult
+}
+
+func classifyQuery(query queryResult) queryStatus {
+	if query.err != nil {
+		if errors.Is(query.err, resolver.ErrDNSNoData) {
+			return queryStatusNoData
+		}
+		return queryStatusFailed
+	}
+	if len(query.records) == 0 {
+		return queryStatusNoData
+	}
+	return queryStatusData
 }
 
 func hasAddressRecords(out *result) bool {
@@ -530,6 +554,7 @@ func platformResult(orig *result, records []record, start time.Time) *result {
 		security:       "mixed (direct nameserver and platform resolver)",
 		source:         "system resolver configuration with platform fallback",
 		records:        make(map[string][]record, len(orig.records)),
+		queries:        slices.Clone(orig.queries),
 		failures:       slices.Clone(orig.failures),
 		queryTotal:     orig.queryTotal,
 		queryWithData:  orig.queryWithData,
