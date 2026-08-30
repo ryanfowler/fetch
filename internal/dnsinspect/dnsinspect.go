@@ -134,15 +134,16 @@ type result struct {
 	// The following fields are only rendered at -vv. Keeping them in the
 	// result, rather than deriving them in the renderer, preserves the
 	// resolver policy that was used for this operation.
-	configuredNameservers []string
-	resolverAttempts      int
-	resolverTimeout       time.Duration
-	resolverRotation      string
-	resolverConfiguration string
-	resolverRouting       string
-	resolverSearchDomains string
-	resolverOSRouting     string
-	resolverBootstrap     string
+	configuredNameservers   []string
+	resolverAttempts        int
+	resolverTimeout         time.Duration
+	resolverRotation        string
+	resolverConfiguration   string
+	resolverRouting         string
+	resolverSearchDomains   string
+	resolverOSRouting       string
+	resolverPlatformRouting string
+	resolverBootstrap       string
 }
 
 type queryStatus uint8
@@ -226,9 +227,36 @@ func setSystemResolverDetails(out *result, policy resolver.SystemResolverPolicy)
 		out.resolverRotation = "disabled"
 	}
 	out.resolverConfiguration = policy.ResolvConfPath
-	out.resolverRouting = "direct nameserver queries"
-	out.resolverSearchDomains = "not applied"
-	out.resolverOSRouting = "not applied by direct queries"
+	caveats := directSystemResolverCaveats(runtime.GOOS)
+	out.resolverRouting = caveats.routing
+	out.resolverSearchDomains = caveats.searchDomains
+	out.resolverOSRouting = caveats.osRouting
+	out.resolverPlatformRouting = caveats.platformRouting
+}
+
+type systemResolverCaveats struct {
+	routing         string
+	searchDomains   string
+	osRouting       string
+	platformRouting string
+}
+
+// directSystemResolverCaveats describes the behavior that differs from the
+// platform resolver when inspection sends DNS packets to configured
+// nameservers. Keep platform-specific caveats separate: macOS has resolver
+// scopes and /etc/resolver routing that are not represented by resolv.conf,
+// while other supported platforms need the more general direct-query warning.
+func directSystemResolverCaveats(goos string) systemResolverCaveats {
+	caveats := systemResolverCaveats{
+		routing:       "direct nameserver queries",
+		searchDomains: "not applied",
+	}
+	if goos == "darwin" {
+		caveats.platformRouting = "scoped/VPN/per-interface and /etc/resolver routing not applied"
+	} else {
+		caveats.osRouting = "not applied by direct queries"
+	}
+	return caveats
 }
 
 func endpointBootstrapDescription(endpoint *resolver.Endpoint) string {
@@ -703,32 +731,33 @@ func isASCII(value string) bool {
 // explicit.
 func platformResult(orig *result, records []record, start time.Time) *result {
 	out := &result{
-		host:                  orig.host,
-		queryName:             orig.queryName,
-		resolver:              "system nameservers + platform resolver",
-		transport:             "mixed",
-		security:              "mixed",
-		source:                "system resolver configuration + platform resolver",
-		responders:            append(slices.Clone(orig.responders), "platform resolver"),
-		records:               make(map[string][]record, len(orig.records)),
-		queries:               slices.Clone(orig.queries),
-		failures:              slices.Clone(orig.failures),
-		queryTotal:            orig.queryTotal,
-		queryWithData:         orig.queryWithData,
-		queryNoData:           orig.queryNoData,
-		tcpFallback:           orig.tcpFallback,
-		platformFallback:      true,
-		verbosity:             orig.verbosity,
-		configuredNameservers: slices.Clone(orig.configuredNameservers),
-		resolverAttempts:      orig.resolverAttempts,
-		resolverTimeout:       orig.resolverTimeout,
-		resolverRotation:      orig.resolverRotation,
-		resolverConfiguration: orig.resolverConfiguration,
-		resolverRouting:       orig.resolverRouting,
-		resolverSearchDomains: orig.resolverSearchDomains,
-		resolverOSRouting:     orig.resolverOSRouting,
-		resolverBootstrap:     orig.resolverBootstrap,
-		duration:              time.Since(start),
+		host:                    orig.host,
+		queryName:               orig.queryName,
+		resolver:                "system nameservers + platform resolver",
+		transport:               "mixed",
+		security:                "mixed",
+		source:                  "system resolver configuration + platform resolver",
+		responders:              append(slices.Clone(orig.responders), "platform resolver"),
+		records:                 make(map[string][]record, len(orig.records)),
+		queries:                 slices.Clone(orig.queries),
+		failures:                slices.Clone(orig.failures),
+		queryTotal:              orig.queryTotal,
+		queryWithData:           orig.queryWithData,
+		queryNoData:             orig.queryNoData,
+		tcpFallback:             orig.tcpFallback,
+		platformFallback:        true,
+		verbosity:               orig.verbosity,
+		configuredNameservers:   slices.Clone(orig.configuredNameservers),
+		resolverAttempts:        orig.resolverAttempts,
+		resolverTimeout:         orig.resolverTimeout,
+		resolverRotation:        orig.resolverRotation,
+		resolverConfiguration:   orig.resolverConfiguration,
+		resolverRouting:         orig.resolverRouting,
+		resolverSearchDomains:   orig.resolverSearchDomains,
+		resolverOSRouting:       orig.resolverOSRouting,
+		resolverPlatformRouting: orig.resolverPlatformRouting,
+		resolverBootstrap:       orig.resolverBootstrap,
+		duration:                time.Since(start),
 	}
 	for typ, values := range orig.records {
 		out.records[typ] = slices.Clone(values)
@@ -1842,7 +1871,11 @@ func renderResolverDetails(p *core.Printer, res *result) {
 		}
 		if fields == 0 {
 			writeInspectionBlankLine(p)
-			renderInspectionSection(p, "Resolver details")
+			heading := "Resolver details"
+			if res.resolverRouting != "" || len(res.configuredNameservers) > 0 {
+				heading = "System resolver"
+			}
+			renderInspectionSection(p, heading)
 		}
 		fields++
 		writeInspectionField(p, label, value)
@@ -1867,6 +1900,7 @@ func renderResolverDetails(p *core.Printer, res *result) {
 	write("Routing", res.resolverRouting)
 	write("Search domains", res.resolverSearchDomains)
 	write("OS resolver routing", res.resolverOSRouting)
+	write("macOS routing", res.resolverPlatformRouting)
 	write("Bootstrap", res.resolverBootstrap)
 }
 
