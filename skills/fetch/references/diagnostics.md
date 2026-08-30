@@ -10,8 +10,9 @@ fetch --inspect-dns example.com
 fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 ```
 
-Use DNS inspection to distinguish resolution failures, record-family issues, and
-resolver-specific behavior. It performs inspection rather than an HTTP request.
+Use DNS inspection as the first network diagnostic layer. It distinguishes
+resolution failures, record-family issues, and resolver-specific behavior
+without making an HTTP request.
 Without `--dns-server`, nameservers from the system resolver configuration are
 queried directly when available. This shows supported record types and TTLs. If
 that configuration is unavailable, the platform resolver provides A/AAAA records
@@ -30,10 +31,10 @@ nameserver list, policy limits, normalization, caveats, responders, transport, d
 and failover attempts. For direct DNS lookups, when IDNA normalization changes the name, normal output includes `Query name` with the absolute punycode name sent to DNS. Single-label names also show their absolute query name; the root terminator is omitted for ordinary multi-label hostnames when it is the only difference. Successful records remain visible when one query fails;
 the `Lookup` section reports an incomplete status and the `Failures` section
 identifies the failed types. The
-command exits nonzero. Inspection output, including the `Failures` section, goes
+command exits with status 1. Inspection output, including the `Failures` section, goes
 to stdout. Invocation warnings and setup/configuration errors go to stderr. `Transport security` describes the resolver connection only; it is not DNSSEC validation, which fetch does not perform. A truncated UDP response is retried over TCP and is reported as transport metadata (`Transport: UDP → TCP fallback`), not as a warning. Use `-vv` to identify the record-type queries that used this fallback.
 
-For an IPv4 or IPv6 URL literal, DNS is not performed. The result reports `Status: IP literal — DNS not performed`, omits resolver and transport fields, and exits successfully. For direct system DNS, `-vv` reports the configuration file, direct nameserver routing, and that search domains are not applied. On macOS, it also reports that scoped, VPN, per-interface, and `/etc/resolver` routing is not applied. On other platforms, it reports that OS resolver routing is not applied by direct queries. These limitations apply to the direct DNS path; platform-fallback addresses use the OS resolver. Do not discard useful stdout only because a partial inspection exits with status 1.
+For an IPv4 or IPv6 URL literal, DNS is not performed. The result reports `Status: IP literal — DNS not performed`, omits resolver and transport fields, and exits successfully. For direct system DNS, `-vv` reports the configuration file, direct nameserver routing, and that search domains are not applied. On macOS, it also reports that scoped, VPN, per-interface, and `/etc/resolver` routing is not applied. On other platforms, it reports that OS resolver routing is not applied by direct queries. These limitations apply to the direct DNS path; platform-fallback addresses use the OS resolver and may lack TTLs. Treat stdout as a useful diagnostic artifact even when a partial inspection exits with status 1; never discard it solely because the exit status is nonzero.
 
 ## TLS
 

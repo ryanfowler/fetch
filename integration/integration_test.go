@@ -615,6 +615,47 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("dns inspection keeps structured results and diagnostics on separate streams", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				w.WriteHeader(http.StatusUnsupportedMediaType)
+				return
+			}
+			w.Header().Set("Content-Type", "application/dns-json")
+			if r.URL.Path == "/partial" && r.URL.Query().Get("type") == "TXT" {
+				io.WriteString(w, `{"Status":2}`)
+				return
+			}
+			if r.URL.Query().Get("type") == "A" {
+				io.WriteString(w, `{"Status":0,"Answer":[{"name":"example.test.","type":1,"TTL":60,"data":"192.0.2.10"}]}`)
+				return
+			}
+			io.WriteString(w, `{"Status":0}`)
+		})
+		defer server.Close()
+
+		opts := fetchOpts{env: []string{"FETCH_TEST_ALLOW_INSECURE_DNS=1"}}
+		res := runFetchOpts(t, fetchPath, opts, "--inspect-dns", "--dns-server", server.URL+"/complete", "example.test")
+		assertExitCode(t, 0, res)
+		assertBufEmpty(t, res.stderr)
+		for _, want := range []string{"Lookup\n", "Name: example.test", "Status: complete", "Records\n", "example.test. → 192.0.2.10"} {
+			assertBufContains(t, res.stdout, want)
+		}
+
+		res = runFetchOpts(t, fetchPath, opts, "--inspect-dns", "--dns-server", server.URL+"/partial", "example.test")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stderr)
+		for _, want := range []string{"Status: incomplete", "Failures\n", "TXT:", "example.test. → 192.0.2.10"} {
+			assertBufContains(t, res.stdout, want)
+		}
+
+		res = runFetch(t, fetchPath, "--inspect-dns", "--timing", "127.0.0.1")
+		assertExitCode(t, 0, res)
+		assertBufContains(t, res.stdout, "Status: IP literal — DNS not performed")
+		assertBufContains(t, res.stderr, "warning: --inspect-dns ignores: --timing")
+	})
+
 	t.Run("dns over https", func(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
