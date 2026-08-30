@@ -78,11 +78,20 @@ type queryType struct {
 	dnsType dnsmessage.Type
 }
 
+type recordSource uint8
+
+const (
+	recordSourceDNS recordSource = iota
+	recordSourcePlatform
+)
+
 type record struct {
+	owner  string
 	typ    string
 	value  string
 	ttl    uint32
 	hasTTL bool
+	source recordSource
 }
 
 type result struct {
@@ -395,11 +404,9 @@ func lookupSystemRecords(ctx context.Context, policy *resolver.SystemResolverPol
 	}
 	records := make([]record, 0, len(resolved))
 	for _, rec := range resolved {
-		value, ok := wireRecordValue(rec)
-		if !ok {
-			continue
+		if converted, ok := recordFromWire(rec); ok {
+			records = append(records, converted)
 		}
-		records = append(records, record{typ: typeLabel(dnsmessage.Type(rec.Type)), value: value, ttl: rec.TTL, hasTTL: rec.TTLPresent})
 	}
 	return records, fallback, nil
 }
@@ -427,7 +434,7 @@ func aggregate(out *result, results []queryResult, start time.Time) error {
 			out.queryWithData++
 		}
 		for _, rec := range query.records {
-			key := rec.typ + "\x00" + rec.value
+			key := canonicalOwnerKey(rec.owner) + "\x00" + rec.typ + "\x00" + rec.value
 			if idx, ok := seen[key]; ok {
 				records := out.records[rec.typ]
 				existing := &records[idx]
@@ -446,6 +453,10 @@ func aggregate(out *result, results []queryResult, start time.Time) error {
 	}
 	out.duration = time.Since(start)
 	return firstResult
+}
+
+func canonicalOwnerKey(owner string) string {
+	return strings.ToLower(owner)
 }
 
 func classifyQuery(query queryResult) queryStatus {
@@ -580,13 +591,14 @@ func lookupDefaultResolverRecords(ctx context.Context, host string) ([]record, e
 	}
 
 	records := make([]record, 0, len(addrs))
+	owner := normalizedOwner(host)
 	for _, addr := range addrs {
 		ip := addr.IP
 		switch {
 		case ip.To4() != nil:
-			records = append(records, record{typ: "A", value: ip.String()})
+			records = append(records, record{owner: owner, typ: "A", value: ip.String(), source: recordSourcePlatform})
 		case ip.To16() != nil:
-			records = append(records, record{typ: "AAAA", value: ip.String()})
+			records = append(records, record{owner: owner, typ: "AAAA", value: ip.String(), source: recordSourcePlatform})
 		}
 	}
 	return records, nil
@@ -611,9 +623,8 @@ func lookupStreamRecords(ctx context.Context, client *resolver.StreamClient, hos
 	}
 	records := make([]record, 0, len(authorized))
 	for _, answer := range authorized {
-		value, ok := wireRecordValue(answer)
-		if ok {
-			records = append(records, record{typ: typeLabel(dnsmessage.Type(answer.Type)), value: value, ttl: answer.TTL, hasTTL: true})
+		if converted, ok := recordFromWire(answer); ok {
+			records = append(records, converted)
 		}
 	}
 	return records, nil
@@ -638,9 +649,8 @@ func lookupDoQRecords(ctx context.Context, client *resolver.DoQClient, host stri
 	}
 	records := make([]record, 0, len(authorized))
 	for _, answer := range authorized {
-		value, ok := wireRecordValue(answer)
-		if ok {
-			records = append(records, record{typ: typeLabel(dnsmessage.Type(answer.Type)), value: value, ttl: answer.TTL, hasTTL: true})
+		if converted, ok := recordFromWire(answer); ok {
+			records = append(records, converted)
 		}
 	}
 	return records, nil
@@ -663,7 +673,14 @@ func lookupDOHRecordsWithClient(ctx context.Context, client *resolver.DOHClient,
 		if value == "" {
 			continue
 		}
-		out = append(out, record{typ: typeLabel(typ), value: value, ttl: answer.Record.TTL, hasTTL: answer.TTLPresent})
+		out = append(out, record{
+			owner:  normalizeOwnerPresentation(answer.Record.Owner.String()),
+			typ:    typeLabel(typ),
+			value:  value,
+			ttl:    answer.Record.TTL,
+			hasTTL: answer.TTLPresent,
+			source: recordSourceDNS,
+		})
 	}
 	return out, nil
 }
@@ -693,13 +710,37 @@ func lookupUDPRecordsWithFallback(ctx context.Context, serverAddr, host string, 
 	}
 	records := make([]record, 0, len(authorized))
 	for _, answer := range authorized {
-		value, ok := wireRecordValue(answer)
-		if !ok {
-			continue
+		if converted, ok := recordFromWire(answer); ok {
+			records = append(records, converted)
 		}
-		records = append(records, record{typ: typeLabel(dnsmessage.Type(answer.Type)), value: value, ttl: answer.TTL, hasTTL: true})
 	}
 	return records, fallback, nil
+}
+
+func recordFromWire(res resolver.Record) (record, bool) {
+	value, ok := wireRecordValue(res)
+	if !ok {
+		return record{}, false
+	}
+	return record{
+		owner:  normalizeOwnerPresentation(res.Owner.String()),
+		typ:    typeLabel(dnsmessage.Type(res.Type)),
+		value:  value,
+		ttl:    res.TTL,
+		hasTTL: res.TTLPresent,
+		source: recordSourceDNS,
+	}, true
+}
+
+func normalizedOwner(host string) string {
+	if queryHost, err := dnsQueryHost(host); err == nil {
+		return normalizeOwnerPresentation(queryHost)
+	}
+	return normalizeOwnerPresentation(host)
+}
+
+func normalizeOwnerPresentation(owner string) string {
+	return strings.ToLower(absoluteName(owner))
 }
 
 func wireRecordValue(res resolver.Record) (string, bool) {
@@ -1322,6 +1363,10 @@ func renderSection(p *core.Printer, name string, records []record) {
 			p.WriteString("  \u251c\u2500 ")
 		}
 		p.Set(core.Green)
+		if rec.owner != "" {
+			p.WriteString(core.TerminalSafeText(rec.owner))
+			p.WriteString(" → ")
+		}
 		p.WriteString(core.TerminalSafeText(rec.value))
 		p.Reset()
 		p.WriteString(" ")
