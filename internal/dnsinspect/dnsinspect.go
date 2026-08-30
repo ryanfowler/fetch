@@ -1111,16 +1111,10 @@ func safeRecordText(text string) string {
 }
 
 func formatCAA(raw []byte) string {
-	if len(raw) < 2 {
+	flags, tag, value, ok := caaFields(raw)
+	if !ok {
 		return "0x" + hex.EncodeToString(raw)
 	}
-	tagLen := int(raw[1])
-	if len(raw) < 2+tagLen {
-		return "0x" + hex.EncodeToString(raw)
-	}
-	flags := raw[0]
-	tag := string(raw[2 : 2+tagLen])
-	value := string(raw[2+tagLen:])
 	return fmt.Sprintf("%d %s %q", flags, safeRecordText(tag), value)
 }
 
@@ -1774,15 +1768,129 @@ func renderSection(p *core.Printer, name string, records []record) {
 	p.WriteString("\n")
 
 	for i, rec := range records {
-		if rec.typ == dnsmessage.TypeTXT && len(rec.txt) > 1 {
-			renderTXTRecord(p, rec, i == len(records)-1)
-			continue
+		last := i == len(records)-1
+		switch {
+		case rec.typ == dnsmessage.TypeTXT && len(rec.txt) > 1:
+			renderTXTRecord(p, rec, last)
+		case rec.hasComplexRendering():
+			renderComplexRecord(p, rec, last)
+		default:
+			renderRecordLine(p, rec, last)
 		}
-		renderRecordLine(p, rec, i == len(records)-1)
 	}
 
 	p.WriteInfoPrefix()
 	p.WriteString("\n")
+}
+
+func (rec record) hasComplexRendering() bool {
+	switch rec.typ {
+	case dnsmessage.TypeMX:
+		return rec.target != ""
+	case dnsmessage.TypeSRV:
+		return rec.target != ""
+	case dnsmessage.TypeSOA:
+		return rec.target != "" && rec.target2 != ""
+	case dnsTypeCAA:
+		_, _, _, ok := caaFields(rec.rawRData)
+		return ok
+	default:
+		return false
+	}
+}
+
+// renderComplexRecord keeps the structured fields of complex resource records
+// visible. The first line identifies the owner and target (when one exists),
+// while the indented fields explain the numeric and type-specific values.
+func renderComplexRecord(p *core.Printer, rec record, last bool) {
+	writeRecordPrefix(p, last)
+	p.Set(core.Green)
+	if rec.owner != "" {
+		p.WriteString(core.TerminalSafeText(rec.owner))
+		if rec.typ != dnsmessage.TypeSOA && rec.typ != dnsTypeCAA {
+			p.WriteString(" → ")
+		}
+	}
+	switch rec.typ {
+	case dnsmessage.TypeMX:
+		p.WriteString(core.TerminalSafeText(rec.target))
+	case dnsmessage.TypeSRV:
+		p.WriteString(core.TerminalSafeText(rec.target))
+		p.WriteString(fmt.Sprintf(":%d", rec.port))
+	case dnsmessage.TypeSOA, dnsTypeCAA:
+		// These records list their semantic values on indented lines below.
+	}
+	p.Reset()
+	p.WriteString("\n")
+
+	continued := !last
+	switch rec.typ {
+	case dnsmessage.TypeMX:
+		writeRecordDetail(p, "Priority", strconv.FormatUint(uint64(rec.preference), 10), continued)
+	case dnsmessage.TypeSRV:
+		writeRecordDetail(p, "Priority", strconv.FormatUint(uint64(rec.priority), 10), continued)
+		writeRecordDetail(p, "Weight", strconv.FormatUint(uint64(rec.weight), 10), continued)
+	case dnsmessage.TypeSOA:
+		writeRecordDetail(p, "Primary NS", rec.target, continued)
+		writeRecordDetail(p, "Responsible", rec.target2, continued)
+		writeRecordDetail(p, "Serial", strconv.FormatUint(uint64(rec.soa[0]), 10), continued)
+		writeRecordDetail(p, "Refresh", formatTTL(rec.soa[1]), continued)
+		writeRecordDetail(p, "Retry", formatTTL(rec.soa[2]), continued)
+		writeRecordDetail(p, "Expire", formatTTL(rec.soa[3]), continued)
+		writeRecordDetail(p, "Minimum TTL", formatTTL(rec.soa[4]), continued)
+	case dnsTypeCAA:
+		flags, tag, value, ok := caaFields(rec.rawRData)
+		if !ok {
+			renderRecordLine(p, rec, last)
+			return
+		}
+		writeRecordDetail(p, "Flags", strconv.Itoa(int(flags)), continued)
+		writeRecordDetail(p, "Tag", tag, continued)
+		writeRecordDetail(p, "Value", value, continued)
+	}
+	writeRecordSourceAndTTL(p, rec, continued)
+}
+
+func writeRecordDetail(p *core.Printer, label, value string, continued bool) {
+	writeRecordContinuationPrefix(p, continued)
+	p.WriteString(label)
+	p.WriteString(": ")
+	p.WriteString(core.TerminalSafeText(safeRecordText(value)))
+	p.WriteString("\n")
+}
+
+// writeRecordContinuationPrefix keeps detail lines connected to the record
+// branch. Without the vertical continuation, the indentation looks like a
+// large gap between the tree marker and the field text.
+func writeRecordContinuationPrefix(p *core.Printer, continued bool) {
+	p.WriteInfoPrefix()
+	if continued {
+		p.WriteString("  \u2502  ")
+		return
+	}
+	p.WriteString("     ")
+}
+
+func writeRecordSourceAndTTL(p *core.Printer, rec record, continued bool) {
+	if rec.source == recordSourcePlatform {
+		writeRecordDetail(p, "Source", "platform resolver", continued)
+	}
+	if rec.hasTTL {
+		writeRecordDetail(p, "TTL", formatTTL(rec.ttl), continued)
+	} else {
+		writeRecordDetail(p, "TTL", "unavailable", continued)
+	}
+}
+
+func caaFields(raw []byte) (flags uint8, tag, value string, ok bool) {
+	if len(raw) < 2 {
+		return 0, "", "", false
+	}
+	tagLen := int(raw[1])
+	if tagLen > len(raw)-2 {
+		return 0, "", "", false
+	}
+	return raw[0], string(raw[2 : 2+tagLen]), string(raw[2+tagLen:]), true
 }
 
 func formatTXTChunk(chunk []byte) string {
@@ -1804,16 +1912,14 @@ func renderTXTRecord(p *core.Printer, rec record, last bool) {
 	p.WriteString("\n")
 
 	for _, chunk := range rec.txt {
-		p.WriteInfoPrefix()
-		p.WriteString("     ")
+		writeRecordContinuationPrefix(p, !last)
 		p.Set(core.Green)
 		p.WriteString(formatTXTChunk(chunk))
 		p.Reset()
 		p.WriteString("\n")
 	}
 
-	p.WriteInfoPrefix()
-	p.WriteString("     ")
+	writeRecordContinuationPrefix(p, !last)
 	p.Set(core.Dim)
 	if rec.source == recordSourcePlatform {
 		p.WriteString("Source: platform resolver; ")
@@ -1883,15 +1989,33 @@ func formatDuration(d time.Duration) string {
 }
 
 func formatTTL(ttl uint32) string {
-	if ttl == 1 {
-		return "1s"
+	if ttl == 0 {
+		return "0s"
 	}
-	d := time.Duration(ttl) * time.Second
-	if ttl < 60 {
-		return d.String()
+
+	// DNS TTLs are seconds. Use compact whole-unit components so SOA
+	// durations such as expire=604800 are readable as 1w instead of 168h.
+	remaining := uint64(ttl)
+	units := []struct {
+		seconds uint64
+		suffix  string
+	}{
+		{7 * 24 * 60 * 60, "w"},
+		{24 * 60 * 60, "d"},
+		{60 * 60, "h"},
+		{60, "m"},
+		{1, "s"},
 	}
-	text := strings.TrimSuffix(d.String(), "0s")
-	return strings.TrimSuffix(text, "0m")
+	var b strings.Builder
+	for _, unit := range units {
+		if remaining < unit.seconds {
+			continue
+		}
+		count := remaining / unit.seconds
+		remaining %= unit.seconds
+		fmt.Fprintf(&b, "%d%s", count, unit.suffix)
+	}
+	return b.String()
 }
 
 func flushInspectionOutput(output, errorOutput *core.Printer) int {
