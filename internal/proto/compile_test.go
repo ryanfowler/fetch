@@ -494,6 +494,12 @@ func descriptorPath() string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "-child-pipe-worker" {
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
+
 	switch os.Getenv("FETCH_FAKE_PROTOC_MODE") {
 	case "stdout-flood":
 		_, _ = os.Stdout.Write([]byte(strings.Repeat("x", 1<<20)))
@@ -525,10 +531,6 @@ func main() {
 		}
 		if path := os.Getenv("FETCH_FAKE_PROTOC_CHILD_PID_FILE"); path != "" {
 			_ = os.WriteFile(path, []byte(fmt.Sprint(child.Process.Pid)), 0600)
-		}
-	case "-child-pipe-worker":
-		for {
-			time.Sleep(time.Hour)
 		}
 	case "hang":
 		for {
