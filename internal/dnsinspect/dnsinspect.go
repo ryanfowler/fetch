@@ -1059,12 +1059,8 @@ func (rec record) renderValue() string {
 			return rec.target
 		}
 	case dnsmessage.TypeTXT:
-		if rec.txt != nil {
-			parts := make([]string, len(rec.txt))
-			for i, chunk := range rec.txt {
-				parts[i] = strconv.Quote(string(chunk))
-			}
-			return strings.Join(parts, " ")
+		if len(rec.txt) == 1 {
+			return formatTXTChunk(rec.txt[0])
 		}
 	case dnsmessage.TypeMX:
 		if rec.target != "" {
@@ -1778,38 +1774,97 @@ func renderSection(p *core.Printer, name string, records []record) {
 	p.WriteString("\n")
 
 	for i, rec := range records {
+		if rec.typ == dnsmessage.TypeTXT && len(rec.txt) > 1 {
+			renderTXTRecord(p, rec, i == len(records)-1)
+			continue
+		}
+		renderRecordLine(p, rec, i == len(records)-1)
+	}
+
+	p.WriteInfoPrefix()
+	p.WriteString("\n")
+}
+
+func formatTXTChunk(chunk []byte) string {
+	// strconv.Quote escapes controls, invalid UTF-8, and quotes, so TXT data
+	// cannot inject terminal control sequences or output lines.
+	return strconv.Quote(string(chunk))
+}
+
+// renderTXTRecord renders each TXT character-string on its own line. This
+// avoids making adjacent DNS character-strings look like one string with a
+// synthetic space between their contents.
+func renderTXTRecord(p *core.Printer, rec record, last bool) {
+	writeRecordPrefix(p, last)
+	p.Set(core.Green)
+	if rec.owner != "" {
+		p.WriteString(core.TerminalSafeText(rec.owner))
+	}
+	p.Reset()
+	p.WriteString("\n")
+
+	for _, chunk := range rec.txt {
 		p.WriteInfoPrefix()
-		if i == len(records)-1 {
-			p.WriteString("  \u2514\u2500 ")
-		} else {
-			p.WriteString("  \u251c\u2500 ")
-		}
+		p.WriteString("     ")
 		p.Set(core.Green)
-		if rec.owner != "" {
-			p.WriteString(core.TerminalSafeText(rec.owner))
-			p.WriteString(" → ")
-		}
-		p.WriteString(core.TerminalSafeText(rec.renderValue()))
-		p.Reset()
-		p.WriteString(" ")
-		p.Set(core.Dim)
-		p.WriteString("(")
-		if rec.source == recordSourcePlatform {
-			p.WriteString("platform resolver; ")
-		}
-		if rec.hasTTL {
-			p.WriteString("TTL ")
-			p.WriteString(formatTTL(rec.ttl))
-		} else {
-			p.WriteString("TTL unavailable")
-		}
-		p.WriteString(")")
+		p.WriteString(formatTXTChunk(chunk))
 		p.Reset()
 		p.WriteString("\n")
 	}
 
 	p.WriteInfoPrefix()
+	p.WriteString("     ")
+	p.Set(core.Dim)
+	if rec.source == recordSourcePlatform {
+		p.WriteString("Source: platform resolver; ")
+	}
+	if rec.hasTTL {
+		p.WriteString("TTL: ")
+		p.WriteString(formatTTL(rec.ttl))
+	} else {
+		p.WriteString("TTL: unavailable")
+	}
+	p.Reset()
 	p.WriteString("\n")
+}
+
+func renderRecordLine(p *core.Printer, rec record, last bool) {
+	writeRecordPrefix(p, last)
+	p.Set(core.Green)
+	if rec.owner != "" {
+		p.WriteString(core.TerminalSafeText(rec.owner))
+		p.WriteString(" → ")
+	}
+	p.WriteString(core.TerminalSafeText(rec.renderValue()))
+	p.Reset()
+	p.WriteString(" ")
+	writeRecordMetadata(p, rec)
+	p.WriteString("\n")
+}
+
+func writeRecordPrefix(p *core.Printer, last bool) {
+	p.WriteInfoPrefix()
+	if last {
+		p.WriteString("  \u2514\u2500 ")
+	} else {
+		p.WriteString("  \u251c\u2500 ")
+	}
+}
+
+func writeRecordMetadata(p *core.Printer, rec record) {
+	p.Set(core.Dim)
+	p.WriteString("(")
+	if rec.source == recordSourcePlatform {
+		p.WriteString("platform resolver; ")
+	}
+	if rec.hasTTL {
+		p.WriteString("TTL ")
+		p.WriteString(formatTTL(rec.ttl))
+	} else {
+		p.WriteString("TTL unavailable")
+	}
+	p.WriteString(")")
+	p.Reset()
 }
 
 func recordCount(res *result) int {
