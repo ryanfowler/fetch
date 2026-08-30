@@ -540,6 +540,10 @@ fetch --inspect-dns example.com
 fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 ```
 
+An IPv4 or IPv6 URL literal does not require DNS inspection. The output reports
+`Status: IP literal — DNS not performed` and omits resolver, transport,
+transport-security, and DNS timing fields. It returns success.
+
 ### `--proxy PROXY`
 
 Route request through a proxy.

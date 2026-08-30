@@ -302,7 +302,7 @@ func InspectWithError(ctx context.Context, output, errorOutput *core.Printer, cf
 	defer cancel()
 
 	start := time.Now()
-	if net.ParseIP(host) != nil {
+	if isIPLiteral(host) {
 		renderIPLiteral(output, host)
 		return flushInspectionOutput(output, errorOutput)
 	}
@@ -1831,6 +1831,23 @@ func typeLabel(typ dnsmessage.Type) string {
 	default:
 		return fmt.Sprintf("TYPE%d", uint16(typ))
 	}
+}
+
+// isIPLiteral reports IPv4, IPv6, and scoped IPv6 literals. URL.Hostname
+// removes brackets from IPv6 authorities and decodes the zone separator, so
+// check the address without its optional interface zone. A scoped IPv6
+// literal is still an address that must not trigger DNS inspection.
+func isIPLiteral(host string) bool {
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if zone := strings.IndexByte(host, '%'); zone > 0 && zone+1 < len(host) {
+		ip := net.ParseIP(host[:zone])
+		// A zone is valid only on an IPv6 spelling. IPv4-mapped IPv6
+		// addresses retain the colon syntax even though To4 reports true.
+		return ip != nil && strings.Contains(host[:zone], ":")
+	}
+	return false
 }
 
 func renderIPLiteral(p *core.Printer, host string) {

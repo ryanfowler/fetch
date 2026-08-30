@@ -33,7 +33,7 @@ identifies the failed types. The
 command exits nonzero. Inspection output, including the `Failures` section, goes
 to stdout. Invocation warnings and setup/configuration errors go to stderr. `Transport security` describes the resolver connection only; it is not DNSSEC validation, which fetch does not perform. A truncated UDP response is retried over TCP and is reported as transport metadata (`Transport: UDP → TCP fallback`), not as a warning. Use `-vv` to identify the record-type queries that used this fallback.
 
-For direct system DNS, `-vv` reports the configuration file, direct nameserver routing, and that search domains are not applied. On macOS, it also reports that scoped, VPN, per-interface, and `/etc/resolver` routing is not applied. On other platforms, it reports that OS resolver routing is not applied by direct queries. These limitations apply to the direct DNS path; platform-fallback addresses use the OS resolver. Do not discard useful stdout only because a partial inspection exits with status 1.
+For an IPv4 or IPv6 URL literal, DNS is not performed. The result reports `Status: IP literal — DNS not performed`, omits resolver and transport fields, and exits successfully. For direct system DNS, `-vv` reports the configuration file, direct nameserver routing, and that search domains are not applied. On macOS, it also reports that scoped, VPN, per-interface, and `/etc/resolver` routing is not applied. On other platforms, it reports that OS resolver routing is not applied by direct queries. These limitations apply to the direct DNS path; platform-fallback addresses use the OS resolver. Do not discard useful stdout only because a partial inspection exits with status 1.
 
 ## TLS
 
