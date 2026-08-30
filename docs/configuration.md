@@ -381,7 +381,7 @@ redirects remain allowed.
 **Type**: Integer
 **Default**: `0` (no retries)
 
-Maximum number of retries for transient failures. Retries occur on connection errors and retryable status codes (429, 502, 503, 504) only for GET, HEAD, OPTIONS, and TRACE by default. PUT, DELETE, POST, PATCH, and custom methods require `retry-unsafe = true`.
+Maximum number of retries for transient failures. Retries occur on transient connection errors and retryable status codes (408, 425, 429, 500, 502, 503, 504) only for GET, HEAD, OPTIONS, and TRACE by default. DNS name-not-found failures are not retried. PUT, DELETE, POST, PATCH, and custom methods require `retry-unsafe = true`.
 The value must be between `0` and `100`.
 
 ```ini

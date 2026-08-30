@@ -208,6 +208,19 @@ func TestSchemelessPlaintextHint(t *testing.T) {
 }
 
 func TestShouldRetry(t *testing.T) {
+	for _, status := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooEarly,
+		http.StatusInternalServerError,
+	} {
+		t.Run(fmt.Sprintf("%d is retryable", status), func(t *testing.T) {
+			ok, _ := shouldRetry(http.MethodGet, false, &http.Response{StatusCode: status}, nil)
+			if !ok {
+				t.Fatalf("expected %d to be retryable", status)
+			}
+		})
+	}
+
 	t.Run("429 is retryable", func(t *testing.T) {
 		resp := &http.Response{StatusCode: 429, Header: http.Header{}}
 		ok, _ := shouldRetry(http.MethodGet, false, resp, nil)
@@ -273,7 +286,7 @@ func TestShouldRetry(t *testing.T) {
 	})
 
 	t.Run("connection error is retryable", func(t *testing.T) {
-		err := &net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host"}}
+		err := &net.OpError{Op: "dial", Err: &net.DNSError{Err: "temporary resolver failure", IsTemporary: true}}
 		ok, _ := shouldRetry(http.MethodGet, false, nil, err)
 		if !ok {
 			t.Error("expected connection error to be retryable")
@@ -288,7 +301,7 @@ func TestShouldRetry(t *testing.T) {
 	})
 
 	t.Run("url error wrapping net error is retryable", func(t *testing.T) {
-		err := &url.Error{Op: "Get", URL: "http://example.com", Err: &net.OpError{Op: "dial", Err: &net.DNSError{Err: "no such host"}}}
+		err := &url.Error{Op: "Get", URL: "http://example.com", Err: &net.OpError{Op: "dial", Err: &net.DNSError{Err: "resolver timeout", IsTimeout: true}}}
 		ok, _ := shouldRetry(http.MethodGet, false, nil, err)
 		if !ok {
 			t.Error("expected url.Error wrapping net error to be retryable")
@@ -332,6 +345,27 @@ func TestShouldRetry(t *testing.T) {
 }
 
 func TestIsRetryableError(t *testing.T) {
+	t.Run("name not found is not retryable", func(t *testing.T) {
+		err := &url.Error{Op: "Get", URL: "https://missing.invalid", Err: &net.DNSError{Err: "no such host", Name: "missing.invalid", IsNotFound: true}}
+		if isRetryableError(err) {
+			t.Error("expected permanent DNS name-not-found error to not be retryable")
+		}
+	})
+
+	t.Run("temporary DNS failure is retryable", func(t *testing.T) {
+		err := &net.DNSError{Err: "server misbehaving", IsTemporary: true}
+		if !isRetryableError(err) {
+			t.Error("expected temporary DNS error to be retryable")
+		}
+	})
+
+	t.Run("unclassified DNS failure is retryable", func(t *testing.T) {
+		err := &net.DNSError{Err: "resolver failure"}
+		if !isRetryableError(err) {
+			t.Error("expected unclassified DNS error to remain retryable")
+		}
+	})
+
 	t.Run("TLS cert error wrapped in url.Error is not retryable", func(t *testing.T) {
 		err := &url.Error{
 			Op:  "Get",

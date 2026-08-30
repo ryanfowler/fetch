@@ -603,10 +603,13 @@ func shouldRetry(method string, retryUnsafe bool, resp *http.Response, err error
 		return false, 0
 	}
 	switch resp.StatusCode {
-	case http.StatusTooManyRequests, // 429
-		http.StatusBadGateway,         // 502
-		http.StatusServiceUnavailable, // 503
-		http.StatusGatewayTimeout:     // 504
+	case http.StatusRequestTimeout, // 408
+		http.StatusTooEarly,            // 425
+		http.StatusTooManyRequests,     // 429
+		http.StatusInternalServerError, // 500
+		http.StatusBadGateway,          // 502
+		http.StatusServiceUnavailable,  // 503
+		http.StatusGatewayTimeout:      // 504
 		return true, parseRetryAfter(resp.Header)
 	default:
 		return false, 0
@@ -649,6 +652,15 @@ func isRetryableError(err error) bool {
 	// retryable. Instead, evaluate the inner error on its own merits.
 	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		return isRetryableError(urlErr.Err)
+	}
+
+	// A positively identified name-not-found failure cannot improve on a
+	// subsequent attempt. Leave unclassified DNS errors retryable: platform
+	// resolvers do not consistently set the timeout/temporary flags.
+	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok {
+		if dnsErr.IsNotFound {
+			return false
+		}
 	}
 
 	// Retry on per-attempt timeout (ErrRequestTimedOut is the custom

@@ -1088,6 +1088,7 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	if source != nil {
 		body.Attach(req, source)
 	}
+	inferredContentLength := req.ContentLength
 	if urlBasic != nil {
 		req.SetBasicAuth(urlBasic.Key, urlBasic.Val)
 		MarkCredentialHeaders(req, "Authorization")
@@ -1121,6 +1122,9 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 	// explicit value, then append so repeated headers remain distinct.
 	seenHeaders := make(map[string]struct{}, len(cfg.Headers))
 	acceptEncodingSet := false
+	var contentLengths []int64
+	var transferEncodings []string
+	transferEncodingSet := false
 	for _, kv := range cfg.Headers {
 		if strings.EqualFold(kv.Key, "Host") {
 			req.Host = kv.Val
@@ -1147,20 +1151,62 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 			if err != nil || length < 0 {
 				return nil, fmt.Errorf("invalid Content-Length header %q", kv.Val)
 			}
-			req.ContentLength = length
+			contentLengths = append(contentLengths, length)
 		case "transfer-encoding":
-			var encodings []string
+			transferEncodingSet = true
 			for encoding := range strings.SplitSeq(kv.Val, ",") {
-				encoding = strings.TrimSpace(encoding)
+				encoding = strings.ToLower(strings.TrimSpace(encoding))
 				if encoding != "" {
-					encodings = append(encodings, encoding)
+					transferEncodings = append(transferEncodings, encoding)
 				}
 			}
-			req.TransferEncoding = encodings
-			if len(encodings) > 0 {
-				req.ContentLength = -1
+		}
+	}
+
+	// Content-Length and Transfer-Encoding are framing metadata represented by
+	// dedicated Request fields. Validate them here so malformed or ambiguous
+	// framing fails before any connection is opened. Equal duplicate lengths
+	// are safe but are normalized to one value; differing values are rejected.
+	if len(contentLengths) > 0 {
+		length := contentLengths[0]
+		for _, other := range contentLengths[1:] {
+			if other != length {
+				return nil, fmt.Errorf("conflicting Content-Length headers: %d and %d", length, other)
 			}
 		}
+		if length == 0 && req.Body != nil && req.Body != http.NoBody {
+			return nil, errors.New("Content-Length 0 cannot be used with a request body")
+		}
+		if length == 0 && (req.Method == http.MethodGet || req.Method == http.MethodHead) {
+			return nil, fmt.Errorf("Content-Length 0 is not transmitted for %s requests without a body", req.Method)
+		}
+		if length > 0 && (req.Body == nil || req.Body == http.NoBody) {
+			return nil, errors.New("positive Content-Length cannot be used without a request body")
+		}
+		if inferredContentLength >= 0 && req.Body != nil && req.Body != http.NoBody && length != inferredContentLength {
+			return nil, fmt.Errorf("Content-Length %d does not match request body length %d", length, inferredContentLength)
+		}
+		req.ContentLength = length
+		req.Header.Set("Content-Length", strconv.FormatInt(length, 10))
+	}
+	if transferEncodingSet && len(transferEncodings) == 0 {
+		return nil, errors.New("Transfer-Encoding must specify chunked")
+	}
+	if len(transferEncodings) > 0 {
+		// Go's HTTP transports support chunked request framing only. Reject other
+		// codings early instead of surfacing an opaque error from RoundTrip.
+		if len(transferEncodings) != 1 || transferEncodings[0] != "chunked" {
+			return nil, fmt.Errorf("unsupported Transfer-Encoding %q; only chunked is supported", strings.Join(transferEncodings, ", "))
+		}
+		if len(contentLengths) > 0 {
+			return nil, errors.New("Content-Length and Transfer-Encoding cannot be used together")
+		}
+		if req.Body == nil || req.Body == http.NoBody {
+			return nil, errors.New("Transfer-Encoding chunked requires a request body")
+		}
+		req.TransferEncoding = transferEncodings
+		req.ContentLength = -1
+		req.Header.Set("Transfer-Encoding", "chunked")
 	}
 
 	// Set the compression policy after explicit headers have been applied. An

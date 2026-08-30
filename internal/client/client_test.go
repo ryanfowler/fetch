@@ -234,6 +234,222 @@ func TestNewRequestDoesNotAccumulateURLDefaults(t *testing.T) {
 	}
 }
 
+func TestNewRequestValidatesFramingHeaders(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers []core.KeyVal[string]
+		wantErr string
+	}{
+		{
+			name: "conflicting content lengths",
+			headers: []core.KeyVal[string]{
+				{Key: "Content-Length", Val: "3"},
+				{Key: "content-length", Val: "4"},
+			},
+			wantErr: "conflicting Content-Length headers",
+		},
+		{
+			name: "content length and transfer encoding",
+			headers: []core.KeyVal[string]{
+				{Key: "Content-Length", Val: "3"},
+				{Key: "Transfer-Encoding", Val: "chunked"},
+			},
+			wantErr: "cannot be used together",
+		},
+		{
+			name:    "unsupported transfer encoding",
+			headers: []core.KeyVal[string]{{Key: "Transfer-Encoding", Val: "gzip, chunked"}},
+			wantErr: "only chunked is supported",
+		},
+		{
+			name:    "zero content length with body",
+			headers: []core.KeyVal[string]{{Key: "Content-Length", Val: "0"}},
+			wantErr: "cannot be used with a request body",
+		},
+		{
+			name:    "content length smaller than body",
+			headers: []core.KeyVal[string]{{Key: "Content-Length", Val: "2"}},
+			wantErr: "does not match request body length 3",
+		},
+		{
+			name:    "content length larger than body",
+			headers: []core.KeyVal[string]{{Key: "Content-Length", Val: "4"}},
+			wantErr: "does not match request body length 3",
+		},
+		{
+			name:    "empty transfer encoding",
+			headers: []core.KeyVal[string]{{Key: "Transfer-Encoding", Val: " , "}},
+			wantErr: "must specify chunked",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+				Data:    strings.NewReader("abc"),
+				Headers: tt.headers,
+				URL:     mustURL(t, "https://example.com"),
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewRequestRejectsPositiveContentLengthWithoutBody(t *testing.T) {
+	_, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+		Headers: []core.KeyVal[string]{{Key: "Content-Length", Val: "1"}},
+		URL:     mustURL(t, "https://example.com"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "without a request body") {
+		t.Fatalf("error = %v, want bodyless Content-Length error", err)
+	}
+}
+
+func TestNewRequestAllowsZeroContentLengthForBodylessPost(t *testing.T) {
+	req, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+		Headers: []core.KeyVal[string]{{Key: "Content-Length", Val: "0"}},
+		Method:  http.MethodPost,
+		URL:     mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Body != nil && req.Body != http.NoBody {
+		t.Fatalf("body = %T, want no body", req.Body)
+	}
+	if req.ContentLength != 0 || req.Header.Get("Content-Length") != "0" {
+		t.Fatalf("content length = %d, header = %q", req.ContentLength, req.Header.Get("Content-Length"))
+	}
+}
+
+func TestNewRequestRejectsFramingThatTransportWouldStrip(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		header core.KeyVal[string]
+		want   string
+	}{
+		{name: "zero length GET", method: http.MethodGet, header: core.KeyVal[string]{Key: "Content-Length", Val: "0"}, want: "is not transmitted"},
+		{name: "zero length HEAD", method: http.MethodHead, header: core.KeyVal[string]{Key: "Content-Length", Val: "0"}, want: "is not transmitted"},
+		{name: "bodyless chunked", method: http.MethodPost, header: core.KeyVal[string]{Key: "Transfer-Encoding", Val: "chunked"}, want: "requires a request body"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+				Headers: []core.KeyVal[string]{tt.header},
+				Method:  tt.method,
+				URL:     mustURL(t, "https://example.com"),
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestExplicitRequestFramingReachesWire(t *testing.T) {
+	type receivedRequest struct {
+		contentLength    int64
+		transferEncoding []string
+		body             string
+	}
+	received := make(chan receivedRequest, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+		}
+		received <- receivedRequest{
+			contentLength:    r.ContentLength,
+			transferEncoding: slices.Clone(r.TransferEncoding),
+			body:             string(data),
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := NewClient(ClientConfig{})
+	defer c.Close()
+	tests := []struct {
+		name     string
+		cfg      RequestConfig
+		wantCL   int64
+		wantTE   []string
+		wantBody string
+	}{
+		{
+			name: "zero-length POST",
+			cfg: RequestConfig{
+				Headers: []core.KeyVal[string]{{Key: "Content-Length", Val: "0"}},
+				Method:  http.MethodPost,
+			},
+			wantCL: 0,
+		},
+		{
+			name: "chunked body",
+			cfg: RequestConfig{
+				Data:    strings.NewReader("abc"),
+				Headers: []core.KeyVal[string]{{Key: "Transfer-Encoding", Val: "chunked"}},
+				Method:  http.MethodPost,
+			},
+			wantCL:   -1,
+			wantTE:   []string{"chunked"},
+			wantBody: "abc",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.cfg.URL = mustURL(t, server.URL)
+			req, err := c.NewRequest(context.Background(), tt.cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := c.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			got := <-received
+			if got.contentLength != tt.wantCL || !slices.Equal(got.transferEncoding, tt.wantTE) || got.body != tt.wantBody {
+				t.Fatalf("wire framing = length %d, encodings %q, body %q", got.contentLength, got.transferEncoding, got.body)
+			}
+		})
+	}
+}
+
+func TestNewRequestNormalizesSafeFramingHeaders(t *testing.T) {
+	req, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+		Data: strings.NewReader("abc"),
+		Headers: []core.KeyVal[string]{
+			{Key: "Content-Length", Val: "3"},
+			{Key: "content-length", Val: "3"},
+		},
+		URL: mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer req.Body.Close()
+	if req.ContentLength != 3 || !slices.Equal(req.Header.Values("Content-Length"), []string{"3"}) {
+		t.Fatalf("content length = %d, headers = %q", req.ContentLength, req.Header.Values("Content-Length"))
+	}
+
+	chunked, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{
+		Data:    strings.NewReader("abc"),
+		Headers: []core.KeyVal[string]{{Key: "Transfer-Encoding", Val: "CHUNKED"}},
+		URL:     mustURL(t, "https://example.com"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chunked.Body.Close()
+	if chunked.ContentLength != -1 || !slices.Equal(chunked.TransferEncoding, []string{"chunked"}) {
+		t.Fatalf("chunked framing = length %d, encodings %q", chunked.ContentLength, chunked.TransferEncoding)
+	}
+}
+
 func TestNewRequestRejectsNilURL(t *testing.T) {
 	_, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{})
 	if err == nil || err.Error() != "request URL is required" {
