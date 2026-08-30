@@ -347,7 +347,7 @@ func TestLookupQueriesRecordTypesConcurrently(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := lookup(context.Background(), &Config{
+	res, err := lookup(context.Background(), &Config{
 		DNSServer: mustURL(t, server.URL+"/dns-query"),
 	}, "example.com", time.Now())
 	if err != nil {
@@ -359,6 +359,14 @@ func TestLookupQueriesRecordTypesConcurrently(t *testing.T) {
 	mu.Unlock()
 	if got < 2 {
 		t.Fatalf("max concurrent requests = %d, want at least 2", got)
+	}
+	if got, want := len(res.queries), len(inspectTypes); got != want {
+		t.Fatalf("query results = %d, want %d", got, want)
+	}
+	for _, query := range res.queries {
+		if query.duration <= 0 {
+			t.Errorf("%s query duration = %s, want positive duration", query.typ.label, query.duration)
+		}
 	}
 }
 
