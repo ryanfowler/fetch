@@ -26,6 +26,20 @@ func TestFormatWithBoundedOutput(t *testing.T) {
 	}
 }
 
+func TestResponseOutputSizeUsesDecodedLength(t *testing.T) {
+	resp := &http.Response{ContentLength: -1}
+	if got := responseOutputSize(resp); got != -1 {
+		t.Fatalf("responseOutputSize = %d, want unknown decoded length", got)
+	}
+	resp.ContentLength = 123
+	if got := responseOutputSize(resp); got != 123 {
+		t.Fatalf("responseOutputSize = %d, want 123", got)
+	}
+	if got := responseOutputSize(nil); got != -1 {
+		t.Fatalf("responseOutputSize(nil) = %d, want -1", got)
+	}
+}
+
 func TestFormatResponseFormatsExactMaxBodyBytes(t *testing.T) {
 	prefix := []byte(`{"a":1}`)
 	body := append(append([]byte(nil), prefix...), bytes.Repeat([]byte(" "), maxBodyBytes-len(prefix))...)

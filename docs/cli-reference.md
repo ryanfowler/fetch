@@ -46,6 +46,11 @@ fetch -X DELETE example.com/resource/123
 
 Set custom headers. Can be used multiple times.
 
+Request framing is validated before connecting. Repeated `Content-Length`
+values must agree and are normalized to one value; `Content-Length` cannot be
+combined with `Transfer-Encoding`, and `chunked` is the only supported request
+transfer encoding.
+
 ```sh
 fetch -H "Authorization: Bearer token" example.com
 fetch -H "X-Custom: value" -H "Accept: application/json" example.com
@@ -469,7 +474,7 @@ allowed.
 Maximum number of retries for transient failures. Default: `0` (no retries).
 The value must be between `0` and `100`.
 
-Retries occur on connection errors and retryable status codes (429, 502, 503, 504) for GET, HEAD, OPTIONS, and TRACE requests. Non-retryable errors (4xx, TLS certificate errors) are not retried. PUT and DELETE are not retried by default: although HTTP describes them as idempotent, individual APIs may implement side effects that are unsafe to repeat. POST, PATCH, PUT, DELETE, and custom methods require the explicit `--retry-unsafe` opt-in. Uses exponential backoff with jitter between attempts.
+Retries occur on transient connection errors and retryable status codes (408, 425, 429, 500, 502, 503, 504) for GET, HEAD, OPTIONS, and TRACE requests. DNS name-not-found failures, other non-retryable 4xx responses, and TLS certificate errors are not retried. PUT and DELETE are not retried by default: although HTTP describes them as idempotent, individual APIs may implement side effects that are unsafe to repeat. POST, PATCH, PUT, DELETE, and custom methods require the explicit `--retry-unsafe` opt-in. Uses exponential backoff with jitter between attempts.
 
 All attempts, redirects, response reads, bounded drains, and retry delays share one `--timeout` wall-clock budget. A request body must be replayable before a retry starts. Only the final attempt's response body is written to stdout. Retry notifications are printed to stderr (suppressed with `--silent`).
 

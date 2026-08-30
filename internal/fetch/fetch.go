@@ -712,7 +712,11 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 	}
 
 	if output != "" && r.Output != "-" {
-		size := client.WireContentLength(resp)
+		// Progress tracks the bytes written to disk. Once a response has been
+		// decoded, its compressed wire length is not the output length and can
+		// make the progress bar exceed 100%. Decoders set ContentLength to -1,
+		// which correctly selects the unknown-size spinner in that case.
+		size := responseOutputSize(resp)
 		p := r.PrinterHandle.Stderr()
 		return nil, writeOutputToFile(output, resp.Body, size, p, r.Verbosity, r.Clobber)
 	}
@@ -816,6 +820,13 @@ func formatResponse(ctx context.Context, r *Request, resp *http.Response, cc *cl
 		return bytes.NewReader(buf), nil
 	}
 	return newUntrustedResponseReader(bytes.NewReader(buf)), nil
+}
+
+func responseOutputSize(resp *http.Response) int64 {
+	if resp == nil {
+		return -1
+	}
+	return resp.ContentLength
 }
 
 func rejectHAROutputPath(r *Request, output string) error {
