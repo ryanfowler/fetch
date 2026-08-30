@@ -550,7 +550,9 @@ exists (notably Windows), or a name is available only from the hosts file, NSS,
 or mDNS, the platform resolver supplies A/AAAA records without TTLs. If direct
 DNS returned non-address records, they remain visible alongside platform
 addresses. Each platform record identifies its source and shows
-`TTL unavailable`; `Lookup` describes a platform-only or mixed path.
+`TTL unavailable`; scoped IPv6 addresses retain their interface zone, and
+duplicate platform addresses are collapsed. `Lookup` describes a platform-only
+or mixed path.
 
 Explicit resolvers support UDP, TCP, DoT, DoQ, and DoH. `Transport security`
 describes only encryption and certificate verification to the resolver, not

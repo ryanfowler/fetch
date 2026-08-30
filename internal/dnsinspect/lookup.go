@@ -472,15 +472,25 @@ func lookupDefaultResolverRecords(ctx context.Context, host string) ([]record, e
 	}
 
 	records := make([]record, 0, len(addrs))
+	seen := make(map[string]struct{}, len(addrs))
 	owner := normalizedOwner(host)
 	for _, addr := range addrs {
 		ip := addr.IP
+		var rec record
 		switch {
 		case ip.To4() != nil:
-			records = append(records, record{owner: owner, typ: dnsmessage.TypeA, address: append(net.IP(nil), ip.To4()...), source: recordSourcePlatform})
+			rec = record{owner: owner, typ: dnsmessage.TypeA, address: append(net.IP(nil), ip.To4()...), source: recordSourcePlatform}
 		case ip.To16() != nil:
-			records = append(records, record{owner: owner, typ: dnsmessage.TypeAAAA, address: append(net.IP(nil), ip.To16()...), source: recordSourcePlatform})
+			rec = record{owner: owner, typ: dnsmessage.TypeAAAA, address: append(net.IP(nil), ip.To16()...), zone: addr.Zone, source: recordSourcePlatform}
+		default:
+			continue
 		}
+		key := strconv.Itoa(int(rec.typ)) + "\x00" + rec.semanticKey()
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		records = append(records, rec)
 	}
 	return records, nil
 }

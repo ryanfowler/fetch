@@ -89,6 +89,7 @@ type record struct {
 	hasTTL         bool
 	source         recordSource
 	address        net.IP
+	zone           string
 	target         string
 	target2        string
 	preference     uint16
