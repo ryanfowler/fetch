@@ -741,6 +741,9 @@ func renderVerboseVerification(p *core.Printer, result *verificationResult, inse
 
 func certificateValidityStatus(cert *x509.Certificate) string {
 	now := tlsInspectNow()
+	if now.Before(cert.NotBefore) {
+		return "not yet valid"
+	}
 	if now.After(cert.NotAfter) {
 		return "expired"
 	}
@@ -922,6 +925,18 @@ func certDisplayName(cert *x509.Certificate) string {
 
 func certExpiryInfo(cert *x509.Certificate) (string, core.Sequence) {
 	now := tlsInspectNow()
+	if now.Before(cert.NotBefore) {
+		untilValid := cert.NotBefore.Sub(now)
+		days := int(untilValid.Hours() / 24)
+		switch days {
+		case 0:
+			return "valid in <1 day", core.Red
+		case 1:
+			return "valid in 1 day", core.Red
+		default:
+			return fmt.Sprintf("valid in %d days", days), core.Red
+		}
+	}
 	if now.After(cert.NotAfter) {
 		return "expired", core.Red
 	}
