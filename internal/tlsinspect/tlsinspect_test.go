@@ -397,10 +397,32 @@ func TestCertExpiryInfo(t *testing.T) {
 
 	tests := []struct {
 		name      string
+		notBefore time.Time
 		notAfter  time.Time
 		wantText  string
 		wantColor core.Sequence
 	}{
+		{
+			name:      "not valid for less than 1 day",
+			notBefore: fixedNow.Add(12 * time.Hour),
+			notAfter:  fixedNow.Add(30 * 24 * time.Hour),
+			wantText:  "valid in <1 day",
+			wantColor: core.Red,
+		},
+		{
+			name:      "not valid for 1 day",
+			notBefore: fixedNow.Add(36 * time.Hour),
+			notAfter:  fixedNow.Add(30 * 24 * time.Hour),
+			wantText:  "valid in 1 day",
+			wantColor: core.Red,
+		},
+		{
+			name:      "not valid for multiple days",
+			notBefore: fixedNow.Add(3 * 24 * time.Hour),
+			notAfter:  fixedNow.Add(30 * 24 * time.Hour),
+			wantText:  "valid in 3 days",
+			wantColor: core.Red,
+		},
 		{
 			name:      "expired",
 			notAfter:  fixedNow.Add(-24 * time.Hour),
@@ -459,13 +481,50 @@ func TestCertExpiryInfo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cert := &x509.Certificate{NotAfter: tt.notAfter}
+			cert := &x509.Certificate{NotBefore: tt.notBefore, NotAfter: tt.notAfter}
 			gotText, gotColor := certExpiryInfo(cert)
 			if gotText != tt.wantText {
 				t.Errorf("certExpiryInfo() text = %q, want %q", gotText, tt.wantText)
 			}
 			if gotColor != tt.wantColor {
 				t.Errorf("certExpiryInfo() color = %q, want %q", gotColor, tt.wantColor)
+			}
+		})
+	}
+}
+
+func TestCertificateValidityStatus(t *testing.T) {
+	fixedNow := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+	origNow := tlsInspectNow
+	tlsInspectNow = func() time.Time { return fixedNow }
+	t.Cleanup(func() { tlsInspectNow = origNow })
+
+	tests := []struct {
+		name string
+		cert *x509.Certificate
+		want string
+	}{
+		{
+			name: "not yet valid",
+			cert: &x509.Certificate{NotBefore: fixedNow.Add(time.Hour), NotAfter: fixedNow.Add(24 * time.Hour)},
+			want: "not yet valid",
+		},
+		{
+			name: "expired",
+			cert: &x509.Certificate{NotBefore: fixedNow.Add(-48 * time.Hour), NotAfter: fixedNow.Add(-time.Hour)},
+			want: "expired",
+		},
+		{
+			name: "valid",
+			cert: &x509.Certificate{NotBefore: fixedNow.Add(-time.Hour), NotAfter: fixedNow.Add(36 * time.Hour)},
+			want: "1 day remaining",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := certificateValidityStatus(tt.cert); got != tt.want {
+				t.Fatalf("certificateValidityStatus() = %q, want %q", got, tt.want)
 			}
 		})
 	}
