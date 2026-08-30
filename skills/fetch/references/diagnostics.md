@@ -26,7 +26,7 @@ shows its normalized, fully qualified owner name before its value. Successful
 records remain visible when one query fails; the `Lookup` section reports an
 incomplete status and the `Failures` section identifies the failed types. The
 command exits nonzero. Inspection output, including the `Failures` section, goes
-to stdout. Invocation warnings and setup/configuration errors go to stderr. `Transport security` describes the resolver connection only; it is not DNSSEC validation, which fetch does not perform.
+to stdout. Invocation warnings and setup/configuration errors go to stderr. `Transport security` describes the resolver connection only; it is not DNSSEC validation, which fetch does not perform. A truncated UDP response is retried over TCP and is reported as transport metadata (`Transport: UDP → TCP fallback`), not as a warning. Use `-vv` to identify the record-type queries that used this fallback.
 
 ## TLS
 

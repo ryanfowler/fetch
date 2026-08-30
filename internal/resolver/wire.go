@@ -675,7 +675,10 @@ func lookupUDPMessage(ctx context.Context, serverAddr, host string, typ uint16, 
 	}
 	message, err = transactTCP(ctx, tcpAddress, raw, id, question, transactionDeadline)
 	if err != nil {
-		return nil, false, fmt.Errorf("DNS TCP fallback: %w", err)
+		// The fallback was attempted even though it did not produce a usable
+		// response. Preserve that fact for diagnostic callers while returning
+		// the retry error so it remains a real query failure.
+		return nil, true, fmt.Errorf("DNS TCP fallback: %w", err)
 	}
 	return message, true, nil
 }

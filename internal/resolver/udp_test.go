@@ -321,6 +321,53 @@ func TestLookupWireTypeFallsBackToTCPWhenUDPIsTruncated(t *testing.T) {
 	}
 }
 
+func TestLookupUDPMessageReportsFailedTCPFallback(t *testing.T) {
+	server, tcp := newUDPAndTCPTestServer(t)
+	defer server.close()
+	defer tcp.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		query, client, err := server.readQuery()
+		if err != nil {
+			done <- err
+			return
+		}
+		message, err := DecodeMessage(query)
+		if err != nil {
+			done <- err
+			return
+		}
+		truncated := responsePacket(query, message.Header.ID, message.Questions[0], nil)
+		binary.BigEndian.PutUint16(truncated[2:4], binary.BigEndian.Uint16(truncated[2:4])|0x0200)
+		if _, err := server.udp.WriteToUDP(truncated, client); err != nil {
+			done <- err
+			return
+		}
+
+		connection, err := tcp.AcceptTCP()
+		if err != nil {
+			done <- err
+			return
+		}
+		_ = connection.Close()
+		done <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, fallback, err := LookupUDPMessage(ctx, server.addr(), "example.com", dnsTypeA)
+	if err == nil || !strings.Contains(err.Error(), "DNS TCP fallback") {
+		t.Fatalf("error = %v, want failed TCP fallback", err)
+	}
+	if !fallback {
+		t.Fatal("fallback = false, want attempted TCP fallback")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLookupWireTypePreservesMatchingSERVFAIL(t *testing.T) {
 	server := newUDPTestServer(t)
 	defer server.close()

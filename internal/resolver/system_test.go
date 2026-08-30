@@ -77,6 +77,65 @@ func TestQuerySystemTypeRetriesAcrossNameservers(t *testing.T) {
 	}
 }
 
+func TestQuerySystemTypePropagatesFailedTCPFallback(t *testing.T) {
+	server, tcp := newUDPAndTCPTestServer(t)
+	defer server.close()
+	defer tcp.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		query, client, err := server.readQuery()
+		if err != nil {
+			done <- err
+			return
+		}
+		message, err := DecodeMessage(query)
+		if err != nil {
+			done <- err
+			return
+		}
+		truncated := responsePacket(query, message.Header.ID, message.Questions[0], nil)
+		_, err = server.udp.WriteToUDP(withTruncatedFlag(truncated), client)
+		if err != nil {
+			done <- err
+			return
+		}
+		connection, err := tcp.AcceptTCP()
+		if err != nil {
+			done <- err
+			return
+		}
+		_ = connection.Close()
+		done <- nil
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, fallback, err := QuerySystemType(ctx, SystemResolverPolicy{
+		Nameservers: []string{server.addr()},
+		Attempts:    1,
+		Timeout:     time.Second,
+	}, "example.com", dnsTypeA)
+	if err == nil || !strings.Contains(err.Error(), "DNS TCP fallback") {
+		t.Fatalf("error = %v, want failed TCP fallback", err)
+	}
+	if !fallback {
+		t.Fatal("fallback = false, want attempted TCP fallback")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func withTruncatedFlag(packet []byte) []byte {
+	packet = append([]byte(nil), packet...)
+	flags := uint16(packet[2])<<8 | uint16(packet[3])
+	flags |= 0x0200
+	packet[2] = byte(flags >> 8)
+	packet[3] = byte(flags)
+	return packet
+}
+
 func TestParseResolvConfSkipsMalformedNameserversAndReadsPolicy(t *testing.T) {
 	policy := ParseResolvConf(strings.TrimSpace(`
 # comments and malformed entries are ignored

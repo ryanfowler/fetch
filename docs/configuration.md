@@ -279,7 +279,9 @@ family preference. TCP and DoT use pipelined operation-scoped connections. DoQ
 uses a verified QUIC connection per resolver operation and one bidirectional
 stream per DNS query. Explicit DNS inspection queries all supported record
 types concurrently and reports partial results with a nonzero status when a
-query fails.
+query fails. A truncated UDP response is retried over TCP and reported as
+`Transport: UDP → TCP fallback`, not as a warning; use `-vv` to identify the
+record-type queries that used the fallback, including failed retries.
 
 ```ini
 # Use Google DNS

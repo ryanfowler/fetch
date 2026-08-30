@@ -187,20 +187,21 @@ func QuerySystemType(ctx context.Context, policy SystemResolverPolicy, host stri
 		queryCtx, cancel := context.WithTimeout(ctx, timeout)
 		message, fallback, err := lookupUDPMessage(queryCtx, policy.Nameservers[index], host, typ, attempts)
 		cancel()
+		totalFallback = totalFallback || fallback
 		if err != nil {
 			lastErr = err
 			continue
 		}
 		name, err := ParseName(host)
 		if err != nil {
-			return nil, fallback, err
+			return nil, totalFallback, err
 		}
 		if message.Header.RCode != 0 {
-			return nil, fallback, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+			return nil, totalFallback, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
 		}
 		authorized, err := AuthorizeAnswers(message, Question{Name: name, Type: typ, Class: 1})
 		if err != nil {
-			return nil, fallback, err
+			return nil, totalFallback, err
 		}
 		out := make([]Record, 0, len(authorized))
 		hasRequestedType := false
@@ -209,10 +210,7 @@ func QuerySystemType(ctx context.Context, policy SystemResolverPolicy, host stri
 			hasRequestedType = hasRequestedType || record.Type == typ
 		}
 		if !hasRequestedType {
-			return nil, fallback, errDNSNoData
-		}
-		if fallback {
-			totalFallback = true
+			return nil, totalFallback, errDNSNoData
 		}
 		return out, totalFallback, nil
 	}
