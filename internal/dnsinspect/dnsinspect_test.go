@@ -95,6 +95,75 @@ func TestFlushInspectionOutputIgnoresBrokenPipe(t *testing.T) {
 	}
 }
 
+func TestResolverTransportSecurityReportsTransportProtection(t *testing.T) {
+	tests := []struct {
+		name      string
+		endpoint  string
+		insecure  bool
+		transport string
+		security  string
+	}{
+		{name: "UDP", endpoint: "udp://192.0.2.53", transport: "UDP", security: "plaintext"},
+		{name: "TCP", endpoint: "tcp://192.0.2.53", transport: "TCP", security: "plaintext"},
+		{name: "DoT", endpoint: "dot://resolver.example", transport: "TLS (DoT)", security: "verified TLS"},
+		{name: "DoQ", endpoint: "doq://resolver.example", transport: "QUIC (DoQ)", security: "verified TLS"},
+		{name: "DoH", endpoint: "https://resolver.example/dns-query", transport: "HTTPS (DoH)", security: "verified TLS"},
+		{name: "DoT insecure", endpoint: "dot://resolver.example", insecure: true, transport: "TLS (DoT)", security: "encrypted, certificate verification disabled"},
+		{name: "DoQ insecure", endpoint: "doq://resolver.example", insecure: true, transport: "QUIC (DoQ)", security: "encrypted, certificate verification disabled"},
+		{name: "DoH insecure", endpoint: "https://resolver.example/dns-query", insecure: true, transport: "HTTPS (DoH)", security: "encrypted, certificate verification disabled"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ep, err := resolver.ParseEndpoint(tt.endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := &Config{Endpoint: ep, Insecure: tt.insecure}
+			if got := inspectionTransport(cfg, ep.URL()); got != tt.transport {
+				t.Errorf("inspectionTransport() = %q, want %q", got, tt.transport)
+			}
+			if got := displaySecurity(resolverTransportSecurity(cfg, ep.URL())); got != tt.security {
+				t.Errorf("resolver transport security = %q, want %q", got, tt.security)
+			}
+		})
+	}
+}
+
+func TestResolverTransportSecuritySupportsLegacyResolverURLs(t *testing.T) {
+	tests := []struct {
+		name     string
+		scheme   string
+		security string
+	}{
+		{name: "UDP", scheme: "", security: "plaintext"},
+		{name: "TCP", scheme: "tcp", security: "plaintext"},
+		{name: "DoT", scheme: "tls", security: "verified TLS"},
+		{name: "DoT alias", scheme: "dot", security: "verified TLS"},
+		{name: "DoQ", scheme: "quic", security: "verified TLS"},
+		{name: "DoQ alias", scheme: "doq", security: "verified TLS"},
+		{name: "DoH", scheme: "https", security: "verified TLS"},
+		{name: "HTTP", scheme: "http", security: "plaintext"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := mustURL(t, "//resolver.example:53")
+			server.Scheme = tt.scheme
+			cfg := &Config{Insecure: tt.name == "HTTP"}
+			if got := displaySecurity(resolverTransportSecurity(cfg, server)); got != tt.security {
+				t.Errorf("resolver transport security = %q, want %q", got, tt.security)
+			}
+		})
+	}
+}
+
+func TestResolverTransportSecurityReportsPlatformResolver(t *testing.T) {
+	if got, want := displaySecurity(resolverTransportSecurity(&Config{}, nil)), "OS-managed / unknown to fetch"; got != want {
+		t.Fatalf("platform resolver security = %q, want %q", got, want)
+	}
+}
+
 func TestInspectDOHShowsAAndAAAATTLs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Query().Get("type") {

@@ -249,7 +249,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		host:      host,
 		resolver:  target.label,
 		transport: inspectionTransport(cfg, server),
-		security:  resolverSecurity(cfg, server),
+		security:  resolverTransportSecurity(cfg, server),
 		source:    inspectionSource(server),
 		records:   make(map[string][]record),
 		silent:    cfg.Silent,
@@ -1502,24 +1502,44 @@ func dnsLabelPresentation(label []byte) string {
 	return b.String()
 }
 
-func resolverSecurity(cfg *Config, server *url.URL) string {
+// resolverTransportSecurity reports protection for the connection to the
+// resolver. It intentionally says nothing about DNSSEC: fetch does not
+// validate DNSSEC chains locally.
+func resolverTransportSecurity(cfg *Config, server *url.URL) string {
 	if server == nil {
 		return "platform resolver (OS-managed security)"
 	}
+
+	// Endpoint is the authoritative representation used by production callers.
+	// Derive the result from VerifyTLS instead of the display URL so --insecure
+	// is reflected without changing endpoint configuration. An HTTPS transport
+	// used by an explicit local test endpoint can intentionally have TLS
+	// verification disabled and is therefore plaintext, not unverified TLS.
 	if cfg.Endpoint != nil {
-		security := cfg.Endpoint.Security
-		if cfg.Insecure && security == resolver.SecurityVerifiedEncrypted {
-			security = resolver.SecurityUnverifiedEncrypt
+		if cfg.Endpoint.VerifyTLS {
+			if cfg.Insecure {
+				return string(resolver.SecurityUnverifiedEncrypt)
+			}
+			return string(resolver.SecurityVerifiedEncrypted)
 		}
-		return string(security)
+		return string(resolver.SecurityPlaintext)
 	}
-	if cfg.Insecure && (strings.EqualFold(server.Scheme, "https") || strings.EqualFold(server.Scheme, "http")) {
-		return string(resolver.SecurityUnverifiedEncrypt)
-	}
-	if strings.EqualFold(server.Scheme, "https") {
+
+	// DNSServer remains supported for older internal callers. Account for all
+	// resolver URL schemes here; treating only https:// as encrypted would
+	// misreport legacy DoT and DoQ configurations.
+	scheme := strings.ToLower(server.Scheme)
+	switch scheme {
+	case "tls", "dot", "quic", "doq", "https":
+		if cfg.Insecure {
+			return string(resolver.SecurityUnverifiedEncrypt)
+		}
 		return string(resolver.SecurityVerifiedEncrypted)
+	default:
+		// UDP, TCP, and plain HTTP expose DNS on the wire. --insecure has no
+		// certificate verification to disable for these transports.
+		return string(resolver.SecurityPlaintext)
 	}
-	return string(resolver.SecurityPlaintext)
 }
 
 func resolverTarget(server *url.URL) resolverTargetInfo {
