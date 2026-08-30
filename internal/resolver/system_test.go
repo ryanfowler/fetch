@@ -62,9 +62,18 @@ func TestQuerySystemTypeRetriesAcrossNameservers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	records, _, err := QuerySystemType(ctx, policy, "example.com", dnsTypeA)
+	records, metadata, err := QuerySystemTypeDetailed(ctx, policy, "example.com", dnsTypeA)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if metadata.Server != server.addr() {
+		t.Fatalf("responder = %q, want %q", metadata.Server, server.addr())
+	}
+	if metadata.Transport != TransportUDP || metadata.TCPFallback || metadata.Attempts != 2 {
+		t.Fatalf("query metadata = %+v, want second UDP responder after two attempts", metadata)
+	}
+	if metadata.Duration <= 0 {
+		t.Fatalf("query metadata duration = %s, want positive duration", metadata.Duration)
 	}
 	if len(records) != 1 || records[0].Type != dnsTypeA {
 		t.Fatalf("records = %#v, want one A record", records)
@@ -111,7 +120,7 @@ func TestQuerySystemTypePropagatesFailedTCPFallback(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_, fallback, err := QuerySystemType(ctx, SystemResolverPolicy{
+	_, metadata, err := QuerySystemTypeDetailed(ctx, SystemResolverPolicy{
 		Nameservers: []string{server.addr()},
 		Attempts:    1,
 		Timeout:     time.Second,
@@ -119,9 +128,16 @@ func TestQuerySystemTypePropagatesFailedTCPFallback(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "DNS TCP fallback") {
 		t.Fatalf("error = %v, want failed TCP fallback", err)
 	}
-	if !fallback {
+	if !metadata.TCPFallback {
 		t.Fatal("fallback = false, want attempted TCP fallback")
 	}
+	if metadata.Server != server.addr() {
+		t.Fatalf("responder = %q, want %q after failed fallback", metadata.Server, server.addr())
+	}
+	if metadata.Attempts != 1 || metadata.Duration <= 0 {
+		t.Fatalf("query metadata = %+v, want one attempted responder and duration", metadata)
+	}
+
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +150,23 @@ func withTruncatedFlag(packet []byte) []byte {
 	packet[2] = byte(flags >> 8)
 	packet[3] = byte(flags)
 	return packet
+}
+
+func TestQuerySystemTypeDetailedStopsAfterContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, metadata, err := QuerySystemTypeDetailed(ctx, SystemResolverPolicy{
+		Nameservers: []string{"192.0.2.1:53", "192.0.2.2:53"},
+		Attempts:    1,
+		Timeout:     time.Second,
+	}, "example.com", dnsTypeA)
+	if err == nil {
+		t.Fatal("error = nil, want canceled context")
+	}
+	if metadata.Attempts != 0 || metadata.Server != "" {
+		t.Fatalf("query metadata = %+v, want no attempted or responding nameserver", metadata)
+	}
 }
 
 func TestParseResolvConfSkipsMalformedNameserversAndReadsPolicy(t *testing.T) {

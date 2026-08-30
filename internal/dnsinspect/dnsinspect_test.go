@@ -804,6 +804,7 @@ func TestLookupSystemCombinesDirectRecordsWithPlatformAddresses(t *testing.T) {
 	out := string(p.Bytes())
 	for _, want := range []string{
 		"Resolver: system nameservers + platform resolver",
+		"Resolvers: " + addr + ", platform resolver",
 		"Fallback: platform resolver used for addresses",
 		"192.0.2.42 (platform resolver; TTL unavailable)",
 		`"device=printer" (TTL 2m)`,
@@ -893,6 +894,52 @@ func TestResolverTargetUsesPlatformResolver(t *testing.T) {
 	}
 	if strings.Contains(target.label, "127.0.0.1") || strings.Contains(target.udpAddr, "127.0.0.1") {
 		t.Fatalf("resolver target silently used loopback: %#v", target)
+	}
+}
+
+func TestSystemResolverSummaryUsesActualResponders(t *testing.T) {
+	res := &result{
+		resolver: "configured-first:53",
+		records:  make(map[string][]record),
+	}
+	aggregate(res, []queryResult{
+		{typ: inspectTypes[0], responder: "192.0.2.2:53", transport: resolver.TransportUDP, records: []record{{typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1")}}},
+		{typ: inspectTypes[1], responder: "192.0.2.1:53", transport: resolver.TransportUDP, records: []record{{typ: dnsmessage.TypeAAAA, address: net.ParseIP("2001:db8::1")}}},
+	}, time.Now())
+	setSystemResponderSummary(res)
+
+	p := core.TestPrinter(false)
+	render(p, res)
+	out := string(p.Bytes())
+	if !strings.Contains(out, "Resolvers: 192.0.2.1:53, 192.0.2.2:53") {
+		t.Fatalf("actual responder summary missing or unsorted:\n%s", out)
+	}
+	if strings.Contains(out, "Resolver: configured-first:53") {
+		t.Fatalf("configured resolver placeholder was rendered:\n%s", out)
+	}
+}
+
+func TestRenderQueryDetailsIncludesResponderMetadata(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{
+		host:      "example.com",
+		verbosity: core.VExtraVerbose,
+		queries: []queryResult{{
+			typ:       inspectTypes[0],
+			status:    queryStatusData,
+			responder: "192.0.2.53:53",
+			transport: resolver.TransportUDP,
+			duration:  4 * time.Millisecond,
+			attempts:  1,
+			records:   []record{{typ: dnsmessage.TypeA}},
+		}},
+		records: map[string][]record{},
+	})
+	out := string(p.Bytes())
+	for _, want := range []string{"A: 1 record · UDP · 192.0.2.53:53", "4ms", "1 attempt"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("query metadata missing %q:\n%s", want, out)
+		}
 	}
 }
 

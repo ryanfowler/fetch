@@ -154,19 +154,50 @@ func RotateSystemResolverPolicy(policy SystemResolverPolicy) SystemResolverPolic
 	return policy
 }
 
+// QueryMetadata describes how a system resolver query completed. Server is
+// set only when a nameserver produced a response, so callers do not mistake a
+// configured-but-unreachable nameserver for the responder. Attempts counts
+// configured nameservers tried, including the successful one.
+type QueryMetadata struct {
+	Server      string
+	Transport   Transport
+	TCPFallback bool
+	Attempts    int
+	Duration    time.Duration
+}
+
 // QuerySystemType resolves host for an arbitrary DNS record type using the
-// configured system nameservers, honoring the resolv.conf attempts, rotate,
-// and timeout policy. The boolean reports whether any nameserver required a
-// TCP fallback. systemd-resolved is consulted only for HTTPS/SVCB because
-// resolvectl does not expose other record types.
+// configured system nameservers. It retains the original compact API for
+// callers that only need the TCP fallback flag.
 func QuerySystemType(ctx context.Context, policy SystemResolverPolicy, host string, typ uint16) ([]Record, bool, error) {
+	records, metadata, err := QuerySystemTypeDetailed(ctx, policy, host, typ)
+	return records, metadata.TCPFallback, err
+}
+
+// QuerySystemTypeDetailed resolves host and reports the nameserver that
+// answered the query. It honors the resolv.conf attempts, rotate, and timeout
+// policy. The transport is UDP unless TCP was needed as a fallback. The
+// detailed result lets diagnostics distinguish failover from the configured
+// nameserver list without changing the compatibility API above.
+//
+// systemd-resolved is consulted only for HTTPS/SVCB because resolvectl does
+// not expose other record types. Its local service identity is reported as
+// the server when that path succeeds; it cannot expose the upstream server.
+func QuerySystemTypeDetailed(ctx context.Context, policy SystemResolverPolicy, host string, typ uint16) (records []Record, metadata QueryMetadata, err error) {
+	metadata = QueryMetadata{Transport: TransportUDP}
+	started := time.Now()
+	defer func() { metadata.Duration = time.Since(started) }()
+
 	if policy.UseSystemdResolved && runtime.GOOS == "linux" && (typ == dnsTypeHTTPS || typ == dnsTypeSVCB) {
 		if records, err := querySystemdResolved(ctx, host, typ); err == nil && len(records) > 0 {
-			return records, false, nil
+			metadata.Server = "systemd-resolved"
+			metadata.Transport = TransportSystem
+			metadata.Attempts = 1
+			return records, metadata, nil
 		}
 	}
 	if len(policy.Nameservers) == 0 {
-		return nil, false, ErrHTTPSRecordsUnavailable
+		return nil, metadata, ErrHTTPSRecordsUnavailable
 	}
 	attempts := policy.Attempts
 	if attempts <= 0 {
@@ -183,25 +214,42 @@ func QuerySystemType(ctx context.Context, policy SystemResolverPolicy, host stri
 	var lastErr error
 	var totalFallback bool
 	for offset := range len(policy.Nameservers) {
+		if err := contextError(ctx); err != nil {
+			return nil, metadata, err
+		}
 		index := (start + offset) % len(policy.Nameservers)
+		server := policy.Nameservers[index]
+		metadata.Attempts++
 		queryCtx, cancel := context.WithTimeout(ctx, timeout)
-		message, fallback, err := lookupUDPMessage(queryCtx, policy.Nameservers[index], host, typ, attempts)
+		message, fallback, err := lookupUDPMessage(queryCtx, server, host, typ, attempts)
 		cancel()
 		totalFallback = totalFallback || fallback
+		metadata.TCPFallback = totalFallback
+		if fallback {
+			metadata.Transport = TransportTCP
+		}
 		if err != nil {
+			if fallback {
+				// A truncated UDP response proves that this nameserver
+				// answered, even when its TCP retry fails.
+				metadata.Server = server
+			}
 			lastErr = err
 			continue
 		}
+		// This server returned a correlated DNS response, even if the response
+		// later fails RCODE or answer authorization checks.
+		metadata.Server = server
 		name, err := ParseName(host)
 		if err != nil {
-			return nil, totalFallback, err
+			return nil, metadata, err
 		}
 		if message.Header.RCode != 0 {
-			return nil, totalFallback, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+			return nil, metadata, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
 		}
 		authorized, err := AuthorizeAnswers(message, Question{Name: name, Type: typ, Class: 1})
 		if err != nil {
-			return nil, totalFallback, err
+			return nil, metadata, err
 		}
 		out := make([]Record, 0, len(authorized))
 		hasRequestedType := false
@@ -210,17 +258,17 @@ func QuerySystemType(ctx context.Context, policy SystemResolverPolicy, host stri
 			hasRequestedType = hasRequestedType || record.Type == typ
 		}
 		if !hasRequestedType {
-			return nil, totalFallback, errDNSNoData
+			return nil, metadata, errDNSNoData
 		}
-		return out, totalFallback, nil
+		return out, metadata, nil
 	}
 	if err := contextError(ctx); err != nil {
-		return nil, totalFallback, err
+		return nil, metadata, err
 	}
 	if lastErr == nil {
 		lastErr = errors.New("system resolver query failed")
 	}
-	return nil, totalFallback, lastErr
+	return nil, metadata, lastErr
 }
 
 func querySystemdResolved(ctx context.Context, host string, typ uint16) ([]Record, error) {
