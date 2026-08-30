@@ -196,6 +196,10 @@ func TestSchemelessPlaintextHint(t *testing.T) {
 	if got := schemelessPlaintextHint(r, connectErr); got != "http://example.com:8080/path?debug=true" {
 		t.Fatalf("hint = %q", got)
 	}
+	schemeErr := &url.Error{Op: "Get", URL: u.String(), Err: http.ErrSchemeMismatch}
+	if got := schemelessPlaintextHint(r, schemeErr); got != "http://example.com:8080/path?debug=true" {
+		t.Fatalf("scheme mismatch hint = %q", got)
+	}
 
 	r.SchemelessURL = false
 	if got := schemelessPlaintextHint(r, connectErr); got != "" {

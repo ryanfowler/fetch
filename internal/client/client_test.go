@@ -210,6 +210,37 @@ func TestNewRequestUsesLazyReplayableFileBody(t *testing.T) {
 	}
 }
 
+func TestNewRequestDoesNotAccumulateURLDefaults(t *testing.T) {
+	u := &url.URL{Host: "example.com", Path: "/path", RawQuery: "existing=one"}
+	wantURL := u.String()
+	c := NewClient(ClientConfig{})
+	cfg := RequestConfig{
+		QueryParams: []core.KeyVal[string]{{Key: "added", Val: "two words"}},
+		URL:         u,
+	}
+
+	for range 2 {
+		req, err := c.NewRequest(context.Background(), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := req.URL.String(); got != "https://example.com/path?existing=one&added=two%20words" {
+			t.Fatalf("request URL = %q", got)
+		}
+	}
+
+	if got := u.String(); got != wantURL {
+		t.Fatalf("input URL mutated: got %q, want %q", got, wantURL)
+	}
+}
+
+func TestNewRequestRejectsNilURL(t *testing.T) {
+	_, err := NewClient(ClientConfig{}).NewRequest(context.Background(), RequestConfig{})
+	if err == nil || err.Error() != "request URL is required" {
+		t.Fatalf("error = %v, want request URL is required", err)
+	}
+}
+
 func TestCLI003RequestDefaultsAndOrdering(t *testing.T) {
 	u, err := url.Parse("https://example.com/path?z=old&space=hello+world")
 	if err != nil {

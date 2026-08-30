@@ -1001,6 +1001,10 @@ type RequestConfig struct {
 
 // NewRequest returns an *http.Request given the provided configuration.
 func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Request, error) {
+	if cfg.URL == nil {
+		return nil, errors.New("request URL is required")
+	}
+
 	// URL userinfo is an authentication source, not part of the request URL.
 	// Convert it to Basic auth before constructing the request so diagnostics,
 	// redirects, and signatures never retain credentials in the URL. Explicit
@@ -1015,6 +1019,12 @@ func (c *Client) NewRequest(ctx context.Context, cfg RequestConfig) (*http.Reque
 		}
 		cfg.URL.User = nil
 	}
+
+	// Scheme defaults and query parameters belong to this request. Apply them
+	// to a copy so callers can safely reuse their parsed URL without accumulating
+	// query parameters. URL userinfo is intentionally scrubbed above.
+	requestURL := *cfg.URL
+	cfg.URL = &requestURL
 
 	// Append query params directly to RawQuery. url.Values.Encode sorts keys,
 	// which loses the user's ordering even though duplicate parameters are

@@ -94,6 +94,26 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "POST / HTTP/1.1")
 	})
 
+	t.Run("schemeless plaintext hint uses the effective URL", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(http.ResponseWriter, *http.Request) {})
+		defer server.Close()
+
+		_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		host := "plaintext-hint.example.test"
+		target := host + ":" + port + "/path?existing=one"
+		res := runFetchOpts(t, fetchPath, fetchOpts{env: []string{
+			"HTTP_PROXY=", "http_proxy=", "HTTPS_PROXY=", "https_proxy=", "ALL_PROXY=", "all_proxy=",
+			"NO_PROXY=*", "no_proxy=*",
+		}}, target, "--query", "added=two words", "--resolve", host+":"+port+":127.0.0.1")
+		assertExitCode(t, 1, res)
+		assertBufEmpty(t, res.stdout)
+		assertBufContains(t, res.stderr, "If this is a plaintext service, use http://"+host+":"+port+"/path?existing=one&added=two%20words.")
+	})
+
 	t.Run("invalid flag", func(t *testing.T) {
 		t.Parallel()
 		res := runFetch(t, fetchPath, "--invalid")
