@@ -75,7 +75,7 @@ func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Prin
 		return err
 	}
 	if clobber {
-		err = fileutil.AtomicReplaceFileNoSymlink(tempName, name)
+		err = fileutil.AtomicReplaceFileNoSymlinkPreserveMode(tempName, name)
 	} else {
 		err = fileutil.AtomicWriteNewFile(tempName, name)
 	}

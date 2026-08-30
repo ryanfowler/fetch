@@ -23,6 +23,17 @@ func AtomicReplaceFile(tempPath, targetPath string) error {
 // with rename: rename never follows the final target symlink, so a race cannot
 // redirect the staged bytes outside targetPath.
 func AtomicReplaceFileNoSymlink(tempPath, targetPath string) error {
+	return atomicReplaceFileNoSymlink(tempPath, targetPath, false)
+}
+
+// AtomicReplaceFileNoSymlinkPreserveMode atomically replaces targetPath while
+// inheriting the permission bits of an existing target. A target that does not
+// exist at commit time retains tempPath's permissions.
+func AtomicReplaceFileNoSymlinkPreserveMode(tempPath, targetPath string) error {
+	return atomicReplaceFileNoSymlink(tempPath, targetPath, true)
+}
+
+func atomicReplaceFileNoSymlink(tempPath, targetPath string, preserveMode bool) error {
 	// Serialize fileutil commits so concurrent fetches cannot invalidate each
 	// other's identity check. The final rename never follows a symlink.
 	noSymlinkCommitMu.Lock()
@@ -57,6 +68,11 @@ func AtomicReplaceFileNoSymlink(tempPath, targetPath string) error {
 	}
 	if !os.SameFile(info, latest) {
 		return errTargetChanged
+	}
+	if preserveMode {
+		if err := os.Chmod(tempPath, latest.Mode().Perm()); err != nil {
+			return err
+		}
 	}
 	// os.Rename replaces the directory entry and never follows the final
 	// target symlink. The identity check prevents a detected replacement from

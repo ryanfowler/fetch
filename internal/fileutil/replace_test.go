@@ -86,3 +86,31 @@ func TestAtomicWriteNewFile_DoesNotReplaceExistingFile(t *testing.T) {
 		t.Fatalf("temp file should remain after failed install, stat err = %v", err)
 	}
 }
+
+func TestAtomicReplaceFileNoSymlinkPreserveMode(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "target.txt")
+	tempPath := filepath.Join(dir, "temp.txt")
+
+	if err := os.WriteFile(targetPath, []byte("old"), 0751); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tempPath, []byte("new"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AtomicReplaceFileNoSymlinkPreserveMode(tempPath, targetPath); err != nil {
+		t.Fatalf("AtomicReplaceFileNoSymlinkPreserveMode returned error: %v", err)
+	}
+	after, err := os.Stat(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := after.Mode().Perm(), before.Mode().Perm(); got != want {
+		t.Fatalf("target permissions = %04o, want %04o", got, want)
+	}
+}

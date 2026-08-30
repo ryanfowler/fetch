@@ -41,6 +41,17 @@ func AtomicReplaceFile(tempPath, targetPath string) error {
 // AtomicReplaceFileNoSymlink atomically replaces targetPath but refuses a
 // symlink that was present when the commit was attempted.
 func AtomicReplaceFileNoSymlink(tempPath, targetPath string) error {
+	return atomicReplaceFileNoSymlink(tempPath, targetPath, false)
+}
+
+// AtomicReplaceFileNoSymlinkPreserveMode atomically replaces targetPath while
+// inheriting the permission bits of an existing target. A target that does not
+// exist at commit time retains tempPath's permissions.
+func AtomicReplaceFileNoSymlinkPreserveMode(tempPath, targetPath string) error {
+	return atomicReplaceFileNoSymlink(tempPath, targetPath, true)
+}
+
+func atomicReplaceFileNoSymlink(tempPath, targetPath string, preserveMode bool) error {
 	// Serialize fileutil commits so concurrent fetches cannot invalidate each
 	// other's identity check. The final replacement does not follow a symlink.
 	noSymlinkCommitMu.Lock()
@@ -70,6 +81,11 @@ func AtomicReplaceFileNoSymlink(tempPath, targetPath string) error {
 	}
 	if !os.SameFile(info, latest) {
 		return errTargetChanged
+	}
+	if preserveMode {
+		if err := os.Chmod(tempPath, latest.Mode().Perm()); err != nil {
+			return err
+		}
 	}
 	return AtomicReplaceFile(tempPath, targetPath)
 }

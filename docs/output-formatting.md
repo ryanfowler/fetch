@@ -375,6 +375,9 @@ Overwrite existing files:
 fetch -o output.json --clobber example.com/data
 ```
 
+When replacing an existing regular file, `--clobber` preserves its permission
+bits.
+
 ## Pager
 
 Use `--pager auto|on|off` to control paging. In `auto` mode, formatted text

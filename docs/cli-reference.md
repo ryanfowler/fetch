@@ -200,7 +200,8 @@ fetch -O -J example.com/download
 
 ### `--clobber`
 
-Overwrite existing output file (default behavior is to fail if file exists).
+Overwrite an existing output file while preserving its permission bits (default
+behavior is to fail if the file exists).
 
 ```sh
 fetch -o output.json --clobber example.com/data
