@@ -18,7 +18,8 @@ that configuration is unavailable, the platform resolver provides A/AAAA records
 without TTLs. With an explicit UDP, TCP, DoT, DoQ, or DoH resolver, supported
 record types are queried concurrently. The default output uses `Lookup` and
 `Records` sections and reports the name, resolver path, transport, transport
-security, source, status, result counts, query counts, and timing. Successful
+security, source, status, result counts, query counts, and timing. Each record
+shows its normalized, fully qualified owner name before its value. Successful
 records remain visible when one query fails; the `Lookup` section reports an
 incomplete status and the `Failures` section identifies the failed types. The
 command exits nonzero. Inspection output, including the `Failures` section, goes

@@ -130,10 +130,10 @@ func TestInspectDOHShowsAAndAAAATTLs(t *testing.T) {
 		"Queries: 11 total · 3 with data · 8 no data",
 		"Timing: ",
 		"* Records\n",
-		"\u2514\u2500 192.0.2.1 (TTL 1m)",
-		"\u2514\u2500 2001:db8::1 (TTL 5m)",
-		"alias.example.com. (TTL 2m)",
-		"v=spf1 -all (TTL 3m)",
+		"\u2514\u2500 alias.example.com. → 192.0.2.1 (TTL 1m)",
+		"\u2514\u2500 example.com. → 2001:db8::1 (TTL 5m)",
+		"example.com. → alias.example.com. (TTL 2m)",
+		"example.com. → v=spf1 -all (TTL 3m)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
@@ -413,8 +413,57 @@ func TestLookupCollapsesDuplicateCNAMEsWithLowestTTL(t *testing.T) {
 	if len(cnames) != 1 {
 		t.Fatalf("CNAME records = %v, want 1 collapsed record", cnames)
 	}
+	if got, want := cnames[0].owner, "example.com."; got != want {
+		t.Fatalf("CNAME owner = %q, want %q", got, want)
+	}
 	if got, want := cnames[0].ttl, uint32(119); got != want {
 		t.Fatalf("CNAME TTL = %d, want lowest TTL %d", got, want)
+	}
+}
+
+func TestAggregateDeduplicatesRecordsByOwnerTypeAndValue(t *testing.T) {
+	out := &result{records: make(map[string][]record)}
+	results := []queryResult{{
+		typ: inspectTypes[0],
+		records: []record{
+			{owner: "first.example.", typ: "A", value: "192.0.2.1", ttl: 120, hasTTL: true},
+			{owner: "second.example.", typ: "A", value: "192.0.2.1", ttl: 90, hasTTL: true},
+			{owner: "FIRST.EXAMPLE.", typ: "A", value: "192.0.2.1", ttl: 60, hasTTL: true},
+		},
+	}}
+
+	aggregate(out, results, time.Now())
+	records := out.records["A"]
+	if got, want := len(records), 2; got != want {
+		t.Fatalf("A records = %#v, want %d owner-distinct records", records, want)
+	}
+	if got, want := records[0].ttl, uint32(60); got != want {
+		t.Fatalf("duplicate same-owner TTL = %d, want lowest TTL %d", got, want)
+	}
+	if got, want := records[1].owner, "second.example."; got != want {
+		t.Fatalf("second owner = %q, want %q", got, want)
+	}
+}
+
+func TestRecordOwnersUseCanonicalFQDNPresentation(t *testing.T) {
+	owner, err := resolver.ParseName("WWW.Example.COM.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := recordFromWire(resolver.Record{
+		Owner:      owner,
+		Type:       uint16(dnsmessage.TypeA),
+		TTLPresent: true,
+		RData:      []byte{192, 0, 2, 1},
+	})
+	if !ok {
+		t.Fatal("recordFromWire() rejected an A record")
+	}
+	if got, want := rec.owner, "www.example.com."; got != want {
+		t.Fatalf("direct DNS owner = %q, want %q", got, want)
+	}
+	if got, want := normalizedOwner("WWW.Example.COM"), rec.owner; got != want {
+		t.Fatalf("platform owner = %q, want direct DNS owner %q", got, want)
 	}
 }
 
@@ -433,8 +482,14 @@ func TestLookupUDPRecordsReturnsTTL(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("records = %v, want 1 record", records)
 	}
+	if got, want := records[0].owner, "example.com."; got != want {
+		t.Fatalf("owner = %q, want %q", got, want)
+	}
 	if got, want := records[0].value, "192.0.2.10"; got != want {
 		t.Fatalf("value = %q, want %q", got, want)
+	}
+	if got, want := records[0].source, recordSourceDNS; got != want {
+		t.Fatalf("source = %d, want direct DNS source %d", got, want)
 	}
 	if got, want := records[0].ttl, uint32(42); got != want {
 		t.Fatalf("TTL = %d, want %d", got, want)
@@ -506,6 +561,14 @@ func TestLookupUsesPlatformResolver(t *testing.T) {
 	}
 	if res.records["A"][0].hasTTL || res.records["AAAA"][0].hasTTL {
 		t.Fatalf("default resolver records unexpectedly reported TTLs: %#v", res.records)
+	}
+	for _, typ := range []string{"A", "AAAA"} {
+		if got, want := res.records[typ][0].owner, "example.com."; got != want {
+			t.Fatalf("%s owner = %q, want %q", typ, got, want)
+		}
+		if got, want := res.records[typ][0].source, recordSourcePlatform; got != want {
+			t.Fatalf("%s source = %d, want platform source %d", typ, got, want)
+		}
 	}
 }
 
@@ -692,6 +755,20 @@ func TestRenderStructuredLookupUsesSingularGrammar(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("structured output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestRenderShowsRecordOwner(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{
+		host: "www.example.com",
+		records: map[string][]record{
+			"CNAME": {{owner: "www.example.com.", typ: "CNAME", value: "cdn.example.net.", ttl: 300, hasTTL: true}},
+		},
+	})
+
+	if out := string(p.Bytes()); !strings.Contains(out, "www.example.com. → cdn.example.net. (TTL 5m)") {
+		t.Fatalf("output missing record owner and target:\n%s", out)
 	}
 }
 
