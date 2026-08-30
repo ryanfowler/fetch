@@ -254,13 +254,68 @@ func TestLookupDOHJSONPreservesTypedRecordData(t *testing.T) {
 	}
 }
 
-func TestDNSQueryHostPreservesASCIIServiceLabels(t *testing.T) {
-	got, err := dnsQueryHost("_acme-challenge.example")
-	if err != nil {
-		t.Fatal(err)
+func TestDNSQueryHostNormalizesToAbsoluteName(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "ordinary hostname", want: "example.com."},
+		{name: "IDN", want: "xn--mnich-kva.example."},
+		{name: "trailing dot", want: "example.com."},
+		{name: "service label", want: "_acme-challenge.example."},
+		{name: "IDN after service label", want: "_acme-challenge.xn--mnich-kva.example."},
+		{name: "root", want: "."},
 	}
-	if want := "_acme-challenge.example"; got != want {
-		t.Fatalf("DNS query host = %q, want %q", got, want)
+	inputs := []string{
+		"example.com",
+		"münich.example",
+		"example.com.",
+		"_acme-challenge.example",
+		"_acme-challenge.münich.example",
+		".",
+	}
+	for i, input := range inputs {
+		t.Run(tests[i].name, func(t *testing.T) {
+			got, err := dnsQueryHost(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tests[i].want {
+				t.Fatalf("DNS query host = %q, want %q", got, tests[i].want)
+			}
+		})
+	}
+}
+
+func TestDNSQueryHostRejectsInvalidNames(t *testing.T) {
+	tests := []string{"", "example..com", strings.Repeat("a", 64) + ".example"}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			if _, err := dnsQueryHost(input); err == nil {
+				t.Fatalf("dnsQueryHost(%q) succeeded, want invalid-name error", input)
+			}
+		})
+	}
+}
+
+func TestQueryNameDiffersOnlyForMeaningfulNormalization(t *testing.T) {
+	tests := []struct {
+		host, queryName string
+		want            bool
+	}{
+		{host: "example.com", queryName: "example.com.", want: false},
+		{host: "EXAMPLE.COM", queryName: "EXAMPLE.COM.", want: false},
+		{host: "example.com.", queryName: "example.com.", want: false},
+		{host: "internal-service", queryName: "internal-service.", want: true},
+		{host: "münich.example", queryName: "xn--mnich-kva.example.", want: true},
+		{host: ".", queryName: ".", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			if got := queryNameDiffers(tt.host, tt.queryName); got != tt.want {
+				t.Fatalf("queryNameDiffers(%q, %q) = %t, want %t", tt.host, tt.queryName, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -270,7 +325,7 @@ func TestInspectNormalizesIDNForDNSQueries(t *testing.T) {
 			w.WriteHeader(http.StatusUnsupportedMediaType)
 			return
 		}
-		if got, want := r.URL.Query().Get("name"), "xn--mnich-kva.example"; got != want {
+		if got, want := r.URL.Query().Get("name"), "xn--mnich-kva.example."; got != want {
 			http.Error(w, "unexpected DNS name", http.StatusBadRequest)
 			return
 		}
@@ -290,8 +345,12 @@ func TestInspectNormalizesIDNForDNSQueries(t *testing.T) {
 	if status != 0 {
 		t.Fatalf("status = %d, want 0\n%s", status, p.Bytes())
 	}
-	if !strings.Contains(string(p.Bytes()), "192.0.2.1") {
+	out := string(p.Bytes())
+	if !strings.Contains(out, "192.0.2.1") {
 		t.Fatalf("output missing IDN A record:\n%s", p.Bytes())
+	}
+	if !strings.Contains(out, "Query name: xn--mnich-kva.example.") {
+		t.Fatalf("output missing normalized query name:\n%s", out)
 	}
 }
 
