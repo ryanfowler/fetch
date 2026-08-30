@@ -130,6 +130,19 @@ type result struct {
 	tcpFallback      bool
 	platformFallback bool
 	verbosity        core.Verbosity
+
+	// The following fields are only rendered at -vv. Keeping them in the
+	// result, rather than deriving them in the renderer, preserves the
+	// resolver policy that was used for this operation.
+	configuredNameservers []string
+	resolverAttempts      int
+	resolverTimeout       time.Duration
+	resolverRotation      string
+	resolverConfiguration string
+	resolverRouting       string
+	resolverSearchDomains string
+	resolverOSRouting     string
+	resolverBootstrap     string
 }
 
 type queryStatus uint8
@@ -193,6 +206,43 @@ func loadSystemResolverPolicy(cfg *Config) *resolver.SystemResolverPolicy {
 		return nil
 	}
 	return &policy
+}
+
+func setSystemResolverDetails(out *result, policy resolver.SystemResolverPolicy) {
+	out.configuredNameservers = slices.Clone(policy.Nameservers)
+	if policy.Attempts > 0 {
+		out.resolverAttempts = policy.Attempts
+	} else {
+		out.resolverAttempts = 2
+	}
+	if policy.Timeout > 0 {
+		out.resolverTimeout = policy.Timeout
+	} else {
+		out.resolverTimeout = 5 * time.Second
+	}
+	if policy.Rotate && len(policy.Nameservers) > 1 {
+		out.resolverRotation = "enabled"
+	} else {
+		out.resolverRotation = "disabled"
+	}
+	out.resolverConfiguration = policy.ResolvConfPath
+	out.resolverRouting = "direct nameserver queries"
+	out.resolverSearchDomains = "not applied"
+	out.resolverOSRouting = "not applied by direct queries"
+}
+
+func endpointBootstrapDescription(endpoint *resolver.Endpoint) string {
+	if endpoint == nil {
+		return ""
+	}
+	if len(endpoint.BootstrapAddrs) == 0 {
+		return "platform resolver for " + endpoint.ConnectHost
+	}
+	addresses := make([]string, 0, len(endpoint.BootstrapAddrs))
+	for _, address := range endpoint.BootstrapAddrs {
+		addresses = append(addresses, net.JoinHostPort(address.String(), strconv.Itoa(int(endpoint.Port))))
+	}
+	return "configured address: " + strings.Join(addresses, ", ")
 }
 
 // Inspect resolves the configured URL hostname and renders DNS information to
@@ -260,6 +310,9 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 		records:   make(map[string][]record),
 		verbosity: cfg.Verbosity,
 	}
+	if cfg.Endpoint != nil {
+		out.resolverBootstrap = endpointBootstrapDescription(cfg.Endpoint)
+	}
 
 	// A missing --dns-server prefers the resolv.conf nameservers, which expose
 	// every record type and per-record TTLs. The platform API is only the
@@ -269,6 +322,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	if systemDefault {
 		policy := loadSystemResolverPolicy(cfg)
 		if policy != nil && len(policy.Nameservers) > 0 {
+			setSystemResolverDetails(out, *policy)
 			ordered := resolver.RotateSystemResolverPolicy(*policy)
 			systemPolicy = &ordered
 			target = resolverTargetInfo{label: ordered.Nameservers[0], udpAddr: ordered.Nameservers[0]}
@@ -356,7 +410,17 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 	out.queryName = queryHost
 	queryCtx, cancelQuery := contextForDirectLookup(ctx, systemPolicy != nil)
 	defer cancelQuery()
-	results := runFanOut(queryCtx, queryHost, target, systemPolicy, streamClient, doqClient, dohClient)
+	queryTransport := resolver.TransportUDP
+	if cfg.Endpoint != nil {
+		queryTransport = cfg.Endpoint.Transport
+	} else if server != nil {
+		queryTransport = resolverURLTransport(server)
+	}
+	queryResponder := target.label
+	if target.udpAddr != "" {
+		queryResponder = target.udpAddr
+	}
+	results := runFanOut(queryCtx, queryHost, target, systemPolicy, queryTransport, queryResponder, streamClient, doqClient, dohClient)
 	firstResult := aggregate(out, results, start)
 	if systemPolicy != nil {
 		setSystemResponderSummary(out)
@@ -384,7 +448,7 @@ func lookup(ctx context.Context, cfg *Config, host string, start time.Time) (*re
 // runFanOut queries every inspection record type concurrently. Exactly one
 // backend is active: the system policy nameservers, or the selected stream,
 // DoQ, DoH, or UDP resolver.
-func runFanOut(ctx context.Context, host string, target resolverTargetInfo, systemPolicy *resolver.SystemResolverPolicy, streamClient *resolver.StreamClient, doqClient *resolver.DoQClient, dohClient *resolver.DOHClient) []queryResult {
+func runFanOut(ctx context.Context, host string, target resolverTargetInfo, systemPolicy *resolver.SystemResolverPolicy, queryTransport resolver.Transport, queryResponder string, streamClient *resolver.StreamClient, doqClient *resolver.DoQClient, dohClient *resolver.DOHClient) []queryResult {
 	results := make([]queryResult, len(inspectTypes))
 	var wg sync.WaitGroup
 	for i, qt := range inspectTypes {
@@ -393,6 +457,12 @@ func runFanOut(ctx context.Context, host string, target resolverTargetInfo, syst
 			defer wg.Done()
 			queryStart := time.Now()
 			results[i].typ = qt
+			if systemPolicy == nil {
+				// Explicit resolver backends do not return QueryMetadata, but their
+				// transport is known before the query starts. Set the responder only
+				// after a query succeeds; an endpoint is not proof that it answered.
+				results[i].transport = queryTransport
+			}
 			switch {
 			case systemPolicy != nil:
 				var metadata resolver.QueryMetadata
@@ -410,6 +480,9 @@ func runFanOut(ctx context.Context, host string, target resolverTargetInfo, syst
 				results[i].records, results[i].err = lookupDOHRecordsWithClient(ctx, dohClient, host, qt)
 			default:
 				results[i].records, results[i].tcpFallback, results[i].err = lookupUDPRecordsWithFallback(ctx, target.udpAddr, host, qt)
+			}
+			if systemPolicy == nil && results[i].err == nil {
+				results[i].responder = queryResponder
 			}
 			// System-nameserver queries expose resolver metadata that includes
 			// failover and retry time. The other backends do not, so measure
@@ -625,23 +698,32 @@ func isASCII(value string) bool {
 // explicit.
 func platformResult(orig *result, records []record, start time.Time) *result {
 	out := &result{
-		host:             orig.host,
-		queryName:        orig.queryName,
-		resolver:         "system nameservers + platform resolver",
-		transport:        "mixed",
-		security:         "mixed",
-		source:           "system resolver configuration + platform resolver",
-		responders:       append(slices.Clone(orig.responders), "platform resolver"),
-		records:          make(map[string][]record, len(orig.records)),
-		queries:          slices.Clone(orig.queries),
-		failures:         slices.Clone(orig.failures),
-		queryTotal:       orig.queryTotal,
-		queryWithData:    orig.queryWithData,
-		queryNoData:      orig.queryNoData,
-		tcpFallback:      orig.tcpFallback,
-		platformFallback: true,
-		verbosity:        orig.verbosity,
-		duration:         time.Since(start),
+		host:                  orig.host,
+		queryName:             orig.queryName,
+		resolver:              "system nameservers + platform resolver",
+		transport:             "mixed",
+		security:              "mixed",
+		source:                "system resolver configuration + platform resolver",
+		responders:            append(slices.Clone(orig.responders), "platform resolver"),
+		records:               make(map[string][]record, len(orig.records)),
+		queries:               slices.Clone(orig.queries),
+		failures:              slices.Clone(orig.failures),
+		queryTotal:            orig.queryTotal,
+		queryWithData:         orig.queryWithData,
+		queryNoData:           orig.queryNoData,
+		tcpFallback:           orig.tcpFallback,
+		platformFallback:      true,
+		verbosity:             orig.verbosity,
+		configuredNameservers: slices.Clone(orig.configuredNameservers),
+		resolverAttempts:      orig.resolverAttempts,
+		resolverTimeout:       orig.resolverTimeout,
+		resolverRotation:      orig.resolverRotation,
+		resolverConfiguration: orig.resolverConfiguration,
+		resolverRouting:       orig.resolverRouting,
+		resolverSearchDomains: orig.resolverSearchDomains,
+		resolverOSRouting:     orig.resolverOSRouting,
+		resolverBootstrap:     orig.resolverBootstrap,
+		duration:              time.Since(start),
 	}
 	for typ, values := range orig.records {
 		out.records[typ] = slices.Clone(values)
@@ -1592,6 +1674,24 @@ func resolverTransportSecurity(cfg *Config, server *url.URL) string {
 	}
 }
 
+func resolverURLTransport(server *url.URL) resolver.Transport {
+	if server == nil {
+		return resolver.TransportUDP
+	}
+	switch strings.ToLower(server.Scheme) {
+	case "tcp":
+		return resolver.TransportTCP
+	case "tls", "dot":
+		return resolver.TransportTLS
+	case "quic", "doq":
+		return resolver.TransportQUIC
+	case "http", "https":
+		return resolver.TransportHTTPS
+	default:
+		return resolver.TransportUDP
+	}
+}
+
 func resolverTarget(server *url.URL) resolverTargetInfo {
 	switch {
 	case server == nil:
@@ -1729,6 +1829,43 @@ func inspectionTransportSummary(res *result) string {
 	return res.transport
 }
 
+func renderResolverDetails(p *core.Printer, res *result) {
+	var fields int
+	write := func(label, value string) {
+		if value == "" {
+			return
+		}
+		if fields == 0 {
+			writeInspectionBlankLine(p)
+			renderInspectionSection(p, "Resolver details")
+		}
+		fields++
+		writeInspectionField(p, label, value)
+	}
+
+	// The normal view only shows a query name when normalization changed the
+	// input. Extra verbosity also records the ordinary case so the exact name
+	// sent to the resolver is always visible when debugging.
+	if res.queryName != "" && res.queryName == res.host {
+		write("Query name", res.queryName)
+	}
+	if len(res.configuredNameservers) > 0 {
+		write("Configured nameservers", strings.Join(res.configuredNameservers, ", "))
+	}
+	if res.resolverAttempts > 0 {
+		write("Resolver attempts", countPhrase(res.resolverAttempts, "per nameserver", "per nameserver"))
+	}
+	if res.resolverTimeout > 0 {
+		write("Resolver timeout", formatDuration(res.resolverTimeout))
+	}
+	write("Resolver rotation", res.resolverRotation)
+	write("Configuration", res.resolverConfiguration)
+	write("Routing", res.resolverRouting)
+	write("Search domains", res.resolverSearchDomains)
+	write("OS resolver routing", res.resolverOSRouting)
+	write("Bootstrap", res.resolverBootstrap)
+}
+
 func renderQueryDetails(p *core.Printer, queries []queryResult) {
 	if len(queries) == 0 {
 		return
@@ -1818,6 +1955,7 @@ func renderInspection(p *core.Printer, res *result) {
 		renderFailures(p, res.failures)
 	}
 	if res.verbosity >= core.VExtraVerbose {
+		renderResolverDetails(p, res)
 		renderQueryDetails(p, res.queries)
 	}
 	writeInspectionBlankLine(p)
