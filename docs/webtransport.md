@@ -14,6 +14,8 @@ a terminal.
 Use `--wt-mode datagram` for unreliable datagrams. `--wt-datagram-mode lines`
 sends one datagram per line; `binary` sends 1 KiB chunks. Received datagrams
 are JSON Lines records with `sequence`, `length`, and base64 `data` fields.
+If an outgoing datagram is too large, the error reports its size and the
+current underlying QUIC limit (before HTTP/3 framing overhead).
 Datagram input ending does not close the session. Use Ctrl+C when the peer does
 not close it.
 
