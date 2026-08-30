@@ -122,6 +122,7 @@ type Request struct {
 
 	// responseDescriptor is set internally after proto setup for response formatting.
 	responseDescriptor protoreflect.MessageDescriptor
+	effectiveURL       *url.URL
 
 	// harRecorder is reserved before the request starts and records the final
 	// response exchange. It remains private so callers only provide a path.
@@ -168,6 +169,7 @@ func Fetch(ctx context.Context, r *Request) int {
 }
 
 func fetch(ctx context.Context, r *Request) (int, error) {
+	r.effectiveURL = nil
 	if r.HAR != "" {
 		if r.WS || r.GRPCList || r.GRPCDescribe != "" || r.DryRun {
 			return 0, errors.New("--har cannot be used with WebSocket, gRPC discovery, or --dry-run")
@@ -292,6 +294,10 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Keep the effective URL separately for diagnostics that run after the
+	// request has failed. The caller's input must remain reusable without
+	// accumulating query parameters.
+	r.effectiveURL = req.URL
 	defer func() {
 		if req.Body != nil {
 			req.Body.Close()
@@ -867,6 +873,8 @@ func formatArticleResponse(ctx context.Context, r *Request, resp *http.Response,
 	pageURL := ""
 	if resp.Request != nil && resp.Request.URL != nil {
 		pageURL = resp.Request.URL.String()
+	} else if r.effectiveURL != nil {
+		pageURL = r.effectiveURL.String()
 	} else if r.URL != nil {
 		pageURL = r.URL.String()
 	}
@@ -1059,11 +1067,18 @@ func addHeader(headers []core.KeyVal[string], h core.KeyVal[string]) []core.KeyV
 // schemeless HTTPS connection when the failure is not a certificate or timeout
 // error.
 func schemelessPlaintextHint(r *Request, err error) string {
-	if r == nil || !r.SchemelessURL || r.URL == nil || r.URL.Scheme != "https" || isCertificateErr(err) {
+	if r == nil || !r.SchemelessURL || isCertificateErr(err) {
+		return ""
+	}
+	effectiveURL := r.effectiveURL
+	if effectiveURL == nil {
+		effectiveURL = r.URL
+	}
+	if effectiveURL == nil || effectiveURL.Scheme != "https" {
 		return ""
 	}
 	var recordErr tls.RecordHeaderError
-	if !errors.As(err, &recordErr) {
+	if !errors.As(err, &recordErr) && !errors.Is(err, http.ErrSchemeMismatch) {
 		return ""
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -1078,7 +1093,7 @@ func schemelessPlaintextHint(r *Request, err error) string {
 		return ""
 	}
 
-	hintURL := *r.URL
+	hintURL := *effectiveURL
 	hintURL.Scheme = "http"
 	return core.RedactedURL(&hintURL)
 }
