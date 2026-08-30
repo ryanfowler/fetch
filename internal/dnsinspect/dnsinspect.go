@@ -1,10 +1,13 @@
 package dnsinspect
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -85,13 +88,27 @@ const (
 	recordSourcePlatform
 )
 
+// record keeps DNS data in semantic form until it reaches the renderer.
+// presentation is only a fallback for DoH JSON and unknown record types whose
+// provider did not supply wire-format RDATA.
 type record struct {
-	owner  string
-	typ    string
-	value  string
-	ttl    uint32
-	hasTTL bool
-	source recordSource
+	owner        string
+	typ          dnsmessage.Type
+	ttl          uint32
+	hasTTL       bool
+	source       recordSource
+	address      net.IP
+	target       string
+	target2      string
+	preference   uint16
+	priority     uint16
+	weight       uint16
+	port         uint16
+	soa          [5]uint32
+	txt          [][]byte
+	params       []resolver.SVCParam
+	rawRData     []byte
+	presentation string
 }
 
 type result struct {
@@ -433,9 +450,10 @@ func aggregate(out *result, results []queryResult, start time.Time) error {
 			out.queryWithData++
 		}
 		for _, rec := range query.records {
-			key := canonicalOwnerKey(rec.owner) + "\x00" + rec.typ + "\x00" + rec.value
+			label := typeLabel(rec.typ)
+			key := canonicalOwnerKey(rec.owner) + "\x00" + strconv.Itoa(int(rec.typ)) + "\x00" + rec.semanticKey()
 			if idx, ok := seen[key]; ok {
-				records := out.records[rec.typ]
+				records := out.records[label]
 				existing := &records[idx]
 				switch {
 				case rec.hasTTL && !existing.hasTTL:
@@ -446,8 +464,8 @@ func aggregate(out *result, results []queryResult, start time.Time) error {
 				}
 				continue
 			}
-			seen[key] = len(out.records[rec.typ])
-			out.records[rec.typ] = append(out.records[rec.typ], rec)
+			seen[key] = len(out.records[label])
+			out.records[label] = append(out.records[label], rec)
 		}
 	}
 	out.duration = time.Since(start)
@@ -484,7 +502,8 @@ func platformLookup(ctx context.Context, out *result, host string, start time.Ti
 		return nil, fmt.Errorf("lookup %s: %w", host, err)
 	}
 	for _, rec := range records {
-		out.records[rec.typ] = append(out.records[rec.typ], rec)
+		label := typeLabel(rec.typ)
+		out.records[label] = append(out.records[label], rec)
 	}
 	if recordCount(out) == 0 {
 		return nil, fmt.Errorf("lookup %s: no DNS records found", host)
@@ -578,7 +597,8 @@ func platformResult(orig *result, records []record, start time.Time) *result {
 		out.records[typ] = slices.Clone(values)
 	}
 	for _, rec := range records {
-		out.records[rec.typ] = append(out.records[rec.typ], rec)
+		label := typeLabel(rec.typ)
+		out.records[label] = append(out.records[label], rec)
 	}
 	return out
 }
@@ -595,9 +615,9 @@ func lookupDefaultResolverRecords(ctx context.Context, host string) ([]record, e
 		ip := addr.IP
 		switch {
 		case ip.To4() != nil:
-			records = append(records, record{owner: owner, typ: "A", value: ip.String(), source: recordSourcePlatform})
+			records = append(records, record{owner: owner, typ: dnsmessage.TypeA, address: append(net.IP(nil), ip.To4()...), source: recordSourcePlatform})
 		case ip.To16() != nil:
-			records = append(records, record{owner: owner, typ: "AAAA", value: ip.String(), source: recordSourcePlatform})
+			records = append(records, record{owner: owner, typ: dnsmessage.TypeAAAA, address: append(net.IP(nil), ip.To16()...), source: recordSourcePlatform})
 		}
 	}
 	return records, nil
@@ -662,24 +682,9 @@ func lookupDOHRecordsWithClient(ctx context.Context, client *resolver.DOHClient,
 	}
 	out := make([]record, 0, len(answers))
 	for _, answer := range answers {
-		typ := dnsmessage.Type(answer.Record.Type)
-		value := ""
-		if answer.Data != "" {
-			value = normalizeDOHValue(typ, answer.Data)
-		} else {
-			value, _ = wireRecordValue(answer.Record)
+		if rec, ok := recordFromDOH(answer); ok {
+			out = append(out, rec)
 		}
-		if value == "" {
-			continue
-		}
-		out = append(out, record{
-			owner:  normalizeOwnerPresentation(answer.Record.Owner.String()),
-			typ:    typeLabel(typ),
-			value:  value,
-			ttl:    answer.Record.TTL,
-			hasTTL: answer.TTLPresent,
-			source: recordSourceDNS,
-		})
 	}
 	return out, nil
 }
@@ -717,18 +722,376 @@ func lookupUDPRecordsWithFallback(ctx context.Context, serverAddr, host string, 
 }
 
 func recordFromWire(res resolver.Record) (record, bool) {
-	value, ok := wireRecordValue(res)
-	if !ok {
-		return record{}, false
+	return semanticRecord(res, "", res.TTLPresent), true
+}
+
+func recordFromDOH(answer resolver.DOHRecord) (record, bool) {
+	rec := semanticRecord(answer.Record, answer.Data, answer.TTLPresent)
+	return rec, rec.hasSemanticData()
+}
+
+func (rec record) hasSemanticData() bool {
+	switch rec.typ {
+	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
+		return len(rec.address) > 0
+	case dnsmessage.TypeCNAME, dnsmessage.TypeNS:
+		return rec.target != ""
+	case dnsmessage.TypeTXT:
+		return rec.txt != nil
+	case dnsmessage.TypeMX, dnsmessage.TypeSRV:
+		return rec.target != ""
+	case dnsmessage.TypeSOA:
+		return rec.target != "" && rec.target2 != ""
+	case dnsTypeCAA:
+		return len(rec.rawRData) >= 2
+	case dnsmessage.TypeSVCB, dnsmessage.TypeHTTPS:
+		return rec.target != ""
+	default:
+		return rec.presentation != "" || rec.rawRData != nil
 	}
-	return record{
-		owner:  normalizeOwnerPresentation(res.Owner.String()),
-		typ:    typeLabel(dnsmessage.Type(res.Type)),
-		value:  value,
-		ttl:    res.TTL,
-		hasTTL: res.TTLPresent,
-		source: recordSourceDNS,
-	}, true
+}
+
+func semanticRecord(res resolver.Record, presentation string, ttlPresent bool) record {
+	rec := record{
+		owner:        normalizeOwnerPresentation(res.Owner.String()),
+		typ:          dnsmessage.Type(res.Type),
+		ttl:          res.TTL,
+		hasTTL:       ttlPresent,
+		source:       recordSourceDNS,
+		preference:   res.Preference,
+		priority:     res.Priority,
+		weight:       res.Weight,
+		port:         res.Port,
+		soa:          res.SOAValues,
+		rawRData:     append([]byte(nil), res.RData...),
+		presentation: presentation,
+	}
+	if ip := resolver.RecordAddress(res); ip != nil {
+		rec.address = append(net.IP(nil), ip...)
+	}
+	if res.Target != nil {
+		rec.target = res.Target.String()
+	}
+	if res.Target2 != nil {
+		rec.target2 = res.Target2.String()
+	}
+	for _, chunk := range res.TXT {
+		rec.txt = append(rec.txt, append([]byte(nil), chunk...))
+	}
+	for _, param := range res.Params {
+		rec.params = append(rec.params, resolver.SVCParam{Key: param.Key, Value: append([]byte(nil), param.Value...)})
+	}
+	populateRecordData(&rec)
+	return rec
+}
+
+func populateRecordData(rec *record) {
+	if len(rec.rawRData) > 0 {
+		populateRecordFromRaw(rec)
+	}
+	if rec.presentation == "" {
+		return
+	}
+	if _, generic := parseGenericRDATA(rec.presentation); generic {
+		return
+	}
+	populateRecordFromPresentation(rec)
+}
+
+func populateRecordFromRaw(rec *record) {
+	raw := rec.rawRData
+	switch rec.typ {
+	case dnsmessage.TypeNS:
+		if target, end, ok := unpackDNSName(raw, 0); ok && end == len(raw) {
+			rec.target = target
+		}
+	case dnsmessage.TypeMX:
+		if len(raw) >= 3 {
+			if target, end, ok := unpackDNSName(raw, 2); ok && end == len(raw) {
+				rec.preference = binary.BigEndian.Uint16(raw)
+				rec.target = target
+			}
+		}
+	case dnsmessage.TypeSOA:
+		if first, off, ok := unpackDNSName(raw, 0); ok {
+			if second, off2, ok := unpackDNSName(raw, off); ok && len(raw)-off2 == 20 {
+				rec.target, rec.target2 = first, second
+				for i := range rec.soa {
+					rec.soa[i] = binary.BigEndian.Uint32(raw[off2+i*4:])
+				}
+			}
+		}
+	case dnsmessage.TypeTXT:
+		var chunks [][]byte
+		for off := 0; off < len(raw); {
+			length := int(raw[off])
+			off++
+			if length > len(raw)-off {
+				return
+			}
+			chunks = append(chunks, append([]byte(nil), raw[off:off+length]...))
+			off += length
+		}
+		rec.txt = chunks
+	case dnsmessage.TypeSRV:
+		if len(raw) >= 7 {
+			if target, end, ok := unpackDNSName(raw, 6); ok && end == len(raw) {
+				rec.priority = binary.BigEndian.Uint16(raw)
+				rec.weight = binary.BigEndian.Uint16(raw[2:])
+				rec.port = binary.BigEndian.Uint16(raw[4:])
+				rec.target = target
+			}
+		}
+	}
+}
+
+func populateRecordFromPresentation(rec *record) {
+	fields := strings.Fields(rec.presentation)
+	parseUint16 := func(value string) (uint16, bool) {
+		parsed, err := strconv.ParseUint(value, 10, 16)
+		return uint16(parsed), err == nil
+	}
+	parseUint32 := func(value string) (uint32, bool) {
+		parsed, err := strconv.ParseUint(value, 10, 32)
+		return uint32(parsed), err == nil
+	}
+	name := func(value string) (string, bool) {
+		parsed, err := resolver.ParseName(value)
+		if err != nil {
+			return "", false
+		}
+		return parsed.String(), true
+	}
+
+	switch rec.typ {
+	case dnsmessage.TypeNS:
+		if len(fields) == 1 {
+			rec.target, _ = name(fields[0])
+		}
+	case dnsmessage.TypeTXT:
+		if chunks, ok := parseDNSCharacterStrings(rec.presentation); ok {
+			rec.txt = chunks
+		} else {
+			// Some JSON resolvers omit the presentation quotes for a single
+			// TXT character-string. Preserve that response as one chunk.
+			rec.txt = [][]byte{[]byte(rec.presentation)}
+		}
+	case dnsmessage.TypeMX:
+		if len(fields) == 2 {
+			preference, numberOK := parseUint16(fields[0])
+			target, nameOK := name(fields[1])
+			if numberOK && nameOK {
+				rec.preference, rec.target = preference, target
+			}
+		}
+	case dnsmessage.TypeSOA:
+		if len(fields) == 7 {
+			primary, primaryOK := name(fields[0])
+			mailbox, mailboxOK := name(fields[1])
+			values := [5]uint32{}
+			valuesOK := true
+			for i := range values {
+				values[i], valuesOK = parseUint32(fields[i+2])
+				if !valuesOK {
+					break
+				}
+			}
+			if primaryOK && mailboxOK && valuesOK {
+				rec.target, rec.target2, rec.soa = primary, mailbox, values
+			}
+		}
+	case dnsmessage.TypeSRV:
+		if len(fields) == 4 {
+			priority, priorityOK := parseUint16(fields[0])
+			weight, weightOK := parseUint16(fields[1])
+			port, portOK := parseUint16(fields[2])
+			target, targetOK := name(fields[3])
+			if priorityOK && weightOK && portOK && targetOK {
+				rec.priority, rec.weight, rec.port, rec.target = priority, weight, port, target
+			}
+		}
+	case dnsTypeCAA:
+		flagsText, rest, flagsFieldOK := cutDNSField(rec.presentation)
+		tag, valueText, tagFieldOK := cutDNSField(rest)
+		flags, flagsOK := parseUint16(flagsText)
+		if flagsFieldOK && tagFieldOK && flagsOK && flags <= 255 && len(tag) <= 255 {
+			if values, ok := parseDNSCharacterStrings(valueText); ok && len(values) == 1 {
+				rec.rawRData = append([]byte{byte(flags), byte(len(tag))}, []byte(tag)...)
+				rec.rawRData = append(rec.rawRData, values[0]...)
+			}
+		}
+	}
+}
+
+func cutDNSField(text string) (field, rest string, ok bool) {
+	text = strings.TrimLeft(text, " \t")
+	if text == "" {
+		return "", "", false
+	}
+	end := strings.IndexAny(text, " \t")
+	if end < 0 {
+		return text, "", true
+	}
+	return text[:end], strings.TrimLeft(text[end:], " \t"), true
+}
+
+func parseDNSCharacterStrings(text string) ([][]byte, bool) {
+	var out [][]byte
+	for offset := 0; ; {
+		for offset < len(text) && (text[offset] == ' ' || text[offset] == '\t') {
+			offset++
+		}
+		if offset == len(text) {
+			return out, len(out) > 0
+		}
+		if text[offset] != '"' {
+			return nil, false
+		}
+		offset++
+		var value []byte
+		closed := false
+		for offset < len(text) {
+			if text[offset] == '"' {
+				offset++
+				closed = true
+				break
+			}
+			if text[offset] != '\\' {
+				value = append(value, text[offset])
+				offset++
+				continue
+			}
+			offset++
+			if offset == len(text) {
+				return nil, false
+			}
+			if offset+3 <= len(text) && text[offset] >= '0' && text[offset] <= '9' && text[offset+1] >= '0' && text[offset+1] <= '9' && text[offset+2] >= '0' && text[offset+2] <= '9' {
+				octet, err := strconv.ParseUint(text[offset:offset+3], 10, 8)
+				if err != nil {
+					return nil, false
+				}
+				value = append(value, byte(octet))
+				offset += 3
+				continue
+			}
+			value = append(value, text[offset])
+			offset++
+		}
+		if !closed || len(value) > 255 {
+			return nil, false
+		}
+		out = append(out, value)
+	}
+}
+
+func (rec record) semanticKey() string {
+	var b strings.Builder
+	switch rec.typ {
+	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
+		fmt.Fprintf(&b, "%x", []byte(rec.address))
+	case dnsmessage.TypeCNAME, dnsmessage.TypeNS:
+		if rec.target == "" && rec.presentation != "" {
+			return rec.presentation
+		}
+		b.WriteString(strings.ToLower(rec.target))
+	case dnsmessage.TypeTXT:
+		if rec.txt == nil && rec.presentation != "" {
+			return rec.presentation
+		}
+		for _, chunk := range rec.txt {
+			fmt.Fprintf(&b, "%d:%x,", len(chunk), chunk)
+		}
+	case dnsmessage.TypeMX:
+		if rec.target == "" && rec.presentation != "" {
+			return rec.presentation
+		}
+		fmt.Fprintf(&b, "%d|%s", rec.preference, strings.ToLower(rec.target))
+	case dnsmessage.TypeSOA:
+		if (rec.target == "" || rec.target2 == "") && rec.presentation != "" {
+			return rec.presentation
+		}
+		fmt.Fprintf(&b, "%s|%s|", strings.ToLower(rec.target), strings.ToLower(rec.target2))
+		for _, value := range rec.soa {
+			fmt.Fprintf(&b, "%d,", value)
+		}
+	case dnsmessage.TypeSRV:
+		if rec.target == "" && rec.presentation != "" {
+			return rec.presentation
+		}
+		fmt.Fprintf(&b, "%d|%d|%d|%s", rec.priority, rec.weight, rec.port, strings.ToLower(rec.target))
+	case dnsTypeCAA:
+		if len(rec.rawRData) == 0 && rec.presentation != "" {
+			return rec.presentation
+		}
+		fmt.Fprintf(&b, "%x", rec.rawRData)
+	case dnsmessage.TypeSVCB, dnsmessage.TypeHTTPS:
+		fmt.Fprintf(&b, "%d|%s|", rec.priority, strings.ToLower(rec.target))
+		for _, param := range rec.params {
+			fmt.Fprintf(&b, "%d:%d:%x,", param.Key, len(param.Value), param.Value)
+		}
+	default:
+		fmt.Fprintf(&b, "%x", rec.rawRData)
+	}
+	if b.Len() == 0 {
+		b.WriteString(rec.presentation)
+	}
+	return b.String()
+}
+
+// renderValue is the only place that turns semantic record data into terminal
+// presentation. DoH JSON text is used only when that protocol did not provide
+// parsed fields or generic wire-format RDATA.
+func (rec record) renderValue() string {
+	fallback := func() string {
+		if rec.presentation != "" {
+			return safeRecordText(normalizeDOHValue(rec.typ, rec.presentation))
+		}
+		return "0x" + hex.EncodeToString(rec.rawRData)
+	}
+
+	switch rec.typ {
+	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
+		if len(rec.address) > 0 {
+			return rec.address.String()
+		}
+	case dnsmessage.TypeCNAME, dnsmessage.TypeNS:
+		if rec.target != "" {
+			return rec.target
+		}
+	case dnsmessage.TypeTXT:
+		if rec.txt != nil {
+			parts := make([]string, len(rec.txt))
+			for i, chunk := range rec.txt {
+				parts[i] = strconv.Quote(string(chunk))
+			}
+			return strings.Join(parts, " ")
+		}
+	case dnsmessage.TypeMX:
+		if rec.target != "" {
+			return fmt.Sprintf("%d %s", rec.preference, rec.target)
+		}
+	case dnsmessage.TypeSOA:
+		if rec.target != "" && rec.target2 != "" {
+			return fmt.Sprintf("%s %s serial=%d refresh=%d retry=%d expire=%d minttl=%d", rec.target, rec.target2, rec.soa[0], rec.soa[1], rec.soa[2], rec.soa[3], rec.soa[4])
+		}
+	case dnsmessage.TypeSRV:
+		if rec.target != "" {
+			return fmt.Sprintf("%d %d %d %s", rec.priority, rec.weight, rec.port, rec.target)
+		}
+	case dnsTypeCAA:
+		if len(rec.rawRData) > 0 {
+			return formatCAA(rec.rawRData)
+		}
+	case dnsmessage.TypeSVCB, dnsmessage.TypeHTTPS:
+		if rec.target != "" {
+			params := make([]dnsmessage.SVCParam, 0, len(rec.params))
+			for _, param := range rec.params {
+				params = append(params, dnsmessage.SVCParam{Key: dnsmessage.SVCParamKey(param.Key), Value: param.Value})
+			}
+			return formatSVCBValue(rec.priority, rec.target, params)
+		}
+	}
+	return fallback()
 }
 
 func normalizedOwner(host string) string {
@@ -742,47 +1105,13 @@ func normalizeOwnerPresentation(owner string) string {
 	return strings.ToLower(absoluteName(owner))
 }
 
-func wireRecordValue(res resolver.Record) (string, bool) {
-	switch res.Type {
-	case uint16(dnsmessage.TypeA), uint16(dnsmessage.TypeAAAA):
-		if ip := resolver.RecordAddress(res); ip != nil {
-			return ip.String(), true
-		}
-	case uint16(dnsmessage.TypeCNAME), uint16(dnsmessage.TypeNS):
-		if res.Target != nil {
-			return res.Target.String(), true
-		}
-	case uint16(dnsmessage.TypeTXT):
-		parts := make([]string, 0, len(res.TXT))
-		for _, part := range res.TXT {
-			parts = append(parts, string(part))
-		}
-		return strings.Join(parts, " "), true
-	case uint16(dnsmessage.TypeMX):
-		if res.Target != nil {
-			return fmt.Sprintf("%d %s", res.Preference, res.Target), true
-		}
-	case uint16(dnsmessage.TypeSOA):
-		if res.Target != nil && res.Target2 != nil {
-			return fmt.Sprintf("%s %s serial=%d refresh=%d retry=%d expire=%d minttl=%d",
-				res.Target, res.Target2, res.SOAValues[0], res.SOAValues[1], res.SOAValues[2], res.SOAValues[3], res.SOAValues[4]), true
-		}
-	case uint16(dnsmessage.TypeSRV):
-		if res.Target != nil {
-			return fmt.Sprintf("%d %d %d %s", res.Priority, res.Weight, res.Port, res.Target), true
-		}
-	case uint16(dnsTypeCAA):
-		return formatCAA(res.RData), true
-	case uint16(dnsmessage.TypeSVCB), uint16(dnsmessage.TypeHTTPS):
-		params := make([]dnsmessage.SVCParam, 0, len(res.Params))
-		for _, param := range res.Params {
-			params = append(params, dnsmessage.SVCParam{Key: dnsmessage.SVCParamKey(param.Key), Value: append([]byte(nil), param.Value...)})
-		}
-		if res.Target != nil {
-			return formatSVCBValue(res.Priority, res.Target.String(), params), true
+func safeRecordText(text string) string {
+	for _, r := range text {
+		if r == '\n' || r == '\t' || r == '\r' || r == '\\' || r == '"' || r < 0x20 || r >= 0x7f && r <= 0x9f {
+			return strconv.Quote(text)
 		}
 	}
-	return "0x" + hex.EncodeToString(res.RData), true
+	return text
 }
 
 func formatCAA(raw []byte) string {
@@ -796,7 +1125,7 @@ func formatCAA(raw []byte) string {
 	flags := raw[0]
 	tag := string(raw[2 : 2+tagLen])
 	value := string(raw[2+tagLen:])
-	return fmt.Sprintf("%d %s %q", flags, tag, value)
+	return fmt.Sprintf("%d %s %q", flags, safeRecordText(tag), value)
 }
 
 func formatSVCBValue(priority uint16, target string, params []dnsmessage.SVCParam) string {
@@ -817,7 +1146,7 @@ func formatSVCParam(param dnsmessage.SVCParam) string {
 			if i+ln > len(param.Value) {
 				return fmt.Sprintf("%s=0x%s", param.Key.String(), hex.EncodeToString(param.Value))
 			}
-			alpns = append(alpns, string(param.Value[i:i+ln]))
+			alpns = append(alpns, safeRecordText(string(param.Value[i:i+ln])))
 			i += ln
 		}
 		return param.Key.String() + "=" + strings.Join(alpns, ",")
@@ -934,9 +1263,21 @@ func unpackDNSName(raw []byte, off int) (string, int, bool) {
 		if ln&0xc0 != 0 || off+ln > len(raw) {
 			return "", 0, false
 		}
-		labels = append(labels, string(raw[off:off+ln]))
+		labels = append(labels, dnsLabelPresentation(raw[off:off+ln]))
 		off += ln
 	}
+}
+
+func dnsLabelPresentation(label []byte) string {
+	var b strings.Builder
+	for _, value := range label {
+		if value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '-' || value == '_' || value >= 0x21 && value <= 0x7e && value != '.' && value != '\\' {
+			b.WriteByte(value)
+			continue
+		}
+		fmt.Fprintf(&b, "\\%03d", value)
+	}
+	return b.String()
 }
 
 func resolverSecurity(cfg *Config, server *url.URL) string {
@@ -1333,14 +1674,93 @@ func renderOtherSections(p *core.Printer, records map[string][]record) {
 	}
 }
 
+func compareRecords(a, b record) int {
+	text := func(left, right string) int {
+		return strings.Compare(strings.ToLower(left), strings.ToLower(right))
+	}
+	if a.typ != b.typ {
+		return cmp.Compare(a.typ, b.typ)
+	}
+
+	switch a.typ {
+	case dnsmessage.TypeA, dnsmessage.TypeAAAA:
+		if order := bytes.Compare(a.address, b.address); order != 0 {
+			return order
+		}
+	case dnsmessage.TypeCNAME, dnsmessage.TypeNS:
+		if order := text(a.target, b.target); order != 0 {
+			return order
+		}
+	case dnsmessage.TypeTXT:
+		for i := 0; i < min(len(a.txt), len(b.txt)); i++ {
+			if order := bytes.Compare(a.txt[i], b.txt[i]); order != 0 {
+				return order
+			}
+		}
+		if order := cmp.Compare(len(a.txt), len(b.txt)); order != 0 {
+			return order
+		}
+	case dnsmessage.TypeMX:
+		if order := cmp.Compare(a.preference, b.preference); order != 0 {
+			return order
+		}
+		if order := text(a.target, b.target); order != 0 {
+			return order
+		}
+	case dnsmessage.TypeSOA:
+		if order := text(a.owner, b.owner); order != 0 {
+			return order
+		}
+	case dnsmessage.TypeSRV:
+		for _, order := range []int{
+			cmp.Compare(a.priority, b.priority),
+			cmp.Compare(a.weight, b.weight),
+			cmp.Compare(a.port, b.port),
+			text(a.target, b.target),
+		} {
+			if order != 0 {
+				return order
+			}
+		}
+	case dnsTypeCAA:
+		aFlags, aTag, aValue := caaSortFields(a.rawRData)
+		bFlags, bTag, bValue := caaSortFields(b.rawRData)
+		for _, order := range []int{text(aTag, bTag), cmp.Compare(aFlags, bFlags), bytes.Compare(aValue, bValue)} {
+			if order != 0 {
+				return order
+			}
+		}
+	case dnsmessage.TypeSVCB, dnsmessage.TypeHTTPS:
+		if order := cmp.Compare(a.priority, b.priority); order != 0 {
+			return order
+		}
+		if order := text(a.target, b.target); order != 0 {
+			return order
+		}
+	default:
+		if order := bytes.Compare(a.rawRData, b.rawRData); order != 0 {
+			return order
+		}
+	}
+	return strings.Compare(a.semanticKey(), b.semanticKey())
+}
+
+func caaSortFields(raw []byte) (uint8, string, []byte) {
+	if len(raw) < 2 || int(raw[1]) > len(raw)-2 {
+		return 0, "", raw
+	}
+	tagEnd := 2 + int(raw[1])
+	return raw[0], string(raw[2:tagEnd]), raw[tagEnd:]
+}
+
 func renderSection(p *core.Printer, name string, records []record) {
 	if len(records) == 0 {
 		return
 	}
 	records = slices.Clone(records)
 	slices.SortFunc(records, func(a, b record) int {
-		if cmp := strings.Compare(a.value, b.value); cmp != 0 {
-			return cmp
+		if order := compareRecords(a, b); order != 0 {
+			return order
 		}
 		if a.ttl < b.ttl {
 			return -1
@@ -1369,7 +1789,7 @@ func renderSection(p *core.Printer, name string, records []record) {
 			p.WriteString(core.TerminalSafeText(rec.owner))
 			p.WriteString(" → ")
 		}
-		p.WriteString(core.TerminalSafeText(rec.value))
+		p.WriteString(core.TerminalSafeText(rec.renderValue()))
 		p.Reset()
 		p.WriteString(" ")
 		p.Set(core.Dim)

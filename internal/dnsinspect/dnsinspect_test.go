@@ -2,6 +2,7 @@ package dnsinspect
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
@@ -133,11 +134,54 @@ func TestInspectDOHShowsAAndAAAATTLs(t *testing.T) {
 		"\u2514\u2500 alias.example.com. → 192.0.2.1 (TTL 1m)",
 		"\u2514\u2500 example.com. → 2001:db8::1 (TTL 5m)",
 		"example.com. → alias.example.com. (TTL 2m)",
-		"example.com. → v=spf1 -all (TTL 3m)",
+		`example.com. → "v=spf1 -all" (TTL 3m)`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestLookupDOHJSONPreservesTypedRecordData(t *testing.T) {
+	answers := map[string]string{
+		"NS":  `{"Status":0,"Answer":[{"name":"example.com.","type":2,"TTL":60,"data":"ns1.example.com."}]}`,
+		"TXT": `{"Status":0,"Answer":[{"name":"example.com.","type":16,"TTL":60,"data":"\"first\" \"second\""}]}`,
+		"MX":  `{"Status":0,"Answer":[{"name":"example.com.","type":15,"TTL":60,"data":"10 mail.example.com."}]}`,
+		"SOA": `{"Status":0,"Answer":[{"name":"example.com.","type":6,"TTL":60,"data":"ns1.example.com. hostmaster.example.com. 1 3600 600 604800 300"}]}`,
+		"SRV": `{"Status":0,"Answer":[{"name":"example.com.","type":33,"TTL":60,"data":"10 5 443 service.example.com."}]}`,
+		"CAA": `{"Status":0,"Answer":[{"name":"example.com.","type":257,"TTL":60,"data":"0 issue \"letsencrypt.org\""}]}`,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-json")
+		if answer, ok := answers[r.URL.Query().Get("type")]; ok {
+			io.WriteString(w, answer)
+			return
+		}
+		io.WriteString(w, `{"Status":0}`)
+	}))
+	defer server.Close()
+
+	res, err := lookup(context.Background(), &Config{DNSServer: mustURL(t, server.URL+"/dns-query")}, "example.com", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.records["NS"][0].target; got != "ns1.example.com." {
+		t.Fatalf("NS target = %q", got)
+	}
+	if got := res.records["TXT"][0].txt; len(got) != 2 || string(got[0]) != "first" || string(got[1]) != "second" {
+		t.Fatalf("TXT chunks = %#v", got)
+	}
+	if got := res.records["MX"][0]; got.preference != 10 || got.target != "mail.example.com." {
+		t.Fatalf("MX data = %#v", got)
+	}
+	if got := res.records["SOA"][0]; got.target != "ns1.example.com." || got.target2 != "hostmaster.example.com." || got.soa != [5]uint32{1, 3600, 600, 604800, 300} {
+		t.Fatalf("SOA data = %#v", got)
+	}
+	if got := res.records["SRV"][0]; got.priority != 10 || got.weight != 5 || got.port != 443 || got.target != "service.example.com." {
+		t.Fatalf("SRV data = %#v", got)
+	}
+	if got := formatCAA(res.records["CAA"][0].rawRData); got != `0 issue "letsencrypt.org"` {
+		t.Fatalf("CAA data = %q", got)
 	}
 }
 
@@ -426,9 +470,9 @@ func TestAggregateDeduplicatesRecordsByOwnerTypeAndValue(t *testing.T) {
 	results := []queryResult{{
 		typ: inspectTypes[0],
 		records: []record{
-			{owner: "first.example.", typ: "A", value: "192.0.2.1", ttl: 120, hasTTL: true},
-			{owner: "second.example.", typ: "A", value: "192.0.2.1", ttl: 90, hasTTL: true},
-			{owner: "FIRST.EXAMPLE.", typ: "A", value: "192.0.2.1", ttl: 60, hasTTL: true},
+			{owner: "first.example.", typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1"), ttl: 120, hasTTL: true},
+			{owner: "second.example.", typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1"), ttl: 90, hasTTL: true},
+			{owner: "FIRST.EXAMPLE.", typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1"), ttl: 60, hasTTL: true},
 		},
 	}}
 
@@ -485,7 +529,7 @@ func TestLookupUDPRecordsReturnsTTL(t *testing.T) {
 	if got, want := records[0].owner, "example.com."; got != want {
 		t.Fatalf("owner = %q, want %q", got, want)
 	}
-	if got, want := records[0].value, "192.0.2.10"; got != want {
+	if got, want := records[0].address.String(), "192.0.2.10"; got != want {
 		t.Fatalf("value = %q, want %q", got, want)
 	}
 	if got, want := records[0].source, recordSourceDNS; got != want {
@@ -553,10 +597,10 @@ func TestLookupUsesPlatformResolver(t *testing.T) {
 	if strings.Contains(res.resolver, "127.0.0.1") {
 		t.Fatalf("resolver label = %q, must not silently fall back to loopback", res.resolver)
 	}
-	if got, want := res.records["A"][0].value, "192.0.2.44"; got != want {
+	if got, want := res.records["A"][0].address.String(), "192.0.2.44"; got != want {
 		t.Fatalf("A record = %q, want %q", got, want)
 	}
-	if got, want := res.records["AAAA"][0].value, "2001:db8::44"; got != want {
+	if got, want := res.records["AAAA"][0].address.String(), "2001:db8::44"; got != want {
 		t.Fatalf("AAAA record = %q, want %q", got, want)
 	}
 	if res.records["A"][0].hasTTL || res.records["AAAA"][0].hasTTL {
@@ -595,7 +639,7 @@ func TestLookupSystemNameserverReturnsTTL(t *testing.T) {
 	if got := len(res.records["A"]); got != 1 {
 		t.Fatalf("A records = %d, want 1", got)
 	}
-	if got, want := res.records["A"][0].value, "192.0.2.10"; got != want {
+	if got, want := res.records["A"][0].address.String(), "192.0.2.10"; got != want {
 		t.Fatalf("A value = %q, want %q", got, want)
 	}
 	if got, want := res.records["A"][0].ttl, uint32(42); got != want {
@@ -659,7 +703,7 @@ func TestLookupSystemCombinesDirectRecordsWithPlatformAddresses(t *testing.T) {
 		"Resolver: system nameservers + platform resolver",
 		"Fallback: platform resolver used for addresses",
 		"192.0.2.42 (platform resolver; TTL unavailable)",
-		"device=printer (TTL 2m)",
+		`"device=printer" (TTL 2m)`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("mixed lookup output missing %q:\n%s", want, out)
@@ -699,7 +743,7 @@ func TestLookupSystemFallsBackToPlatform(t *testing.T) {
 	if got := len(res.records["A"]); got != 1 {
 		t.Fatalf("A records = %d, want 1", got)
 	}
-	if got, want := res.records["A"][0].value, "192.0.2.99"; got != want {
+	if got, want := res.records["A"][0].address.String(), "192.0.2.99"; got != want {
 		t.Fatalf("A value = %q, want %q", got, want)
 	}
 	if len(res.failures) == 0 {
@@ -810,7 +854,7 @@ func TestRenderStructuredLookupUsesSingularGrammar(t *testing.T) {
 		queryWithData: 1,
 		duration:      time.Millisecond,
 		records: map[string][]record{
-			"A": {{typ: "A", value: "192.0.2.1", hasTTL: true, ttl: 60}},
+			"A": {{typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1"), hasTTL: true, ttl: 60}},
 		},
 	})
 
@@ -830,7 +874,7 @@ func TestRenderShowsRecordOwner(t *testing.T) {
 	render(p, &result{
 		host: "www.example.com",
 		records: map[string][]record{
-			"CNAME": {{owner: "www.example.com.", typ: "CNAME", value: "cdn.example.net.", ttl: 300, hasTTL: true}},
+			"CNAME": {{owner: "www.example.com.", typ: dnsmessage.TypeCNAME, target: "cdn.example.net.", ttl: 300, hasTTL: true}},
 		},
 	})
 
@@ -845,7 +889,7 @@ func TestRenderShowsUnavailableTTLPerRecord(t *testing.T) {
 		host:     "example.com",
 		resolver: "system",
 		records: map[string][]record{
-			"A": {{typ: "A", value: "192.0.2.1", ttl: 60, hasTTL: true}},
+			"A": {{typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1"), ttl: 60, hasTTL: true}},
 		},
 	})
 
@@ -861,10 +905,10 @@ func TestRenderShowsPlatformSourceAndUnavailableTTLOnRecord(t *testing.T) {
 		host: "printer.local",
 		records: map[string][]record{
 			"A": {{
-				owner:  "printer.local.",
-				typ:    "A",
-				value:  "192.0.2.1",
-				source: recordSourcePlatform,
+				owner:   "printer.local.",
+				typ:     dnsmessage.TypeA,
+				address: net.ParseIP("192.0.2.1"),
+				source:  recordSourcePlatform,
 			}},
 		},
 	})
@@ -885,15 +929,15 @@ func TestRenderMixedResolverSummaryAndPerRecordProvenance(t *testing.T) {
 		platformFallback: true,
 		records: map[string][]record{
 			"A": {{
-				owner:  "printer.local.",
-				typ:    "A",
-				value:  "192.0.2.1",
-				source: recordSourcePlatform,
+				owner:   "printer.local.",
+				typ:     dnsmessage.TypeA,
+				address: net.ParseIP("192.0.2.1"),
+				source:  recordSourcePlatform,
 			}},
 			"TXT": {{
 				owner:  "printer.local.",
-				typ:    "TXT",
-				value:  "device=printer",
+				typ:    dnsmessage.TypeTXT,
+				txt:    [][]byte{[]byte("device=printer")},
 				ttl:    120,
 				hasTTL: true,
 				source: recordSourceDNS,
@@ -908,7 +952,7 @@ func TestRenderMixedResolverSummaryAndPerRecordProvenance(t *testing.T) {
 		"Transport security: mixed",
 		"Fallback: platform resolver used for addresses",
 		"192.0.2.1 (platform resolver; TTL unavailable)",
-		"device=printer (TTL 2m)",
+		`"device=printer" (TTL 2m)`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("mixed output missing %q:\n%s", want, out)
@@ -926,8 +970,8 @@ func TestRenderSortsRecordsWithinType(t *testing.T) {
 		resolver: "system",
 		records: map[string][]record{
 			"A": {
-				{typ: "A", value: "192.0.2.20", ttl: 60, hasTTL: true},
-				{typ: "A", value: "192.0.2.10", ttl: 60, hasTTL: true},
+				{typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.20"), ttl: 60, hasTTL: true},
+				{typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.10"), ttl: 60, hasTTL: true},
 			},
 		},
 	})
@@ -962,6 +1006,233 @@ func TestFormatCAA(t *testing.T) {
 	}
 }
 
+func TestRecordFromWirePreservesTypedDNSData(t *testing.T) {
+	owner, err := resolver.ParseName("example.com.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := resolver.ParseName("service.example.net.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := resolver.ParseName("hostmaster.example.com.")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	input := resolver.Record{
+		Owner:      owner,
+		Type:       uint16(dnsmessage.TypeSOA),
+		TTL:        300,
+		TTLPresent: true,
+		Target:     &target,
+		Target2:    &mailbox,
+		Preference: 10,
+		Priority:   20,
+		Weight:     30,
+		Port:       443,
+		SOAValues:  [5]uint32{1, 2, 3, 4, 5},
+		TXT:        [][]byte{[]byte("first"), []byte("second")},
+		Params:     []resolver.SVCParam{{Key: uint16(dnsmessage.SVCParamALPN), Value: []byte{2, 'h', '2'}}},
+		RData:      []byte{0xde, 0xad},
+	}
+	rec, ok := recordFromWire(input)
+	if !ok {
+		t.Fatal("recordFromWire() rejected a valid record")
+	}
+	input.TXT[0][0] = 'X'
+	input.Params[0].Value[1] = 'X'
+	input.RData[0] = 0
+
+	if rec.typ != dnsmessage.TypeSOA || rec.owner != "example.com." || rec.target != "service.example.net." || rec.target2 != "hostmaster.example.com." {
+		t.Fatalf("record identity and targets were not preserved: %#v", rec)
+	}
+	if rec.preference != 10 || rec.priority != 20 || rec.weight != 30 || rec.port != 443 || rec.soa != [5]uint32{1, 2, 3, 4, 5} {
+		t.Fatalf("numeric DNS fields were not preserved: %#v", rec)
+	}
+	if got := string(rec.txt[0]); got != "first" {
+		t.Fatalf("TXT data aliases resolver storage: %q", got)
+	}
+	if got := string(rec.params[0].Value); got != "\x02h2" {
+		t.Fatalf("SVCB parameter aliases resolver storage: %q", got)
+	}
+	if got := hex.EncodeToString(rec.rawRData); got != "dead" {
+		t.Fatalf("raw RDATA aliases resolver storage: %q", got)
+	}
+}
+
+func TestWireNameTargetsRemainEscapedInTypedRecords(t *testing.T) {
+	target, err := resolver.ParseName(`bad\010dot\046slash\092.example.`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := target.Wire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := resolver.ParseName("hostmaster.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailboxWire, err := mailbox.Wire()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	records := []resolver.Record{
+		{Type: uint16(dnsmessage.TypeNS), Target: &target, RData: wire},
+		{Type: uint16(dnsmessage.TypeMX), Target: &target, RData: append([]byte{0, 10}, wire...)},
+		{Type: uint16(dnsmessage.TypeSOA), Target: &target, Target2: &mailbox, RData: append(append(append([]byte(nil), wire...), mailboxWire...), make([]byte, 20)...)},
+		{Type: uint16(dnsmessage.TypeSRV), Target: &target, RData: append(make([]byte, 6), wire...)},
+	}
+	for _, input := range records {
+		rec, ok := recordFromWire(input)
+		if !ok {
+			t.Fatalf("recordFromWire() rejected type %d", input.Type)
+		}
+		if rec.target != target.String() {
+			t.Errorf("type %d target = %q, want escaped %q", input.Type, rec.target, target.String())
+		}
+		if strings.ContainsAny(rec.target, "\n\r") {
+			t.Errorf("type %d target contains a raw line break: %q", input.Type, rec.target)
+		}
+	}
+}
+
+func TestRenderUsesTypedDNSRecordData(t *testing.T) {
+	p := core.TestPrinter(false)
+	records := map[string][]record{
+		"A":     {{typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1")}},
+		"AAAA":  {{typ: dnsmessage.TypeAAAA, address: net.ParseIP("2001:db8::1")}},
+		"CNAME": {{typ: dnsmessage.TypeCNAME, target: "alias.example."}},
+		"TXT":   {{typ: dnsmessage.TypeTXT, txt: [][]byte{[]byte("first"), []byte("second")}}},
+		"MX":    {{typ: dnsmessage.TypeMX, preference: 10, target: "mail.example."}},
+		"NS":    {{typ: dnsmessage.TypeNS, target: "ns1.example."}},
+		"SOA": {{
+			typ: dnsmessage.TypeSOA, target: "ns1.example.", target2: "hostmaster.example.",
+			soa: [5]uint32{2026082901, 3600, 600, 604800, 300},
+		}},
+		"SRV":  {{typ: dnsmessage.TypeSRV, priority: 10, weight: 5, port: 443, target: "service.example."}},
+		"CAA":  {{typ: dnsTypeCAA, rawRData: append([]byte{0, 5}, []byte("issueletsencrypt.org")...)}},
+		"SVCB": {{typ: dnsmessage.TypeSVCB, priority: 0, target: "."}},
+		"HTTPS": {{
+			typ: dnsmessage.TypeHTTPS, priority: 1, target: ".",
+			params: []resolver.SVCParam{{Key: uint16(dnsmessage.SVCParamALPN), Value: []byte{2, 'h', '2'}}},
+		}},
+		"TYPE99": {{typ: dnsmessage.Type(99), rawRData: []byte{0xde, 0xad}}},
+	}
+	render(p, &result{host: "example.com", records: records})
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"192.0.2.1", "2001:db8::1", "alias.example.", `"first" "second"`,
+		"10 mail.example.", "ns1.example.",
+		"ns1.example. hostmaster.example. serial=2026082901 refresh=3600 retry=600 expire=604800 minttl=300",
+		"10 5 443 service.example.", `0 issue "letsencrypt.org"`, "0 .", "1 . ALPN=h2",
+		"TYPE99", "0xdead",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("typed record output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAggregateKeepsDistinctDOHPresentationRecords(t *testing.T) {
+	out := &result{records: make(map[string][]record)}
+	results := []queryResult{
+		{typ: inspectTypes[4], records: []record{
+			{typ: dnsmessage.TypeMX, presentation: "10 first.example."},
+			{typ: dnsmessage.TypeMX, presentation: "20 second.example."},
+		}},
+		{typ: inspectTypes[6], records: []record{
+			{typ: dnsmessage.TypeSOA, presentation: "ns1.example. hostmaster.example. 1 2 3 4 5"},
+			{typ: dnsmessage.TypeSOA, presentation: "ns2.example. hostmaster.example. 2 3 4 5 6"},
+		}},
+		{typ: inspectTypes[7], records: []record{
+			{typ: dnsmessage.TypeSRV, presentation: "10 5 443 first.example."},
+			{typ: dnsmessage.TypeSRV, presentation: "20 5 443 second.example."},
+		}},
+	}
+	aggregate(out, results, time.Now())
+	for _, typ := range []string{"MX", "SOA", "SRV"} {
+		if got := len(out.records[typ]); got != 2 {
+			t.Fatalf("%s records = %d, want 2 distinct DoH records: %#v", typ, got, out.records[typ])
+		}
+	}
+}
+
+func TestRenderTXTChunksAreQuotedAndCannotInjectLines(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{host: "example.com", records: map[string][]record{
+		"TXT": {{typ: dnsmessage.TypeTXT, txt: [][]byte{[]byte("line\nnext"), {0x1b, '[', 'A'}}}},
+	}})
+	out := string(p.Bytes())
+	if !strings.Contains(out, `"line\nnext" "\x1b[A"`) {
+		t.Fatalf("TXT chunks were not safely quoted:\n%s", out)
+	}
+	if strings.Contains(out, "line\nnext") || strings.ContainsRune(out, '\x1b') {
+		t.Fatalf("TXT data injected terminal layout or controls: %q", out)
+	}
+}
+
+func TestRecordFromDOHRejectsMissingTXTDataButKeepsEmptyChunk(t *testing.T) {
+	owner, err := resolver.ParseName("example.com.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := resolver.DOHRecord{Record: resolver.Record{Owner: owner, Type: uint16(dnsmessage.TypeTXT)}}
+	if _, ok := recordFromDOH(answer); ok {
+		t.Fatal("recordFromDOH() accepted a TXT answer with missing data")
+	}
+	answer.Data = `""`
+	rec, ok := recordFromDOH(answer)
+	if !ok || len(rec.txt) != 1 || len(rec.txt[0]) != 0 {
+		t.Fatalf("empty TXT chunk was not preserved: %#v, %t", rec, ok)
+	}
+}
+
+func TestDOHCAANumericTagIsParsedSemantically(t *testing.T) {
+	rec := semanticRecord(resolver.Record{Type: uint16(dnsTypeCAA)}, `0 0 "value"`, false)
+	if got := formatCAA(rec.rawRData); got != `0 0 "value"` {
+		t.Fatalf("numeric CAA tag was not parsed: %q", got)
+	}
+}
+
+func TestRenderEscapesCAAAndSVCBFields(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{host: "example.com", records: map[string][]record{
+		"CAA": {{typ: dnsTypeCAA, rawRData: append([]byte{0, 8}, []byte("bad\nnamevalue")...)}},
+		"HTTPS": {{
+			typ: dnsmessage.TypeHTTPS, priority: 1, target: ".",
+			params: []resolver.SVCParam{{Key: uint16(dnsmessage.SVCParamALPN), Value: []byte{8, 'b', 'a', 'd', '\n', 'n', 'a', 'm', 'e'}}},
+		}},
+	}})
+	out := string(p.Bytes())
+	for _, want := range []string{`"bad\nname"`, `ALPN="bad\nname"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("record field was not escaped as %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "bad\nname") {
+		t.Fatalf("record field injected an output line: %q", out)
+	}
+}
+
+func TestRenderSortsTypedNumericFieldsNumerically(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{host: "example.com", records: map[string][]record{
+		"MX": {
+			{typ: dnsmessage.TypeMX, preference: 10, target: "ten.example."},
+			{typ: dnsmessage.TypeMX, preference: 2, target: "two.example."},
+		},
+	}})
+	out := string(p.Bytes())
+	two := strings.Index(out, "2 two.example.")
+	ten := strings.Index(out, "10 ten.example.")
+	if two < 0 || ten < 0 || two > ten {
+		t.Fatalf("MX records are not sorted by numeric preference:\n%s", out)
+	}
+}
+
 func TestNormalizeDOHHTTPSGenericRDATA(t *testing.T) {
 	got := normalizeDOHValue(dnsmessage.TypeHTTPS, `\# 24 000100000100030268330003000201bb00040004c0000201`)
 	for _, want := range []string{
@@ -986,7 +1257,7 @@ func TestNormalizeDOHCAAGenericRDATA(t *testing.T) {
 func TestAggregatePreservesEveryQueryStatus(t *testing.T) {
 	out := &result{records: make(map[string][]record)}
 	results := []queryResult{
-		{typ: inspectTypes[0], records: []record{{typ: "A", value: "192.0.2.1"}}},
+		{typ: inspectTypes[0], records: []record{{typ: dnsmessage.TypeA, address: net.ParseIP("192.0.2.1")}}},
 		{typ: inspectTypes[1], err: resolver.ErrDNSNoData},
 		{typ: inspectTypes[2], err: errors.New("SERVFAIL")},
 		{typ: inspectTypes[3]},
