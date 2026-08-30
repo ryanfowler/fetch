@@ -288,10 +288,70 @@ func TestInspectKeepsRecordsAndFailsOnPartialQueryError(t *testing.T) {
 	if got := string(errors.Bytes()); got != "" {
 		t.Fatalf("partial error output = %q, want empty", got)
 	}
-	for _, want := range []string{"Status: incomplete", "Failures", "TXT:", "ServFail"} {
+	for _, want := range []string{"Status: incomplete — 1 of 11 queries failed", "Failures", "TXT:", "ServFail"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("partial output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestRenderFailuresGroupsIdenticalErrors(t *testing.T) {
+	p := core.TestPrinter(false)
+	err := errors.New("SERVFAIL")
+	renderFailures(p, []queryFailure{
+		{label: "TXT", err: err},
+		{label: "A", err: err},
+		{label: "AAAA", err: err},
+	})
+
+	out := string(p.Bytes())
+	if !strings.Contains(out, "A, AAAA, TXT: SERVFAIL") {
+		t.Fatalf("grouped failure output = %q, want grouped labels", out)
+	}
+	if strings.Count(out, "SERVFAIL") != 1 {
+		t.Fatalf("grouped failure output = %q, want one diagnostic", out)
+	}
+}
+
+func TestRenderFailuresKeepsDistinctLongErrorsDistinct(t *testing.T) {
+	prefix := strings.Repeat("x", maxPartialErrorBytes)
+	first := errors.New(prefix + "first")
+	second := errors.New(prefix + "second")
+	p := core.TestPrinter(false)
+	renderFailures(p, []queryFailure{
+		{label: "A", err: first},
+		{label: "AAAA", err: second},
+	})
+
+	out := string(p.Bytes())
+	if strings.Count(out, prefix[:maxPartialErrorBytes-3]) != 2 {
+		t.Fatalf("distinct failures were grouped or not bounded: %q", out)
+	}
+	if !strings.Contains(out, "A: "+prefix+"...") ||
+		!strings.Contains(out, "AAAA: "+prefix+"...") {
+		t.Fatalf("bounded failure output = %q, want both diagnostics", out)
+	}
+	if strings.Contains(out, "first") || strings.Contains(out, "second") {
+		t.Fatalf("failure output was not bounded: %q", out)
+	}
+}
+
+func TestRenderFailuresUsesAllRecordTypesOnlyForCompleteSet(t *testing.T) {
+	p := core.TestPrinter(false)
+	failures := make([]queryFailure, 0, len(inspectTypes))
+	for _, typ := range inspectTypes {
+		failures = append(failures, queryFailure{label: typ.label, err: errors.New("SERVFAIL")})
+	}
+	renderFailures(p, failures)
+	if out := string(p.Bytes()); !strings.Contains(out, "All record types: SERVFAIL") {
+		t.Fatalf("all-type failure output = %q, want aggregate label", out)
+	}
+
+	p = core.TestPrinter(false)
+	failures[0].label = failures[1].label
+	renderFailures(p, failures)
+	if out := string(p.Bytes()); strings.Contains(out, "All record types:") {
+		t.Fatalf("duplicate labels incorrectly treated as all types: %q", out)
 	}
 }
 

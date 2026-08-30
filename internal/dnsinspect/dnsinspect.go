@@ -1105,30 +1105,94 @@ func renderInspection(p *core.Printer, res *result) {
 func renderFailures(p *core.Printer, failures []queryFailure) {
 	type failureGroup struct {
 		labels []string
-		err    string
+		// Keep the complete error as the grouping key. The displayed value is
+		// bounded, so a long resolver diagnostic cannot make the output grow
+		// without limit while two distinct errors are not accidentally merged
+		// because their prefixes happen to match.
+		key string
+		err string
 	}
 	groups := make([]failureGroup, 0, len(failures))
 	indices := make(map[string]int, len(failures))
 	for _, failure := range failures {
-		errText := "query failed"
-		if failure.err != nil {
-			errText = conciseDiagnostic(failure.err.Error())
-		}
-		idx, ok := indices[errText]
+		key, errText := failureDiagnostic(failure.err)
+		idx, ok := indices[key]
 		if !ok {
-			indices[errText] = len(groups)
-			groups = append(groups, failureGroup{err: errText})
+			indices[key] = len(groups)
+			groups = append(groups, failureGroup{key: key, err: errText})
 			idx = len(groups) - 1
 		}
 		groups[idx].labels = append(groups[idx].labels, failure.label)
 	}
+
+	// Aggregation normally supplies failures in inspection order. Sort here as
+	// well because renderFailures is also used by focused tests and should be
+	// deterministic for any input order.
+	for i := range groups {
+		slices.SortFunc(groups[i].labels, compareInspectionLabels)
+	}
+	slices.SortFunc(groups, func(a, b failureGroup) int {
+		if cmp := compareInspectionLabels(a.labels[0], b.labels[0]); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.key, b.key)
+	})
+
 	for _, group := range groups {
 		label := strings.Join(group.labels, ", ")
-		if len(group.labels) == len(inspectTypes) {
+		if allInspectionTypesFailed(group.labels) {
 			label = "All record types"
 		}
 		writeInspectionField(p, label, group.err)
 	}
+}
+
+func failureDiagnostic(err error) (key, display string) {
+	if err == nil {
+		return "query failed", "query failed"
+	}
+	key = err.Error()
+	if key == "" {
+		return "query failed", "query failed"
+	}
+	return key, conciseDiagnostic(key)
+}
+
+func allInspectionTypesFailed(labels []string) bool {
+	if len(labels) != len(inspectTypes) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(labels))
+	for _, label := range labels {
+		if _, ok := seen[label]; ok {
+			return false
+		}
+		seen[label] = struct{}{}
+	}
+	for _, typ := range inspectTypes {
+		if _, ok := seen[typ.label]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func compareInspectionLabels(a, b string) int {
+	rank := func(label string) int {
+		for i, typ := range inspectTypes {
+			if label == typ.label {
+				return i
+			}
+		}
+		return len(inspectTypes)
+	}
+	if aRank, bRank := rank(a), rank(b); aRank != bRank {
+		if aRank < bRank {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a, b)
 }
 
 func renderInspectionSection(p *core.Printer, heading string) {
