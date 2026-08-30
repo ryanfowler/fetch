@@ -3,6 +3,7 @@ package fetch
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -204,6 +205,90 @@ func TestWriteOutputToFile_OverwritesExistingFileWithClobber(t *testing.T) {
 	}
 }
 
+func TestWriteOutputToFile_ClobberPreservesExistingPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "download.txt")
+
+	if err := os.WriteFile(path, []byte("old"), 0751); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = writeOutputToFile(path, strings.NewReader("new"), 3, core.TestPrinter(false), core.VSilent, true)
+	if err != nil {
+		t.Fatalf("writeOutputToFile returned error: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode().Perm(), before.Mode().Perm(); got != want {
+		t.Fatalf("output file permissions = %04o, want %04o", got, want)
+	}
+}
+
+func TestWriteOutputToFile_ClobberUsesPermissionsAtCommit(t *testing.T) {
+	tests := []struct {
+		name   string
+		setup  func(*testing.T, string)
+		change func(string) error
+	}{
+		{
+			name: "destination permissions change during download",
+			setup: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte("old"), 0751); err != nil {
+					t.Fatal(err)
+				}
+			},
+			change: func(path string) error { return os.Chmod(path, 0600) },
+		},
+		{
+			name:  "destination appears during download",
+			setup: func(*testing.T, string) {},
+			change: func(path string) error {
+				return os.WriteFile(path, []byte("racing writer"), 0740)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "download.txt")
+			tt.setup(t, path)
+			var wantMode os.FileMode
+			body := &beforeReadReader{
+				Reader: strings.NewReader("new"),
+				before: func() error {
+					if err := tt.change(path); err != nil {
+						return err
+					}
+					info, err := os.Stat(path)
+					if err == nil {
+						wantMode = info.Mode().Perm()
+					}
+					return err
+				},
+			}
+
+			err := writeOutputToFile(path, body, 3, core.TestPrinter(false), core.VSilent, true)
+			if err != nil {
+				t.Fatalf("writeOutputToFile returned error: %v", err)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != wantMode {
+				t.Fatalf("output file permissions = %04o, want commit-time %04o", got, wantMode)
+			}
+		})
+	}
+}
+
 func TestContentDispositionFilenamePrefersRFC5987(t *testing.T) {
 	h := http.Header{}
 	h.Set("Content-Disposition", `attachment; filename="plain.txt"; filename*=UTF-8''%E2%82%AC.txt`)
@@ -281,6 +366,22 @@ func TestWriteOutputToFileCleansTemporaryFileAfterReadError(t *testing.T) {
 type errorReader struct{}
 
 func (*errorReader) Read([]byte) (int, error) { return 0, errors.New("body failed") }
+
+type beforeReadReader struct {
+	io.Reader
+	before func() error
+}
+
+func (r *beforeReadReader) Read(p []byte) (int, error) {
+	if r.before != nil {
+		before := r.before
+		r.before = nil
+		if err := before(); err != nil {
+			return 0, err
+		}
+	}
+	return r.Reader.Read(p)
+}
 
 func TestWriteOutputToFile_DoesNotOverwriteExistingFileWithoutClobber(t *testing.T) {
 	dir := t.TempDir()
