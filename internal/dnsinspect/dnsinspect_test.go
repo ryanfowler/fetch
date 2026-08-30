@@ -514,11 +514,11 @@ func TestLookupWithoutExplicitServerUsesPlatformResolver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.resolver != "system resolver" {
-		t.Fatalf("resolver label = %q, want system resolver", res.resolver)
+	if res.resolver != "platform resolver" {
+		t.Fatalf("resolver label = %q, want platform resolver", res.resolver)
 	}
-	if !res.ttlUnavailable {
-		t.Fatal("ttlUnavailable = false, want true")
+	if res.transport != "platform resolver" || res.source != "platform resolver" {
+		t.Fatalf("platform summary = transport %q, source %q", res.transport, res.source)
 	}
 	if got := recordCount(res); got != 2 {
 		t.Fatalf("record count = %d, want only platform A/AAAA records", got)
@@ -589,8 +589,8 @@ func TestLookupSystemNameserverReturnsTTL(t *testing.T) {
 	if res.resolver != addr {
 		t.Fatalf("resolver label = %q, want %q", res.resolver, addr)
 	}
-	if res.ttlUnavailable {
-		t.Fatal("ttlUnavailable = true, want false for a direct nameserver query")
+	if res.platformFallback {
+		t.Fatal("platformFallback = true for a direct nameserver query")
 	}
 	if got := len(res.records["A"]); got != 1 {
 		t.Fatalf("A records = %d, want 1", got)
@@ -600,6 +600,70 @@ func TestLookupSystemNameserverReturnsTTL(t *testing.T) {
 	}
 	if got, want := res.records["A"][0].ttl, uint32(42); got != want {
 		t.Fatalf("A TTL = %d, want %d", got, want)
+	}
+}
+
+func TestLookupSystemCombinesDirectRecordsWithPlatformAddresses(t *testing.T) {
+	origDefaultLookupIPAddr := defaultLookupIPAddr
+	t.Cleanup(func() {
+		defaultLookupIPAddr = origDefaultLookupIPAddr
+	})
+	defaultLookupIPAddr = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("192.0.2.42")}}, nil
+	}
+
+	addr, stop := startUDPServerWithAnswers(t, func(question dnsmessage.Question) []dnsmessage.Resource {
+		if question.Type != dnsmessage.TypeTXT {
+			return nil
+		}
+		return []dnsmessage.Resource{{
+			Header: dnsmessage.ResourceHeader{
+				Name:  question.Name,
+				Type:  dnsmessage.TypeTXT,
+				Class: dnsmessage.ClassINET,
+				TTL:   120,
+			},
+			Body: &dnsmessage.TXTResource{TXT: []string{"device=printer"}},
+		}}
+	})
+	defer stop()
+
+	res, err := lookup(context.Background(), &Config{SystemPolicy: &resolver.SystemResolverPolicy{
+		Nameservers: []string{addr},
+		Attempts:    1,
+		Timeout:     time.Second,
+	}}, "printer.local", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.platformFallback {
+		t.Fatal("platformFallback = false, want mixed lookup")
+	}
+	if got, want := res.records["TXT"][0].source, recordSourceDNS; got != want {
+		t.Fatalf("TXT source = %d, want direct DNS source %d", got, want)
+	}
+	if got, want := res.records["TXT"][0].ttl, uint32(120); got != want || !res.records["TXT"][0].hasTTL {
+		t.Fatalf("TXT TTL = %d (present %t), want %d", got, res.records["TXT"][0].hasTTL, want)
+	}
+	if got, want := res.records["A"][0].source, recordSourcePlatform; got != want {
+		t.Fatalf("A source = %d, want platform source %d", got, want)
+	}
+	if res.records["A"][0].hasTTL {
+		t.Fatal("platform A record unexpectedly has a TTL")
+	}
+
+	p := core.TestPrinter(false)
+	render(p, res)
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"Resolver: system nameservers + platform resolver",
+		"Fallback: platform resolver used for addresses",
+		"192.0.2.42 (platform resolver; TTL unavailable)",
+		"device=printer (TTL 2m)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("mixed lookup output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -623,11 +687,14 @@ func TestLookupSystemFallsBackToPlatform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.resolver != "system resolver (configured nameservers) (platform fallback)" {
-		t.Fatalf("resolver label = %q, want platform fallback label", res.resolver)
+	if res.resolver != "system nameservers + platform resolver" {
+		t.Fatalf("resolver label = %q, want mixed resolver summary", res.resolver)
 	}
-	if !res.ttlUnavailable {
-		t.Fatal("ttlUnavailable = false, want true for platform fallback")
+	if !res.platformFallback {
+		t.Fatal("platformFallback = false for platform fallback")
+	}
+	if res.transport != "mixed" || res.security != "mixed" {
+		t.Fatalf("mixed summary = transport %q, security %q", res.transport, res.security)
 	}
 	if got := len(res.records["A"]); got != 1 {
 		t.Fatalf("A records = %d, want 1", got)
@@ -788,17 +855,67 @@ func TestRenderShowsUnavailableTTLPerRecord(t *testing.T) {
 	}
 }
 
-func TestRenderShowsUnavailableTTLOnRecord(t *testing.T) {
+func TestRenderShowsPlatformSourceAndUnavailableTTLOnRecord(t *testing.T) {
 	p := core.TestPrinter(false)
 	render(p, &result{
 		host: "printer.local",
 		records: map[string][]record{
-			"A": {{typ: "A", value: "192.0.2.1"}},
+			"A": {{
+				owner:  "printer.local.",
+				typ:    "A",
+				value:  "192.0.2.1",
+				source: recordSourcePlatform,
+			}},
 		},
 	})
 
-	if out := string(p.Bytes()); !strings.Contains(out, "192.0.2.1 (TTL unavailable)") {
-		t.Fatalf("output missing unavailable record TTL:\n%s", out)
+	if out := string(p.Bytes()); !strings.Contains(out, "printer.local. → 192.0.2.1 (platform resolver; TTL unavailable)") {
+		t.Fatalf("output missing platform provenance and unavailable TTL:\n%s", out)
+	}
+}
+
+func TestRenderMixedResolverSummaryAndPerRecordProvenance(t *testing.T) {
+	p := core.TestPrinter(false)
+	render(p, &result{
+		host:             "printer.local",
+		resolver:         "system nameservers + platform resolver",
+		transport:        "mixed",
+		security:         "mixed",
+		source:           "system resolver configuration + platform resolver",
+		platformFallback: true,
+		records: map[string][]record{
+			"A": {{
+				owner:  "printer.local.",
+				typ:    "A",
+				value:  "192.0.2.1",
+				source: recordSourcePlatform,
+			}},
+			"TXT": {{
+				owner:  "printer.local.",
+				typ:    "TXT",
+				value:  "device=printer",
+				ttl:    120,
+				hasTTL: true,
+				source: recordSourceDNS,
+			}},
+		},
+	})
+
+	out := string(p.Bytes())
+	for _, want := range []string{
+		"Resolver: system nameservers + platform resolver",
+		"Transport: mixed",
+		"Transport security: mixed",
+		"Fallback: platform resolver used for addresses",
+		"192.0.2.1 (platform resolver; TTL unavailable)",
+		"device=printer (TTL 2m)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("mixed output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "device=printer (platform resolver") {
+		t.Fatalf("direct record incorrectly marked as platform data:\n%s", out)
 	}
 }
 
@@ -965,6 +1082,24 @@ func mustURL(t *testing.T, raw string) *url.URL {
 
 func startUDPServer(t *testing.T) (string, func()) {
 	t.Helper()
+	return startUDPServerWithAnswers(t, func(question dnsmessage.Question) []dnsmessage.Resource {
+		if question.Type != dnsmessage.TypeA {
+			return nil
+		}
+		return []dnsmessage.Resource{{
+			Header: dnsmessage.ResourceHeader{
+				Name:  question.Name,
+				Type:  dnsmessage.TypeA,
+				Class: dnsmessage.ClassINET,
+				TTL:   42,
+			},
+			Body: &dnsmessage.AResource{A: [4]byte{192, 0, 2, 10}},
+		}}
+	})
+}
+
+func startUDPServerWithAnswers(t *testing.T, answers func(dnsmessage.Question) []dnsmessage.Resource) (string, func()) {
+	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -996,17 +1131,7 @@ func startUDPServer(t *testing.T) (string, func()) {
 				},
 				Questions: req.Questions,
 			}
-			if req.Questions[0].Type == dnsmessage.TypeA {
-				res.Answers = []dnsmessage.Resource{{
-					Header: dnsmessage.ResourceHeader{
-						Name:  req.Questions[0].Name,
-						Type:  dnsmessage.TypeA,
-						Class: dnsmessage.ClassINET,
-						TTL:   42,
-					},
-					Body: &dnsmessage.AResource{A: [4]byte{192, 0, 2, 10}},
-				}}
-			}
+			res.Answers = answers(req.Questions[0])
 			raw, err := res.Pack()
 			if err == nil {
 				_, _ = conn.WriteTo(raw, addr)

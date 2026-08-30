@@ -15,7 +15,10 @@ resolver-specific behavior. It performs inspection rather than an HTTP request.
 Without `--dns-server`, nameservers from the system resolver configuration are
 queried directly when available. This shows supported record types and TTLs. If
 that configuration is unavailable, the platform resolver provides A/AAAA records
-without TTLs. With an explicit UDP, TCP, DoT, DoQ, or DoH resolver, supported
+without TTLs. Each platform record shows `platform resolver` and `TTL unavailable`.
+If direct DNS returns non-address records but no addresses, the lookup summary
+reports a mixed path and the platform fallback adds A/AAAA records. With an
+explicit UDP, TCP, DoT, DoQ, or DoH resolver, supported
 record types are queried concurrently. The default output uses `Lookup` and
 `Records` sections and reports the name, resolver path, transport, transport
 security, source, status, result counts, query counts, and timing. Each record
