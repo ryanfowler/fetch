@@ -3466,6 +3466,39 @@ func TestMain(t *testing.T) {
 		assertBufNotContains(t, res.stderr, "POST /chat")
 	})
 
+	t.Run("webtransport dry-run uses effective CONNECT method", func(t *testing.T) {
+		t.Parallel()
+		configHome := t.TempDir()
+		for _, test := range []struct {
+			name string
+			args []string
+			body bool
+		}{
+			{name: "default", args: []string{"--webtransport", "--dry-run", "https://example.com/path"}},
+			{name: "body-inferred POST", args: []string{"--webtransport", "--dry-run", "-d", "payload", "https://example.com/path"}, body: true},
+			{name: "explicit POST", args: []string{"--webtransport", "--dry-run", "-X", "POST", "https://example.com/path"}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				res := runFetchOpts(t, fetchPath, fetchOpts{env: []string{
+					"HOME=" + configHome,
+					"XDG_CONFIG_HOME=" + filepath.Join(configHome, "config"),
+					"HTTP_PROXY=", "http_proxy=", "HTTPS_PROXY=", "https_proxy=",
+					"ALL_PROXY=", "all_proxy=", "NO_PROXY=*", "no_proxy=*",
+				}}, test.args...)
+				assertExitCode(t, 0, res)
+				assertBufContains(t, res.stderr, "CONNECT /path HTTP/3.0")
+				assertBufNotContains(t, res.stderr, "GET /path")
+				assertBufNotContains(t, res.stderr, "POST /path")
+				if test.body {
+					assertBufContains(t, res.stderr, "payload")
+				}
+				if test.name == "explicit POST" {
+					assertBufContains(t, res.stderr, "ignoring method POST")
+				}
+			})
+		}
+	})
+
 	t.Run("websocket ctrl-c exits", func(t *testing.T) {
 		t.Parallel()
 		if runtime.GOOS == "windows" {

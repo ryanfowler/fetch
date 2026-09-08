@@ -18,12 +18,18 @@ import (
 	"github.com/ryanfowler/fetch/internal/wt"
 )
 
-func handleWebTransport(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {
-	if r.MethodExplicit && req.Method != http.MethodConnect {
-		p := r.PrinterHandle.Stderr()
-		core.WriteWarningMsgIf(p, "WebTransport requires CONNECT; ignoring method "+req.Method, r.Verbosity == core.VSilent)
-		req.Method = http.MethodConnect
+func setWebTransportMethod(req *http.Request, explicit bool, p *core.Printer, silent bool) {
+	if req.Method == http.MethodConnect {
+		return
 	}
+	if explicit {
+		core.WriteWarningMsgIf(p, "WebTransport requires CONNECT; ignoring method "+req.Method, silent)
+	}
+	req.Method = http.MethodConnect
+}
+
+func handleWebTransport(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {
+	setWebTransportMethod(req, r.MethodExplicit, r.PrinterHandle.Stderr(), r.Verbosity == core.VSilent)
 	p := r.PrinterHandle.Stderr()
 	if r.Timing {
 		core.WriteWarningMsgIf(p, "--timing is not supported for WebTransport connections", r.Verbosity == core.VSilent)
