@@ -1,6 +1,6 @@
 # fetch
 
-`fetch` is a Go HTTP(S) client CLI. Use Go 1.27.0 or a later compatible
+`fetch` is a Go HTTP(S) client CLI. Use Go 1.27.1 or a later compatible
 Go 1.27 patch release.
 
 ## Development commands
