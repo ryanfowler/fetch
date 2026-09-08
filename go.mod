@@ -13,7 +13,7 @@ require (
 	github.com/quic-go/webtransport-go v0.13.0
 	github.com/ryanfowler/readability v0.1.1
 	github.com/tinylib/msgp v1.6.4
-	github.com/yuin/goldmark/v2 v2.0.0
+	github.com/yuin/goldmark/v2 v2.0.1
 	golang.org/x/crypto v0.56.0
 	golang.org/x/image v0.45.0
 	golang.org/x/net v0.58.0
