@@ -29,7 +29,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	"golang.org/x/net/http2"
 )
 
 // Client represents a wrapped HTTP client.
@@ -588,23 +587,6 @@ func wrapDialWithConnectTimeout(baseDial func(context.Context, string, string) (
 			return nil, err
 		}
 		return newConnectDeadlineConn(conn, ctx), nil
-	}
-}
-
-func getHTTP2Transport(baseDial func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, explicitProxy *url.URL, tlsConfig *tls.Config, connectTimeout time.Duration, echMode core.ECHMode) http.RoundTripper {
-	return &http2.Transport{
-		AllowHTTP:          false,
-		DialTLSContext:     newHTTP2DialTLS(baseDial, res, explicitProxy, "https", tlsConfig, connectTimeout, echMode),
-		DisableCompression: true,
-		TLSClientConfig:    tlsConfig.Clone(),
-	}
-}
-
-func getH2CTransport(baseDial func(context.Context, string, string) (net.Conn, error), res *resolver.Resolver, explicitProxy *url.URL, connectTimeout time.Duration) http.RoundTripper {
-	return &http2.Transport{
-		AllowHTTP:          true,
-		DialTLSContext:     newHTTP2DialTLS(baseDial, res, explicitProxy, "http", nil, connectTimeout, core.ECHOff),
-		DisableCompression: true,
 	}
 }
 
