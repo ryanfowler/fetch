@@ -3,7 +3,7 @@ module github.com/ryanfowler/fetch
 go 1.27.1
 
 require (
-	github.com/andybalholm/brotli v1.2.4
+	github.com/andybalholm/brotli v1.2.5
 	github.com/coder/websocket v1.8.15
 	github.com/dunglas/httpsfv v1.1.2
 	github.com/goccy/go-yaml v1.19.2
