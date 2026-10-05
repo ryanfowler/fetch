@@ -12,7 +12,7 @@ require (
 	github.com/quic-go/quic-go v0.63.0
 	github.com/quic-go/webtransport-go v0.13.0
 	github.com/ryanfowler/readability v0.1.1
-	github.com/tinylib/msgp v1.6.4
+	github.com/tinylib/msgp v1.6.5
 	github.com/yuin/goldmark/v2 v2.1.6
 	golang.org/x/crypto v0.57.0
 	golang.org/x/image v0.46.0
