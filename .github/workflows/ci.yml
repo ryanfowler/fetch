@@ -36,8 +36,8 @@ jobs:
       - name: Lint
         uses: dominikh/staticcheck-action@v1.4.1
         with:
-          version: "2026.2.1"
-          install-go: true
+          version: "452d5bb86b45416c35891262f6a11dbd6a970117"
+          install-go: false
 
   test:
     if: ${{ github.event_name == 'pull_request' }}
