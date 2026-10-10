@@ -7,7 +7,7 @@ on:
     - cron: "17 3 * * 1"
 
 env:
-  GO_VERSION: "1.27.1"
+  GO_VERSION: "1.27.2"
 
 jobs:
   check:
@@ -36,7 +36,7 @@ jobs:
       - name: Lint
         uses: dominikh/staticcheck-action@v1.4.1
         with:
-          version: "2026.2.1"
+          version: "452d5bb86b45416c35891262f6a11dbd6a970117"
           install-go: false
 
   test:
