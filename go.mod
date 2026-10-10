@@ -1,6 +1,6 @@
 module github.com/ryanfowler/fetch
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/andybalholm/brotli v1.2.6
