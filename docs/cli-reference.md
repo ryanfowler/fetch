@@ -443,7 +443,11 @@ fetch --connect-timeout 5 --timeout 30 example.com
 
 ### `-t, --timeout SECONDS`
 
-Request timeout in seconds. Accepts decimal values.
+Request timeout in seconds. Accepts decimal values. One wall-clock budget
+starts before request preparation and covers body reading and editing, AWS
+signing, protobuf compilation, gRPC reflection and conversion, all network
+attempts, redirects, response reads, and retry delays. Cancellation closes
+active input streams to unblock preparation. `0` disables this deadline.
 
 ```sh
 fetch --timeout 30 example.com

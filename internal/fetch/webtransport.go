@@ -106,7 +106,7 @@ func handleWebTransport(ctx context.Context, r *Request, c *client.Client, req *
 		p.Flush()
 		if r.DryRun {
 			if preview != nil {
-				if err := printDryRunBodyPreview(p, preview, r.Verbosity == core.VSilent); err != nil {
+				if err := printDryRunBodyPreview(req.Context(), p, preview, r.Verbosity == core.VSilent); err != nil {
 					_ = preview.Close()
 					return 1, err
 				}

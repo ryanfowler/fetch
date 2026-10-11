@@ -1,6 +1,7 @@
 package fetch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -49,9 +50,12 @@ func editRequestBody(req *http.Request) error {
 	// Copy any existing body to the temporary file before editing.
 	input := req.Body
 	if input != nil {
+		input, stop := body.ContextReader(req.Context(), input)
+		defer stop()
+		defer input.Close()
 		_, err = io.Copy(f, input)
 		if err != nil {
-			return err
+			return contextCauseOr(err, req.Context())
 		}
 		err = input.Close()
 		if err != nil {
@@ -64,11 +68,14 @@ func editRequestBody(req *http.Request) error {
 
 	// Start the editor and block until completed.
 	argv := append(editor, path)
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := exec.CommandContext(req.Context(), argv[0], argv[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout
 	if err = cmd.Run(); err != nil {
+		if cause := context.Cause(req.Context()); cause != nil {
+			return cause
+		}
 		if state := cmd.ProcessState; state != nil {
 			code := state.ExitCode()
 			return fmt.Errorf("editor failed with exit code: %d", code)
@@ -82,7 +89,10 @@ func editRequestBody(req *http.Request) error {
 		return err
 	}
 	defer edited.Close()
-	buf, err := core.ReadAllLimited(edited, core.MaxCompositeMaterialization, "edited request body")
+	reader, stop := body.ContextReader(req.Context(), edited)
+	defer stop()
+	defer reader.Close()
+	buf, err := core.ReadAllLimited(reader, core.MaxCompositeMaterialization, "edited request body")
 	if err != nil {
 		return err
 	}

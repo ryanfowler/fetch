@@ -26,14 +26,18 @@ import (
 // retryableRequest executes an HTTP request with one wall-clock budget shared
 // by all attempts, redirects, response reads, drains, and retry delays.
 func retryableRequest(ctx context.Context, r *Request, c *client.Client, req *http.Request) (int, error) {
+	requestBudget, err := core.NewBudget(r.Timeout)
+	if err != nil {
+		return 0, err
+	}
+	return retryableRequestWithBudget(ctx, r, c, req, requestBudget)
+}
+
+func retryableRequestWithBudget(ctx context.Context, r *Request, c *client.Client, req *http.Request, requestBudget core.Budget) (int, error) {
 	if err := contextCause(ctx); err != nil {
 		return 0, err
 	}
 	maxAttempts, err := retryAttemptCount(r.Retry)
-	if err != nil {
-		return 0, err
-	}
-	requestBudget, err := core.NewBudget(r.Timeout)
 	if err != nil {
 		return 0, err
 	}

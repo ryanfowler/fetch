@@ -44,6 +44,11 @@ error when it crosses its limit. Request, connect, DNS, TLS, retry, redirect,
 body-read, and subprocess work uses the applicable wall-clock budget. A zero
 request or connect timeout means unlimited for that budget.
 
+The ordinary request budget starts before preparation. Body reading and
+editing, AWS signing, protobuf compilation, gRPC reflection and conversion,
+and all attempts share the same absolute deadline. Cancellation closes active
+input streams, including those used for hashing, materialization, and spooling.
+
 The response content-encoding limit counts entries across all `Content-Encoding`
 header values, including `identity` and `aws-chunked`. Longer chains are rejected
 before any decompressor is created or body bytes are read. It does not apply

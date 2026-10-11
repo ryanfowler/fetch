@@ -2,6 +2,7 @@ package aws
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -60,6 +61,9 @@ func (err *MissingEnvVarError) PrintTo(p *core.Printer) {
 // Sign signs the provided HTTP request with the information from Config,
 // returning any error encountered.
 func Sign(req *http.Request, cfg Config, now time.Time) error {
+	if err := context.Cause(req.Context()); err != nil {
+		return err
+	}
 	if err := fillEnvCredentials(&cfg); err != nil {
 		return err
 	}
@@ -107,7 +111,7 @@ func Sign(req *http.Request, cfg Config, now time.Time) error {
 	sb.WriteString(signature)
 
 	setHeaderInsensitive(req, "Authorization", sb.String())
-	return nil
+	return context.Cause(req.Context())
 }
 
 func setHeaderInsensitive(req *http.Request, name, value string) {
@@ -168,13 +172,12 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			defer stream.Close()
-			return hexSha256Reader(stream)
+			return hashPayloadStream(req.Context(), stream)
 		}
 		if service == "s3" {
 			return "UNSIGNED-PAYLOAD", nil
 		}
-		if _, err := source.Materialize(core.MaxCompositeMaterialization); err != nil {
+		if _, err := source.MaterializeWithContext(req.Context(), core.MaxCompositeMaterialization); err != nil {
 			return "", err
 		}
 		body.Attach(req, source)
@@ -182,24 +185,24 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		defer stream.Close()
-		return hexSha256Reader(stream)
+		return hashPayloadStream(req.Context(), stream)
 	}
 
 	// Attempt to utilize the GetBody function if it exists.
 	if req.GetBody != nil {
-		body, err := req.GetBody()
+		stream, err := req.GetBody()
 		if err != nil {
 			return "", err
 		}
-		defer body.Close()
-		return hexSha256Reader(body)
+		return hashPayloadStream(req.Context(), stream)
 	}
 
 	// If body implements io.ReadSeeker, calculate the hash and seek back
 	// to the start afterwards.
 	if rs, ok := req.Body.(io.ReadSeeker); ok && rs != os.Stdin {
-		payload, err := hexSha256Reader(rs)
+		reader, stop := body.ContextReader(req.Context(), req.Body)
+		defer stop()
+		payload, err := hexSha256Reader(reader)
 		if err != nil {
 			return "", err
 		}
@@ -216,7 +219,8 @@ func getPayloadHash(req *http.Request, service string) (string, error) {
 	}
 
 	// Read the entire body into memory to calculate the payload hash.
-	oldBody := req.Body
+	oldBody, stop := body.ContextReader(req.Context(), req.Body)
+	defer stop()
 	defer oldBody.Close()
 	body, err := io.ReadAll(oldBody)
 	if err != nil {
@@ -559,4 +563,11 @@ func hexSha256Reader(r io.Reader) (string, error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func hashPayloadStream(ctx context.Context, stream io.ReadCloser) (string, error) {
+	reader, stop := body.ContextReader(ctx, stream)
+	defer stop()
+	defer reader.Close()
+	return hexSha256Reader(reader)
 }

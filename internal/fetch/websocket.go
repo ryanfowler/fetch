@@ -119,7 +119,7 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 					errPrinter.WriteString("\n")
 					errPrinter.Flush()
 				}
-				if err := printDryRunBodyPreview(errPrinter, dryRunBody, r.Verbosity == core.VSilent); err != nil {
+				if err := printDryRunBodyPreview(req.Context(), errPrinter, dryRunBody, r.Verbosity == core.VSilent); err != nil {
 					return 1, err
 				}
 			}
