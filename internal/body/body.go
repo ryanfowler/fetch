@@ -250,6 +250,14 @@ func (b *Body) SetCleanup(cleanup func() error) {
 // will use. For one-shot sources the unopened stream is retained and later
 // Read returns the complete body, including the previewed prefix.
 func (b *Body) Preview(max int64) (Preview, error) {
+	return b.PreviewWithContext(context.Background(), max)
+}
+
+// PreviewWithContext is Preview with cancellation of any stream it reads.
+func (b *Body) PreviewWithContext(ctx context.Context, max int64) (Preview, error) {
+	if err := context.Cause(ctx); err != nil {
+		return Preview{}, err
+	}
 	if max < 0 {
 		return Preview{}, core.LimitError{Subsystem: "body preview", Limit: max}
 	}
@@ -268,12 +276,16 @@ func (b *Body) Preview(max int64) (Preview, error) {
 		if err != nil {
 			return Preview{}, err
 		}
-		return previewStream(rc, max)
+		reader, stop := ContextReader(ctx, rc)
+		defer stop()
+		return previewStream(reader, max)
 	}
 	if b.pending != nil {
 		if !b.pending.done && int64(len(b.pending.prefix)) < max+1 {
 			need := max + 1 - int64(len(b.pending.prefix))
-			extra, err := io.ReadAll(io.LimitReader(b.pending.rest, need))
+			reader, stop := ContextReader(ctx, b.pending.rest)
+			defer stop()
+			extra, err := io.ReadAll(io.LimitReader(reader, need))
 			if err != nil {
 				b.mu.Unlock()
 				return Preview{}, err
@@ -296,9 +308,11 @@ func (b *Body) Preview(max int64) (Preview, error) {
 	if err != nil {
 		return Preview{}, err
 	}
-	data, readErr := readPreview(rc, max)
+	reader, stop := ContextReader(ctx, rc)
+	defer stop()
+	data, readErr := readPreview(reader, max)
 	if readErr != nil {
-		_ = rc.Close()
+		_ = reader.Close()
 		return Preview{}, readErr
 	}
 	b.mu.Lock()
@@ -340,6 +354,16 @@ func readPreview(rc io.ReadCloser, max int64) (previewResult, error) {
 // replayable in-memory body. It is for protocol conversions and signing, not
 // ordinary uploads.
 func (b *Body) Materialize(max int64) ([]byte, error) {
+	return b.MaterializeWithContext(context.Background(), max)
+}
+
+// MaterializeWithContext is Materialize with cancellation of the opened input
+// stream. Close the stream directly: Materialize holds the lifecycle lock, so
+// calling Body.Close from a cancellation callback would deadlock.
+func (b *Body) MaterializeWithContext(ctx context.Context, max int64) ([]byte, error) {
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
 	if max < 0 {
 		return nil, core.LimitError{Subsystem: "request body materialization", Limit: max}
 	}
@@ -370,6 +394,8 @@ func (b *Body) Materialize(max int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	rc, stop := ContextReader(ctx, rc)
+	defer stop()
 	data, err := core.ReadAllLimited(rc, max, "request body materialization")
 	closeErr := rc.Close()
 	b.mu.Lock()
@@ -380,6 +406,9 @@ func (b *Body) Materialize(max int64) ([]byte, error) {
 	}
 	if closeErr != nil {
 		return nil, closeErr
+	}
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
 	}
 
 	b.mu.Lock()

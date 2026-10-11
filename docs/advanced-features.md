@@ -502,12 +502,20 @@ fetch --timeout 30 example.com
 fetch --timeout 2.5 example.com  # Decimal seconds
 ```
 
-The timeout covers:
+One wall-clock budget starts before request preparation. The timeout covers:
 
+- Request body preparation and editing, including the editor process
+- AWS payload hashing and signing
+- Protobuf compilation, gRPC reflection, conversion, and framing
 - DNS resolution
 - Connection establishment
 - TLS handshake
 - Request/response transfer
+- Redirects, retries, bounded response drains, and retry delays
+
+Cancellation closes active input streams to interrupt blocked preparation
+reads. Retries use the remaining budget. Use `--timeout 0` to disable the
+request deadline.
 
 ### `--connect-timeout SECONDS`
 

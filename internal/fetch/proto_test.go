@@ -2,6 +2,7 @@ package fetch
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -99,7 +100,7 @@ func TestConvertJSONToProtobufClosesBody(t *testing.T) {
 	desc := testMessageDescriptor(t)
 	body := &trackingReadCloser{Reader: strings.NewReader(`{"name":"hello"}`)}
 
-	if _, err := convertJSONToProtobuf(body, desc); err != nil {
+	if _, err := convertJSONToProtobuf(context.Background(), body, desc); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !body.closed {
@@ -109,7 +110,7 @@ func TestConvertJSONToProtobufClosesBody(t *testing.T) {
 
 func TestFrameGRPCBodyClosesSource(t *testing.T) {
 	source := body.NewReader(strings.NewReader("hello"), int64(len("hello")), "")
-	framed, err := frameGRPCBody(source)
+	framed, err := frameGRPCBody(context.Background(), source)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestFrameGRPCBodyClosesSource(t *testing.T) {
 
 func TestFrameGRPCBodyDoesNotDoubleCloseSource(t *testing.T) {
 	input := &nonIdempotentCloser{Reader: strings.NewReader("hello")}
-	framed, err := frameGRPCBody(body.NewReader(input, int64(len("hello")), ""))
+	framed, err := frameGRPCBody(context.Background(), body.NewReader(input, int64(len("hello")), ""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestFrameGRPCBodyKnownLengthIsLazyAndReplayable(t *testing.T) {
 		return io.NopCloser(strings.NewReader("hello")), nil
 	}, 5, "", true)
 
-	framed, err := frameGRPCBody(source)
+	framed, err := frameGRPCBody(context.Background(), source)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -203,7 +204,7 @@ func TestFrameGRPCBodyRejectsKnownOversizeBeforeOpen(t *testing.T) {
 		return io.NopCloser(strings.NewReader("must not open")), nil
 	}, fetchgrpc.MaxMessageSize+1, "", true)
 
-	_, err := frameGRPCBody(source)
+	_, err := frameGRPCBody(context.Background(), source)
 	if !errors.Is(err, core.ErrLimitExceeded) {
 		t.Fatalf("frame error = %v, want a limit error", err)
 	}
@@ -216,7 +217,7 @@ func TestFrameGRPCBodySpoolsUnknownLengthWithBound(t *testing.T) {
 	input := &patternReader{remaining: fetchgrpc.MaxMessageSize + 1}
 	source := body.NewReader(input, -1, "")
 
-	_, err := frameGRPCBody(source)
+	_, err := frameGRPCBody(context.Background(), source)
 	if !errors.Is(err, core.ErrLimitExceeded) {
 		t.Fatalf("frame error = %v, want a limit error", err)
 	}
@@ -239,7 +240,7 @@ func TestFrameGRPCBodySpoolOversizeCallerCleanupDoesNotDoubleCloseSource(t *test
 	}
 	body.Attach(req, source)
 
-	if _, err := frameGRPCBody(source); !errors.Is(err, core.ErrLimitExceeded) {
+	if _, err := frameGRPCBody(context.Background(), source); !errors.Is(err, core.ErrLimitExceeded) {
 		t.Fatalf("frame error = %v, want a limit error", err)
 	}
 	if err := req.Body.Close(); err != nil {
@@ -252,7 +253,7 @@ func TestFrameGRPCBodySpoolOversizeCallerCleanupDoesNotDoubleCloseSource(t *test
 
 func TestFrameGRPCBodySupportsRetryReplayAfterSpooling(t *testing.T) {
 	source := body.NewReader(strings.NewReader("payload"), -1, "")
-	framed, err := frameGRPCBody(source)
+	framed, err := frameGRPCBody(context.Background(), source)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -318,7 +319,7 @@ func TestFrameGRPCBodySupportsDigestReplayAfterSpooling(t *testing.T) {
 	}))
 	defer server.Close()
 
-	framed, err := frameGRPCBody(body.NewReader(strings.NewReader("payload"), -1, ""))
+	framed, err := frameGRPCBody(context.Background(), body.NewReader(strings.NewReader("payload"), -1, ""))
 	if err != nil {
 		t.Fatalf("unexpected framing error: %v", err)
 	}

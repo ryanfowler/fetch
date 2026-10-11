@@ -100,7 +100,9 @@ func setupGRPC(r *Request, schema *proto.Schema) (protoreflect.MessageDescriptor
 }
 
 // convertJSONToProtobuf converts JSON body to protobuf.
-func convertJSONToProtobuf(data io.ReadCloser, desc protoreflect.MessageDescriptor) ([]byte, error) {
+func convertJSONToProtobuf(ctx context.Context, data io.ReadCloser, desc protoreflect.MessageDescriptor) ([]byte, error) {
+	data, stop := body.ContextReader(ctx, data)
+	defer stop()
 	defer data.Close()
 
 	// JSON-to-protobuf conversion is one of the explicitly materializing
@@ -135,7 +137,7 @@ func materializeGRPCDryRunBody(req *http.Request) error {
 	if source.Replayable() {
 		return nil
 	}
-	if _, err := source.Materialize(core.MaxCompositeMaterialization); err != nil {
+	if _, err := source.MaterializeWithContext(req.Context(), core.MaxCompositeMaterialization); err != nil {
 		return fmt.Errorf("failed to materialize gRPC request body for dry-run: %w", err)
 	}
 	// Materialize changes the source to replayable, but req.GetBody still
@@ -150,7 +152,7 @@ func materializeGRPCDryRunBody(req *http.Request) error {
 // until the message length is known. This is a protocol conversion, so the
 // shared 16 MiB materialization cap applies and a one-shot source is consumed
 // at most once.
-func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
+func dryRunGRPCBody(ctx context.Context, source *body.Body) (*body.Body, error) {
 	if source == nil || source.ContentLength() == 0 {
 		framed, err := fetchgrpc.FrameChecked(nil, false)
 		if err != nil {
@@ -160,7 +162,7 @@ func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
 	}
 	length := source.ContentLength()
 	if length < 0 {
-		if _, err := source.Materialize(fetchgrpc.MaxMessageSize); err != nil {
+		if _, err := source.MaterializeWithContext(ctx, fetchgrpc.MaxMessageSize); err != nil {
 			return nil, fmt.Errorf("failed to materialize gRPC request body for dry-run: %w", err)
 		}
 		length = source.ContentLength()
@@ -192,7 +194,7 @@ func dryRunGRPCBody(source *body.Body) (*body.Body, error) {
 // extra byte distinguishes an exact-limit body from an oversized one without
 // retaining the payload in memory, and the resulting file is replayable for
 // retries and authentication.
-func frameGRPCBody(source *body.Body) (*body.Body, error) {
+func frameGRPCBody(ctx context.Context, source *body.Body) (*body.Body, error) {
 	if source == nil || source.ContentLength() >= 0 {
 		length := int64(0)
 		if source != nil {
@@ -201,7 +203,7 @@ func frameGRPCBody(source *body.Body) (*body.Body, error) {
 		return newFramedGRPCBody(source, length, nil)
 	}
 
-	spooled, cleanup, err := spoolGRPCBody(source)
+	spooled, cleanup, err := spoolGRPCBody(ctx, source)
 	if err != nil {
 		return nil, err
 	}
@@ -249,22 +251,27 @@ func newFramedGRPCBody(source *body.Body, length int64, cleanup func() error) (*
 	return framed, nil
 }
 
-func spoolGRPCBody(source *body.Body) (*body.Body, func() error, error) {
-	stream, err := source.Open()
+func spoolGRPCBody(ctx context.Context, source *body.Body) (*body.Body, func() error, error) {
+	input, err := source.Open()
 	if err != nil {
 		return nil, nil, err
 	}
+	// Read the opened stream directly so cancellation cannot cause Body.Read
+	// to reopen a replayable source. Close through Body to clear its active
+	// stream and run any source cleanup after spooling ends.
+	stream, stop := body.ContextReader(ctx, newReaderWithCloser(input, source))
+	defer stop()
 
 	f, err := os.CreateTemp("", "fetch-grpc-*")
 	if err != nil {
-		_ = source.Close()
+		_ = stream.Close()
 		return nil, nil, fmt.Errorf("failed to create gRPC request spool: %w", err)
 	}
 	path := f.Name()
 	remove := func() { _ = os.Remove(path) }
 
 	count, copyErr := io.Copy(f, io.LimitReader(stream, fetchgrpc.MaxMessageSize+1))
-	streamCloseErr := source.Close()
+	streamCloseErr := stream.Close()
 	fileCloseErr := f.Close()
 	if copyErr != nil || streamCloseErr != nil || fileCloseErr != nil {
 		remove()

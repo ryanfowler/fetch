@@ -168,7 +168,23 @@ func Fetch(ctx context.Context, r *Request) int {
 	return 1
 }
 
-func fetch(ctx context.Context, r *Request) (int, error) {
+func fetch(ctx context.Context, r *Request) (code int, err error) {
+	var requestBudget core.Budget
+	if !r.WS && !r.WebTransport {
+		// Preparation, reflection, signing, and network attempts share one
+		// absolute deadline. Persistent protocols manage their dial budgets.
+		requestBudget, err = core.NewBudget(r.Timeout)
+		if err != nil {
+			return 0, err
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = requestBudget.WithContext(ctx, "")
+		defer cancel()
+		defer func() { err = contextCauseOr(err, ctx) }()
+	}
+	if err := contextCause(ctx); err != nil {
+		return 0, err
+	}
 	r.effectiveURL = nil
 	if r.HAR != "" {
 		if r.WS || r.GRPCList || r.GRPCDescribe != "" || r.DryRun {
@@ -356,7 +372,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			// Unary / server-streaming: convert JSON with the descriptor, then
 			// frame one protobuf message.
 			if requestDesc != nil && requiresGRPCSchema(r) && req.Body != nil && req.Body != http.NoBody {
-				converted, err := convertJSONToProtobuf(req.Body, requestDesc)
+				converted, err := convertJSONToProtobuf(ctx, req.Body, requestDesc)
 				if err != nil {
 					return 0, err
 				}
@@ -364,14 +380,14 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			}
 			if r.DryRun {
 				source, _ := body.SourceFromContext(req.Context())
-				framed, err := dryRunGRPCBody(source)
+				framed, err := dryRunGRPCBody(ctx, source)
 				if err != nil {
 					return 0, err
 				}
 				body.Attach(req, framed)
 			} else {
 				source, _ := body.SourceFromContext(req.Context())
-				framed, err := frameGRPCBody(source)
+				framed, err := frameGRPCBody(ctx, source)
 				if err != nil {
 					return 0, err
 				}
@@ -416,7 +432,7 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 			if !ok {
 				return 0, errors.New("request body preview is unavailable")
 			}
-			if err := printDryRunBodyPreview(errPrinter, source, r.Verbosity == core.VSilent); err != nil {
+			if err := printDryRunBodyPreview(req.Context(), errPrinter, source, r.Verbosity == core.VSilent); err != nil {
 				return 0, err
 			}
 			return 0, nil
@@ -426,13 +442,11 @@ func fetch(ctx context.Context, r *Request) (int, error) {
 		errPrinter.Flush()
 	}
 
-	// 8. Make request (with optional retries and per-attempt timeout).
-	code, err := retryableRequest(ctx, r, c, req)
-
-	return code, err
+	// 8. Make request with optional retries under the existing request budget.
+	return retryableRequestWithBudget(ctx, r, c, req, requestBudget)
 }
 
-func printDryRunBodyPreview(p *core.Printer, source *body.Body, silent bool) error {
+func printDryRunBodyPreview(ctx context.Context, p *core.Printer, source *body.Body, silent bool) error {
 	// A preview of a replayable source can be retained and replayed by the
 	// body abstraction. A one-shot source, such as stdin, must not be read
 	// during dry-run: doing so can block forever and would consume bytes a
@@ -441,7 +455,7 @@ func printDryRunBodyPreview(p *core.Printer, source *body.Body, silent bool) err
 		core.WriteWarningMsgIf(p, "request body preview is unavailable for a one-shot source", silent)
 		return nil
 	}
-	preview, err := source.Preview(core.MaxDryRunBodyPreview)
+	preview, err := source.PreviewWithContext(ctx, core.MaxDryRunBodyPreview)
 	if err != nil {
 		return err
 	}

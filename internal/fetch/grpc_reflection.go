@@ -635,7 +635,19 @@ func DiscoverGRPC(ctx context.Context, r *Request) int {
 	return 1
 }
 
-func discoverGRPC(ctx context.Context, r *Request) (int, error) {
+func discoverGRPC(ctx context.Context, r *Request) (code int, err error) {
+	// Local schema loading and compilation must consume the same budget as
+	// reflection, rather than starting a fresh timeout after preparation.
+	budget, err := core.NewBudget(r.Timeout)
+	if err != nil {
+		return 0, err
+	}
+	ctx, cancel := budget.WithContext(ctx, "gRPC discovery")
+	defer cancel()
+	defer func() { err = contextCauseOr(err, ctx) }()
+	if err := contextCause(ctx); err != nil {
+		return 0, err
+	}
 	schema, offline, c, err := loadDiscoverySchema(ctx, r)
 	if err != nil {
 		return 0, err

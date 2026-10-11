@@ -526,7 +526,7 @@ func TestRetryableRequestCleansGRPCSpoolAfterRetry(t *testing.T) {
 	}))
 	defer server.Close()
 
-	framed, err := frameGRPCBody(requestbody.NewReader(strings.NewReader("payload"), -1, ""))
+	framed, err := frameGRPCBody(context.Background(), requestbody.NewReader(strings.NewReader("payload"), -1, ""))
 	if err != nil {
 		t.Fatalf("frameGRPCBody: %v", err)
 	}
