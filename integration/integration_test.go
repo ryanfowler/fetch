@@ -3575,9 +3575,13 @@ func TestMain(t *testing.T) {
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "--timeout", "1")
+		// Allow preparation and scheduling on Windows CI to fit comfortably
+		// inside this successful-retry budget. Retry budget unit tests verify
+		// shared-deadline exhaustion separately.
+		res := runFetch(t, fetchPath, server.URL, "--retry", "1", "--retry-delay", "0.01", "--timeout", "10")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
+		assertBufContains(t, res.stderr, "retry: attempt 2/2")
 		if count.Load() != 2 {
 			t.Fatalf("expected 2 requests, got %d", count.Load())
 		}
