@@ -18,6 +18,7 @@ omits `Content-Length`.
 | gRPC reflection                          | 128 messages and 64 MiB total             |
 | MessagePack/schema-less protobuf nesting | 128 levels                                |
 | Complete formatted response              | 1 MiB                                     |
+| Response content-encoding chain          | 8 entries when decoding                   |
 | Schema-less protobuf fields              | 1,000,000                                 |
 | Clipboard capture                        | 1 MiB                                     |
 | DoH wire response                        | 65,535 bytes                              |
@@ -42,6 +43,11 @@ instead of buffering a complete body. A bounded transformation reports an
 error when it crosses its limit. Request, connect, DNS, TLS, retry, redirect,
 body-read, and subprocess work uses the applicable wall-clock budget. A zero
 request or connect timeout means unlimited for that budget.
+
+The response content-encoding limit counts entries across all `Content-Encoding`
+header values, including `identity` and `aws-chunked`. Longer chains are rejected
+before any decompressor is created or body bytes are read. It does not apply
+when decoding is disabled or the response is metadata-only.
 
 Output files, HAR files, sessions, HTTP/3 cache files, skill installations, and
 updater staging use exclusive temporary state and atomic commits. Symlink

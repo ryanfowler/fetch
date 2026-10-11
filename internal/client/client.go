@@ -2179,7 +2179,11 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		} else if encodingRequested(req) {
 			// Preserve the old behavior for requests constructed directly by
 			// package users that predate CompressionMode.
-			decoders, ok := contentEncodingDecoders(resp.Header)
+			decoders, ok, err := contentEncodingDecoders(resp.Header)
+			if err != nil {
+				_ = resp.Body.Close()
+				return nil, err
+			}
 			if ok {
 				if err := decodeResponseBodyChain(resp, decoders); err != nil {
 					return nil, err
@@ -2327,8 +2331,11 @@ func WireContentLength(resp *http.Response) int64 {
 
 type wireContentLengthKey struct{}
 
-func contentEncodingDecoders(h http.Header) ([]namedResponseBodyDecoder, bool) {
-	encodings := contentEncodings(h)
+func contentEncodingDecoders(h http.Header) ([]namedResponseBodyDecoder, bool, error) {
+	encodings, err := contentEncodings(h)
+	if err != nil {
+		return nil, false, err
+	}
 	decoders := make([]namedResponseBodyDecoder, 0, len(encodings))
 	for i := len(encodings) - 1; i >= 0; i-- {
 		switch strings.ToLower(encodings[i]) {
@@ -2355,20 +2362,23 @@ func contentEncodingDecoders(h http.Header) ([]namedResponseBodyDecoder, bool) {
 			})
 		case "identity", "aws-chunked":
 		default:
-			return nil, false
+			return nil, false, nil
 		}
 	}
-	return decoders, true
+	return decoders, true, nil
 }
 
 // contentEncodingDecodersForPolicy validates the complete encoding chain
 // before installing any decoder. This avoids partially decoding a response
-// whose later encoding is unsupported.
+// whose later encoding is unsupported, and bounds decoder allocations.
 func contentEncodingDecodersForPolicy(h http.Header, allowed map[string]bool) ([]namedResponseBodyDecoder, error) {
 	values := h.Values("Content-Encoding")
 	var encodings []string
 	for _, value := range values {
 		for token := range strings.SplitSeq(value, ",") {
+			if len(encodings) == core.MaxResponseEncodingLayers {
+				return nil, fmt.Errorf("Content-Encoding exceeds %d-entry limit: %w", core.MaxResponseEncodingLayers, core.ErrLimitExceeded)
+			}
 			encoding := strings.TrimSpace(token)
 			if encoding == "" {
 				return nil, errors.New("malformed Content-Encoding header: empty encoding")
@@ -2411,18 +2421,23 @@ func contentEncodingDecodersForPolicy(h http.Header, allowed map[string]bool) ([
 	return decoders, nil
 }
 
-func contentEncodings(h http.Header) []string {
+func contentEncodings(h http.Header) ([]string, error) {
 	values := h.Values("Content-Encoding")
 	var encodings []string
 	for _, v := range values {
 		for encoding := range strings.SplitSeq(v, ",") {
 			encoding = strings.TrimSpace(encoding)
 			if encoding != "" {
+				// Count every entry, including identity and aws-chunked, before
+				// allocating any decompressor or an unbounded encoding list.
+				if len(encodings) == core.MaxResponseEncodingLayers {
+					return nil, fmt.Errorf("Content-Encoding exceeds %d-entry limit: %w", core.MaxResponseEncodingLayers, core.ErrLimitExceeded)
+				}
 				encodings = append(encodings, encoding)
 			}
 		}
 	}
-	return encodings
+	return encodings, nil
 }
 
 type responseEncodingPolicy struct {
