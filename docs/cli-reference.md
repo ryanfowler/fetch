@@ -296,6 +296,10 @@ explicit `Accept-Encoding` header is never replaced. The compatibility flag
 `--no-encode` is equivalent to `--compress off`; selecting conflicting
 explicit modes is an error.
 
+When decoding a response, at most eight `Content-Encoding` entries are
+accepted across all header values, including `identity` and `aws-chunked`.
+Longer chains fail before any decompressor is created or body bytes are read.
+
 ### `--ech MODE`
 
 Configure Encrypted ClientHello with `auto`, `on`, or `off`. The default is

@@ -427,6 +427,10 @@ bytes, including when writing to a file. An explicit `Accept-Encoding` header
 is never replaced. Use `--no-encode` as a compatibility alias for
 `--compress off`.
 
+Decoding accepts at most eight `Content-Encoding` entries across all header
+values, including `identity` and `aws-chunked`. Longer chains are rejected
+before any decompressor is created or body bytes are read.
+
 ## Range Requests
 
 ### `-r, --range RANGE`

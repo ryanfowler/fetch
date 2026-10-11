@@ -30,6 +30,7 @@ const (
 	MaxNestingDepth                     = 128
 	MaxClipboardBytes             int64 = 1 << 20
 	MaxFormatterNestingDepth            = 1024
+	MaxResponseEncodingLayers           = 8
 	MaxDOHWireResponseBytes       int64 = 65_535
 	MaxDOHJSONResponseBytes       int64 = 1 << 20
 	MaxUpdaterReleaseMetadata     int64 = 1 << 20
