@@ -209,6 +209,10 @@ the initial HTTP origin. A redirect to a different scheme, host, or port is
 refused before the destination TLS handshake, so the client certificate cannot
 be presented to an unintended service.
 
+With `--article`, automatic image downloads also stay within the article's
+HTTP origin when a client certificate is configured. Images on other origins
+use the alt-text and URL fallback without connecting to those services.
+
 ## Custom Headers
 
 For authentication methods not directly supported, use custom headers:

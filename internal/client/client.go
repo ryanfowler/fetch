@@ -896,6 +896,13 @@ func (c *Client) HTTPClient() *http.Client {
 	return c.c
 }
 
+// HasClientCertificate reports whether this client's TLS transport can present
+// a configured client certificate. Automatic subrequests must account for this
+// credential before connecting to an origin selected by response content.
+func (c *Client) HasClientCertificate() bool {
+	return c != nil && c.tlsConfig != nil && len(c.tlsConfig.Certificates) > 0
+}
+
 // LookupIPAddr resolves host using the resolver configured for this client.
 // It keeps policy checks consistent with the addresses used by its transport.
 func (c *Client) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
