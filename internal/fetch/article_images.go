@@ -95,6 +95,9 @@ func (f *articleImageFetcher) render(destination string, dst io.Writer) bool {
 }
 
 func (f *articleImageFetcher) fetch(target *url.URL) ([]byte, error) {
+	if err := f.checkOrigin(target); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(f.ctx, articleImageTimeout)
 	defer cancel()
 
@@ -102,11 +105,16 @@ func (f *articleImageFetcher) fetch(target *url.URL) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Do not forward the article request's custom headers or credentials to
-	// image hosts. The shared client still supplies the configured transport,
-	// proxy, TLS, compression, and cookie policy.
+	// Do not forward the article request's custom headers to image hosts. TLS
+	// credentials remain in the shared transport, so checkOrigin limits mTLS
+	// image requests to the article's origin before any connection is opened.
 	req.Header.Set("Accept", "image/*")
 	ctx = client.WithRedirectValidator(ctx, func(hop client.RedirectHop) error {
+		if hop.NextRequest != nil {
+			if err := f.checkOrigin(hop.NextRequest.URL); err != nil {
+				return err
+			}
+		}
 		if hop.NextRequest == nil || !safeArticleImageURL(ctx, hop.NextRequest.URL, f.client.LookupIPAddr) {
 			return errors.New("article image redirect targets a private or non-public address")
 		}
@@ -165,10 +173,20 @@ func (f *articleImageFetcher) resolve(destination string) (*url.URL, bool) {
 	}
 	target = f.baseURL.ResolveReference(target)
 	target.Fragment = ""
+	if err := f.checkOrigin(target); err != nil {
+		return nil, false
+	}
 	if !safeArticleImageURL(f.ctx, target, f.client.LookupIPAddr) {
 		return nil, false
 	}
 	return target, true
+}
+
+func (f *articleImageFetcher) checkOrigin(target *url.URL) error {
+	if f.client.HasClientCertificate() && !client.SameOrigin(f.baseURL, target) {
+		return errors.New("refusing cross-origin article image request while a client certificate is configured")
+	}
+	return nil
 }
 
 func safeArticleImageURL(ctx context.Context, target *url.URL, lookup func(context.Context, string) ([]net.IPAddr, error)) bool {

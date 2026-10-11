@@ -52,5 +52,11 @@ output files, pipes, or clipboard destinations, which receive raw, uncolored
 Markdown. Image fetches are bounded and failed images fall back to their alt
 text and URL.
 
+When a client certificate is configured, images are fetched only from the
+article's HTTP origin (the same scheme, host, and port). Images on other origins
+fall back to their alt text and URL without a connection, so page content cannot
+cause the certificate to be presented to another service. Image redirects must
+also stay within that origin.
+
 Article mode cannot be combined with WebSockets, gRPC, DNS/TLS inspection,
 `--discard`, `--remote-name`, or `--remote-header-name`.

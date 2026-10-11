@@ -268,6 +268,11 @@ and rendered unless `--image off` is set. Output files and pipes retain image
 links in the raw Markdown. It cannot be combined with `--discard`,
 `--remote-name`, or `--remote-header-name`.
 
+When a client certificate is configured, article image downloads and their
+redirects stay within the article's HTTP origin (the same scheme, host, and
+port). Images on other origins fall back to their alt text and URL without
+connecting to those services.
+
 The frontmatter fields are `title`, `byline`, `site_name`, `published_time`,
 `lang`, `dir`, `length`, `excerpt`, and `url` when available. String values use
 JSON quoting, which is also valid YAML. The final URL after redirects is used
