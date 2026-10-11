@@ -136,6 +136,12 @@ fetch --basic username:password example.com
 
 HTTP Digest Authentication. Uses a bounded RFC 7616 challenge-response handshake. Supports MD5, MD5-sess, SHA-256, SHA-256-sess, SHA-512-256, and SHA-512-256-sess, with no qop or qop=auth challenges.
 
+Same-origin redirects recalculate authorization for the final method and URI
+within the challenge's protection space. Other destinations require their own
+challenge; credentials never cross an origin boundary. Each method and request
+URI allows one challenge response and one stale-nonce retry, up to 20 challenge
+replays per HTTP attempt.
+
 ```sh
 fetch --digest username:password example.com
 ```
@@ -509,9 +515,10 @@ fetch --method POST --data '{"action":"create"}' --retry 2 --retry-unsafe exampl
 ```
 
 Digest authentication is a separate challenge-response mechanism. A Digest
-401 challenge can replay the request once (and a stale nonce can cause one
-additional bounded replay) when `--digest` is enabled, including for an unsafe
-method; `--retry-unsafe` does not control those authentication replays.
+401 challenge can replay each method and request URI once (and a stale nonce
+can cause one additional replay per target) when `--digest` is enabled,
+including for an unsafe method. At most 20 challenge replays are allowed per
+HTTP attempt; `--retry-unsafe` does not control those authentication replays.
 
 ### `--retry-delay SECONDS`
 

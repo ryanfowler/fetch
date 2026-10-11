@@ -31,6 +31,7 @@ omits `Content-Length`.
 | Update archive entries                   | 128                                       |
 | Dry-run body preview                     | 1,024 bytes                               |
 | Retry count per request                  | 100 retries maximum (0–100 configured)   |
+| Digest challenge replays                 | 20 per HTTP attempt; one response and one stale retry per method/URI |
 | Effective `Retry-After`                  | 30 seconds; clamped values warn           |
 | Update redirects                         | 10                                        |
 | Persistent session file                  | 2 MiB                                     |
