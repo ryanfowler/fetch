@@ -1275,6 +1275,8 @@ func requestBodySource(r io.Reader, contentType string) (*body.Body, error) {
 	// unread portion into a replayable source so dry-run can preview them
 	// without consuming the body that the real request would send.
 	switch value := r.(type) {
+	case *body.Body:
+		return value, nil
 	case *bytes.Reader:
 		data, err := io.ReadAll(value)
 		if err != nil {

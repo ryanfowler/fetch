@@ -50,7 +50,7 @@ func parseShortFlags(r *Result, flags string, rest []string) (int, error) {
 			if err != nil {
 				return 0, fmt.Errorf("-d requires an argument")
 			}
-			r.DataValues = append(r.DataValues, DataValue{Value: v})
+			r.DataValues = append(r.DataValues, DataValue{Value: v, Kind: DataText})
 			total += n
 		case 'F':
 			v, n, err := consumeArg()

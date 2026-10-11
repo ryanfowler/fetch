@@ -172,14 +172,14 @@ func TestParseSimple(t *testing.T) {
 			name:  "data-raw",
 			input: `curl --data-raw "@not-a-file" https://example.com`,
 			check: func(t *testing.T, r *Result) {
-				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "@not-a-file", IsRaw: true}})
+				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "@not-a-file", Kind: DataRaw}})
 			},
 		},
 		{
 			name:  "json flag",
 			input: `curl --json '{"key":"value"}' https://example.com`,
 			check: func(t *testing.T, r *Result) {
-				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: `{"key":"value"}`}})
+				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: `{"key":"value"}`, Kind: DataJSON}})
 				assertTrue(t, "HasContentType", r.HasContentType)
 				assertTrue(t, "HasAccept", r.HasAccept)
 				// Check Content-Type and Accept headers were added.
@@ -258,28 +258,28 @@ func TestParseSimple(t *testing.T) {
 			name:  "data-urlencode",
 			input: `curl --data-urlencode "key=hello world" https://example.com`,
 			check: func(t *testing.T, r *Result) {
-				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "key=hello+world"}})
+				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "key=hello world", Kind: DataURLEncoded}})
 			},
 		},
 		{
 			name:  "data-urlencode bare content",
 			input: `curl --data-urlencode "hello world" https://example.com`,
 			check: func(t *testing.T, r *Result) {
-				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "hello+world"}})
+				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "hello world", Kind: DataURLEncoded}})
 			},
 		},
 		{
 			name:  "data-urlencode @filename",
 			input: `curl --data-urlencode "@myfile.txt" https://example.com`,
 			check: func(t *testing.T, r *Result) {
-				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "@myfile.txt", IsURLEncode: true}})
+				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "@myfile.txt", Kind: DataURLEncoded}})
 			},
 		},
 		{
 			name:  "data-urlencode name@filename",
 			input: `curl --data-urlencode "field@data.txt" https://example.com`,
 			check: func(t *testing.T, r *Result) {
-				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "field@data.txt", IsURLEncode: true}})
+				assertDataValues(t, "DataValues", r.DataValues, []DataValue{{Value: "field@data.txt", Kind: DataURLEncoded}})
 			},
 		},
 		{
@@ -1053,7 +1053,7 @@ func TestParseDataBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	assertDataValues(t, "DataValues", result.DataValues, []DataValue{{Value: "@file.bin"}})
+	assertDataValues(t, "DataValues", result.DataValues, []DataValue{{Value: "@file.bin", Kind: DataBinary}})
 }
 
 func TestParseMixedData(t *testing.T) {
@@ -1064,7 +1064,7 @@ func TestParseMixedData(t *testing.T) {
 	}
 	assertDataValues(t, "DataValues", result.DataValues, []DataValue{
 		{Value: "a=1"},
-		{Value: "@not-a-file", IsRaw: true},
+		{Value: "@not-a-file", Kind: DataRaw},
 		{Value: "b=2"},
 	})
 }
@@ -1145,64 +1145,28 @@ func TestParseShortFlagInlineValue(t *testing.T) {
 	}
 }
 
-func TestURLEncodeValue(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want DataValue
-	}{
-		{
-			name: "bare content",
-			in:   "hello world",
-			want: DataValue{Value: "hello+world"},
-		},
-		{
-			name: "=content",
-			in:   "=hello world",
-			want: DataValue{Value: "hello+world"},
-		},
-		{
-			name: "name=content",
-			in:   "key=hello world",
-			want: DataValue{Value: "key=hello+world"},
-		},
-		{
-			name: "@filename passthrough",
-			in:   "@myfile.txt",
-			want: DataValue{Value: "@myfile.txt", IsURLEncode: true},
-		},
-		{
-			name: "name@filename passthrough",
-			in:   "field@data.txt",
-			want: DataValue{Value: "field@data.txt", IsURLEncode: true},
-		},
-		{
-			name: "name=content with @ in content",
-			in:   "email=user@example.com",
-			want: DataValue{Value: "email=user%40example.com"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := urlEncodeValue(tt.in)
-			if err != nil {
-				t.Fatalf("urlEncodeValue(%q) error = %v", tt.in, err)
-			}
-			if got != tt.want {
-				t.Fatalf("urlEncodeValue(%q) = %+v, want %+v", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestParseDataUrlencodeEqualsContent(t *testing.T) {
-	// "=content" format: leading = means URL-encode the content after it.
+	// Keep the raw option so file expansion and encoding happen in the CLI.
 	result, err := Parse(`curl --data-urlencode "=hello world" https://example.com`)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	assertDataValues(t, "DataValues", result.DataValues, []DataValue{{Value: "hello+world"}})
+	assertDataValues(t, "DataValues", result.DataValues, []DataValue{{Value: "=hello world", Kind: DataURLEncoded}})
+}
+
+func TestParsePreservesDataKindsAndOrder(t *testing.T) {
+	r, err := Parse(`curl -d first --data-ascii second --data-binary @file --json '{"a":1}' --data-raw @literal --data-urlencode 'key=hello world' https://example.com`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDataValues(t, "DataValues", r.DataValues, []DataValue{
+		{Value: "first", Kind: DataText},
+		{Value: "second", Kind: DataText},
+		{Value: "@file", Kind: DataBinary},
+		{Value: `{"a":1}`, Kind: DataJSON},
+		{Value: "@literal", Kind: DataRaw},
+		{Value: "key=hello world", Kind: DataURLEncoded},
+	})
 }
 
 func TestParseURLConflicts(t *testing.T) {

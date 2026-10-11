@@ -62,32 +62,32 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		if err != nil {
 			return 0, fmt.Errorf("--%s requires an argument", name)
 		}
-		r.DataValues = append(r.DataValues, DataValue{Value: v})
+		kind := DataText
+		if name == "data-binary" {
+			kind = DataBinary
+		}
+		r.DataValues = append(r.DataValues, DataValue{Value: v, Kind: kind})
 		return n, nil
 	case "data-raw":
 		v, n, err := consumeArg()
 		if err != nil {
 			return 0, fmt.Errorf("--data-raw requires an argument")
 		}
-		r.DataValues = append(r.DataValues, DataValue{Value: v, IsRaw: true})
+		r.DataValues = append(r.DataValues, DataValue{Value: v, Kind: DataRaw})
 		return n, nil
 	case "data-urlencode":
 		v, n, err := consumeArg()
 		if err != nil {
 			return 0, fmt.Errorf("--data-urlencode requires an argument")
 		}
-		dv, err := urlEncodeValue(v)
-		if err != nil {
-			return 0, err
-		}
-		r.DataValues = append(r.DataValues, dv)
+		r.DataValues = append(r.DataValues, DataValue{Value: v, Kind: DataURLEncoded})
 		return n, nil
 	case "json":
 		v, n, err := consumeArg()
 		if err != nil {
 			return 0, fmt.Errorf("--json requires an argument")
 		}
-		r.DataValues = append(r.DataValues, DataValue{Value: v})
+		r.DataValues = append(r.DataValues, DataValue{Value: v, Kind: DataJSON})
 		r.jsonDefaults = true
 		return n, nil
 	case "form":

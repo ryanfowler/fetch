@@ -11,6 +11,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/ryanfowler/fetch/internal/body"
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
@@ -708,11 +709,11 @@ func TestFromCurlSingleCurlFileBodiesUseStreamingSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	file, ok := app.Data.(*os.File)
-	if !ok {
-		t.Fatalf("Data type = %T, want *os.File for a streaming curl body", app.Data)
+	source, ok := app.Data.(*body.Body)
+	if !ok || !source.Replayable() || source.ContentLength() != -1 {
+		t.Fatalf("Data type = %T, want a replayable streaming source with unknown filtered length", app.Data)
 	}
-	if err := file.Close(); err != nil {
+	if err := source.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
 
@@ -720,9 +721,11 @@ func TestFromCurlSingleCurlFileBodiesUseStreamingSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdin Parse() error = %v", err)
 	}
-	if app.Data != os.Stdin {
-		t.Fatalf("stdin Data = %T, want os.Stdin", app.Data)
+	source, ok = app.Data.(*body.Body)
+	if !ok || source.Replayable() {
+		t.Fatalf("stdin Data = %T, want a one-shot streaming source", app.Data)
 	}
+	defer source.Close()
 }
 
 func TestFromCurlCompositeDataIsBounded(t *testing.T) {

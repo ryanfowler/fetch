@@ -17,12 +17,22 @@ type formField struct {
 	Value string
 }
 
-// DataValue represents a single data value with flags indicating how
-// the value should be processed.
+// DataKind preserves the processing and concatenation rules of a body option.
+type DataKind uint8
+
+const (
+	DataText DataKind = iota // --data/-d and --data-ascii.
+	DataBinary
+	DataJSON
+	DataRaw
+	DataURLEncoded
+)
+
+// DataValue represents one body option in command-line order. Value is kept
+// unprocessed until the CLI expands files/stdin and assembles the body.
 type DataValue struct {
-	Value       string
-	IsRaw       bool // No @file expansion.
-	IsURLEncode bool // URL-encode the value (or file contents for @file/name@file forms).
+	Value string
+	Kind  DataKind
 }
 
 // Result is the intermediate representation of a parsed curl command.

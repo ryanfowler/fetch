@@ -2,7 +2,6 @@ package curl
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 )
 
@@ -35,34 +34,6 @@ func validateCookieValue(v string) error {
 		return fmt.Errorf("cookie jar files are not supported; -b/--cookie value %q looks like a file path (use -b 'name=value' for inline cookies)", v)
 	}
 	return nil
-}
-
-// urlEncodeValue processes a --data-urlencode value. For inline forms
-// (content, =content, name=content) it URL-encodes immediately. For file
-// forms (@filename, name@filename) it returns the raw value and sets a flag
-// so that the caller can read the file and URL-encode its contents.
-func urlEncodeValue(s string) (DataValue, error) {
-	// "@filename" - read file, URL-encode contents.
-	if strings.HasPrefix(s, "@") {
-		return DataValue{Value: s, IsURLEncode: true}, nil
-	}
-
-	// "name@filename" - read file, URL-encode contents, prepend "name=".
-	// We check for '@' before '=' to distinguish from "name=content".
-	eqIdx := strings.Index(s, "=")
-	atIdx := strings.Index(s, "@")
-	if atIdx > 0 && (eqIdx < 0 || atIdx < eqIdx) {
-		return DataValue{Value: s, IsURLEncode: true}, nil
-	}
-
-	// Inline forms: URL-encode immediately.
-	if name, content, ok := strings.Cut(s, "="); ok {
-		if name == "" {
-			return DataValue{Value: url.QueryEscape(content)}, nil
-		}
-		return DataValue{Value: name + "=" + url.QueryEscape(content)}, nil
-	}
-	return DataValue{Value: url.QueryEscape(s)}, nil
 }
 
 // ParseAllowedProto parses a curl --proto value and returns which protocols
