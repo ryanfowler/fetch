@@ -298,6 +298,12 @@ body again. Multipart uses a stable boundary and replays identical bytes.
 Materialization for signing, protocol conversion, or composite curl data is
 capped at 16 MiB.
 
+For imported curl commands, `-d`/`--data` and `--data-ascii` remove CR, LF, and
+NUL from file/stdin input. `--data-binary` and `--json` preserve those bytes.
+Single-file transformations stream and remain replayable. Repeated `--json`
+fragments concatenate directly; other data options insert `&` when the
+preceding body is nonempty. These rules apply only to `--from-curl` imports.
+
 ```sh
 fetch -F "large=@bigfile.zip" --timeout 300 -v -m POST example.com/upload
 ```

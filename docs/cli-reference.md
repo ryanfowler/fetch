@@ -889,7 +889,7 @@ fetch --from-curl 'https://example.com'
 
 | Category                   | Curl Flags                                                                                                                         |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Request                    | `-X`, `-H`, `-d`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G`                              |
+| Request                    | `-X`, `-H`, `-d`/`--data`/`--data-ascii`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G` |
 | Auth                       | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                 |
 | TLS                        | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`, `--ech hard                                                    | true | auto | false` |
 | Output                     | `-o`, `-O`, `-J`                                                                                                                   |
@@ -904,7 +904,9 @@ fetch --from-curl 'https://example.com'
 **Notes:**
 
 - `-b`/`--cookie` only supports inline cookie strings (e.g., `-b 'name=value'`). Cookie jar files are not supported and will return an error.
-- A single `-d @filename` or `-d @-` body streams through fetch's native request-body path. Composite data bodies and `--data-urlencode @filename` are materialized for curl compatibility and capped at 16 MiB.
+- `-d`/`--data` and `--data-ascii` strip CR, LF, and NUL from `@filename` or `@-` input; inline data is unchanged. `--data-binary` and `--json` preserve file/stdin bytes, while `--data-raw` treats `@` literally.
+- Body options are combined in order. A `--json` fragment is appended directly; other data fragments add `&` when the preceding body is nonempty. Repeated JSON fragments can therefore form one JSON document.
+- A single file/stdin data body streams through fetch's native request-body path. Transformed regular-file bodies remain replayable; stdin remains one-shot. Composite data bodies and `--data-urlencode @filename` are materialized for curl compatibility and capped at 16 MiB.
 - `--data-urlencode` supports `@filename` and `name@filename` forms for reading and URL-encoding file contents. File bytes are encoded before any text conversion.
 - `-n`/`--netrc` is not supported. Use `--basic`, `--bearer`, or an explicit `Authorization` header instead.
 - Semantic curl flags that fetch cannot faithfully translate, such as `-f`/`--fail`, `-N`/`--no-buffer`, `--proto-default`, and `--proto-redir`, return an error instead of being ignored.
