@@ -25,9 +25,10 @@ func TestParseChallenge(t *testing.T) {
 		},
 		{
 			name:  "full",
-			input: `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5", opaque="opaque123", stale="true"`,
+			input: `Digest realm="test", domain="/start /final", nonce="abc123", qop="auth", algorithm="MD5", opaque="opaque123", stale="true"`,
 			want: &Challenge{
 				Realm:     "test",
+				Domain:    "/start /final",
 				Nonce:     "abc123",
 				QOP:       "auth",
 				Algorithm: "MD5",
@@ -83,6 +84,9 @@ func TestParseChallenge(t *testing.T) {
 			}
 			if got.Realm != tt.want.Realm {
 				t.Errorf("realm: got %q, want %q", got.Realm, tt.want.Realm)
+			}
+			if got.Domain != tt.want.Domain {
+				t.Errorf("domain: got %q, want %q", got.Domain, tt.want.Domain)
 			}
 			if got.Nonce != tt.want.Nonce {
 				t.Errorf("nonce: got %q, want %q", got.Nonce, tt.want.Nonce)
@@ -346,7 +350,7 @@ func TestResponseMatchesRFC7616Vectors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		auth, err := responseWithCnonce(req, chal, "Mufasa", "Circle Of Life", strings.ToLower(algorithm), hashFunc, "0a4f113b")
+		auth, err := responseWithCnonce(req, chal, "Mufasa", "Circle Of Life", strings.ToLower(algorithm), hashFunc, "0a4f113b", 1)
 		if err != nil || !strings.Contains(auth, `response="`+want+`"`) {
 			t.Fatalf("%s vector: auth=%q err=%v", algorithm, auth, err)
 		}
@@ -355,7 +359,7 @@ func TestResponseMatchesRFC7616Vectors(t *testing.T) {
 	// The no-qop form uses the same RFC credentials and must not emit qop/nc.
 	chal := challenge("MD5", "")
 	hashFunc, _ := hashForAlgorithm("md5")
-	auth, err := responseWithCnonce(req, chal, "Mufasa", "Circle Of Life", "md5", hashFunc, "")
+	auth, err := responseWithCnonce(req, chal, "Mufasa", "Circle Of Life", "md5", hashFunc, "", 1)
 	if err != nil || !strings.Contains(auth, `response="670fd8c2df070c60b045671b8b24ff02"`) || strings.Contains(auth, "qop=") || strings.Contains(auth, "nc=") {
 		t.Fatalf("no-qop vector: auth=%q err=%v", auth, err)
 	}

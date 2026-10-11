@@ -16,6 +16,7 @@ import (
 // Challenge represents a parsed Digest authentication challenge.
 type Challenge struct {
 	Realm     string
+	Domain    string
 	Nonce     string
 	Opaque    string
 	QOP       string
@@ -40,6 +41,7 @@ func ParseChallenge(header string) (*Challenge, error) {
 	}
 	chal := &Challenge{
 		Realm:     params["realm"],
+		Domain:    params["domain"],
 		Nonce:     params["nonce"],
 		Opaque:    params["opaque"],
 		QOP:       params["qop"],
@@ -162,6 +164,11 @@ func validQuotedPair(c byte) bool {
 
 // Response builds an Authorization header value for a Digest challenge.
 func Response(req *http.Request, chal *Challenge, username, password string) (string, error) {
+	return ResponseWithNonceCount(req, chal, username, password, 1)
+}
+
+// ResponseWithNonceCount builds a response for a nonce reused across requests.
+func ResponseWithNonceCount(req *http.Request, chal *Challenge, username, password string, nonceCount uint32) (string, error) {
 	if req == nil || req.URL == nil {
 		return "", fmt.Errorf("digest request has no URL")
 	}
@@ -204,13 +211,13 @@ func Response(req *http.Request, chal *Challenge, username, password string) (st
 		}
 	}
 
-	return responseWithCnonce(req, chal, username, password, algorithm, hashFunc, cnonce)
+	return responseWithCnonce(req, chal, username, password, algorithm, hashFunc, cnonce, nonceCount)
 }
 
 // responseWithCnonce contains the deterministic RFC 7616 calculation. It is
 // kept separate from secure cnonce generation so the calculation can be
 // checked against published vectors without weakening production randomness.
-func responseWithCnonce(req *http.Request, chal *Challenge, username, password, algorithm string, hashFunc func() hash.Hash, cnonce string) (string, error) {
+func responseWithCnonce(req *http.Request, chal *Challenge, username, password, algorithm string, hashFunc func() hash.Hash, cnonce string, nonceCount uint32) (string, error) {
 	uri := req.URL.RequestURI()
 	if uri == "" {
 		uri = "/"
@@ -230,7 +237,7 @@ func responseWithCnonce(req *http.Request, chal *Challenge, username, password, 
 
 	ha2 := hashDigest(hashFunc, req.Method+":"+uri)
 	if qopHasAuth {
-		const nc = "00000001"
+		nc := fmt.Sprintf("%08x", nonceCount)
 		response := hashDigest(hashFunc, ha1+":"+chal.Nonce+":"+nc+":"+cnonce+":auth:"+ha2)
 		return fmt.Sprintf(
 			`Digest username="%s", realm="%s", nonce="%s", uri="%s", algorithm=%s, response="%s", qop=auth, nc=%s, cnonce="%s"`,

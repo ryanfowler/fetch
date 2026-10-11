@@ -333,22 +333,90 @@ func clearAWSHeaders(req *http.Request) {
 	}
 }
 
-const maxDigestStaleRetries = 1
+const (
+	maxDigestStaleRetries = 1
+	// Also bound redirects that continually introduce new challenged targets.
+	maxDigestChallengeRetries = 20
+)
 
 // doOnce performs a request and the bounded Digest challenge-response
 // lifecycle. The client is deliberately supplied by the caller and remains
 // alive while the authenticated response body is consumed. This matters for
 // transports whose response stream is owned by a connection pool.
 func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayableBody) (*http.Response, error) {
-	resp, err := c.Do(req)
-	if err != nil || resp == nil || r.Digest == nil || resp.StatusCode != http.StatusUnauthorized {
+	if r.Digest == nil {
+		return c.Do(req)
+	}
+	if err := c.ValidateTransport(req); err != nil {
+		return nil, err
+	}
+
+	type target struct{ method, uri string }
+	requestTarget := func(next *http.Request) target {
+		return target{next.Method, next.URL.RequestURI()}
+	}
+	type authAttempts struct {
+		authenticated bool
+		staleRetries  int
+	}
+	attempts := make(map[target]authAttempts)
+	type nonceKey struct{ realm, nonce string }
+	nonceCounts := make(map[nonceKey]uint32)
+	makeAuth := func(next *http.Request, chal *digest.Challenge) (string, error) {
+		key := nonceKey{chal.Realm, chal.Nonce}
+		count := nonceCounts[key] + 1
+		auth, err := digest.ResponseWithNonceCount(next, chal, r.Digest.Key, r.Digest.Val, count)
+		if err == nil {
+			nonceCounts[key] = count
+		}
+		return auth, err
+	}
+
+	origin := *req.URL
+	var activeChallenge *digest.Challenge
+	var activeURL *url.URL
+	var activeTarget target
+	var pendingAuth string
+	var observerErr error
+	// This observer runs after the client normalizes redirect methods and bodies.
+	// Install it once so authentication replays do not accumulate signing hooks.
+	req = req.WithContext(client.WithRequestObserver(req.Context(), func(next *http.Request) {
+		if activeChallenge == nil {
+			return
+		}
+		next.Header.Del("Authorization")
+		if observerErr != nil || client.RedirectCrossedOrigin(next) || !client.SameOrigin(&origin, next.URL) {
+			return
+		}
+		if requestTarget(next) != activeTarget && !digestChallengeApplies(activeChallenge, activeURL, next.URL) {
+			return
+		}
+		auth := pendingAuth
+		pendingAuth = ""
+		if auth == "" {
+			auth, observerErr = makeAuth(next, activeChallenge)
+		}
+		if observerErr == nil {
+			next.Header.Set("Authorization", auth)
+		}
+	}))
+	do := func(next *http.Request) (*http.Response, error) {
+		resp, err := c.Do(next)
+		if observerErr != nil {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			return nil, fmt.Errorf("generate redirected digest authorization: %w", observerErr)
+		}
+		return resp, err
+	}
+	resp, err := do(req)
+	if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
 		return resp, err
 	}
 
-	staleRetries := 0
-	authenticatedRetry := false
 	currentReq := req
-	for {
+	for range maxDigestChallengeRetries {
 		wwwAuth := findDigestChallenge(resp.Header)
 		if wwwAuth == "" {
 			return resp, nil
@@ -366,21 +434,23 @@ func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayabl
 		// Digest credentials are scoped to the request origin. A challenge after
 		// a cross-origin redirect must not cause credentials for the original
 		// origin to be sent to the redirected host.
-		if client.RedirectCrossedOrigin(challengedReq) || !client.SameOrigin(req.URL, challengedReq.URL) {
+		if client.RedirectCrossedOrigin(challengedReq) || !client.SameOrigin(&origin, challengedReq.URL) {
 			return resp, nil
 		}
 
-		// A second challenge is useful only when the server explicitly marks its
-		// nonce stale. Limit this path so a hostile server cannot create an
-		// authentication retry loop.
-		if authenticatedRetry {
-			if !strings.EqualFold(strings.TrimSpace(chal.Stale), "true") || staleRetries >= maxDigestStaleRetries {
+		// Each method and request URI gets one challenge exchange and one stale
+		// retry. A redirect to a new target can require a different realm/nonce,
+		// even after preemptive authorization with the previous challenge.
+		key := requestTarget(challengedReq)
+		state := attempts[key]
+		if state.authenticated {
+			if !strings.EqualFold(strings.TrimSpace(chal.Stale), "true") || state.staleRetries >= maxDigestStaleRetries {
 				return resp, nil
 			}
-			staleRetries++
+			state.staleRetries++
 		}
 
-		auth, err := digest.Response(challengedReq, chal, r.Digest.Key, r.Digest.Val)
+		auth, err := makeAuth(challengedReq, chal)
 		if err != nil {
 			return rejectDigestResponse(resp, fmt.Errorf("unsupported digest authentication challenge: %w", err))
 		}
@@ -420,16 +490,43 @@ func doOnce(r *Request, c *client.Client, req *http.Request, replayer *replayabl
 			req2.GetBody = replayer.open
 		}
 		req2.Header.Set("Authorization", auth)
+		activeChallenge, activeURL, activeTarget = chal, challengedReq.URL, key
+		pendingAuth = auth
+		state.authenticated = true
+		attempts[key] = state
 
 		// Keep c alive: callers consume the returned body before their normal
 		// client cleanup runs. Do not create a short-lived client for this retry.
-		resp, err = c.Do(req2)
+		resp, err = do(req2)
 		if err != nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
 			return resp, err
 		}
 		currentReq = req2
-		authenticatedRetry = true
 	}
+	return resp, nil
+}
+
+// digestChallengeApplies implements the RFC 7616 domain prefix rule while
+// retaining fetch's stricter origin boundary, even for absolute domain URIs.
+func digestChallengeApplies(chal *digest.Challenge, challengedURL, nextURL *url.URL) bool {
+	if !client.SameOrigin(challengedURL, nextURL) {
+		return false
+	}
+	domains := strings.Fields(chal.Domain)
+	if len(domains) == 0 {
+		return true
+	}
+	for _, domain := range domains {
+		u, err := url.Parse(domain)
+		if err != nil || u.User != nil || u.Fragment != "" || (!u.IsAbs() && (!strings.HasPrefix(domain, "/") || u.Host != "")) {
+			continue
+		}
+		scope := challengedURL.ResolveReference(u)
+		if client.SameOrigin(scope, nextURL) && strings.HasPrefix(nextURL.RequestURI(), scope.RequestURI()) {
+			return true
+		}
+	}
+	return false
 }
 
 func rejectDigestResponse(resp *http.Response, err error) (*http.Response, error) {

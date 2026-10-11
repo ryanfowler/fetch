@@ -48,6 +48,15 @@ Authorization: Digest username="...", realm="...", nonce="...", uri="...", respo
 
 `fetch` supports MD5, MD5-sess, SHA-256, SHA-256-sess, SHA-512-256, and SHA-512-256-sess. It supports challenges with no `qop` and selects `auth` when it appears in a qop list. `auth-int` and unknown-only qop lists are rejected with a clear diagnostic. Quoted UTF-8 values and quoted-pair escapes are preserved. A challenge response can replay the request body, and a stale nonce is retried once; one-shot bodies such as stdin cannot be replayed for Digest authentication. This authentication replay is separate from transient `--retry` behavior: it can still resend an unsafe method without `--retry-unsafe`.
 
+For same-origin redirects, `fetch` recalculates authorization using the final
+method and URI when the destination is within the challenge's `domain`
+protection space (the whole origin when omitted or empty). Otherwise, it removes
+the old authorization and waits for a destination challenge. Each method and
+request URI permits one challenge response and one stale-nonce retry, with at
+most 20 challenge replays per HTTP attempt. Credentials are never sent across
+an origin boundary, even if `domain` names another origin or a later redirect
+returns to the original origin.
+
 ### Compatibility with curl
 
 `fetch` supports curl's `--digest` flag when using `--from-curl`:
