@@ -29,6 +29,7 @@ const (
 	eKitty
 	eKonsole
 	eMintty
+	eRex
 	eTmux
 	eVSCode
 	eWezTerm
@@ -43,7 +44,7 @@ func (e emulator) Protocol() protocol {
 		return protoBlock
 	case eHyper, eIterm2, eMintty, eWezTerm:
 		return protoInline
-	case eGhostty, eKitty, eKonsole:
+	case eGhostty, eKitty, eKonsole, eRex:
 		return protoKitty
 	default:
 		return protoBlock
@@ -84,6 +85,8 @@ func detectProgramVar() (emulator, bool) {
 		return eIterm2, true
 	case "mintty":
 		return eMintty, true
+	case "rex":
+		return eRex, true
 	case "tmux":
 		return eTmux, true
 	case "vscode":
@@ -110,6 +113,8 @@ func detectTermVar() (emulator, bool) {
 
 func detectCustomVar() (emulator, bool) {
 	switch {
+	case os.Getenv("REX_BIN_DIR") != "":
+		return eRex, true
 	case os.Getenv("GHOSTTY_BIN_DIR") != "":
 		return eGhostty, true
 	case os.Getenv("ITERM_SESSION_ID") != "":
