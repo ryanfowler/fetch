@@ -51,7 +51,7 @@ When `--image external` is selected, these additional formats are supported if y
 
 ### Kitty Graphics Protocol
 
-**Supported terminals**: Kitty, Ghostty, Konsole
+**Supported terminals**: Kitty, Ghostty, Konsole, Rex
 
 The highest quality protocol with full color support and efficient transmission.
 
@@ -77,6 +77,7 @@ Fallback rendering using Unicode block characters (▀▄█). Works everywhere 
 | ---------------- | ---------------------------------------------- |
 | Kitty            | `KITTY_PID` or `TERM=xterm-kitty`              |
 | Ghostty          | `GHOSTTY_BIN_DIR` or `TERM=xterm-ghostty`      |
+| Rex              | `REX_BIN_DIR` or `TERM_PROGRAM=rex`           |
 | iTerm2           | `ITERM_SESSION_ID` or `TERM_PROGRAM=iTerm.app` |
 | WezTerm          | `WEZTERM_EXECUTABLE` or `TERM_PROGRAM=WezTerm` |
 | Konsole          | `KONSOLE_VERSION`                              |
