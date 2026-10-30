@@ -72,8 +72,14 @@ func RenderWithModeTo(ctx context.Context, b []byte, mode core.ImageSetting, dst
 		return writeBlocksTo(img, size.Cols, size.Rows, dst)
 	}
 
-	switch detectEmulator().Protocol() {
+	em := detectEmulator()
+	switch em.Protocol() {
 	case protoInline:
+		// Only enable animation for terminals with confirmed GIF support.
+		// Other inline-protocol implementations still receive a PNG.
+		if em == eIterm2 && isGIF(b) {
+			return writeGIFInlineTo(ctx, b, img, size.WidthPx, size.HeightPx, dst)
+		}
 		return writeInlineTo(img, size.WidthPx, size.HeightPx, dst)
 	case protoKitty:
 		return writeKittyTo(img, size.WidthPx, size.HeightPx, dst)
@@ -85,14 +91,22 @@ func RenderWithModeTo(ctx context.Context, b []byte, mode core.ImageSetting, dst
 var errImageDimensions = errors.New("image dimensions rejected")
 
 func decodeImage(ctx context.Context, b []byte, mode core.ImageSetting) (image.Image, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	img, err := decodeImageStd(b)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
 	if err == nil {
 		return img, nil
 	}
 	// Do not let an adapter bypass the raster safety boundary. Adapters may
 	// convert an unsupported format, but they may not rescue an image whose
 	// declared dimensions or allocation arithmetic is already unsafe.
-	if errors.Is(err, errImageDimensions) {
+	// Recognized GIFs also stay in the built-in decoder: malformed data
+	// must not be handed to a more permissive external parser.
+	if errors.Is(err, errImageDimensions) || isGIF(b) {
 		return nil, err
 	}
 
@@ -112,7 +126,7 @@ func decodeImage(ctx context.Context, b []byte, mode core.ImageSetting) (image.I
 const maxImageDimension = 8192
 
 func decodeImageStd(b []byte) (image.Image, error) {
-	config, _, err := image.DecodeConfig(bytes.NewReader(b))
+	config, format, err := image.DecodeConfig(bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +135,9 @@ func decodeImageStd(b []byte) (image.Image, error) {
 	}
 
 	img, _, err := image.Decode(bytes.NewReader(b))
+	if err == nil && format == "gif" {
+		img = gifStillCanvas(b, config, img)
+	}
 	return img, err
 }
 

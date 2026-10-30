@@ -32,6 +32,7 @@ These formats are decoded without external tools:
 
 - **JPEG** - `.jpg`, `.jpeg`
 - **PNG** - `.png`
+- **GIF** - `.gif` (animated in iTerm2; still frame in other terminals)
 - **TIFF** - `.tiff`, `.tif`
 - **WebP** - `.webp`
 
@@ -41,7 +42,6 @@ When `--image external` is selected, these additional formats are supported if y
 
 - **AVIF** - `.avif`
 - **HEIF/HEIC** - `.heif`, `.heic`
-- **GIF** - `.gif` (static frame)
 - **BMP** - `.bmp`
 - **And many more...**
 
@@ -59,7 +59,9 @@ The highest quality protocol with full color support and efficient transmission.
 
 **Supported terminals**: iTerm2, WezTerm, Hyper, Mintty
 
-Base64-encoded PNG images displayed inline.
+Base64-encoded images displayed inline. In iTerm2, bounded animated GIFs
+play in the terminal without keeping `fetch` running. Other terminals receive
+a still PNG frame.
 
 ### Unicode Block Characters
 
@@ -197,9 +199,30 @@ fetch --image off example.com/image.jpg
 
 `fetch` limits images to 8192x8192 pixels maximum to prevent memory issues. Larger images will fail to decode with a "dimensions are too large" error.
 
+## GIF Safety
+
+GIF rendering uses Go's built-in decoder. It does not run external programs,
+even when an animation is malformed. Before decoding all frames, `fetch`
+checks the animation's block structure and allocation dimensions.
+
+Animation is limited to 128 frames, 8 MiB of source data, 8 MiB of encoded
+output, and 16 Mi canvas pixels summed across all frames.
+The pixel budget counts the full canvas for each frame, even when a frame
+changes only a small rectangle. Animations that exceed these limits, or have
+invalid data after a valid first frame, fall back to a still image.
+
+`fetch` re-encodes animations before sending them to the terminal. This removes
+comments, unrecognized application extensions, and trailing data. Frame
+positions, transparency, disposal methods, and loop counts are preserved.
+Frame delays are at least 100 ms to limit playback to 10 frames per second.
+This does not guarantee that an animation is safe for photosensitive viewers.
+Use `--image off` to disable image display. Terminal security updates remain
+important because the terminal must still decode the generated image.
+
 ## Limitations
 
-- **Animated GIFs**: Only the first frame is displayed
+- **Animated GIFs**: Animation is enabled only in iTerm2 with available terminal pixel dimensions; other cases show the first frame
+- **Animation sizing**: The terminal scales animated GIFs to fit; still images are resized before transmission
 - **Maximum dimensions**: 8192x8192 pixels
 - **Adapter stdout**: External adapter output is capped at 64 MiB
 - **External adapters**: Each adapter has a deadline, does not inherit stdin, and is terminated with its process tree on cancellation
