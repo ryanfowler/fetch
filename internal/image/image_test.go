@@ -66,6 +66,13 @@ func TestDecodeImageExternalUsesAdaptersOnlyWhenExplicit(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("auto mode ran an adapter; marker stat error = %v", err)
 	}
+	// A recognized but malformed GIF must not invoke even opt-in adapters.
+	if _, err := decodeImage(context.Background(), gifBytes(t, 1)[:13], core.ImageExternal); err == nil {
+		t.Fatal("external mode unexpectedly decoded a malformed GIF")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("malformed GIF ran an adapter; marker stat error = %v", err)
+	}
 	img, err := decodeImage(context.Background(), []byte("not an image"), core.ImageExternal)
 	if err != nil {
 		t.Fatalf("external mode error = %v", err)

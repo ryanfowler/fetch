@@ -347,9 +347,11 @@ fetch --color off example.com
 Control image rendering. Values: `auto`, `external`, or `off`. `auto` uses
 built-in decoders only. `external` allows bounded `vips`, `magick`, and
 `ffmpeg` adapters after built-in decoding. The legacy `native` spelling
-remains accepted as an alias for `auto`.
+remains accepted as an alias for `auto`. GIFs animate in iTerm2 when terminal
+pixel dimensions are available and animation safety limits are met. Other
+cases show the first frame. See [Image Rendering](image-rendering.md) for limits.
 
-- `auto` - Use only built-in decoders (JPEG, PNG, TIFF, WebP)
+- `auto` - Use only built-in decoders (JPEG, PNG, GIF, TIFF, WebP)
 - `external` - Try built-in decoders, then bounded external adapters
 - `off` - Disable image rendering
 
