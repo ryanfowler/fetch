@@ -66,8 +66,8 @@ func FormatMarkdownWithOptions(buf []byte, p *core.Printer, options MarkdownOpti
 	rest = truncateMarkdownBlockquoteOpeners(rest)
 
 	mdParser := parser.New(parser.WithExtensions(
-		extension.StrikethroughParser,
-		extension.TableParser,
+		extension.NewStrikethroughParser(),
+		extension.NewTableParser(),
 	))
 	doc := mdParser.Parse(rest)
 
