@@ -13,14 +13,16 @@ import (
 
 // FormatCSV formats the provided CSV data to the Printer.
 func FormatCSV(buf []byte, p *core.Printer) error {
-	err := formatCSV(buf, p)
+	err := formatCSV(buf, p, core.GetTerminalCols())
 	if err != nil {
 		p.Discard()
 	}
 	return err
 }
 
-func formatCSV(buf []byte, p *core.Printer) error {
+// formatCSV uses vertical layout when termCols is positive and the table is
+// wider than termCols.
+func formatCSV(buf []byte, p *core.Printer, termCols int) error {
 	if len(buf) == 0 {
 		return nil
 	}
@@ -51,7 +53,6 @@ func formatCSV(buf []byte, p *core.Printer) error {
 	// Calculate column widths
 	colWidths := calculateColumnWidths(records)
 	totalWidth := calculateTotalWidth(colWidths)
-	termCols := core.GetTerminalCols()
 
 	// Use vertical mode if terminal width is known and content exceeds it
 	if termCols > 0 && totalWidth > termCols && len(records) > 1 {
@@ -64,10 +65,15 @@ func formatCSV(buf []byte, p *core.Printer) error {
 			p.WriteString("\n")
 		}
 		writeRow(p, row, colWidths, i == 0)
+		if err := p.Err(); err != nil {
+			// Stop at the output limit. Padding for a wide column
+			// would otherwise continue for every remaining row.
+			return err
+		}
 	}
 	p.WriteString("\n")
 
-	return nil
+	return p.Err()
 }
 
 // detectDelimiter auto-detects the delimiter from the first line.
@@ -156,10 +162,7 @@ func writeRow(p *core.Printer, row []string, colWidths []int, isHeader bool) {
 		// Add padding for alignment (except for the last column)
 		if j < len(colWidths)-1 {
 			cellWidth := runewidth.StringWidth(cell)
-			padding := colWidths[j] - cellWidth
-			for range padding {
-				p.WriteString(" ")
-			}
+			writeSpaces(p, colWidths[j]-cellWidth)
 		}
 	}
 }
@@ -181,6 +184,10 @@ func writeVertical(p *core.Printer, records [][]string) error {
 			p.WriteString("\n")
 		}
 
+		if err := p.Err(); err != nil {
+			return err
+		}
+
 		// Row separator
 		p.Set(core.Dim)
 		fmt.Fprintf(p, "--- Row %d ---\n", i+1)
@@ -193,10 +200,7 @@ func writeVertical(p *core.Printer, records [][]string) error {
 			}
 
 			// Right-align header using display width
-			padding := maxHeaderWidth - runewidth.StringWidth(header)
-			for range padding {
-				p.WriteString(" ")
-			}
+			writeSpaces(p, maxHeaderWidth-runewidth.StringWidth(header))
 
 			// Header in blue+bold
 			p.Set(core.Blue)
@@ -213,5 +217,5 @@ func writeVertical(p *core.Printer, records [][]string) error {
 		}
 	}
 
-	return nil
+	return p.Err()
 }
