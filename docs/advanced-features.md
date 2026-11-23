@@ -304,10 +304,10 @@ Authenticated discovery failures are fatal; authenticated no-data results may
 fall back. `--ech on` requires an advertised usable configuration, requires
 TLS 1.3, rejects explicit HTTP/3, and uses TCP during automatic version
 selection. Explicit TLS 1.2 bounds are rejected. ECH is not available through
-proxies or cleartext HTTP/2. Real ECH uses Go's `crypto/tls`; auto mode sends a
-fresh randomized GREASE configuration when discovery has no usable config and
-falls back to ordinary TLS after a verified rejection. WSS and `--inspect-tls`
-use the same host-scoped discovery and report whether real ECH was accepted,
+proxies or cleartext HTTP/2. ECH uses Go's `crypto/tls`; auto mode uses
+ordinary TLS when discovery has no usable config and falls back to ordinary
+TLS after a verified rejection. WSS and `--inspect-tls`
+use the same host-scoped discovery and report whether ECH was accepted,
 rejected, or followed by fallback at `-v` and above. HTTP/3 inspection fails closed when a
 rejected handshake does not expose certificate state for verification, unless
 `--insecure` is explicit. At `-vvv`, fetch warns once when discovery

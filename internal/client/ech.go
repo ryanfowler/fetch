@@ -68,7 +68,6 @@ type ECHConnectionConfig struct {
 	targetPort string
 	addresses  []net.IPAddr
 	configured bool
-	grease     bool
 	outerName  string
 }
 
@@ -90,11 +89,14 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 	if mode == core.ECHUnknown || mode == core.ECHOff {
 		return fallback, nil
 	}
+	if cfg.ServerName == "" {
+		cfg.ServerName = core.TLSVerificationName(host)
+	}
 	if res == nil {
 		if mode == core.ECHOn {
 			return nil, ErrECHConfigUnavailable
 		}
-		return configureECHGREASE(fallback)
+		return fallback, nil
 	}
 
 	discovery, err := res.DiscoverHTTPS(ctx, host, uint16(parsedPort), nil)
@@ -106,7 +108,7 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 		if mode == core.ECHOn || resolver.IsAuthenticatedDiscoveryFailure(err) || !resolver.MayDowngrade(err) {
 			return nil, err
 		}
-		return configureECHGREASE(fallback)
+		return fallback, nil
 	}
 
 	candidate := selectECHCandidate(discovery, version)
@@ -114,7 +116,7 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 		if mode == core.ECHOn {
 			return nil, ErrECHConfigUnavailable
 		}
-		return configureECHGREASE(fallback)
+		return fallback, nil
 	}
 	configList, err := resolver.SupportedECHConfigList(candidate.ECH)
 	if err != nil {
@@ -122,9 +124,6 @@ func discoverECHForConnection(ctx context.Context, res *resolver.Resolver, host,
 	}
 	cfg.MinVersion = tls.VersionTLS13
 	cfg.EncryptedClientHelloConfigList = configList
-	if cfg.ServerName == "" {
-		cfg.ServerName = core.TLSVerificationName(host)
-	}
 	outerName, nameErr := resolver.ECHPublicName(configList)
 	if nameErr != nil {
 		return nil, nameErr
@@ -176,10 +175,6 @@ func (c *ECHConnectionConfig) Addresses() []net.IPAddr {
 	}
 	return append([]net.IPAddr(nil), c.addresses...)
 }
-
-// Real reports whether the TLS configuration came from an advertised ECH
-// configuration rather than generated GREASE.
-func (c *ECHConnectionConfig) Real() bool { return c != nil && c.configured && !c.grease }
 
 // Offered reports whether this connection will send an ECH extension.
 func (c *ECHConnectionConfig) Offered() bool { return c != nil && c.configured }
@@ -250,7 +245,7 @@ func newECHHTTPDialTLS(base func(context.Context, string, string) (net.Conn, err
 		if !connection.configured {
 			return dialAndHandshake(connectCtx, base, network, address, connection.tlsConfig)
 		}
-		got, err := dialResolverWithECH(connectCtx, NewResolverDialer(res, timeout), DialRequest{
+		got, err := DialResolverWithECH(connectCtx, NewResolverDialer(res, timeout), DialRequest{
 			Network: "tcp", Host: connection.targetHost, Port: connection.targetPort,
 			OriginHost: host, OriginPort: port, Candidates: connection.addresses,
 		}, connection.tlsConfig, mode)
@@ -276,25 +271,4 @@ func dialAndHandshake(ctx context.Context, base func(context.Context, string, st
 	return dialTLSWithECHPolicy(ctx, func(rawCtx context.Context) (net.Conn, error) {
 		return base(rawCtx, network, address)
 	}, cfg, core.ECHOff)
-}
-
-func configureECHGREASE(fallback *ECHConnectionConfig) (*ECHConnectionConfig, error) {
-	configList, err := GenerateGREASEECHConfigList()
-	if err != nil {
-		return nil, err
-	}
-	cfg := fallback.tlsConfig.Clone()
-	cfg.MinVersion = tls.VersionTLS13
-	cfg.EncryptedClientHelloConfigList = configList
-	if cfg.ServerName == "" {
-		cfg.ServerName = core.TLSVerificationName(fallback.targetHost)
-	}
-	return &ECHConnectionConfig{
-		tlsConfig:  cfg,
-		targetHost: fallback.targetHost,
-		targetPort: fallback.targetPort,
-		configured: true,
-		grease:     true,
-		outerName:  string(greaseECHPublicName),
-	}, nil
 }
