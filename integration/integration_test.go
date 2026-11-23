@@ -936,6 +936,43 @@ func TestMain(t *testing.T) {
 		}
 	})
 
+	t.Run("remote-name ignores redirect target filename", func(t *testing.T) {
+		t.Parallel()
+		const data = "downloaded data"
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/dl/archive.txt" {
+				http.Redirect(w, r, "/x/.bashrc", http.StatusFound)
+				return
+			}
+			w.WriteHeader(200)
+			io.WriteString(w, data)
+		})
+		defer server.Close()
+
+		dir := t.TempDir()
+		const original = "original dotfile"
+		if err := os.WriteFile(filepath.Join(dir, ".bashrc"), []byte(original), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		res := runFetchOpts(t, fetchPath, fetchOpts{dir: dir}, server.URL+"/dl/archive.txt", "-O", "--clobber")
+		assertExitCode(t, 0, res)
+
+		raw, err := os.ReadFile(filepath.Join(dir, "archive.txt"))
+		if err != nil {
+			t.Fatalf("unable to read from output file: %s", err.Error())
+		}
+		if string(raw) != data {
+			t.Fatalf("unexpected data in output file: %s", raw)
+		}
+		raw, err = os.ReadFile(filepath.Join(dir, ".bashrc"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != original {
+			t.Fatalf("redirect target file was overwritten: %s", raw)
+		}
+	})
+
 	t.Run("remote-name ignores content-disposition", func(t *testing.T) {
 		t.Parallel()
 		const data = "file content"

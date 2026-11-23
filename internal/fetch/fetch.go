@@ -122,7 +122,9 @@ type Request struct {
 
 	// responseDescriptor is set internally after proto setup for response formatting.
 	responseDescriptor protoreflect.MessageDescriptor
-	effectiveURL       *url.URL
+	// effectiveURL is the normalized URL of the first request, before any
+	// redirect. fetch sets it before the request is sent.
+	effectiveURL *url.URL
 
 	// harRecorder is reserved before the request starts and records the final
 	// response exchange. It remains private so callers only provide a path.

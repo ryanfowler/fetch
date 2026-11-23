@@ -192,6 +192,7 @@ fetch -o - example.com/file.bin > output.bin
 ### `-O, --remote-name`
 
 Write response body to current directory using the filename from the URL.
+The filename comes from the requested URL, not from the target of a redirect.
 
 **Alias**: `--output-current-dir`
 
@@ -203,7 +204,9 @@ fetch -O example.com/path/to/file.txt  # Creates ./file.txt
 
 Use filename from `Content-Disposition` header. Requires `-O`. The extended
 `filename*` parameter is preferred. Unsafe or malformed names fall back to the
-URL filename with a warning.
+URL filename with a warning. Leading dots are replaced with `_`, so the server
+cannot create a hidden file such as `.bashrc`. With `--clobber`, the server can
+choose to replace any regular file in the current directory.
 
 ```sh
 fetch -O -J example.com/download
