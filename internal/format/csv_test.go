@@ -1,8 +1,11 @@
 package format
 
 import (
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -388,5 +391,73 @@ func TestVerticalModeWithExtraColumns(t *testing.T) {
 	// Should contain the extra value even without a header
 	if !strings.Contains(output, "3") {
 		t.Errorf("output should contain '3' even without header, got: %s", output)
+	}
+}
+
+func TestFormatCSVWideColumnStopsAtOutputLimit(t *testing.T) {
+	// A wide header cell with many short rows needs rows × width padding.
+	// Formatting must stop at the output limit instead of padding every
+	// remaining row one space at a time.
+	var input strings.Builder
+	input.WriteString(strings.Repeat("a", 40000) + ",x\n")
+	for range 40000 {
+		input.WriteString(",b\n")
+	}
+	p := core.TestPrinter(false).NewBoundedWriter(io.Discard, 1<<20, "test")
+	start := time.Now()
+	err := formatCSV([]byte(input.String()), p, 0)
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatCSV() error = %v, want limit error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("FormatCSV() took %v", elapsed)
+	}
+}
+
+func TestVerticalOutputStopsAtOutputLimit(t *testing.T) {
+	records := [][]string{{strings.Repeat("h", 40000), "x"}}
+	for range 40000 {
+		records = append(records, []string{"", "b"})
+	}
+	p := core.TestPrinter(false).NewBoundedWriter(io.Discard, 1<<20, "test")
+	start := time.Now()
+	if err := writeVertical(p, records); !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("writeVertical() error = %v, want limit error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("writeVertical() took %v", elapsed)
+	}
+}
+
+func TestWriteSpaces(t *testing.T) {
+	for _, n := range []int{-1, 0, 1, 255, 256, 257, 1000} {
+		p := core.TestPrinter(false)
+		writeSpaces(p, n)
+		if got, want := string(p.Bytes()), strings.Repeat(" ", max(n, 0)); got != want {
+			t.Errorf("writeSpaces(%d) wrote %q, want %d spaces", n, got, max(n, 0))
+		}
+	}
+}
+
+func TestWriteSpacesStopsAtOutputLimit(t *testing.T) {
+	p := core.TestPrinter(false).NewBoundedWriter(io.Discard, 300, "test")
+	writeSpaces(p, 1000)
+	if !errors.Is(p.Err(), core.ErrLimitExceeded) {
+		t.Fatalf("Err() = %v, want limit error", p.Err())
+	}
+	if n := len(p.Bytes()); n > 300 {
+		t.Fatalf("wrote %d bytes, want at most 300", n)
+	}
+}
+
+func TestFormatCSVAlignsColumnsWiderThanPaddingChunk(t *testing.T) {
+	wide := strings.Repeat("w", 300)
+	p := core.TestPrinter(false)
+	if err := formatCSV([]byte(wide+",b\nx,y\n"), p, 0); err != nil {
+		t.Fatalf("formatCSV() error = %v", err)
+	}
+	want := wide + "  b\n" + "x" + strings.Repeat(" ", 299) + "  y\n"
+	if got := string(p.Bytes()); got != want {
+		t.Fatalf("formatCSV() = %q, want %q", got, want)
 	}
 }
