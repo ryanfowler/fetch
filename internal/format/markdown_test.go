@@ -1,6 +1,7 @@
 package format
 
 import (
+	"io"
 	"strings"
 	"testing"
 
@@ -1015,6 +1016,80 @@ func TestFormatMarkdownCodeBlockDelegation(t *testing.T) {
 	}
 	if !strings.Contains(output, "\"a\"") {
 		t.Errorf("expected output to contain key \"a\", got: %q", output)
+	}
+}
+
+func TestFormatMarkdownDelegationKeepsPriorOutput(t *testing.T) {
+	// fetch renders into a bounded printer whose writer discards flushed
+	// data and then copies the buffered bytes. Article mode renders into
+	// an unbounded printer. Delegating a fenced block must not flush or
+	// discard the output that comes before it.
+	printers := map[string]func() *core.Printer{
+		"bounded":   func() *core.Printer { return core.TestPrinter(false).NewBoundedWriter(io.Discard, 1<<20, "test") },
+		"unbounded": func() *core.Printer { return core.TestPrinter(false).NewWriter(io.Discard) },
+	}
+	blocks := map[string]string{
+		"valid":   "{\n  \"a\": 1\n}",
+		"invalid": `{"a":`,
+	}
+	bodies := map[string]string{"valid": `{"a":1}`, "invalid": `{"a":`}
+	for printerName, newPrinter := range printers {
+		for kind, body := range bodies {
+			t.Run(printerName+"/"+kind, func(t *testing.T) {
+				input := "# Title\n\nImportant paragraph.\n\n```json\n" + body + "\n```\n\nAfter.\n"
+				p := newPrinter()
+				if err := FormatMarkdown([]byte(input), p); err != nil {
+					t.Fatalf("FormatMarkdown() error = %v", err)
+				}
+				got := string(p.Bytes())
+				for _, want := range []string{"Title", "Important paragraph.", "```json", blocks[kind], "After."} {
+					if !strings.Contains(got, want) {
+						t.Errorf("output does not contain %q: %q", want, got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestFormatMarkdownDelegationKeepsColor(t *testing.T) {
+	p := core.TestTerminalPrinter(true)
+	if err := FormatMarkdown([]byte("text\n\n```json\n{\"a\":1}\n```\n"), p); err != nil {
+		t.Fatalf("FormatMarkdown() error = %v", err)
+	}
+	got := string(p.Bytes())
+	if !strings.Contains(got, "\x1b[34m") {
+		t.Fatalf("delegated block lost color: %q", got)
+	}
+}
+
+func TestFormatMarkdownDelegationRespectsOutputLimit(t *testing.T) {
+	// The delegated block must stop at the remaining output budget of the
+	// destination printer. Here the formatted JSON does not fit, but the
+	// raw block does, so the renderer falls back to the raw block.
+	raw := "[" + strings.Repeat("1,", 299) + "1]"
+	input := "intro\n\n```json\n" + raw + "\n```\n"
+	p := core.TestPrinter(false).NewBoundedWriter(io.Discard, 1024, "test")
+	if err := FormatMarkdown([]byte(input), p); err != nil {
+		t.Fatalf("FormatMarkdown() error = %v", err)
+	}
+	if err := p.Err(); err != nil {
+		t.Fatalf("printer error = %v", err)
+	}
+	if got := string(p.Bytes()); !strings.Contains(got, raw) {
+		t.Fatalf("output does not contain the raw block: %q", got)
+	}
+}
+
+func TestPrinterNewBufferUsesRemainingBudget(t *testing.T) {
+	p := core.TestPrinter(false).NewBoundedWriter(io.Discard, 10, "test")
+	p.WriteString("123456")
+	buffer := p.NewBuffer()
+	if _, err := buffer.WriteString("12345"); err == nil {
+		t.Fatal("buffer accepted more than the remaining budget")
+	}
+	if _, err := p.NewBuffer().WriteString("1234"); err != nil {
+		t.Fatalf("buffer rejected the remaining budget: %v", err)
 	}
 }
 
