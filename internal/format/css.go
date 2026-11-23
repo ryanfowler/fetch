@@ -308,13 +308,12 @@ func FormatCSSIndented(buf []byte, p *core.Printer, baseIndent int) error {
 		err = out.Err()
 	}
 	if err != nil {
-		p.Discard()
+		// p is unchanged: the output was built in a separate buffer. Do
+		// not Discard p, because an HTML caller holds earlier output in it.
 		return err
 	}
+	// Write is all or nothing, so p is unchanged when it fails.
 	_, err = p.Write(out.Bytes())
-	if err != nil {
-		p.Discard()
-	}
 	return err
 }
 

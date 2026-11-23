@@ -51,12 +51,17 @@ func FormatMarkdownWithOptions(buf []byte, p *core.Printer, options MarkdownOpti
 
 	frontMatter, rest := extractFrontMatter(buf)
 	if frontMatter != nil {
-		if err := FormatYAML(frontMatter, p); err != nil {
-			// FormatYAML calls Discard on error, so fall through to
-			// render the original buffer as plain markdown.
+		// FormatYAML calls Discard on error. A separate buffer keeps
+		// that from erasing output that p already holds.
+		block := p.NewBuffer()
+		if err := FormatYAML(frontMatter, block); err != nil {
+			// Render the original buffer as plain markdown.
 			rest = buf
-		} else if len(rest) > 0 {
-			p.WriteString("\n\n")
+		} else {
+			p.Write(block.Bytes())
+			if len(rest) > 0 {
+				p.WriteString("\n\n")
+			}
 		}
 	}
 
@@ -955,17 +960,21 @@ func (r *mdRenderer) renderFencedCodeBlock(v *ast.CodeBlock) (ast.WalkStatus, er
 		lines = append(lines, line)
 	}
 
-	// Try to delegate to a known formatter. Flush before delegating so
-	// that a formatter's Discard on error cannot erase prior output.
-	// Skip delegation inside blockquotes since delegated formatters
-	// cannot emit blockquote prefixes.
+	// Try to delegate to a known formatter. The formatter writes to a
+	// separate buffer, because it calls Discard on error and that must
+	// not erase the output rendered before this block. Flushing r.printer
+	// instead would send that output to its writer, which can be a sink
+	// that discards it. The buffer has the remaining output budget of
+	// r.printer, so a large block fails as early as before. Skip delegation inside blockquotes since delegated
+	// formatters cannot emit blockquote prefixes.
 	delegated := false
 	if lang != "" && len(lines) > 0 && r.bqDepth == 0 {
 		content := strings.Join(lines, "\n")
 		if formatter := getFormatterForLang(lang); formatter != nil {
-			r.printer.Flush()
-			if err := formatter([]byte(content), r.printer); err == nil {
+			block := r.printer.NewBuffer()
+			if err := formatter([]byte(content), block); err == nil {
 				delegated = true
+				r.printer.Write(block.Bytes())
 				r.lineWidth = 0
 				if len(content) > 0 && content[len(content)-1] != '\n' {
 					r.writeString("\n")

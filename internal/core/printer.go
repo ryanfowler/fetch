@@ -89,6 +89,21 @@ func (p *Printer) NewBoundedWriter(w io.Writer, max int64, subsystem string) *Pr
 	}
 }
 
+// NewBuffer returns an empty printer with the same color policy as p. Use it
+// to build output that is appended to p only on success. When p is bounded,
+// the buffer accepts at most the bytes that p can still accept, so a
+// formatter stops at the same point that it would stop when it writes to p.
+// The buffer never writes to an underlying file; read its output with Bytes.
+func (p *Printer) NewBuffer() *Printer {
+	buffer := p.NewWriter(io.Discard)
+	if p.bounded {
+		buffer.bounded = true
+		buffer.limitName = p.limitName
+		buffer.maxBytes = max(p.maxBytes-p.accepted, 0)
+	}
+	return buffer
+}
+
 // Printer allows for writing data with optional ANSI escape sequences based on
 // the color settings for a target.
 type Printer struct {
