@@ -351,6 +351,8 @@ fetch -O example.com/files/document.pdf
 # Creates ./document.pdf
 ```
 
+The filename comes from the requested URL. A redirect does not change it.
+
 ### `-J, --remote-header-name`
 
 Use filename from `Content-Disposition` header:
@@ -363,7 +365,10 @@ fetch -O -J example.com/download
 The extended `filename*` parameter is preferred. Server-provided names are
 restricted to one safe filename component. Path separators, control characters,
 Windows device names, and alternate-data-stream syntax are removed or rejected.
-Malformed or missing header names fall back to the URL filename with a warning.
+Leading dots are replaced with `_`, so the server cannot create a hidden file.
+The server still chooses the name. With `--clobber`, it can replace any regular
+file in the current directory, so combine `-J` and `--clobber` only for trusted
+servers. Malformed or missing header names fall back to the URL filename with a warning.
 Downloads use an exclusive temporary file and an atomic commit. Existing
 symlink destinations are rejected, including with `--clobber`.
 

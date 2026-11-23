@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -403,5 +404,56 @@ func TestWriteOutputToFile_DoesNotOverwriteExistingFileWithoutClobber(t *testing
 	}
 	if string(data) != "old" {
 		t.Fatalf("output file = %q, want %q", data, "old")
+	}
+}
+
+func TestRemoteNameUsesRequestedURLNotRedirectTarget(t *testing.T) {
+	t.Chdir(t.TempDir())
+	final, err := url.Parse("https://example.com/x/.bashrc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for requestedURL, want := range map[string]string{
+		"https://example.com/dl/archive.tar.gz":         "archive.tar.gz",
+		"https://example.com/dl/archive.tar.gz?token=x": "archive.tar.gz",
+		"https://example.com/":                          "example.com",
+	} {
+		requested, err := url.Parse(requestedURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := &Request{RemoteName: true, effectiveURL: requested}
+		resp := &http.Response{Request: &http.Request{URL: final}, Header: http.Header{}}
+		name, err := getOutputValue(r, resp)
+		if err != nil {
+			t.Fatalf("%s: %v", requestedURL, err)
+		}
+		if name != want {
+			t.Errorf("%s: output name = %q, want %q", requestedURL, name, want)
+		}
+	}
+}
+
+func TestRemoteHeaderNameCannotCreateHiddenFile(t *testing.T) {
+	t.Chdir(t.TempDir())
+	requested, err := url.Parse("https://example.com/download")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &Request{RemoteName: true, RemoteHeaderName: true, effectiveURL: requested}
+	for header, want := range map[string]string{
+		`attachment; filename=".bashrc"`:         "_bashrc",
+		`attachment; filename="..npmrc"`:         "__npmrc",
+		`attachment; filename="report.v1"`:       "report.v1",
+		`attachment; filename*=UTF-8''%2Ebashrc`: "_bashrc",
+	} {
+		resp := &http.Response{Header: http.Header{"Content-Disposition": {header}}}
+		name, err := getOutputValue(r, resp)
+		if err != nil {
+			t.Fatalf("%s: %v", header, err)
+		}
+		if name != want {
+			t.Errorf("%s: output name = %q, want %q", header, name, want)
+		}
 	}
 }

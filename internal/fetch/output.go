@@ -132,16 +132,17 @@ func getOutputValueDetails(r *Request, resp *http.Response) (string, string, err
 		cdName, valid := getContentDispositionFilenameDetails(headers)
 		if valid {
 			filename, _ = sanitizeFilename(cdName)
+			filename = unhideFilename(filename)
 		}
 		if filename == "" {
 			warning = "unable to use the Content-Disposition filename; falling back to the URL filename"
 		}
 	}
 
-	requestURL := (*url.URL)(nil)
-	if resp != nil && resp.Request != nil {
-		requestURL = resp.Request.URL
-	}
+	// Use the URL that the user requested, not the final URL after
+	// redirects. Otherwise a redirect could choose any local filename,
+	// such as ".bashrc".
+	requestURL := r.effectiveURL
 	if filename == "" && requestURL != nil {
 		path := requestURL.Path
 		for path != "" {
@@ -199,6 +200,14 @@ func checkOutputFile(filename string, clobber bool) error {
 }
 
 const maxOutputFilenameBytes = 255
+
+// unhideFilename replaces the leading dots of a server-supplied filename with
+// underscores, so that the server cannot create a hidden file such as
+// ".bashrc" or ".npmrc" in the current directory.
+func unhideFilename(filename string) string {
+	trimmed := strings.TrimLeft(filename, ".")
+	return strings.Repeat("_", len(filename)-len(trimmed)) + trimmed
+}
 
 func sanitizeFilename(filename string) (string, error) {
 	// Treat both separators as path separators even on Unix. Content-Disposition
