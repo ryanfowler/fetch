@@ -18,7 +18,6 @@ var errECHNotAccepted = errors.New("ECH handshake completed without ECH acceptan
 // to interpret it.
 type ECHHandshakeInfo struct {
 	Offered         bool
-	Real            bool
 	Accepted        bool
 	Rejected        bool
 	Fallback        bool
@@ -37,16 +36,12 @@ type ECHHandshakeInfo struct {
 // downgrade rules. rawDial must create a new TCP connection on every call:
 // TLS connections that return ECHRejectionError cannot be reused for a retry.
 func dialTLSWithECHPolicy(ctx context.Context, rawDial func(context.Context) (net.Conn, error), base *tls.Config, mode core.ECHMode) (net.Conn, error) {
-	conn, _, err := dialTLSWithECHPolicyInfo(ctx, rawDial, base, mode, false)
+	conn, _, err := dialTLSWithECHPolicyInfoAndFallback(ctx, rawDial, base, mode, nil)
 	return conn, err
 }
 
-func dialTLSWithECHPolicyInfo(ctx context.Context, rawDial func(context.Context) (net.Conn, error), base *tls.Config, mode core.ECHMode, real bool) (net.Conn, ECHHandshakeInfo, error) {
-	return dialTLSWithECHPolicyInfoAndFallback(ctx, rawDial, base, mode, real, nil)
-}
-
-func dialTLSWithECHPolicyInfoAndFallback(ctx context.Context, rawDial func(context.Context) (net.Conn, error), base *tls.Config, mode core.ECHMode, real bool, allowsFallback func(tls.ConnectionState) bool) (net.Conn, ECHHandshakeInfo, error) {
-	info := ECHHandshakeInfo{Real: real}
+func dialTLSWithECHPolicyInfoAndFallback(ctx context.Context, rawDial func(context.Context) (net.Conn, error), base *tls.Config, mode core.ECHMode, allowsFallback func(tls.ConnectionState) bool) (net.Conn, ECHHandshakeInfo, error) {
+	var info ECHHandshakeInfo
 	if base != nil {
 		info.Offered = len(base.EncryptedClientHelloConfigList) > 0
 		info.OuterServerName = base.ServerName
@@ -142,9 +137,8 @@ func dialTLSWithECHPolicyInfoAndFallback(ctx context.Context, rawDial func(conte
 			return nil, info, err
 		}
 
-		// A verified rejection is the expected result of a GREASE offer and is
-		// also a permitted outcome for auto mode when a real configuration is
-		// stale. Retry ordinary TLS exactly once, using the same context and
+		// A verified rejection is a permitted outcome for auto mode when an
+		// advertised configuration is stale. Retry ordinary TLS exactly once, using the same context and
 		// therefore the same connect budget. No certificate error reaches this
 		// branch by default: crypto/tls verifies the outer ECH provider before
 		// returning an ECHRejectionError, even when InsecureSkipVerify is set.
@@ -156,22 +150,12 @@ func dialTLSWithECHPolicyInfoAndFallback(ctx context.Context, rawDial func(conte
 	}
 }
 
-// dialResolverWithECH uses the resolver-aware address race while keeping ECH
+// DialResolverWithECH uses the resolver-aware address race while keeping ECH
 // retries inside each address attempt. This is needed because a rejected ECH
 // handshake requires a fresh TCP connection and must not make the resolver
-// race restart from scratch.
-func dialResolverWithECH(ctx context.Context, dialer *ResolverDialer, request DialRequest, cfg *tls.Config, mode core.ECHMode) (DialResult, error) {
-	return dialResolverWithECHInfo(ctx, dialer, request, cfg, mode, false)
-}
-
-// DialResolverWithECH performs a resolver-aware TLS connection and returns
-// ECH outcome metadata for inspection callers. real must be true when cfg was
-// built from an advertised ECHConfigList and false for GREASE.
-func DialResolverWithECH(ctx context.Context, dialer *ResolverDialer, request DialRequest, cfg *tls.Config, mode core.ECHMode, real bool) (DialResult, error) {
-	return dialResolverWithECHInfo(ctx, dialer, request, cfg, mode, real)
-}
-
-func dialResolverWithECHInfo(ctx context.Context, dialer *ResolverDialer, request DialRequest, cfg *tls.Config, mode core.ECHMode, real bool) (DialResult, error) {
+// race restart from scratch. The result includes ECH outcome metadata for
+// inspection callers.
+func DialResolverWithECH(ctx context.Context, dialer *ResolverDialer, request DialRequest, cfg *tls.Config, mode core.ECHMode) (DialResult, error) {
 	if dialer == nil {
 		return DialResult{}, errors.New("ECH resolver dialer is nil")
 	}
@@ -222,7 +206,7 @@ func dialResolverWithECHInfo(ctx context.Context, dialer *ResolverDialer, reques
 		address := core.JoinIPHostPort(ip, port)
 		conn, info, err := dialTLSWithECHPolicyInfoAndFallback(attemptCtx, func(rawCtx context.Context) (net.Conn, error) {
 			return baseDial(rawCtx, network, address)
-		}, cfg, mode, real, request.ECHRejectionAllowsFallback)
+		}, cfg, mode, request.ECHRejectionAllowsFallback)
 		return conn, info, err
 	}
 	result, err := dialer.Dial(ctx, request)

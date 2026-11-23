@@ -213,13 +213,30 @@ func TestAcceptedECHUsesOriginSNI(t *testing.T) {
 	state := &tls.ConnectionState{ServerName: "outer.example", ECHAccepted: true}
 	p := newTestPrinter()
 	renderConnection(p, state, &client.ECHHandshakeInfo{
-		Offered: true, Real: true, Accepted: true, OuterServerName: "outer.example",
+		Offered: true, Accepted: true, OuterServerName: "outer.example",
 	}, connectionInfo{
 		OriginHost: "inner.example", ServerName: "inner.example", Verbosity: core.VVerbose,
 	})
 	out := string(p.Bytes())
 	if !strings.Contains(out, "SNI: inner.example") || !strings.Contains(out, "Outer SNI: outer.example") {
 		t.Fatalf("accepted ECH SNI output = %q", out)
+	}
+}
+
+func TestECHInspectionStatus(t *testing.T) {
+	tests := []struct {
+		info client.ECHHandshakeInfo
+		want string
+	}{
+		{info: client.ECHHandshakeInfo{Offered: true}, want: "offered"},
+		{info: client.ECHHandshakeInfo{Offered: true, Accepted: true}, want: "accepted"},
+		{info: client.ECHHandshakeInfo{Offered: true, Rejected: true}, want: "rejected"},
+		{info: client.ECHHandshakeInfo{Offered: true, Rejected: true, Fallback: true}, want: "rejected (fallback)"},
+	}
+	for _, test := range tests {
+		if got := echInspectionStatus(&test.info); got != test.want {
+			t.Errorf("echInspectionStatus(%+v) = %q, want %q", test.info, got, test.want)
+		}
 	}
 }
 

@@ -30,12 +30,12 @@ func TestDialResolverWithECHUsesResolveOriginPort(t *testing.T) {
 		return nil, errors.New("stop before TLS")
 	}
 
-	_, err := dialResolverWithECHInfo(context.Background(), dialer, DialRequest{
+	_, err := DialResolverWithECH(context.Background(), dialer, DialRequest{
 		Network: "tcp", Host: "edge.test", Port: "8443", OriginHost: "origin.test", OriginPort: "0443",
 		Resolver: res, Candidates: []net.IPAddr{{IP: net.ParseIP("192.0.2.11")}},
-	}, &tls.Config{}, core.ECHOff, false)
+	}, &tls.Config{}, core.ECHOff)
 	if err == nil {
-		t.Fatal("dialResolverWithECHInfo succeeded, want test dial failure")
+		t.Fatal("DialResolverWithECH succeeded, want test dial failure")
 	}
 	if dialed != "192.0.2.10:443" {
 		t.Fatalf("dial address = %q, want 192.0.2.10:443", dialed)
@@ -100,6 +100,11 @@ func TestDialTLSWithECHPolicyAcceptsRealECH(t *testing.T) {
 
 func echTestCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
+	return echTestCertificateFor(t, "public.example", "secret.example")
+}
+
+func echTestCertificateFor(t *testing.T, dnsNames ...string) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +112,7 @@ func echTestCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "fetch ECH test"},
-		DNSNames:     []string{"public.example", "secret.example"},
+		DNSNames:     dnsNames,
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -130,16 +135,16 @@ func echTestCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
 
 func testECHConfig(id byte, publicKey []byte, publicName string) []byte {
 	contents := []byte{id}
-	contents = appendUint16(contents, greaseECHKEM)
+	contents = appendUint16(contents, testECHKEM)
 	contents = appendUint16(contents, uint16(len(publicKey)))
 	contents = append(contents, publicKey...)
 	contents = appendUint16(contents, 4)
-	contents = appendUint16(contents, greaseECHKDF)
-	contents = appendUint16(contents, greaseECHAES128GCM)
+	contents = appendUint16(contents, testECHKDF)
+	contents = appendUint16(contents, testECHAES128GCM)
 	contents = append(contents, 32, byte(len(publicName)))
 	contents = append(contents, []byte(publicName)...)
 	contents = appendUint16(contents, 0)
-	config := appendUint16(nil, greaseECHVersion)
+	config := appendUint16(nil, testECHVersion)
 	config = appendUint16(config, uint16(len(contents)))
 	config = append(config, contents...)
 	return config

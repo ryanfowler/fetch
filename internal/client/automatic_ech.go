@@ -76,7 +76,7 @@ func (t *automaticHTTP3Transport) dialAutomaticECHTCP(ctx context.Context, origi
 	if service.TargetName.String() != "" && service.TargetName.String() != "." {
 		host = service.TargetName.String()
 	}
-	got, err := dialResolverWithECH(ctx, t.dialer, DialRequest{
+	got, err := DialResolverWithECH(ctx, t.dialer, DialRequest{
 		Network:    "tcp",
 		Host:       host,
 		Port:       port,

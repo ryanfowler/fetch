@@ -55,7 +55,7 @@ Inspection completes the handshake even when certificate verification fails,
 then reports the verification error and returns nonzero. Use
 `--insecure` only when you want to ignore that reported failure. With `--http 3`,
 TLS inspection uses QUIC and reports an unavailable cipher suite rather than
-guessing. ECH inspection reports real or GREASE acceptance and fallback. Do not
+guessing. ECH inspection reports acceptance, rejection, and fallback. Do not
 use `--insecure` as a generic workaround.
 If a private CA is expected, identify and use the intended CA configuration; only
 use `--insecure` when explicitly requested or clearly required and explain the risk.

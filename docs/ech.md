@@ -4,11 +4,11 @@
 Control it with `--ech off|auto|on`.
 
 - `off` is the default. It does not query HTTPS/SVCB records only for ECH and
-  does not send ECH or GREASE.
+  does not send ECH.
 - `auto` discovers HTTPS/SVCB records with address resolution. It uses a valid
-  advertised ECH configuration when available. When no real configuration is
-  usable, it may send structurally valid randomized GREASE and falls back to
-  ordinary TLS after a verified rejection.
+  advertised ECH configuration when available. When no configuration is
+  usable, it uses ordinary TLS. When the server rejects an advertised
+  configuration, it falls back to ordinary TLS after a verified rejection.
 - `on` requires a usable advertised configuration and an accepted ECH
   handshake. It fails on missing configuration, discovery failure, or rejection.
 
@@ -38,10 +38,9 @@ fetch --inspect-dns --dns-server https://1.1.1.1/dns-query example.com
 fetch --inspect-tls --ech auto https://example.com
 ```
 
-TLS inspection reports real ECH acceptance or rejection, GREASE offer and
-rejection, outer SNI, and final fallback when the rejection can be verified.
-The `-v` flag has no effect in TLS inspection mode. If
-QUIC cannot expose a rejected handshake's certificate state, inspection fails
+TLS inspection reports ECH acceptance or rejection, outer SNI, and final
+fallback when the rejection can be verified. The `-v` flag has no effect in TLS
+inspection mode. If QUIC cannot expose a rejected handshake's certificate state, inspection fails
 closed instead of downgrading (unless `--insecure` is explicit). DNS inspection
 displays ECH bytes as base64. Terminal diagnostics escape untrusted values.
 

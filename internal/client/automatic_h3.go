@@ -958,13 +958,6 @@ func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, c
 	if len(candidate.ech) > 0 && (t.ech == core.ECHAuto || t.ech == core.ECHOn) {
 		baseTLSConfig.MinVersion = tls.VersionTLS13
 		baseTLSConfig.EncryptedClientHelloConfigList = append([]byte(nil), candidate.ech...)
-	} else if t.ech == core.ECHAuto {
-		configList, greaseErr := GenerateGREASEECHConfigList()
-		if greaseErr != nil {
-			return nil, nil, DialTiming{}, greaseErr
-		}
-		baseTLSConfig.MinVersion = tls.VersionTLS13
-		baseTLSConfig.EncryptedClientHelloConfigList = configList
 	}
 	baseTLSConfig.NextProtos = []string{http3.NextProtoH3}
 	if baseTLSConfig.ServerName == "" {

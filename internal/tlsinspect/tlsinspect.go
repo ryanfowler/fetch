@@ -211,7 +211,7 @@ func InspectWithError(ctx context.Context, output, errorOutput *core.Printer, cf
 			if quicResult.OuterServerName != "" {
 				outerName = quicResult.OuterServerName
 			}
-			info = &client.ECHHandshakeInfo{Offered: echConfig.Offered(), Real: echConfig.Real(), Accepted: state, Rejected: echConfig.Offered() && !state, Fallback: quicResult.Fallback, OuterServerName: outerName}
+			info = &client.ECHHandshakeInfo{Offered: echConfig.Offered(), Accepted: state, Rejected: echConfig.Offered() && !state, Fallback: quicResult.Fallback, OuterServerName: outerName}
 		}
 		verificationName := connectionVerificationName(quicResult.State, host)
 		verification := verifyConnection(quicResult.State, tlsConfig, verificationName)
@@ -264,7 +264,7 @@ func InspectWithError(ctx context.Context, output, errorOutput *core.Printer, cf
 	}
 	var result client.DialResult
 	if echConfig != nil {
-		result, err = client.DialResolverWithECH(ctx, dialer, dialRequest, tlsConfig, cfg.ECH, echConfig.Real())
+		result, err = client.DialResolverWithECH(ctx, dialer, dialRequest, tlsConfig, cfg.ECH)
 	} else {
 		result, err = dialer.Dial(ctx, dialRequest)
 	}
@@ -356,7 +356,7 @@ func inspectQUICWithECHFallback(ctx context.Context, res *resolver.Resolver, add
 		return result, nil
 	}
 	// A server may reject ECH with an explicit TLS error, or complete the
-	// outer handshake without accepting a GREASE offer. Auto mode retries the
+	// outer handshake without accepting the offer. Auto mode retries the
 	// same inspection target without ECH, while preserving the shared context.
 	fallbackResult, fallbackErr := inspectQUICAttempt(ctx, res, addr, candidates, fallbackTLS)
 	fallbackResult.Fallback = true
@@ -702,14 +702,10 @@ func writeVerboseInspectionField(p *core.Printer, label, value string) {
 func echInspectionStatus(info *client.ECHHandshakeInfo) string {
 	status := "offered"
 	switch {
-	case info.Accepted && info.Real:
-		status = "accepted (real)"
 	case info.Accepted:
-		status = "accepted (GREASE)"
-	case info.Fallback && info.Real:
-		status = "rejected (real/fallback)"
+		status = "accepted"
 	case info.Fallback:
-		status = "rejected (GREASE/fallback)"
+		status = "rejected (fallback)"
 	case info.Rejected:
 		status = "rejected"
 	}
