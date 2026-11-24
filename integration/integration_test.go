@@ -1244,6 +1244,25 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, "ok")
 	})
 
+	t.Run("connect timeout excludes response wait before a redirect", func(t *testing.T) {
+		t.Parallel()
+		target := startServer(func(w http.ResponseWriter, r *http.Request) {
+			io.WriteString(w, "ok")
+		})
+		defer target.Close()
+		// The first response takes longer than the connect timeout. The
+		// redirect needs a new connection to another server.
+		slow := startServer(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(700 * time.Millisecond)
+			http.Redirect(w, r, target.URL, http.StatusFound)
+		})
+		defer slow.Close()
+
+		res := runFetch(t, fetchPath, slow.URL, "--connect-timeout", "0.5")
+		assertExitCode(t, 0, res)
+		assertBufEquals(t, res.stdout, "ok")
+	})
+
 	t.Run("connect timeout invalid", func(t *testing.T) {
 		t.Parallel()
 		res := runFetch(t, fetchPath, "http://localhost", "--connect-timeout", "-1")

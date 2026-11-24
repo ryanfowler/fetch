@@ -161,15 +161,8 @@ func reflectionContext(ctx context.Context, r *Request) (context.Context, contex
 	if err != nil {
 		return nil, nil, err
 	}
-	connectBudget, err := core.NewBudget(r.ConnectTimeout)
-	if err != nil {
-		return nil, nil, err
-	}
 	operationCtx, cancel := requestBudget.WithContext(ctx, "gRPC reflection")
-	if connectBudget.Limited() {
-		operationCtx = client.WithConnectBudget(operationCtx, connectBudget)
-	}
-	return operationCtx, cancel, nil
+	return client.WithConnectTimeout(operationCtx, r.ConnectTimeout), cancel, nil
 }
 
 func (rc *reflectionClient) ListServices(ctx context.Context) ([]string, error) {

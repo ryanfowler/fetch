@@ -92,12 +92,6 @@ func (b Budget) TimeoutError(phase string) error {
 	return TimeoutError{Duration: b.timeout, Phase: phase}
 }
 
-// ConnectionTimeoutError returns the connection-scoped form of the budget
-// error while retaining the same absolute deadline.
-func (b Budget) ConnectionTimeoutError(phase string) error {
-	return TimeoutError{Duration: b.timeout, Phase: phase, Connection: true}
-}
-
 // Check reports a timeout when the budget is exhausted. It is an explicit
 // checkpoint for operations that do not yet derive a context.
 func (b Budget) Check(phase string) error {
@@ -128,16 +122,6 @@ func (b Budget) ErrAt(now time.Time, phase string) error {
 // WithContext derives a cancellable context that observes this budget. If a
 // parent deadline is earlier, it is preserved rather than being reset.
 func (b Budget) WithContext(parent context.Context, phase string) (context.Context, context.CancelFunc) {
-	return b.withContext(parent, phase, false)
-}
-
-// WithConnectionContext derives a context whose timeout is reported as a
-// connection timeout. It shares the same absolute deadline as WithContext.
-func (b Budget) WithConnectionContext(parent context.Context, phase string) (context.Context, context.CancelFunc) {
-	return b.withContext(parent, phase, true)
-}
-
-func (b Budget) withContext(parent context.Context, phase string, connection bool) (context.Context, context.CancelFunc) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -147,14 +131,7 @@ func (b Budget) withContext(parent context.Context, phase string, connection boo
 	if parentDeadline, ok := parent.Deadline(); ok && !b.deadline.Before(parentDeadline) {
 		return context.WithCancel(parent)
 	}
-
-	var cause error
-	if connection {
-		cause = b.ConnectionTimeoutError(phase)
-	} else {
-		cause = b.TimeoutError(phase)
-	}
-	return context.WithDeadlineCause(parent, b.deadline, cause)
+	return context.WithDeadlineCause(parent, b.deadline, b.TimeoutError(phase))
 }
 
 // Child returns a budget view with the same immutable deadline. The phase is

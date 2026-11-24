@@ -445,7 +445,7 @@ Can also be configured per-host in the [configuration file](configuration.md).
 
 ### `--connect-timeout SECONDS`
 
-Timeout for the connection phase (DNS resolution, TCP connect, TLS handshake) in seconds. Accepts decimal values. Independent of `--timeout`, which covers the entire request.
+Timeout for the connection phase (DNS resolution, proxy setup, TCP connect, TLS handshake) in seconds. Accepts decimal values. Redirects and retries share this limit, but only time spent establishing connections counts against it. Time spent waiting for a response does not count. Independent of `--timeout`, which covers the entire request.
 
 ```sh
 fetch --connect-timeout 5 example.com

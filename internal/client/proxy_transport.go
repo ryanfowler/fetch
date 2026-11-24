@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/resolver"
@@ -40,19 +41,21 @@ func httpsProxyAsHTTP(proxy *url.URL) *url.URL {
 func newHTTPSProxyDialer(base func(context.Context, string, string) (net.Conn, error), proxy *url.URL, timeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
 	proxyTLS := proxyTLSConfig(proxy)
 	return func(ctx context.Context, network, _ string) (net.Conn, error) {
-		connectCtx, cancel := connectContext(ctx, timeout, "HTTPS proxy connect")
-		defer cancel()
+		connectCtx, endAttempt := connectContext(ctx, timeout, "HTTPS proxy connect")
 		address := canonicalProxyAddress(proxy)
 		conn, err := base(connectCtx, network, address)
 		if err != nil {
+			endAttempt()
 			return nil, err
 		}
 		tlsConn := tls.Client(conn, proxyTLS.Clone())
 		if err := tlsConn.HandshakeContext(connectCtx); err != nil {
 			_ = conn.Close()
+			endAttempt()
 			return nil, fmt.Errorf("HTTPS proxy TLS handshake: %w", err)
 		}
-		return newConnectDeadlineConn(tlsConn, connectCtx), nil
+		// The attempt continues through the CONNECT request and origin TLS.
+		return newConnectDeadlineConn(tlsConn, connectCtx, endAttempt), nil
 	}
 }
 
@@ -141,8 +144,13 @@ func newSOCKS5Dialer(base func(context.Context, string, string) (net.Conn, error
 }
 
 func dialSOCKSConnection(ctx context.Context, base func(context.Context, string, string) (net.Conn, error), proxy *url.URL, destination socksDestination, timeout time.Duration) (net.Conn, error) {
-	connectCtx, cancel := connectContext(ctx, timeout, "SOCKS5 proxy connect")
-	defer cancel()
+	connectCtx, endAttempt := connectContext(ctx, timeout, "SOCKS5 proxy connect")
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			endAttempt()
+		}
+	}()
 	proxyConn, err := base(connectCtx, "tcp", canonicalProxyAddress(proxy))
 	if err != nil {
 		return nil, err
@@ -157,9 +165,12 @@ func dialSOCKSConnection(ctx context.Context, base func(context.Context, string,
 		case <-stop:
 		}
 	}()
+	var finishOnce sync.Once
 	finish := func() {
-		close(stop)
-		<-exited
+		finishOnce.Do(func() {
+			close(stop)
+			<-exited
+		})
 	}
 	defer finish()
 
@@ -175,8 +186,13 @@ func dialSOCKSConnection(ctx context.Context, base func(context.Context, string,
 		return nil, err
 	}
 	// net/http performs origin TLS after DialContext returns. Retain the
-	// establishment deadline until its first application write clears it.
-	return newConnectDeadlineConn(proxyConn, connectCtx), nil
+	// establishment deadline and the attempt until its first application
+	// write clears them.
+	// Stop the watcher first: newConnectDeadlineConn can end the attempt,
+	// which cancels connectCtx, and the watcher would then close proxyConn.
+	finish()
+	handedOff = true
+	return newConnectDeadlineConn(proxyConn, connectCtx, endAttempt), nil
 }
 
 type socksDestination struct {

@@ -2409,13 +2409,9 @@ func TestNewClientUsesProxyFromEnvironment(t *testing.T) {
 }
 
 func TestConnectContextUsesEarlierRequestDeadline(t *testing.T) {
-	budget, err := core.NewBudget(time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
 	parent, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	ctx := WithConnectBudget(parent, budget)
+	ctx := WithConnectTimeout(parent, time.Second)
 	connected, stop := connectContext(ctx, time.Second, "connect")
 	defer stop()
 	deadline, ok := connected.Deadline()

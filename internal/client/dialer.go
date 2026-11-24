@@ -102,7 +102,6 @@ type DialRequest struct {
 	ResolverScope string
 	Candidates    []net.IPAddr
 	UnixSocket    string
-	Budget        core.Budget
 	Timeout       time.Duration
 
 	TLSConfig *tls.Config
@@ -410,9 +409,6 @@ func (d *ResolverDialer) Dial(ctx context.Context, req DialRequest) (DialResult,
 }
 
 func (d *ResolverDialer) connectionContext(ctx context.Context, req DialRequest) (context.Context, context.CancelFunc) {
-	if req.Budget.Limited() {
-		return req.Budget.WithConnectionContext(ctx, "resolver/DNS/TCP/TLS connect")
-	}
 	timeout := req.Timeout
 	if timeout == 0 {
 		timeout = d.ConnectTimeout

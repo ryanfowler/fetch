@@ -81,25 +81,6 @@ func TestBudgetContextReportsTimeoutCause(t *testing.T) {
 	}
 }
 
-func TestBudgetConnectionContextReportsConnectionTimeout(t *testing.T) {
-	start := time.Now().Add(-time.Second)
-	budget, err := NewBudgetAt(time.Millisecond, start)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := budget.WithConnectionContext(context.Background(), "TCP connect")
-	defer cancel()
-	select {
-	case <-ctx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("connection budget context did not expire")
-	}
-	var timeout ErrConnectionTimedOut
-	if !errors.As(context.Cause(ctx), &timeout) {
-		t.Fatalf("context cause = %v, want connection timeout", context.Cause(ctx))
-	}
-}
-
 func TestParseSeconds(t *testing.T) {
 	tests := []struct {
 		value string
