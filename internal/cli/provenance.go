@@ -97,7 +97,8 @@ func (a *App) markCurlOptions(r *curl.Result) {
 	if len(r.FormFields) > 0 {
 		a.markCurlOption("multipart")
 	}
-	if r.BasicAuth != "" {
+	// With --aws-sigv4, -u holds the AWS keys, not Basic credentials.
+	if r.BasicAuth != "" && r.AWSSigv4 == "" {
 		if r.DigestAuth {
 			a.markCurlOption("digest")
 		} else {

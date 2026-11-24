@@ -326,3 +326,32 @@ func TestGetSignedHeadersStripsSchemeDefaultPort(t *testing.T) {
 		})
 	}
 }
+
+func TestSignReadsSessionTokenOnlyWithEnvironmentKeys(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "ENVKEY")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "envsecret")
+	t.Setenv("AWS_SESSION_TOKEN", "envtoken")
+	sign := func(cfg Config) *http.Request {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, "https://example.amazonaws.com/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Sign(req, cfg, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+
+	envSigned := sign(Config{Region: "us-east-1", Service: "execute-api"})
+	if got := envSigned.Header.Get("X-Amz-Security-Token"); got != "envtoken" {
+		t.Fatalf("token with environment keys = %q, want envtoken", got)
+	}
+	explicit := sign(Config{AccessKey: "AKID", SecretKey: "secret", Region: "us-east-1", Service: "execute-api"})
+	if got := explicit.Header.Get("X-Amz-Security-Token"); got != "" {
+		t.Fatalf("token with explicit keys = %q, want none: the environment token belongs to another key", got)
+	}
+	if auth := explicit.Header.Get("Authorization"); !strings.Contains(auth, "Credential=AKID/") {
+		t.Fatalf("Authorization = %q, want the explicit key", auth)
+	}
+}

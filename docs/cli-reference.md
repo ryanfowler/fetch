@@ -156,7 +156,7 @@ fetch --bearer mysecrettoken example.com
 
 ### `--aws-sigv4 REGION/SERVICE`
 
-Sign requests with AWS Signature V4. Requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables. If `AWS_SESSION_TOKEN` is set, it is sent and signed as `x-amz-security-token`.
+Sign requests with AWS Signature V4. Requires `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables. If `AWS_SESSION_TOKEN` is set, it is sent and signed as `x-amz-security-token`. With `--from-curl`, curl's `-u ACCESS_KEY:SECRET_KEY` can give the keys instead.
 
 ```sh
 fetch --aws-sigv4 us-east-1/s3 s3.amazonaws.com/bucket/key
@@ -914,6 +914,7 @@ fetch --from-curl 'https://example.com'
 - Body options are combined in order. A `--json` fragment is appended directly; other data fragments add `&` when the preceding body is nonempty. Repeated JSON fragments can therefore form one JSON document.
 - A single file/stdin data body streams through fetch's native request-body path. Transformed regular-file bodies remain replayable; stdin remains one-shot. Composite data bodies and `--data-urlencode @filename` are materialized for curl compatibility and capped at 16 MiB.
 - `--data-urlencode` supports `@filename` and `name@filename` forms for reading and URL-encoding file contents. File bytes are encoded before any text conversion.
+- With `--aws-sigv4`, `-u ACCESS_KEY:SECRET_KEY` gives the AWS keys, as in curl, instead of Basic credentials. These keys replace the `AWS_*` environment variables, and `AWS_SESSION_TOKEN` is then not sent; add `-H 'X-Amz-Security-Token: TOKEN'` for temporary keys. `--aws-sigv4` cannot be combined with `--digest`.
 - `-n`/`--netrc` is not supported. Use `--basic`, `--bearer`, or an explicit `Authorization` header instead.
 - Semantic curl flags that fetch cannot faithfully translate, such as `-f`/`--fail`, `-N`/`--no-buffer`, `--proto-default`, and `--proto-redir`, return an error instead of being ignored.
 
