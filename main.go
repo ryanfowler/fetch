@@ -250,6 +250,7 @@ func main() {
 		QueryParams:      app.Cfg.QueryParams,
 		Range:            app.Range,
 		Redirects:        app.Cfg.Redirects,
+		RedirectSchemes:  app.RedirectSchemes,
 		RemoteHeaderName: app.RemoteHeaderName,
 		RemoteName:       app.RemoteName,
 		Resolve:          app.Resolve,

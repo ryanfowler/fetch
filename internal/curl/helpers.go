@@ -36,42 +36,66 @@ func validateCookieValue(v string) error {
 	return nil
 }
 
-// ParseAllowedProto parses a curl --proto value and returns which protocols
-// are allowed. Curl syntax: "=https" means only HTTPS; "http,https" or
-// "+http" adds to defaults; "-http" removes from defaults.
-// Returns (allowHTTP, allowHTTPS).
-func ParseAllowedProto(value string) (bool, bool) {
-	if value == "" {
-		return true, true
+// curlProtocols are the protocol names that curl's --proto accepts.
+var curlProtocols = map[string]struct{}{
+	"dict": {}, "file": {}, "ftp": {}, "ftps": {}, "gopher": {}, "gophers": {},
+	"http": {}, "https": {}, "imap": {}, "imaps": {}, "ipfs": {}, "ipns": {},
+	"ldap": {}, "ldaps": {}, "mqtt": {}, "mqtts": {}, "pop3": {}, "pop3s": {},
+	"rtsp": {}, "scp": {}, "sftp": {}, "smtp": {}, "smtps": {}, "telnet": {},
+	"tftp": {}, "ws": {}, "wss": {},
+}
+
+// AllowedProtocols is the result of a curl --proto value, for the protocols
+// that fetch supports.
+type AllowedProtocols struct {
+	allowed map[string]bool
+}
+
+// fetchProtocols are the protocols in AllowedProtocols.
+var fetchProtocols = []string{"http", "https", "ws", "wss"}
+
+// Allows reports whether the URL scheme is allowed.
+func (p AllowedProtocols) Allows(scheme string) bool {
+	return p.allowed[strings.ToLower(scheme)]
+}
+
+// ParseAllowedProto parses a curl --proto value. As in curl, the
+// comma-separated items are evaluated left to right. Each item is a protocol
+// name or "all", with an optional modifier: "+" permits it (the default),
+// "-" denies it, and "=" denies every protocol and then permits it. Every
+// protocol is allowed before the first item. For example, "=https" and
+// "-all,https" allow only HTTPS. As in curl, an empty or unknown protocol
+// name is an error.
+func ParseAllowedProto(value string) (AllowedProtocols, error) {
+	allowed := make(map[string]bool, len(fetchProtocols))
+	setAll := func(permit bool) {
+		for _, name := range fetchProtocols {
+			allowed[name] = permit
+		}
 	}
-
-	// "=" prefix means "only these protocols".
-	exclusive := strings.HasPrefix(value, "=")
-	if exclusive {
-		value = value[1:]
-	}
-
-	// Start with defaults (both allowed) unless exclusive mode.
-	allowHTTP := !exclusive
-	allowHTTPS := !exclusive
-
-	for proto := range strings.SplitSeq(value, ",") {
-		proto = strings.TrimSpace(proto)
-		if proto == "" {
+	setAll(true)
+	for item := range strings.SplitSeq(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
 			continue
 		}
-
-		switch {
-		case proto == "http" || proto == "+http":
-			allowHTTP = true
-		case proto == "https" || proto == "+https":
-			allowHTTPS = true
-		case proto == "-http":
-			allowHTTP = false
-		case proto == "-https":
-			allowHTTPS = false
+		modifier := byte('+')
+		if strings.IndexByte("+-=", item[0]) >= 0 {
+			modifier, item = item[0], item[1:]
+		}
+		name := strings.ToLower(item)
+		if _, known := curlProtocols[name]; !known && name != "all" {
+			return AllowedProtocols{}, fmt.Errorf("--proto %q: unrecognized protocol %q", value, item)
+		}
+		permit := modifier != '-'
+		if modifier == '=' {
+			setAll(false)
+		}
+		if name == "all" {
+			setAll(permit)
+		} else if _, ok := allowed[name]; ok {
+			allowed[name] = permit
 		}
 	}
-
-	return allowHTTP, allowHTTPS
+	return AllowedProtocols{allowed: allowed}, nil
 }

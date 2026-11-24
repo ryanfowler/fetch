@@ -3140,3 +3140,48 @@ func TestDoPreservesEncodedBytesWhenCompressionIsOff(t *testing.T) {
 		t.Fatal("compression off changed response bytes")
 	}
 }
+
+func TestRedirectSchemesRestrictRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	for _, test := range []struct {
+		name    string
+		schemes []string
+		wantErr bool
+	}{
+		{name: "unrestricted", schemes: nil},
+		{name: "http allowed", schemes: []string{"http"}},
+		{name: "only https", schemes: []string{"https"}, wantErr: true},
+		{name: "no redirects", schemes: []string{}, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c := NewClient(ClientConfig{HTTP: core.HTTP1, RedirectSchemes: test.schemes})
+			defer c.Close()
+			req, err := c.NewRequest(context.Background(), RequestConfig{URL: mustURL(t, redirector.URL)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := c.Do(req)
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "not permitted") {
+					t.Fatalf("Do() error = %v, want a refused redirect", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("status = %d, want the redirect target", resp.StatusCode)
+			}
+		})
+	}
+}

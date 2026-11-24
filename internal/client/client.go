@@ -13,6 +13,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,6 +196,10 @@ type ClientConfig struct {
 	UnixSocket         string
 	ECH                core.ECHMode
 	WebTransport       bool
+	// RedirectSchemes, when not nil, lists the URL schemes that a redirect
+	// may use; an empty list allows no redirect. It applies curl's --proto
+	// restriction to redirects.
+	RedirectSchemes []string
 }
 
 // NewClient returns an initialized Client given the provided configuration.
@@ -373,6 +378,9 @@ func NewClient(cfg ClientConfig) *Client {
 		}
 		if maxRedirects > 0 && len(via) > maxRedirects {
 			return fmt.Errorf("exceeded maximum number of redirects: %d", maxRedirects)
+		}
+		if cfg.RedirectSchemes != nil && !slices.Contains(cfg.RedirectSchemes, req.URL.Scheme) {
+			return fmt.Errorf("redirect to %q is not allowed: protocol %q is not permitted", req.URL.Redacted(), req.URL.Scheme)
 		}
 		if cfg.ClientCert != nil {
 			if err := rejectClientCertificateCrossOriginRedirect(req, via); err != nil {

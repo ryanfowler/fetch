@@ -3817,6 +3817,27 @@ func TestMain(t *testing.T) {
 		assertBufEquals(t, res.stdout, "hello from curl")
 	})
 
+	t.Run("from-curl proto restricts redirects", func(t *testing.T) {
+		t.Parallel()
+		var plainHits atomic.Int32
+		plain := startServer(func(w http.ResponseWriter, r *http.Request) {
+			plainHits.Add(1)
+			io.WriteString(w, "plain")
+		})
+		defer plain.Close()
+		secure := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, plain.URL, http.StatusFound)
+		}))
+		defer secure.Close()
+
+		res := runFetch(t, fetchPath, "--from-curl", "curl -k --proto =https -L "+secure.URL)
+		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "not permitted")
+		if plainHits.Load() != 0 {
+			t.Fatal("the redirect to http was followed")
+		}
+	})
+
 	t.Run("from-curl without curl prefix", func(t *testing.T) {
 		t.Parallel()
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
