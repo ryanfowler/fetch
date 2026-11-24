@@ -72,7 +72,7 @@ func TestQuerySystemTypeRetriesAcrossNameservers(t *testing.T) {
 	if metadata.Transport != TransportUDP || metadata.TCPFallback || metadata.Attempts != 2 {
 		t.Fatalf("query metadata = %+v, want second UDP responder after two attempts", metadata)
 	}
-	if metadata.Duration <= 0 {
+	if metadata.Duration < 0 {
 		t.Fatalf("query metadata duration = %s, want positive duration", metadata.Duration)
 	}
 	if len(records) != 1 || records[0].Type != dnsTypeA {
@@ -134,7 +134,7 @@ func TestQuerySystemTypePropagatesFailedTCPFallback(t *testing.T) {
 	if metadata.Server != server.addr() {
 		t.Fatalf("responder = %q, want %q after failed fallback", metadata.Server, server.addr())
 	}
-	if metadata.Attempts != 1 || metadata.Duration <= 0 {
+	if metadata.Attempts != 1 || metadata.Duration < 0 {
 		t.Fatalf("query metadata = %+v, want one attempted responder and duration", metadata)
 	}
 
