@@ -31,8 +31,8 @@ const (
 )
 
 // persistentH3Cache is deliberately a small best-effort cache. Its worker
-// serializes writes for this process, while the per-shard lock coordinates
-// writers from other fetch processes. Cache failures never affect a request.
+// serializes writes for this process, while lock files coordinate writers
+// from other fetch processes. Cache failures never affect a request.
 type h3CacheMutation func([]persistentH3Entry, time.Time) []persistentH3Entry
 
 type h3CacheLock struct {
@@ -412,11 +412,40 @@ func (c *persistentH3Cache) writeShardLocked(key string, entries []persistentH3E
 	return writeH3CacheFile(c.dir, h3CacheShardName(key)+".json", data)
 }
 
+// h3CacheLockName returns the lock file for a shard. The 16 lock files are
+// shared by all shards, chosen by the first hex digit of the shard name. A
+// fixed set keeps lock files from accumulating for every origin, while
+// processes that update different origins seldom wait for each other.
+// Locked sections never nest, so two shards that share a lock cannot
+// deadlock.
+//
+// Versions before these files locked ".<shard>.lock" instead. During an
+// upgrade, an old and a new process do not exclude each other, so one update
+// can be lost; files are written with an atomic rename, so none is corrupted.
+func h3CacheLockName(shard string) string {
+	return ".lock-" + shard[:1]
+}
+
 func (c *persistentH3Cache) lockShard(key string) (*h3CacheLock, error) {
 	if err := ensureH3CacheDir(c.dir); err != nil {
 		return nil, err
 	}
-	return lockH3CacheFile(c.dir, "."+h3CacheShardName(key)+".lock")
+	return lockH3CacheFile(c.dir, h3CacheLockName(h3CacheShardName(key)))
+}
+
+// isLegacyH3ShardLockName reports whether name is a per-shard lock file of
+// an earlier version. Those files are no longer used and can be removed.
+func isLegacyH3ShardLockName(name string) bool {
+	hash, ok := strings.CutPrefix(name, ".")
+	if !ok {
+		return false
+	}
+	hash, ok = strings.CutSuffix(hash, ".lock")
+	if !ok || len(hash) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(hash)
+	return err == nil
 }
 
 func unlockH3Cache(lock *h3CacheLock) {
@@ -495,6 +524,16 @@ func (c *persistentH3Cache) pruneNow(now time.Time) error {
 	}
 	shards := make([]shardInfo, 0, len(entries))
 	for _, entry := range entries {
+		if !entry.IsDir() && isLegacyH3ShardLockName(entry.Name()) {
+			// Earlier versions held these locks for milliseconds and removed
+			// the file to release them. An old file is a stale lock of a
+			// process that exited; a new one may belong to an older fetch
+			// that runs now.
+			if info, err := entry.Info(); err == nil && now.Sub(info.ModTime()) > time.Minute {
+				_ = removeH3CacheFile(c.dir, entry.Name())
+			}
+			continue
+		}
 		if entry.IsDir() || !isH3ShardFileName(entry.Name()) {
 			continue
 		}
