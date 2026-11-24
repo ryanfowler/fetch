@@ -1291,3 +1291,59 @@ func assertDataValues(t *testing.T, name string, got []DataValue, want []DataVal
 		t.Fatalf("%s = %v, want %v", name, got, want)
 	}
 }
+
+func TestTokenizeANSICQuoting(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "newline", input: `curl --data-raw $'{"a":"b\nc"}'`, want: []string{"curl", "--data-raw", "{\"a\":\"b\nc\"}"}},
+		{name: "escaped single quote", input: `curl -d $'it\'s'`, want: []string{"curl", "-d", "it's"}},
+		{name: "simple escapes", input: `x $'\t\r\\\"\?\a\b\f\v\e'`, want: []string{"x", "\t\r\\\"?\a\b\f\v\x1b"}},
+		{name: "octal and hex", input: `x $'\101\x41\x4\777'`, want: []string{"x", "AA\x04\xff"}},
+		{name: "escapes without digits", input: `x $'\x\u\U'`, want: []string{"x", `\x\u\U`}},
+		{name: "invalid code point", input: `x $'\uD800'`, want: []string{"x", "\uFFFD"}},
+		{name: "control question mark", input: `x $'\c?'`, want: []string{"x", "\x7f"}},
+		{name: "control backslash", input: `x $'\c\\x'`, want: []string{"x", "\x1cx"}},
+		{name: "control at end", input: `x $'a\c'`, want: []string{"x", `a\c`}},
+		{name: "locale quote", input: `x $"a b"`, want: []string{"x", "a b"}},
+		{name: "literal in double quotes", input: `x "$'a'"`, want: []string{"x", "$'a'"}},
+		{name: "unicode", input: `x $'é\U0001F600'`, want: []string{"x", "é😀"}},
+		{name: "control", input: `x $'\cA'`, want: []string{"x", "\x01"}},
+		{name: "unknown escape kept", input: `x $'\q'`, want: []string{"x", `\q`}},
+		{name: "adjacent to other quoting", input: `x pre$'a\nb'"post"`, want: []string{"x", "prea\nbpost"}},
+		{name: "dollar alone", input: `x $HOME $`, want: []string{"x", "$HOME", "$"}},
+		{name: "CRLF continuation", input: "curl \\\r\n  https://example.com", want: []string{"curl", "https://example.com"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := tokenize(tt.input)
+			if err != nil {
+				t.Fatalf("tokenize() error = %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("tokenize() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	for _, input := range []string{
+		`curl -d $'unterminated`,
+		`curl -d $'escaped quote at end\'`,
+		`curl -d $'a\0b'`,
+		`curl -d $'a\x00'`,
+	} {
+		if _, err := tokenize(input); err == nil {
+			t.Errorf("tokenize(%q) succeeded, want an error", input)
+		}
+	}
+}
+
+func TestParseBrowserCopyAsCurlWithANSICQuoting(t *testing.T) {
+	// Chrome and Firefox use $'...' for bodies with newlines or quotes.
+	result, err := Parse(`curl 'https://example.com/api' -H 'content-type: application/json' --data-raw $'{"note":"it\'s\nfine"}'`)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	assertDataValues(t, "DataValues", result.DataValues, []DataValue{{Value: "{\"note\":\"it's\nfine\"}", Kind: DataRaw}})
+}

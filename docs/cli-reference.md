@@ -909,6 +909,7 @@ fetch --from-curl 'https://example.com'
 
 **Notes:**
 
+- The command is split like a bash command: single, double, and ANSI-C (`$'...'`) quotes, backslash escapes, and line continuations are supported. A backslash before a Windows line ending (CRLF) also continues the line. Variables and command substitutions are not expanded, and a `$'...'` value with a NUL byte is an error.
 - `-b`/`--cookie` only supports inline cookie strings (e.g., `-b 'name=value'`). Cookie jar files are not supported and will return an error.
 - `-d`/`--data` and `--data-ascii` strip CR, LF, and NUL from `@filename` or `@-` input; inline data is unchanged. `--data-binary` and `--json` preserve file/stdin bytes, while `--data-raw` treats `@` literally.
 - Body options are combined in order. A `--json` fragment is appended directly; other data fragments add `&` when the preceding body is nonempty. Repeated JSON fragments can therefore form one JSON document.
