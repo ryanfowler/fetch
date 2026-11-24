@@ -190,6 +190,10 @@ func (c *Config) Merge(c2 *Config) []string {
 		c.CACerts = append(c2.CACerts, c.CACerts...)
 		add("ca-cert")
 	}
+	// A certificate file of a higher-precedence scope that holds its own,
+	// matching private key is complete. It does not take the key of a lower
+	// scope, which belongs to another certificate.
+	certIsComplete := (c.CertPath != "" || c.CertData != nil) && certHasOwnKey(c.CertData)
 	if c.CertPath == "" && c.CertData == nil && (c2.CertPath != "" || c2.CertData != nil) {
 		c.CertData = c2.CertData
 		c.CertPath = c2.CertPath
@@ -198,7 +202,7 @@ func (c *Config) Merge(c2 *Config) []string {
 	// Certificate and key are merged independently. This permits either CLI
 	// component to pair with the component supplied by a lower-precedence
 	// config scope; validation runs only after all scopes have been merged.
-	if c.KeyPath == "" && c.KeyData == nil && (c2.KeyPath != "" || c2.KeyData != nil) {
+	if c.KeyPath == "" && c.KeyData == nil && (c2.KeyPath != "" || c2.KeyData != nil) && !certIsComplete {
 		c.KeyData = c2.KeyData
 		c.KeyPath = c2.KeyPath
 		add("key")
@@ -1045,6 +1049,17 @@ func parseDurationSeconds(flag, value, usage string, isFile bool) (*time.Duratio
 		return nil, core.NewValueError(flag, value, usage, isFile)
 	}
 	return &duration, nil
+}
+
+// certHasOwnKey reports whether data, a certificate file, also holds the
+// private key of its certificate, as a combined PEM file does. An encrypted
+// or unrelated key block does not count.
+func certHasOwnKey(data []byte) bool {
+	if data == nil {
+		return false
+	}
+	_, err := tls.X509KeyPair(data, data)
+	return err == nil
 }
 
 func (c *Config) ClientCert() (*tls.Certificate, error) {
