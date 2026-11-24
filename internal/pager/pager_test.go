@@ -2,6 +2,7 @@ package pager
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -240,4 +241,105 @@ func (r *blockingReader) wasClosed() bool {
 
 func sameStrings(a, b []string) bool {
 	return strings.Join(a, "\x00") == strings.Join(b, "\x00")
+}
+
+// startInteractiveTestPager runs StreamContext with an interactive pager
+// script. The script writes "ready" when it runs and runs onTerm on SIGTERM.
+func startInteractiveTestPager(t *testing.T, onTerm string) (dir string, cancel context.CancelFunc, done <-chan error) {
+	t.Helper()
+	if testing.Short() || runtime.GOOS == "windows" {
+		t.Skip("starts a Unix subprocess")
+	}
+	dir = t.TempDir()
+	script := "#!/bin/sh\ntrap '" + onTerm + "' TERM\nprintf ready > \"$FETCH_TEST_PAGER_DIR/ready\"\nwhile :; do sleep 0.05; done\n"
+	pagerPath := filepath.Join(dir, "pager.sh")
+	if err := os.WriteFile(pagerPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FETCH_TEST_PAGER_DIR", dir)
+	t.Setenv("PAGER", pagerPath)
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		// stdoutTerminal is true, so the pager stays in this process group,
+		// as an interactive pager does.
+		result <- StreamContext(ctx, strings.NewReader("data"), core.PagerOn, true, false, io.Discard)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
+			break
+		}
+		select {
+		case err := <-result:
+			cancelFunc()
+			t.Fatalf("StreamContext returned before the pager started: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			cancelFunc()
+			t.Fatal("pager fixture did not start before the deadline")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return dir, cancelFunc, result
+}
+
+func TestStreamContextLetsInteractivePagerHandleSIGTERM(t *testing.T) {
+	dir, cancel, done := startInteractiveTestPager(t, `printf term > "$FETCH_TEST_PAGER_DIR/term"; exit 0`)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("StreamContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("interactive pager did not exit")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "term")); err != nil {
+		t.Fatalf("pager did not receive SIGTERM before it exited: %v", err)
+	}
+}
+
+func TestStreamContextKillsInteractivePagerThatIgnoresSIGTERM(t *testing.T) {
+	previous := pagerExitGrace
+	pagerExitGrace = 100 * time.Millisecond
+	t.Cleanup(func() { pagerExitGrace = previous })
+
+	// The trap records SIGTERM and keeps running.
+	dir, cancel, done := startInteractiveTestPager(t, `printf term > "$FETCH_TEST_PAGER_DIR/term"`)
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("StreamContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("interactive pager that ignores SIGTERM was not killed")
+	}
+	if elapsed := time.Since(start); elapsed < pagerExitGrace {
+		t.Fatalf("pager was killed after %v, before the %v grace period", elapsed, pagerExitGrace)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "term")); err != nil {
+		t.Fatalf("pager did not receive SIGTERM before SIGKILL: %v", err)
+	}
+}
+
+func TestStreamContextCancelsWhilePagerDoesNotReadInput(t *testing.T) {
+	if testing.Short() || runtime.GOOS == "windows" {
+		t.Skip("starts a Unix subprocess")
+	}
+	// The pager never reads, so a large non-closable input blocks the copy.
+	t.Setenv("PAGER", "sleep 30")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := StreamContext(ctx, strings.NewReader(strings.Repeat("x", 4<<20)), core.PagerOn, false, false, io.Discard)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("StreamContext() error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("StreamContext() returned after %v", elapsed)
+	}
 }

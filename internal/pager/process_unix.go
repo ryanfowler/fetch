@@ -33,6 +33,21 @@ func terminateProcessTree(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
+// requestProcessExit asks a pager that shares fetch's process group to exit.
+// Such a pager owns the terminal, and SIGTERM lets it restore the terminal
+// state; SIGKILL would leave the terminal without echo. It reports false
+// when no signal was sent, for example for a pager in its own process group.
+func requestProcessExit(cmd *exec.Cmd) bool {
+	if cmd.Process == nil {
+		return false
+	}
+	pgid, err := syscall.Getpgid(cmd.Process.Pid)
+	if err != nil || pgid != syscall.Getpgrp() {
+		return false
+	}
+	return cmd.Process.Signal(syscall.SIGTERM) == nil
+}
+
 func pagerExitWasSIGPIPE(err error) bool {
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
