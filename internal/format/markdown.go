@@ -29,6 +29,12 @@ const (
 	// emphasis inside emphasis, adds no visible style, and every pop
 	// re-applies the whole stack.
 	maxMarkdownStyleDepth = 16
+	// maxMarkdownTableCells is the most table cells that a document may
+	// contain before it is parsed without table support. The table parser
+	// pads every row to the column count of its header, so its work and
+	// memory grow with rows times columns: a 1 MiB body with one wide header
+	// can create tens of millions of cells.
+	maxMarkdownTableCells = 500_000
 )
 
 // MarkdownOptions controls terminal-only Markdown presentation.
@@ -79,10 +85,11 @@ func FormatMarkdownWithOptions(buf []byte, p *core.Printer, options MarkdownOpti
 	}
 	rest = truncateMarkdownBlockquoteOpeners(rest)
 
-	mdParser := parser.New(parser.WithExtensions(
-		extension.NewStrikethroughParser(),
-		extension.NewTableParser(),
-	))
+	extensions := []parser.Extension{extension.NewStrikethroughParser()}
+	if markdownTableCells(rest) <= maxMarkdownTableCells {
+		extensions = append(extensions, extension.NewTableParser())
+	}
+	mdParser := parser.New(parser.WithExtensions(extensions...))
 	doc := mdParser.Parse(rest)
 
 	width := 0
@@ -99,6 +106,56 @@ func FormatMarkdownWithOptions(buf []byte, p *core.Printer, options MarkdownOpti
 	}
 	r.tty = p.IsTerminal()
 	return ast.Walk(doc, r.walk)
+}
+
+// markdownTableCells estimates the number of cells that the table parser
+// creates for src. The estimate is never lower than the real count; it can
+// be higher, which only makes table support more likely to be turned off.
+//
+// A table can start at any delimiter row, such as "|---|:-:|", inside a run
+// of non-blank lines, also after a blockquote or list marker, and it can
+// continue until a blank line. Each line of the run therefore counts as many
+// cells as the widest delimiter row seen so far in the run. As in goldmark,
+// only spaces and tabs make a line blank.
+func markdownTableCells(src []byte) int {
+	cells := 0
+	columns := 0 // widest delimiter row in the current run of lines
+	for line := range bytes.SplitSeq(src, []byte("\n")) {
+		if len(bytes.Trim(line, " \t\r")) == 0 {
+			columns = 0
+			continue
+		}
+		if n := markdownDelimiterColumns(line); n > columns {
+			// The header line before the delimiter also gets n cells.
+			cells += n
+			columns = n
+		}
+		cells += columns
+		if cells > maxMarkdownTableCells {
+			return cells
+		}
+	}
+	return cells
+}
+
+// markdownDelimiterColumns returns an upper bound for the number of columns
+// of line as a table delimiter row, or 0 if line cannot be one. Leading
+// blockquote and list markers are skipped.
+func markdownDelimiterColumns(line []byte) int {
+	line = bytes.TrimLeft(line, " \t>")
+	// An ordered list marker, such as "1." or "2)".
+	if digits := len(line) - len(bytes.TrimLeft(line, "0123456789")); digits > 0 && digits < len(line) && (line[digits] == '.' || line[digits] == ')') {
+		line = line[digits+1:]
+	}
+	if bytes.IndexByte(line, '-') < 0 {
+		return 0
+	}
+	for _, c := range line {
+		if !strings.ContainsRune("|-:+* \t>\r", rune(c)) {
+			return 0
+		}
+	}
+	return bytes.Count(line, []byte("|")) + 1
 }
 
 func markdownWidth(maxWidth, terminalWidth int) int {
