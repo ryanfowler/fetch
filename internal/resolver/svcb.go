@@ -130,6 +130,11 @@ func parseJSONSVCBPresentation(value string) (SVCBRecord, []byte, error) {
 	if err != nil {
 		return SVCBRecord{}, nil, fmt.Errorf("SVCB target: %w", err)
 	}
+	if priority == 0 {
+		// RFC 9460, section 2.4.2: in AliasMode, recipients MUST ignore
+		// any SvcParams, so do not parse them. The wire decoder does the same.
+		fields = fields[:2]
+	}
 	params := make([][]byte, 0, len(fields)-2)
 	for _, field := range fields[2:] {
 		keyText, valueText, hasValue := strings.Cut(field, "=")
@@ -513,16 +518,15 @@ func buildSVCBRecord(priority uint16, target Name, params []SVCParam) (SVCBRecor
 	if err := target.validate(); err != nil {
 		return SVCBRecord{}, fmt.Errorf("invalid SVCB target: %w", err)
 	}
-	if priority == 0 && len(params) != 0 {
-		return SVCBRecord{}, errors.New("SVCB AliasMode must not contain service parameters")
+	if priority == 0 {
+		// RFC 9460, section 2.4.2: in AliasMode, recipients MUST ignore
+		// any SvcParams that are present.
+		return SVCBRecord{Priority: priority, Target: target}, nil
 	}
 	record := SVCBRecord{
 		Priority: priority,
 		Target:   target,
 		Params:   cloneSVCBParams(params),
-	}
-	if priority == 0 {
-		return record, nil
 	}
 
 	present := make(map[uint16]struct{}, len(params))

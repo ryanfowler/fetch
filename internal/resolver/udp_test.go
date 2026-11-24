@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -222,7 +223,7 @@ func TestLookupWireTypeAcceptsResponseAfterMalformedMatchingBurst(t *testing.T) 
 		}
 		question := message.Questions[0]
 		malformed := append(responsePacket(query, message.Header.ID, question, nil), 0xff)
-		for range maxDNSMalformedUDPPackets {
+		for range 8 {
 			if _, err := server.udp.WriteToUDP(malformed, client); err != nil {
 				done <- err
 				return
@@ -248,83 +249,92 @@ func TestLookupWireTypeAcceptsResponseAfterMalformedMatchingBurst(t *testing.T) 
 }
 
 func TestQuerySystemTypeDetailedReportsTCPFallback(t *testing.T) {
-	server, tcp := newUDPAndTCPTestServer(t)
-	defer server.close()
-	defer tcp.Close()
+	for _, cutRecords := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cut records %t", cutRecords), func(t *testing.T) {
+			server, tcp := newUDPAndTCPTestServer(t)
+			defer server.close()
+			defer tcp.Close()
 
-	done := make(chan error, 1)
-	go func() {
-		query, client, err := server.readQuery()
-		if err != nil {
-			done <- err
-			return
-		}
-		message, err := DecodeMessage(query)
-		if err != nil {
-			done <- err
-			return
-		}
-		truncated := responsePacket(query, message.Header.ID, message.Questions[0], nil)
-		binary.BigEndian.PutUint16(truncated[2:4], binary.BigEndian.Uint16(truncated[2:4])|0x0200)
-		if _, err := server.udp.WriteToUDP(truncated, client); err != nil {
-			done <- err
-			return
-		}
+			done := make(chan error, 1)
+			go func() {
+				query, client, err := server.readQuery()
+				if err != nil {
+					done <- err
+					return
+				}
+				message, err := DecodeMessage(query)
+				if err != nil {
+					done <- err
+					return
+				}
+				truncated := responsePacket(query, message.Header.ID, message.Questions[0], nil)
+				binary.BigEndian.PutUint16(truncated[2:4], binary.BigEndian.Uint16(truncated[2:4])|0x0200)
+				if cutRecords {
+					// The datagram was cut before its records: the header claims
+					// three answers, and the body does not decode.
+					binary.BigEndian.PutUint16(truncated[6:8], 3)
+				}
+				if _, err := server.udp.WriteToUDP(truncated, client); err != nil {
+					done <- err
+					return
+				}
 
-		connection, err := tcp.AcceptTCP()
-		if err != nil {
-			done <- err
-			return
-		}
-		defer connection.Close()
-		var length [2]byte
-		if _, err := io.ReadFull(connection, length[:]); err != nil {
-			done <- err
-			return
-		}
-		tcpQuery := make([]byte, int(binary.BigEndian.Uint16(length[:])))
-		if _, err := io.ReadFull(connection, tcpQuery); err != nil {
-			done <- err
-			return
-		}
-		tcpMessage, err := DecodeMessage(tcpQuery)
-		if err != nil {
-			done <- err
-			return
-		}
-		if tcpMessage.Header.ID != message.Header.ID {
-			done <- errors.New("TCP fallback changed transaction ID")
-			return
-		}
-		answer := makeRecord(tcpMessage.Questions[0].Name, dnsTypeA, net.IPv4(192, 0, 2, 13).To4())
-		response := responsePacket(tcpQuery, tcpMessage.Header.ID, tcpMessage.Questions[0], []Record{answer})
-		binary.BigEndian.PutUint16(length[:], uint16(len(response)))
-		if _, err := connection.Write(length[:]); err != nil {
-			done <- err
-			return
-		}
-		_, err = connection.Write(response)
-		done <- err
-	}()
+				connection, err := tcp.AcceptTCP()
+				if err != nil {
+					done <- err
+					return
+				}
+				defer connection.Close()
+				var length [2]byte
+				if _, err := io.ReadFull(connection, length[:]); err != nil {
+					done <- err
+					return
+				}
+				tcpQuery := make([]byte, int(binary.BigEndian.Uint16(length[:])))
+				if _, err := io.ReadFull(connection, tcpQuery); err != nil {
+					done <- err
+					return
+				}
+				tcpMessage, err := DecodeMessage(tcpQuery)
+				if err != nil {
+					done <- err
+					return
+				}
+				if tcpMessage.Header.ID != message.Header.ID {
+					done <- errors.New("TCP fallback changed transaction ID")
+					return
+				}
+				answer := makeRecord(tcpMessage.Questions[0].Name, dnsTypeA, net.IPv4(192, 0, 2, 13).To4())
+				response := responsePacket(tcpQuery, tcpMessage.Header.ID, tcpMessage.Questions[0], []Record{answer})
+				binary.BigEndian.PutUint16(length[:], uint16(len(response)))
+				if _, err := connection.Write(length[:]); err != nil {
+					done <- err
+					return
+				}
+				_, err = connection.Write(response)
+				done <- err
+			}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	records, metadata, err := QuerySystemTypeDetailed(ctx, SystemResolverPolicy{
-		Nameservers: []string{server.addr()},
-		Attempts:    1,
-		Timeout:     time.Second,
-	}, "example.com", dnsTypeA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(records) != 1 || !net.IP(records[0].RData).Equal(net.IPv4(192, 0, 2, 13)) {
-		t.Fatalf("records = %v", records)
-	}
-	if metadata.Server != server.addr() || metadata.Transport != TransportTCP || !metadata.TCPFallback || metadata.Attempts != 1 || metadata.Duration <= 0 {
-		t.Fatalf("query metadata = %+v, want successful TCP fallback from %s", metadata, server.addr())
-	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			records, metadata, err := QuerySystemTypeDetailed(ctx, SystemResolverPolicy{
+				Nameservers: []string{server.addr()},
+				Attempts:    1,
+				Timeout:     time.Second,
+			}, "example.com", dnsTypeA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(records) != 1 || !net.IP(records[0].RData).Equal(net.IPv4(192, 0, 2, 13)) {
+				t.Fatalf("records = %v", records)
+			}
+			if metadata.Server != server.addr() || metadata.Transport != TransportTCP || !metadata.TCPFallback || metadata.Attempts != 1 || metadata.Duration <= 0 {
+				t.Fatalf("query metadata = %+v, want successful TCP fallback from %s", metadata, server.addr())
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -454,3 +464,80 @@ func (s *udpTestServer) readQuery() ([]byte, *net.UDPAddr, error) {
 }
 
 func (s *udpTestServer) close() { _ = s.udp.Close() }
+
+func TestLookupWireTypeReportsMalformedResponseInsteadOfTimeout(t *testing.T) {
+	server := newUDPTestServer(t)
+	defer server.close()
+
+	go func() {
+		query, client, err := server.readQuery()
+		if err != nil {
+			return
+		}
+		message, err := DecodeMessage(query)
+		if err != nil {
+			return
+		}
+		// A matching response whose single answer is missing.
+		malformed := responsePacket(query, message.Header.ID, message.Questions[0], nil)
+		binary.BigEndian.PutUint16(malformed[6:8], 1)
+		_, _ = server.udp.WriteToUDP(malformed, client)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := lookupWireType(ctx, server.addr(), "example.com", dnsTypeA)
+	if err == nil || !strings.Contains(err.Error(), "invalid DNS UDP response") {
+		t.Fatalf("lookupWireType() error = %v, want the decode error", err)
+	}
+}
+
+func TestLookupUDPMessageRejectsTruncatedTCPResponse(t *testing.T) {
+	server, tcp := newUDPAndTCPTestServer(t)
+	defer server.close()
+	defer tcp.Close()
+
+	go func() {
+		query, client, err := server.readQuery()
+		if err != nil {
+			return
+		}
+		message, err := DecodeMessage(query)
+		if err != nil {
+			return
+		}
+		cut := func(packet []byte) []byte {
+			// TC=1, and the header claims three answers that are missing.
+			binary.BigEndian.PutUint16(packet[2:4], binary.BigEndian.Uint16(packet[2:4])|0x0200)
+			binary.BigEndian.PutUint16(packet[6:8], 3)
+			return packet
+		}
+		_, _ = server.udp.WriteToUDP(cut(responsePacket(query, message.Header.ID, message.Questions[0], nil)), client)
+		connection, err := tcp.AcceptTCP()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		var length [2]byte
+		if _, err := io.ReadFull(connection, length[:]); err != nil {
+			return
+		}
+		tcpQuery := make([]byte, int(binary.BigEndian.Uint16(length[:])))
+		if _, err := io.ReadFull(connection, tcpQuery); err != nil {
+			return
+		}
+		response := cut(responsePacket(tcpQuery, message.Header.ID, message.Questions[0], nil))
+		binary.BigEndian.PutUint16(length[:], uint16(len(response)))
+		_, _ = connection.Write(append(length[:], response...))
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	message, fallback, err := LookupUDPMessage(ctx, server.addr(), "example.com", dnsTypeA)
+	if err == nil {
+		t.Fatalf("LookupUDPMessage() = %+v, want an error for a malformed TCP response", message)
+	}
+	if !fallback {
+		t.Fatal("LookupUDPMessage() did not report the TCP fallback")
+	}
+}
