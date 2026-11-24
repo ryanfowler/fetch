@@ -903,7 +903,7 @@ fetch --from-curl 'https://example.com'
 | HTTP version               | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                            |
 | Headers                    | `-A`, `-e`, `-b`                                                                                                                   |
 | Verbosity                  | `-v`, `-s`                                                                                                                         |
-| Protocol                   | `--proto` (restricts allowed protocols; errors if URL scheme is not allowed)                                                       |
+| Protocol                   | `--proto` (restricts allowed protocols for the URL and for redirects; errors if a scheme is not allowed)                           |
 | Default-compatible no-ops  | `--compressed`, `-S`/`--show-error`, `--fail-with-body`, `--no-keepalive`                                                          |
 | Presentation compatibility | `-#`/`--progress-bar`, `--no-progress-meter`                                                                                       |
 

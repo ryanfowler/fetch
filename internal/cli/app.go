@@ -74,6 +74,9 @@ type App struct {
 	Version          bool
 	WSInteractive    core.WSInteractiveMode
 	WSMessageMode    core.WSMessageMode
+	// RedirectSchemes, when not nil, lists the URL schemes that redirects
+	// may use. It is set from curl's --proto option by --from-curl.
+	RedirectSchemes []string
 
 	dataSet          bool
 	jsonSet          bool

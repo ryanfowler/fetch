@@ -650,7 +650,11 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 
 	// Apply --proto restrictions.
 	if r.AllowedProto != "" {
-		allowHTTP, allowHTTPS := curl.ParseAllowedProto(r.AllowedProto)
+		protocols, err := curl.ParseAllowedProto(r.AllowedProto)
+		if err != nil {
+			return err
+		}
+		allowHTTP, allowHTTPS := protocols.Allows("http"), protocols.Allows("https")
 		if a.SchemelessURL {
 			// A schemeless URL may be forced to the only protocol allowed by
 			// curl's --proto setting.
@@ -660,14 +664,24 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 				u.Scheme = "http"
 			}
 		}
-		switch u.Scheme {
-		case "http":
-			if !allowHTTP {
-				return fmt.Errorf("protocol 'http' not allowed by --proto %q", r.AllowedProto)
+		// parseURL maps ws and wss to http and https. Check the scheme that
+		// the command used.
+		scheme := u.Scheme
+		if isWS {
+			scheme = map[string]string{"http": "ws", "https": "wss"}[scheme]
+		}
+		if !protocols.Allows(scheme) {
+			return fmt.Errorf("protocol '%s' not allowed by --proto %q", scheme, r.AllowedProto)
+		}
+		// As in curl, the restriction also applies to redirects, which use
+		// http or https.
+		if !allowHTTP || !allowHTTPS {
+			a.RedirectSchemes = []string{}
+			if allowHTTP {
+				a.RedirectSchemes = append(a.RedirectSchemes, "http")
 			}
-		case "https":
-			if !allowHTTPS {
-				return fmt.Errorf("protocol 'https' not allowed by --proto %q", r.AllowedProto)
+			if allowHTTPS {
+				a.RedirectSchemes = append(a.RedirectSchemes, "https")
 			}
 		}
 	}
@@ -829,15 +843,19 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		}
 	}
 
-	// Network.
-	redirects := 0
-	if r.FollowRedirects {
-		redirects = curlDefaultMaxRedirects
-		if r.MaxRedirectsSet {
-			redirects = r.MaxRedirects
+	// Network. A WebSocket handshake does not follow redirects, and fetch
+	// rejects --redirects for it, so leave the setting alone unless -L asks
+	// for redirects.
+	if !a.WS || r.FollowRedirects {
+		redirects := 0
+		if r.FollowRedirects {
+			redirects = curlDefaultMaxRedirects
+			if r.MaxRedirectsSet {
+				redirects = r.MaxRedirects
+			}
 		}
+		a.Cfg.Redirects = &redirects
 	}
-	a.Cfg.Redirects = &redirects
 	if r.TimeoutSet {
 		if err := a.Cfg.ParseTimeout(strconv.FormatFloat(r.Timeout, 'f', -1, 64)); err != nil {
 			return err

@@ -2,6 +2,7 @@ package curl
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1019,29 +1020,48 @@ func TestParseProto(t *testing.T) {
 
 func TestParseAllowedProto(t *testing.T) {
 	tests := []struct {
-		name      string
-		value     string
-		wantHTTP  bool
-		wantHTTPS bool
+		name    string
+		value   string
+		allowed []string // of http, https, ws, wss
+		wantErr bool
 	}{
-		{"empty", "", true, true},
-		{"exclusive https", "=https", false, true},
-		{"exclusive http", "=http", true, false},
-		{"exclusive both", "=http,https", true, true},
-		{"add https", "+https", true, true},
-		{"remove http", "-http", false, true},
-		{"remove https", "-https", true, false},
-		{"exclusive https only", "=https", false, true},
+		{name: "empty", value: "", allowed: []string{"http", "https", "ws", "wss"}},
+		{name: "exclusive https", value: "=https", allowed: []string{"https"}},
+		{name: "exclusive http", value: "=http", allowed: []string{"http"}},
+		{name: "exclusive both", value: "=http,https", allowed: []string{"http", "https"}},
+		{name: "add https", value: "+https", allowed: []string{"http", "https", "ws", "wss"}},
+		{name: "remove http", value: "-http", allowed: []string{"https", "ws", "wss"}},
+		{name: "remove https", value: "-https", allowed: []string{"http", "ws", "wss"}},
+		{name: "deny all then https", value: "-all,https", allowed: []string{"https"}},
+		{name: "deny all then plus http", value: "-all,+http", allowed: []string{"http"}},
+		{name: "deny all", value: "-all", allowed: nil},
+		{name: "all", value: "all", allowed: []string{"http", "https", "ws", "wss"}},
+		{name: "plus all", value: "+all", allowed: []string{"http", "https", "ws", "wss"}},
+		{name: "deny all then exclusive https", value: "-all,=https", allowed: []string{"https"}},
+		{name: "exclusive other protocol", value: "=ftp", allowed: nil},
+		{name: "left to right", value: "https,-http", allowed: []string{"https", "ws", "wss"}},
+		{name: "case insensitive", value: "=HTTPS", allowed: []string{"https"}},
+		{name: "websocket", value: "=wss", allowed: []string{"wss"}},
+		{name: "trailing comma", value: "=https,", allowed: []string{"https"}},
+		{name: "bare modifier", value: "=,https", wantErr: true},
+		{name: "unknown protocol", value: "xyz,https", wantErr: true},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotHTTP, gotHTTPS := ParseAllowedProto(tt.value)
-			if gotHTTP != tt.wantHTTP {
-				t.Errorf("allowHTTP = %v, want %v", gotHTTP, tt.wantHTTP)
+			got, err := ParseAllowedProto(tt.value)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("ParseAllowedProto() succeeded, want an error")
+				}
+				return
 			}
-			if gotHTTPS != tt.wantHTTPS {
-				t.Errorf("allowHTTPS = %v, want %v", gotHTTPS, tt.wantHTTPS)
+			if err != nil {
+				t.Fatalf("ParseAllowedProto() error = %v", err)
+			}
+			for _, scheme := range []string{"http", "https", "ws", "wss"} {
+				if want := slices.Contains(tt.allowed, scheme); got.Allows(scheme) != want {
+					t.Errorf("Allows(%q) = %t, want %t", scheme, got.Allows(scheme), want)
+				}
 			}
 		})
 	}

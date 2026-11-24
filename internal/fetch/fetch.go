@@ -97,6 +97,7 @@ type Request struct {
 	Range            []string
 	Article          bool
 	Redirects        *int
+	RedirectSchemes  []string
 	RemoteHeaderName bool
 	RemoteName       bool
 	Resolve          []resolver.ResolveEntry
