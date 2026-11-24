@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
@@ -455,29 +456,27 @@ func (im *interactiveMode) drawStatusLocked() {
 	fmt.Fprintf(os.Stdout, "\x1b[%d;1H\x1b[2K\x1b[90m%s\x1b[0m", row, msg)
 }
 
+// drawInputLineLocked draws the visible part of the input line. Its work
+// depends on the terminal width, not on the length of the line, and it
+// writes the line with one write.
 func (im *interactiveMode) drawInputLineLocked() {
 	inputRow := im.rows - 1
-	text := im.editor.text()
+	runes := im.editor.buf
 	pos := im.editor.pos
 
 	avail := max(im.cols-promptWidth, 1)
 
-	runes := []rune(text)
+	// Show the text before the cursor that fits; scroll when it does not.
+	// Zero-width runes, such as combining marks, never fill the line, so
+	// the scan is also limited to a number of runes.
+	maxRunes := 4*avail + 16
 	displayStart := 0
-
-	widthToCursor := 0
-	for i := range pos {
-		widthToCursor += runewidth.RuneWidth(runes[i])
-	}
-
-	if widthToCursor >= avail {
-		w := 0
-		for i := pos - 1; i >= 0; i-- {
-			w += runewidth.RuneWidth(runes[i])
-			if w >= avail {
-				displayStart = i + 1
-				break
-			}
+	widthBeforeCursor := 0
+	for i := pos - 1; i >= 0; i-- {
+		widthBeforeCursor += runewidth.RuneWidth(runes[i])
+		if widthBeforeCursor >= avail || pos-i >= maxRunes {
+			displayStart = i + 1
+			break
 		}
 	}
 
@@ -487,20 +486,22 @@ func (im *interactiveMode) drawInputLineLocked() {
 	}
 
 	// Move to input row, clear, write prompt + visible text.
-	fmt.Fprintf(os.Stdout, "\x1b[%d;1H\x1b[2K", inputRow)
-	fmt.Fprintf(os.Stdout, "\x1b[1m%s\x1b[0m", promptStr)
+	var line strings.Builder
+	fmt.Fprintf(&line, "\x1b[%d;1H\x1b[2K", inputRow)
+	fmt.Fprintf(&line, "\x1b[1m%s\x1b[0m", promptStr)
 
 	displayW := 0
-	for i := displayStart; i < len(runes); i++ {
+	for i := displayStart; i < len(runes) && i-displayStart < maxRunes; i++ {
 		rw := runewidth.RuneWidth(runes[i])
 		if displayW+rw > avail {
 			break
 		}
-		fmt.Fprintf(os.Stdout, "%c", runes[i])
+		line.WriteRune(runes[i])
 		displayW += rw
 	}
 
-	fmt.Fprintf(os.Stdout, "\x1b[%d;%dH", inputRow, cursorCol+1)
+	fmt.Fprintf(&line, "\x1b[%d;%dH", inputRow, cursorCol+1)
+	_, _ = io.WriteString(os.Stdout, line.String())
 }
 
 // writePhysicalLine positions the cursor for one rendered message row. Once
@@ -759,27 +760,50 @@ func (im *interactiveMode) handleInput(ctx context.Context, buf []byte) []byte {
 			continue
 		}
 
-		// Printable character or UTF-8 leading byte.
+		// Printable characters or UTF-8 leading bytes. Insert the whole run,
+		// such as a paste, and then draw the input line once.
 		if b >= 0x20 {
-			r, size := utf8.DecodeRune(buf[i:])
-			if r == utf8.RuneError && size <= 1 {
-				if !utf8.FullRune(buf[i:]) {
-					return buf[i:]
-				}
-				i++
-				continue
-			}
 			im.mu.Lock()
-			if int64(im.editor.byteLen)+int64(utf8.RuneLen(r)) > core.MaxWebSocketInteractiveEntry {
+			var runes []rune
+			var rest []byte
+			byteLen := int64(im.editor.byteLen)
+			overLimit := false
+			for i < len(buf) && buf[i] >= 0x20 && buf[i] != 0x7f {
+				r, size := utf8.DecodeRune(buf[i:])
+				if r == utf8.RuneError && size <= 1 {
+					if !utf8.FullRune(buf[i:]) {
+						rest = buf[i:]
+						break
+					}
+					i++
+					continue
+				}
+				i += size
+				if unicode.IsControl(r) {
+					// A C1 control character, which a terminal would
+					// interpret. Received messages are filtered the same way.
+					continue
+				}
+				if byteLen+int64(utf8.RuneLen(r)) > core.MaxWebSocketInteractiveEntry {
+					overLimit = true
+					continue
+				}
+				byteLen += int64(utf8.RuneLen(r))
+				runes = append(runes, r)
+			}
+			if len(runes) > 0 {
+				im.editor.insertRunes(runes)
+				im.drawInputLineLocked()
+			}
+			if overLimit {
 				im.editor.limitReached = true
 				im.status = "message exceeds 16 MiB limit"
 				im.drawStatusLocked()
-			} else {
-				im.editor.insert(r)
-				im.drawInputLineLocked()
 			}
 			im.mu.Unlock()
-			i += size
+			if rest != nil {
+				return rest
+			}
 			continue
 		}
 

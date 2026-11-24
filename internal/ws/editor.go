@@ -23,6 +23,22 @@ func (e *lineEditor) insert(r rune) {
 	e.byteLen += utf8.RuneLen(r)
 }
 
+// insertRunes inserts runes at the cursor with one copy of the text after
+// the cursor, so that a paste into the middle of a line takes linear time.
+func (e *lineEditor) insertRunes(runes []rune) {
+	if len(runes) == 0 {
+		return
+	}
+	tail := len(e.buf) - e.pos
+	e.buf = append(e.buf, runes...)
+	copy(e.buf[e.pos+len(runes):], e.buf[e.pos:e.pos+tail])
+	copy(e.buf[e.pos:], runes)
+	e.pos += len(runes)
+	for _, r := range runes {
+		e.byteLen += utf8.RuneLen(r)
+	}
+}
+
 func (e *lineEditor) backspace() bool {
 	if e.pos == 0 {
 		return false
