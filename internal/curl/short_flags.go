@@ -132,10 +132,9 @@ func parseShortFlags(r *Result, flags string, rest []string) (int, error) {
 			if err != nil {
 				return 0, fmt.Errorf("-b requires an argument")
 			}
-			if err := validateCookieValue(v); err != nil {
+			if err := r.addCookie(v); err != nil {
 				return 0, err
 			}
-			r.Cookie = v
 			total += n
 		case 'I':
 			r.Head = true

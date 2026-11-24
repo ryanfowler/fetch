@@ -804,6 +804,13 @@ func TestParseConvenienceHeaders(t *testing.T) {
 				assertEqual(t, "Cookie", r.Cookie, "session=abc123; user=john")
 			},
 		},
+		{
+			name:  "cookie repeated",
+			input: `curl -b "session=abc123" --cookie 'user=john; theme=dark' -b a=1 https://example.com`,
+			check: func(t *testing.T, r *Result) {
+				assertEqual(t, "Cookie", r.Cookie, "session=abc123; user=john; theme=dark; a=1")
+			},
+		},
 	}
 
 	for _, tt := range tests {
