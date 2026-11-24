@@ -10,40 +10,41 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// lockH3CacheFile takes an exclusive advisory lock on the file name in dir,
+// and creates the file if necessary. On a local file system, the kernel
+// releases the lock when the process exits, so a crash cannot leave a stale
+// lock. (On NFS, the server releases it when the lock lease expires, and a
+// mount without lock support makes every cache update fail.) The file is
+// never removed: removing a lock file while another process opens it would
+// let two processes hold locks on different files.
 func lockH3CacheFile(dir, name string) (*h3CacheLock, error) {
 	dirFD, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
+	fd, err := unix.Openat(dirFD, name, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
+	_ = unix.Close(dirFD)
+	if err != nil {
+		return nil, err
+	}
 	deadline := time.Now().Add(h3CacheLockWait)
 	for {
-		fd, openErr := unix.Openat(dirFD, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0600)
-		if openErr == nil {
-			file := os.NewFile(uintptr(fd), name)
-			if file == nil {
-				_ = unix.Close(fd)
-				_ = unix.Close(dirFD)
-				return nil, os.ErrInvalid
-			}
+		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
 			return &h3CacheLock{release: func() {
-				_ = file.Close()
-				_ = unix.Unlinkat(dirFD, name, 0)
-				_ = unix.Close(dirFD)
+				_ = unix.Flock(fd, unix.LOCK_UN)
+				_ = unix.Close(fd)
 			}}, nil
 		}
-		if !errors.Is(openErr, unix.EEXIST) {
-			_ = unix.Close(dirFD)
-			return nil, openErr
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
+			_ = unix.Close(fd)
+			return nil, err
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			_ = unix.Close(dirFD)
+			_ = unix.Close(fd)
 			return nil, os.ErrDeadlineExceeded
 		}
-		delay := 5 * time.Millisecond
-		if remaining < delay {
-			delay = remaining
-		}
-		time.Sleep(delay)
+		time.Sleep(min(5*time.Millisecond, remaining))
 	}
 }
