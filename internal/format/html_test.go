@@ -549,3 +549,98 @@ func TestEscapeHTMLAttrValue(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatHTMLKeepsSourceText(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+		deny  []string
+	}{
+		{
+			name:  "text keeps references",
+			input: "<p>&lt;script&gt;alert(1)&lt;/script&gt; &amp; more</p>",
+			want:  []string{"&lt;script&gt;alert(1)&lt;/script&gt; &amp; more"},
+			deny:  []string{"<script>"},
+		},
+		{
+			name:  "pre text keeps references",
+			input: "<pre>a &lt;b&gt; c</pre>",
+			want:  []string{"a &lt;b&gt; c"},
+		},
+		{
+			name:  "textarea and title text keep references",
+			input: "<title>&lt;t&gt;</title><textarea>&lt;/textarea&gt;</textarea>",
+			want:  []string{"<title>&lt;t&gt;</title>", "&lt;/textarea&gt;</textarea>"},
+		},
+		{
+			name:  "other references are kept",
+			input: `<p>"quoted" &quot;ref&quot; &copy; &#27;</p>`,
+			want:  []string{`"quoted" &quot;ref&quot; &copy; &#27;`},
+		},
+		{
+			name:  "text after a self-closing script",
+			input: `<div><script src="a.js" /><p>a &amp; b</p></div>`,
+			want:  []string{"<p>a &amp; b</p>"},
+			deny:  []string{"&amp;amp;", "&lt;p&gt;"},
+		},
+		{
+			name:  "uppercase script text",
+			input: "<SCRIPT>a < b</SCRIPT>",
+			want:  []string{"a < b"},
+		},
+		{
+			name:  "comment keeps references",
+			input: "<p>x</p><!-- &lt;b&gt; &amp; -->",
+			want:  []string{"<!-- &lt;b&gt; &amp; -->"},
+		},
+		{
+			name:  "carriage returns become newlines",
+			input: "<pre>a\r\nb\rc</pre>",
+			want:  []string{"a\nb\nc"},
+			deny:  []string{"\r"},
+		},
+		{
+			name:  "script text is not escaped",
+			input: "<script>if (a < b && c > d) {}</script>",
+			want:  []string{"if (a < b && c > d) {}"},
+		},
+		{
+			name:  "noscript text is not escaped",
+			input: "<noscript><img src=x></noscript>",
+			want:  []string{"<img src=x>"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := core.NewHandle(core.ColorOff).Stderr()
+			if err := FormatHTML([]byte(tt.input), p); err != nil {
+				t.Fatalf("FormatHTML() error = %v", err)
+			}
+			output := string(p.Bytes())
+			for _, want := range tt.want {
+				if !strings.Contains(output, want) {
+					t.Errorf("output does not contain %q:\n%s", want, output)
+				}
+			}
+			for _, deny := range tt.deny {
+				if strings.Contains(output, deny) {
+					t.Errorf("output contains %q:\n%s", deny, output)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatHTMLEscapedTextDoesNotGrow(t *testing.T) {
+	// Text with many "&" and "<" characters must not grow past the output
+	// limit when it is formatted.
+	input := "<p>" + strings.Repeat("a &lt; b &amp; c ", 50000) + "</p>"
+	p := core.NewHandle(core.ColorOff).Stderr()
+	if err := FormatHTML([]byte(input), p); err != nil {
+		t.Fatalf("FormatHTML() error = %v", err)
+	}
+	if got := len(p.Bytes()); got > len(input)+16 {
+		t.Fatalf("output is %d bytes for %d input bytes", got, len(input))
+	}
+}

@@ -270,7 +270,7 @@ func formatHTML(buf []byte, w *core.Printer) error {
 			}
 
 		case html.TextToken:
-			text := tokenizer.Text()
+			text := htmlSourceText(tokenizer.Raw())
 
 			// Check if we're inside a raw text or whitespace-preserving element.
 			inRawText := false
@@ -336,10 +336,46 @@ func formatHTML(buf []byte, w *core.Printer) error {
 				writeIndent(w, len(stack))
 			}
 			w.WriteString("<!--")
-			writeHTMLComment(w, tokenizer.Token().Data)
+			writeHTMLComment(w, htmlCommentText(tokenizer))
 			w.WriteString("-->\n")
 		}
 	}
+}
+
+// htmlSourceText returns the text of a token as it is in the source, with
+// "\r\n" and "\r" changed to "\n" and NUL changed to U+FFFD. Tokenizer.Text
+// decodes character references, so "&lt;b&gt;" would show as the markup
+// "<b>". The tokenizer does not decode the text of raw elements such as
+// script, so the source is the same as Text for them.
+func htmlSourceText(raw []byte) []byte {
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		switch c := raw[i]; c {
+		case '\r':
+			out = append(out, '\n')
+			if i+1 < len(raw) && raw[i+1] == '\n' {
+				i++
+			}
+		case 0:
+			out = append(out, "\uFFFD"...)
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// htmlCommentText returns the text of the current comment token as it is
+// in the source. A bogus comment, such as "<?xml ...>", has no "<!--" and
+// "-->" around it, so its text comes from the tokenizer.
+func htmlCommentText(tokenizer *html.Tokenizer) string {
+	raw := tokenizer.Raw()
+	if inner, ok := bytes.CutPrefix(raw, []byte("<!--")); ok {
+		if inner, ok = bytes.CutSuffix(inner, []byte("-->")); ok {
+			return string(htmlSourceText(inner))
+		}
+	}
+	return tokenizer.Token().Data
 }
 
 func writeHTMLTagName(p *core.Printer, s string) {
