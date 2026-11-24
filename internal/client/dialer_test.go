@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ryanfowler/fetch/internal/resolver"
@@ -166,25 +167,27 @@ func TestResolverDialerPreservesCandidatePreferenceAndClosesLoser(t *testing.T) 
 }
 
 func TestResolverDialerConnectBudgetIncludesAttempt(t *testing.T) {
-	budget := 40 * time.Millisecond
-	start := time.Now()
-	_, err := NewResolverDialer(nil, 0).Dial(context.Background(), DialRequest{
-		Candidates: []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}},
-		Host:       "service.test",
-		Port:       "443",
-		Timeout:    budget,
-		Attempt: func(ctx context.Context, _ string, _ net.IPAddr) (net.Conn, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
+	synctest.Test(t, func(t *testing.T) {
+		budget := 40 * time.Millisecond
+		start := time.Now()
+		_, err := NewResolverDialer(nil, 0).Dial(context.Background(), DialRequest{
+			Candidates: []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}},
+			Host:       "service.test",
+			Port:       "443",
+			Timeout:    budget,
+			Attempt: func(ctx context.Context, _ string, _ net.IPAddr) (net.Conn, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		})
+		var timeoutErr net.Error
+		if !errors.As(err, &timeoutErr) || !timeoutErr.Timeout() {
+			t.Fatalf("error = %v, want a timeout", err)
+		}
+		if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
+			t.Fatalf("dial took %s, budget was %s", elapsed, budget)
+		}
 	})
-	var timeoutErr net.Error
-	if !errors.As(err, &timeoutErr) || !timeoutErr.Timeout() {
-		t.Fatalf("error = %v, want a timeout", err)
-	}
-	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
-		t.Fatalf("dial took %s, budget was %s", elapsed, budget)
-	}
 }
 
 func TestResolverDialerUnixSocketUsesSingleAttempt(t *testing.T) {

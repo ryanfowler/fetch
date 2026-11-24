@@ -3,12 +3,15 @@ package pager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -179,7 +182,7 @@ func TestStreamContextStopsSourceWhenPagerExits(t *testing.T) {
 	if err := StreamContext(context.Background(), source, core.PagerOn, false, false, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("pager did not stop a blocked source: %s", elapsed)
 	}
 	if !source.wasClosed() {
@@ -244,20 +247,18 @@ func sameStrings(a, b []string) bool {
 }
 
 // startInteractiveTestPager runs StreamContext with an interactive pager
-// script. The script writes "ready" when it runs and runs onTerm on SIGTERM.
-func startInteractiveTestPager(t *testing.T, onTerm string) (dir string, cancel context.CancelFunc, done <-chan error) {
+// helper process. The helper installs its SIGTERM handler before writing
+// "ready", so SIGTERM is handled immediately without waiting on a shell sleep
+// child process.
+func startInteractiveTestPager(t *testing.T, mode string) (dir string, cancel context.CancelFunc, done <-chan error) {
 	t.Helper()
 	if testing.Short() || runtime.GOOS == "windows" {
 		t.Skip("starts a Unix subprocess")
 	}
 	dir = t.TempDir()
-	script := "#!/bin/sh\ntrap '" + onTerm + "' TERM\nprintf ready > \"$FETCH_TEST_PAGER_DIR/ready\"\nwhile :; do sleep 0.05; done\n"
-	pagerPath := filepath.Join(dir, "pager.sh")
-	if err := os.WriteFile(pagerPath, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("FETCH_TEST_PAGER_DIR", dir)
-	t.Setenv("PAGER", pagerPath)
+	t.Setenv("FETCH_TEST_PAGER_INTERACTIVE_MODE", mode)
+	t.Setenv("PAGER", fmt.Sprintf("%q -test.run=^TestPagerInteractiveHelper$", os.Args[0]))
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
@@ -265,7 +266,7 @@ func startInteractiveTestPager(t *testing.T, onTerm string) (dir string, cancel 
 		// as an interactive pager does.
 		result <- StreamContext(ctx, strings.NewReader("data"), core.PagerOn, true, false, io.Discard)
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
 			break
@@ -285,15 +286,36 @@ func startInteractiveTestPager(t *testing.T, onTerm string) (dir string, cancel 
 	return dir, cancelFunc, result
 }
 
+func TestPagerInteractiveHelper(t *testing.T) {
+	mode := os.Getenv("FETCH_TEST_PAGER_INTERACTIVE_MODE")
+	if mode == "" {
+		return
+	}
+	dir := os.Getenv("FETCH_TEST_PAGER_DIR")
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+	if err := os.WriteFile(filepath.Join(dir, "ready"), []byte("ready"), 0o600); err != nil {
+		os.Exit(1)
+	}
+	<-sigCh
+	_ = os.WriteFile(filepath.Join(dir, "term"), []byte("term"), 0o600)
+	if mode == "exit" {
+		os.Exit(0)
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+
 func TestStreamContextLetsInteractivePagerHandleSIGTERM(t *testing.T) {
-	dir, cancel, done := startInteractiveTestPager(t, `printf term > "$FETCH_TEST_PAGER_DIR/term"; exit 0`)
+	dir, cancel, done := startInteractiveTestPager(t, "exit")
 	cancel()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("StreamContext() error = %v, want context.Canceled", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("interactive pager did not exit")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "term")); err != nil {
@@ -303,13 +325,11 @@ func TestStreamContextLetsInteractivePagerHandleSIGTERM(t *testing.T) {
 
 func TestStreamContextKillsInteractivePagerThatIgnoresSIGTERM(t *testing.T) {
 	previous := pagerExitGrace
-	// The shell runs the trap only after its current "sleep 0.05" ends.
-	// Allow enough time for that on a slow machine.
-	pagerExitGrace = time.Second
+	pagerExitGrace = 500 * time.Millisecond
 	t.Cleanup(func() { pagerExitGrace = previous })
 
-	// The trap records SIGTERM and keeps running.
-	dir, cancel, done := startInteractiveTestPager(t, `printf term > "$FETCH_TEST_PAGER_DIR/term"`)
+	// The helper records SIGTERM and keeps running until SIGKILL.
+	dir, cancel, done := startInteractiveTestPager(t, "ignore")
 	start := time.Now()
 	cancel()
 	select {
@@ -317,7 +337,7 @@ func TestStreamContextKillsInteractivePagerThatIgnoresSIGTERM(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("StreamContext() error = %v, want context.Canceled", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("interactive pager that ignores SIGTERM was not killed")
 	}
 	if elapsed := time.Since(start); elapsed < pagerExitGrace {

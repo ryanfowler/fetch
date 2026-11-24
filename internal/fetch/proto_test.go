@@ -294,6 +294,7 @@ func TestFrameGRPCBodySupportsRetryReplayAfterSpooling(t *testing.T) {
 }
 
 func TestFrameGRPCBodySupportsDigestReplayAfterSpooling(t *testing.T) {
+	isolateTestTempDir(t)
 	before := grpcSpoolFileNames(t)
 	t.Cleanup(func() {
 		for name := range grpcSpoolFileNames(t) {

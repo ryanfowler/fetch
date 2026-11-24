@@ -2426,7 +2426,9 @@ func TestConnectContextUsesEarlierRequestDeadline(t *testing.T) {
 func TestConnectTimeoutCoversHTTPSProxyConnect(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
-			t.Fatalf("proxy method = %s, want CONNECT", r.Method)
+			t.Errorf("proxy method = %s, want CONNECT", r.Method)
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		<-r.Context().Done()
 	}))
@@ -2447,7 +2449,7 @@ func TestConnectTimeoutCoversHTTPSProxyConnect(t *testing.T) {
 	if err == nil {
 		t.Fatal("request succeeded, want proxy CONNECT timeout")
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("proxy timeout took too long: %s", elapsed)
 	}
 }

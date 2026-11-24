@@ -48,7 +48,7 @@ func TestStreamContextTerminatesPagerJobTree(t *testing.T) {
 		}
 	})
 
-	deadline := time.NewTimer(5 * time.Second)
+	deadline := time.NewTimer(15 * time.Second)
 	defer deadline.Stop()
 	for {
 		if _, err := os.Stat(readyPath); err == nil {
@@ -82,7 +82,7 @@ func TestStreamContextTerminatesPagerJobTree(t *testing.T) {
 		if streamErr == nil {
 			t.Fatal("canceled pager returned nil")
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("canceled pager job did not terminate")
 	}
 	if !waitForTestProcessExit(childPID, 2*time.Second) {

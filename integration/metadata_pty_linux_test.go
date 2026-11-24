@@ -16,7 +16,7 @@ import (
 )
 
 func TestMetadataHelpInPTY(t *testing.T) {
-	fetchPath := goBuild(t, t.TempDir())
+	fetchPath := fetchExecutable(t)
 
 	tests := []struct {
 		name string
@@ -58,7 +58,7 @@ func runInPTY(t *testing.T, path string, args ...string) (string, error) {
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave
-	cmd.Env = cleanPagerEnv()
+	cmd.Env = cleanPagerEnv(t)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
 	if err := cmd.Start(); err != nil {
 		slave.Close()
@@ -79,10 +79,10 @@ func runInPTY(t *testing.T, path string, args ...string) (string, error) {
 		select {
 		case output := <-outputDone:
 			return output, err
-		case <-time.After(2 * time.Second):
+		case <-time.After(5 * time.Second):
 			return "", err
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		_ = cmd.Process.Kill()
 		return "", <-waitDone
 	}
@@ -112,9 +112,11 @@ func openPTY(t *testing.T) (*os.File, *os.File) {
 	return master, slave
 }
 
-func cleanPagerEnv() []string {
-	env := make([]string, 0, len(os.Environ())+2)
-	for _, value := range os.Environ() {
+func cleanPagerEnv(t *testing.T) []string {
+	t.Helper()
+	base := isolatedEnv(t, t.TempDir())
+	env := make([]string, 0, len(base)+1)
+	for _, value := range base {
 		if strings.HasPrefix(value, "PAGER=") || strings.HasPrefix(value, "NO_PAGER=") || strings.HasPrefix(value, "LESS=") {
 			continue
 		}

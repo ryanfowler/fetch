@@ -67,14 +67,7 @@ func TestFromCurlBodyOptionSemantics(t *testing.T) {
 			cmd := exec.CommandContext(ctx, fetchPath, "--auto-update", "false", "--from-curl", command)
 			cmd.WaitDelay = time.Second
 			cmd.Dir = root
-			cmd.Env = append(os.Environ(),
-				"HOME="+root, "USERPROFILE="+root,
-				"XDG_CONFIG_HOME="+root, "XDG_CACHE_HOME="+root,
-				"APPDATA="+root, "LOCALAPPDATA="+root,
-				"TMPDIR="+root, "TMP="+root, "TEMP="+root,
-				"HTTP_PROXY=", "HTTPS_PROXY=", "ALL_PROXY=", "NO_PROXY=*",
-				"http_proxy=", "https_proxy=", "all_proxy=", "no_proxy=*",
-			)
+			cmd.Env = isolatedEnv(t, root)
 			if tt.stdin {
 				cmd.Stdin = strings.NewReader(payload)
 			}

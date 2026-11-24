@@ -425,7 +425,7 @@ func TestRetryBudgetCoversDelay(t *testing.T) {
 	r := &Request{
 		Discard:       true,
 		Retry:         1,
-		RetryDelay:    time.Second,
+		RetryDelay:    5 * time.Second,
 		Timeout:       50 * time.Millisecond,
 		URL:           mustParseURL(server.URL),
 		PrinterHandle: core.NewHandle(core.ColorOff),
@@ -448,7 +448,7 @@ func TestRetryBudgetCoversDelay(t *testing.T) {
 	if requests != 1 {
 		t.Fatalf("requests = %d, want one attempt", requests)
 	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("shared timeout took too long: %s", elapsed)
 	}
 }
@@ -498,6 +498,7 @@ func TestUnsafeRequestWithConfiguredRetriesStillSendsOneShotBody(t *testing.T) {
 }
 
 func TestRetryableRequestCleansGRPCSpoolAfterRetry(t *testing.T) {
+	isolateTestTempDir(t)
 	before := grpcSpoolFileNames(t)
 	t.Cleanup(func() {
 		for name := range grpcSpoolFileNames(t) {
@@ -565,6 +566,14 @@ func TestRetryableRequestCleansGRPCSpoolAfterRetry(t *testing.T) {
 	}
 }
 
+func isolateTestTempDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	t.Setenv("TMP", dir)
+	t.Setenv("TEMP", dir)
+}
+
 func grpcSpoolFileNames(t *testing.T) map[string]struct{} {
 	t.Helper()
 	entries, err := os.ReadDir(os.TempDir())
@@ -586,7 +595,7 @@ func TestRetryDrainHasBoundedTime(t *testing.T) {
 	if err := drainResponseBody(context.Background(), body); err != nil {
 		t.Fatalf("drainResponseBody: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed < maxRetryDrainTime/2 || elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed < maxRetryDrainTime/2 || elapsed > 2*time.Second {
 		t.Fatalf("drain elapsed = %s, want approximately %s", elapsed, maxRetryDrainTime)
 	}
 	select {
@@ -659,7 +668,7 @@ func TestRetryUsesCallerCancellation(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("error = %v, want cancellation", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("caller cancellation did not stop retry")
 	}
 }

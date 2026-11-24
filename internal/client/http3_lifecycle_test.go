@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -64,40 +65,40 @@ func TestRoundTripHTTP3PreservesResponseEOF(t *testing.T) {
 }
 
 func TestRoundTripHTTP3CancelsResponseBodyOnContextDeadline(t *testing.T) {
-	body := newBlockingReadCloser()
-	transport := h3RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: body, Request: req}, nil
-	})
-	// The deadline must not pass before roundTripHTTP3 returns, also on a
-	// slow CI machine. The body read below then waits for it.
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := roundTripHTTP3(transport, req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	readDone := make(chan error, 1)
-	go func() {
-		_, readErr := resp.Body.Read(make([]byte, 1))
-		readDone <- readErr
-	}()
-	select {
-	case readErr := <-readDone:
-		if !errors.Is(readErr, context.DeadlineExceeded) {
-			t.Fatalf("body read error = %v, want deadline exceeded", readErr)
+	synctest.Test(t, func(t *testing.T) {
+		body := newBlockingReadCloser()
+		transport := h3RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: body, Request: req}, nil
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("response body did not stop after request deadline")
-	}
-	if !body.wasClosed() {
-		t.Fatal("response body was not closed after request deadline")
-	}
+		resp, err := roundTripHTTP3(transport, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+
+		readDone := make(chan error, 1)
+		go func() {
+			_, readErr := resp.Body.Read(make([]byte, 1))
+			readDone <- readErr
+		}()
+		select {
+		case readErr := <-readDone:
+			if !errors.Is(readErr, context.DeadlineExceeded) {
+				t.Fatalf("body read error = %v, want deadline exceeded", readErr)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("response body did not stop after request deadline")
+		}
+		if !body.wasClosed() {
+			t.Fatal("response body was not closed after request deadline")
+		}
+	})
 }
 
 func TestRoundTripHTTP3CloseCancelsUnreadResponse(t *testing.T) {
