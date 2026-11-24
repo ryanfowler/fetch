@@ -540,6 +540,7 @@ ca-cert = /path/to/api-ca.crt
 **Notes:**
 
 - If `cert` is provided without `key`, the tool will attempt to read the private key from the certificate file (combined PEM format)
+- A certificate file that contains its matching private key does not use a `key` from a lower-precedence scope, such as the global section when `cert` is set in a host section. A `key` set in a higher-precedence scope always applies
 - If the private key cannot be found, an error will be displayed
 - Encrypted private keys are not supported
 
