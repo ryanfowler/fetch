@@ -768,12 +768,22 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 	}
 
 	// Authentication.
+	var awsKey, awsSecret string
+	if r.AWSSigv4 != "" && r.DigestAuth {
+		return fmt.Errorf("curl --aws-sigv4 cannot be combined with --digest")
+	}
 	if r.BasicAuth != "" {
 		user, pass, ok := strings.Cut(r.BasicAuth, ":")
-		if !ok {
+		if r.AWSSigv4 != "" {
+			// With --aws-sigv4, curl uses -u as the access key ID and the
+			// secret access key, not as Basic credentials.
+			if !ok || user == "" || pass == "" {
+				return fmt.Errorf("--aws-sigv4 with -u requires ACCESS_KEY:SECRET_KEY")
+			}
+			awsKey, awsSecret = user, pass
+		} else if !ok {
 			return fmt.Errorf("invalid basic auth format, expected USER:PASS")
-		}
-		if r.DigestAuth {
+		} else if r.DigestAuth {
 			a.Digest = &core.KeyVal[string]{Key: user, Val: pass}
 		} else {
 			a.Basic = &core.KeyVal[string]{Key: user, Val: pass}
@@ -793,6 +803,8 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		if err != nil {
 			return err
 		}
+		// Keys from -u replace the AWS_* environment variables.
+		cfg.AccessKey, cfg.SecretKey = awsKey, awsSecret
 		a.AWSSigv4 = cfg
 	}
 

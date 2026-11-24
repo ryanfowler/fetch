@@ -135,7 +135,12 @@ func headerValueInsensitive(header http.Header, name string) string {
 	return ""
 }
 
+// fillEnvCredentials fills missing credentials from the AWS_* environment
+// variables. The session token is read only when the access key is read too:
+// a token from the environment belongs to the environment's key, not to a
+// key that the caller supplied.
 func fillEnvCredentials(cfg *Config) error {
+	keyFromEnv := cfg.AccessKey == ""
 	if cfg.AccessKey == "" {
 		cfg.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
 		if cfg.AccessKey == "" {
@@ -148,7 +153,7 @@ func fillEnvCredentials(cfg *Config) error {
 			return &MissingEnvVarError{EnvVar: "AWS_SECRET_ACCESS_KEY"}
 		}
 	}
-	if cfg.SessionToken == "" {
+	if cfg.SessionToken == "" && keyFromEnv {
 		cfg.SessionToken = os.Getenv("AWS_SESSION_TOKEN")
 	}
 	return nil
