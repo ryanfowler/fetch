@@ -910,6 +910,7 @@ fetch --from-curl 'https://example.com'
 **Notes:**
 
 - The command is split like a bash command: single, double, and ANSI-C (`$'...'`) quotes, backslash escapes, and line continuations are supported. A backslash before a Windows line ending (CRLF) also continues the line. Variables and command substitutions are not expanded, and a `$'...'` value with a NUL byte is an error.
+- As in curl, `-T FILE` with a URL whose path is empty or ends with `/`, and that has no query, adds the percent-encoded base name of `FILE` to the URL. The base name is the text after the last `/` or `\`.
 - `-b`/`--cookie` only supports inline cookie strings (e.g., `-b 'name=value'`). Cookie jar files are not supported and will return an error.
 - Repeated `-b`/`--cookie` options are joined with `; `, as curl does, so every cookie is sent.
 - As in curl, a `-H` header named `User-Agent`, `Referer` or `Cookie` replaces the value of `-A`, `-e` or `-b`.

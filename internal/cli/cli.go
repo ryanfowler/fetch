@@ -642,6 +642,40 @@ func validateFromCurlExclusives(app *App, cli *CLI, long map[string]Flag) error 
 	return nil
 }
 
+// addUploadFileName adds the base name of the -T file to u, as curl does,
+// when the escaped URL path is empty or ends with "/" and u has no query
+// (a bare "?" is not a query). Like curl, it takes the text after the last
+// "/" or "\" on every OS, and it percent-encodes every byte of the name
+// except the unreserved characters of RFC 3986. Standard input ("-") has
+// no name to add.
+func addUploadFileName(u *url.URL, file string) {
+	dir := u.EscapedPath()
+	if file == "-" || u.RawQuery != "" || (dir != "" && !strings.HasSuffix(dir, "/")) {
+		return
+	}
+	name := file[strings.LastIndexAny(file, `/\`)+1:]
+	if name == "" {
+		return
+	}
+	var escaped strings.Builder
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || strings.IndexByte("-._~", c) >= 0 {
+			escaped.WriteByte(c)
+		} else {
+			fmt.Fprintf(&escaped, "%%%02X", c)
+		}
+	}
+	if dir == "" {
+		dir = "/"
+		u.Path = "/"
+	}
+	u.Path += name
+	u.RawPath = dir + escaped.String()
+	// curl drops a bare "?" when it adds the name.
+	u.ForceQuery = false
+}
+
 // applyFromCurl maps a parsed curl Result onto the App fields.
 // curlHasHeader reports whether the curl command has a -H header named
 // name, in any letter case.
@@ -704,6 +738,9 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		}
 	}
 
+	if r.UploadFile != "" {
+		addUploadFileName(u, r.UploadFile)
+	}
 	a.URL = u
 
 	// Method.
