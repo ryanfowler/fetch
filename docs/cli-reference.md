@@ -946,6 +946,8 @@ version, or build information output.
 ### `--check-update`
 
 Check the latest GitHub release without downloading or replacing the executable.
+When the current version is newer than the latest release, it reports this
+instead of an available update.
 The command uses bounded HTTPS requests and carries only operational proxy, DNS,
 CA, and timeout settings.
 
@@ -957,8 +959,10 @@ dry-runs, and updater children do not start another automatic check.
 
 ### `--update`
 
-Update fetch binary in place. The selected archive must have a matching SHA-256
-sidecar. Metadata is limited to 1 MiB, checksums to 1 KiB, and archives to 128
+Update fetch binary in place. fetch does not downgrade: when the current
+version is newer than the latest release, as for a build from the main branch,
+it reports this and does not update. The selected archive must have a matching
+SHA-256 sidecar. Metadata is limited to 1 MiB, checksums to 1 KiB, and archives to 128
 MiB. The archive is streamed to a temporary file and verified before extraction.
 Use with `--dry-run` to validate release metadata, asset selection, checksum
 availability, and executable preflight. Dry-run downloads bounded release
