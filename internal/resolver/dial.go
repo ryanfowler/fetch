@@ -130,6 +130,21 @@ func RaceCandidates[T any](ctx context.Context, candidates []net.IPAddr, attempt
 		case <-ctx.Done():
 			state.Store(-2)
 			cancel()
+			// An attempt can succeed and send its result before it sees the
+			// new state, so it does not close itself. Close every result
+			// that is ready; an attempt that sends later sees the state and
+			// closes itself. Close runs at most once for each result.
+			for {
+				select {
+				case got := <-results:
+					if got.err == nil {
+						got.close()
+					}
+					continue
+				default:
+				}
+				break
+			}
 			return zero, contextError(ctx)
 		}
 	}
