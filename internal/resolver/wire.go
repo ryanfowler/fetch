@@ -291,7 +291,7 @@ func DecodeMessage(packet []byte) (*Message, error) {
 		Response:           flags&0x8000 != 0,
 		Opcode:             uint8((flags >> 11) & 0x0f),
 		Authoritative:      flags&0x0400 != 0,
-		Truncated:          flags&0x0200 != 0,
+		Truncated:          flags&dnsFlagTruncated != 0,
 		RecursionDesired:   flags&0x0100 != 0,
 		RecursionAvailable: flags&0x0080 != 0,
 		RCode:              uint16(flags & 0x000f),
@@ -519,9 +519,12 @@ func decodeKnownRData(record *Record, packet []byte, start, end int, boundaries 
 			record.Params = append(record.Params, SVCParam{Key: key, Value: append([]byte(nil), packet[at:at+ln]...)})
 			at += ln
 		}
-		if _, err := buildSVCBRecord(record.Priority, *record.Target, record.Params); err != nil {
+		built, err := buildSVCBRecord(record.Priority, *record.Target, record.Params)
+		if err != nil {
 			return err
 		}
+		// buildSVCBRecord drops the SvcParams of an AliasMode record.
+		record.Params = built.Params
 	}
 	return nil
 }
@@ -613,7 +616,6 @@ const (
 	// parent context can shorten it further.
 	dnsRetransmissionInterval = time.Second
 	dnsTransactionAttempts    = 2
-	maxDNSMalformedUDPPackets = 8
 	maxDNSWirePacket          = 65535
 	maxDNSTCPFrames           = 8
 	maxDNSTCPBytes            = 256 * 1024
@@ -683,6 +685,9 @@ func lookupUDPMessage(ctx context.Context, serverAddr, host string, typ uint16, 
 		// the retry error so it remains a real query failure.
 		return nil, true, fmt.Errorf("DNS TCP fallback: %w", err)
 	}
+	if message.Header.Truncated {
+		return nil, true, errors.New("DNS TCP fallback: response is truncated")
+	}
 	return message, true, nil
 }
 
@@ -707,12 +712,27 @@ func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16
 	defer stopClosing()
 
 	var lastErr error
+	// lastDecodeErr is the decode error of the last datagram that matched
+	// the transaction but failed strict decoding. It is a better error than
+	// a timeout when no valid response arrives.
+	var lastDecodeErr error
+	// failure returns err, or the decode error of a matched datagram, which
+	// tells more. A context error always wins.
+	failure := func(err error) error {
+		if ctxErr := contextError(ctx); ctxErr != nil {
+			return ctxErr
+		}
+		if lastDecodeErr != nil {
+			return fmt.Errorf("invalid DNS UDP response: %w", lastDecodeErr)
+		}
+		return err
+	}
 	for attempt := 0; attempt < attempts; attempt++ {
 		if err := contextError(ctx); err != nil {
 			return nil, err
 		}
 		if time.Now().After(transactionDeadline) {
-			return nil, errors.New("DNS transaction budget exhausted")
+			return nil, failure(errors.New("DNS transaction budget exhausted"))
 		}
 		if err := conn.SetWriteDeadline(transactionDeadline); err != nil {
 			return nil, err
@@ -723,13 +743,12 @@ func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16
 
 		deadline, err := receiveDeadline(ctx, attempt, transactionDeadline, attempts)
 		if err != nil {
-			return nil, err
+			return nil, failure(err)
 		}
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			return nil, err
 		}
 		packet := make([]byte, maxDNSWirePacket+1)
-		malformedMatched := 0
 		for {
 			n, source, readErr := conn.ReadFromUDP(packet)
 			if readErr != nil {
@@ -737,10 +756,7 @@ func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16
 					lastErr = readErr
 					break
 				}
-				if err := contextError(ctx); err != nil {
-					return nil, err
-				}
-				return nil, readErr
+				return nil, failure(readErr)
 			}
 			if n > maxDNSWirePacket {
 				// The packet was larger than the DNS wire limit. Do not attempt
@@ -750,15 +766,13 @@ func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16
 			if !sameUDPAddr(source, conn.RemoteAddr()) {
 				continue
 			}
-			message, matched, decodeErr := decodeTransactionPacket(packet[:n], id, question)
+			message, matched, decodeErr := decodeTransactionPacket(packet[:n], id, question, true)
 			if decodeErr != nil {
 				// UDP cannot reliably attribute a datagram to this transaction
-				// beyond its source and DNS correlation fields. Count packets that
-				// pass those checks but fail strict decoding without letting a burst
-				// abort the receive window or overflow the counter.
-				if malformedMatched < maxDNSMalformedUDPPackets {
-					malformedMatched++
-				}
+				// beyond its source and DNS correlation fields. A datagram that
+				// passes those checks but fails strict decoding does not end the
+				// receive window, because a valid response can still follow.
+				lastDecodeErr = decodeErr
 				continue
 			}
 			if !matched {
@@ -767,13 +781,10 @@ func transactUDP(ctx context.Context, conn *net.UDPConn, query []byte, id uint16
 			return message, nil
 		}
 	}
-	if err := contextError(ctx); err != nil {
-		return nil, err
-	}
 	if lastErr != nil {
-		return nil, fmt.Errorf("DNS UDP transaction timed out after %d attempts: %w", attempts, lastErr)
+		return nil, failure(fmt.Errorf("DNS UDP transaction timed out after %d attempts: %w", attempts, lastErr))
 	}
-	return nil, errors.New("DNS UDP transaction failed")
+	return nil, failure(errors.New("DNS UDP transaction failed"))
 }
 
 func transactTCP(ctx context.Context, serverAddr string, query []byte, id uint16, question Question, transactionDeadline time.Time) (*Message, error) {
@@ -833,7 +844,7 @@ func transactTCP(ctx context.Context, serverAddr string, query []byte, id uint16
 			}
 			return nil, err
 		}
-		message, matched, decodeErr := decodeTransactionPacket(framePacket, id, question)
+		message, matched, decodeErr := decodeTransactionPacket(framePacket, id, question, false)
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
@@ -866,7 +877,16 @@ func addressAnswers(message *Message, question Question, typ uint16) ([]net.IPAd
 	return out, nil
 }
 
-func decodeTransactionPacket(packet []byte, id uint16, question Question) (*Message, bool, error) {
+// dnsFlagTruncated is the TC bit in the DNS header flags.
+const dnsFlagTruncated = 0x0200
+
+// decodeTransactionPacket decodes a response that may belong to the given
+// transaction. matched is false for a packet of another transaction. When
+// allowTruncated is true, a matching response with the TC bit set whose body
+// does not decode is returned as a header-only truncated message, so a UDP
+// caller can retry over TCP. A TCP caller must pass false: there is no
+// further retry.
+func decodeTransactionPacket(packet []byte, id uint16, question Question, allowTruncated bool) (*Message, bool, error) {
 	// Filter the cheap correlation fields before strict decoding. A stale
 	// query packet or response for another opcode must not be able to abort
 	// this transaction merely because its remaining bytes are malformed.
@@ -876,6 +896,15 @@ func decodeTransactionPacket(packet []byte, id uint16, question Question) (*Mess
 	}
 	message, err := DecodeMessage(packet)
 	if err != nil {
+		if allowTruncated && binary.BigEndian.Uint16(packet[2:4])&dnsFlagTruncated != 0 {
+			// A truncated response can be cut anywhere, so its body may not
+			// decode. Its header and question match this transaction, so
+			// return only the header and let the caller retry over TCP.
+			return &Message{
+				Header:    Header{ID: id, Response: true, Truncated: true},
+				Questions: []Question{question},
+			}, true, nil
+		}
 		return nil, false, err
 	}
 	if err := message.ValidateResponse(id, question); err != nil {

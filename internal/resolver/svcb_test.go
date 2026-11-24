@@ -113,7 +113,6 @@ func TestParseSVCBRDataRejectsMalformedParameters(t *testing.T) {
 		{"empty IPv4 hint", svcbRData(1, nil, svcbParam(svcParamIPv4Hint, nil)), "nonzero multiple"},
 		{"bad IPv6 hint", svcbRData(1, nil, svcbParam(svcParamIPv6Hint, make([]byte, 15))), "nonzero multiple"},
 		{"bad ECH framing", svcbRData(1, nil, svcbParam(svcParamECH, []byte{0, 2, 0xfe})), "declares 2"},
-		{"alias parameters", svcbRData(0, []string{"alias", "example"}, svcbParam(svcParamALPN, []byte{2, 'h', '3'})), "AliasMode"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -261,5 +260,54 @@ func TestParseSVCBRDataAcceptsFramedECHConfigList(t *testing.T) {
 	}
 	if string(parsed.ECH) != string(value) {
 		t.Fatalf("ECH value was not preserved")
+	}
+}
+
+func TestParseSVCBRDataIgnoresAliasModeParameters(t *testing.T) {
+	// RFC 9460, section 2.4.2: recipients MUST ignore SvcParams in AliasMode.
+	raw := svcbRData(0, []string{"alias", "example"}, svcbParam(svcParamALPN, []byte{2, 'h', '3'}))
+	record, err := ParseSVCBRData(raw)
+	if err != nil {
+		t.Fatalf("ParseSVCBRData() error = %v", err)
+	}
+	if !record.IsAliasMode() || len(record.Params) != 0 || record.Target.String() != "alias.example." {
+		t.Fatalf("record = %+v, want AliasMode to alias.example. without parameters", record)
+	}
+
+	owner := mustParseTestName(t, "example.com")
+	packet := responsePacket(nil, 1, Question{Name: owner, Type: dnsTypeHTTPS, Class: 1}, []Record{makeRecord(owner, dnsTypeHTTPS, raw)})
+	message, err := DecodeMessage(packet)
+	if err != nil {
+		t.Fatalf("DecodeMessage() error = %v", err)
+	}
+	if got := message.Answers[0].Params; len(got) != 0 {
+		t.Fatalf("decoded AliasMode parameters = %v, want none", got)
+	}
+}
+
+func TestDecodeMessageStillChecksAliasModeParameterSyntax(t *testing.T) {
+	owner := mustParseTestName(t, "example.com")
+	tests := map[string][]byte{
+		"out of order": svcbRData(0, []string{"alias", "example"}, svcbParam(svcParamPort, []byte{0, 1}), svcbParam(svcParamALPN, []byte{2, 'h', '3'})),
+		"reserved key": svcbRData(0, []string{"alias", "example"}, svcbParam(65535, nil)),
+		"truncated":    append(svcbRData(0, []string{"alias", "example"}), 0, 1, 0, 9, 1),
+	}
+	for name, raw := range tests {
+		t.Run(name, func(t *testing.T) {
+			packet := responsePacket(nil, 1, Question{Name: owner, Type: dnsTypeHTTPS, Class: 1}, []Record{makeRecord(owner, dnsTypeHTTPS, raw)})
+			if _, err := DecodeMessage(packet); err == nil {
+				t.Fatal("DecodeMessage() accepted malformed AliasMode parameters")
+			}
+		})
+	}
+}
+
+func TestParseJSONSVCBPresentationIgnoresAliasModeParameters(t *testing.T) {
+	record, _, err := parseJSONSVCBPresentation("0 alias.example. ipv4hint=bogus")
+	if err != nil {
+		t.Fatalf("parseJSONSVCBPresentation() error = %v", err)
+	}
+	if !record.IsAliasMode() || len(record.Params) != 0 {
+		t.Fatalf("record = %+v, want AliasMode without parameters", record)
 	}
 }
