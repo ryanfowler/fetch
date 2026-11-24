@@ -80,11 +80,24 @@ func atomicReplaceFileNoSymlink(tempPath, targetPath string, preserveMode bool) 
 	return os.Rename(tempPath, targetPath)
 }
 
+// linkFunc is os.Link. Tests replace it to exercise the fallback for file
+// systems without hard links.
+var linkFunc = os.Link
+
 // AtomicWriteNewFile atomically installs tempPath at targetPath only if targetPath
 // does not already exist. tempPath and targetPath must be on the same filesystem.
+//
+// It links tempPath to targetPath. Some file systems, such as FAT, exFAT, and
+// some FUSE and network mounts, have no hard links. Then it uses a rename
+// that does not replace an existing file, where the platform has one, and
+// otherwise reserves targetPath with an exclusive create before it renames
+// tempPath over it.
 func AtomicWriteNewFile(tempPath, targetPath string) error {
-	if err := os.Link(tempPath, targetPath); err != nil {
-		return err
+	if err := linkFunc(tempPath, targetPath); err != nil {
+		if !linkUnsupported(err) {
+			return err
+		}
+		return writeNewFileWithoutLink(tempPath, targetPath)
 	}
 	// Report cleanup failures with committed state so callers retain
 	// responsibility for the temporary path without treating the install as a
