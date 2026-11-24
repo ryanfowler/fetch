@@ -182,3 +182,24 @@ func TestDryRunDoesNotCreateLockOrDirectories(t *testing.T) {
 		t.Fatalf("dry-run created entries: %v", entries)
 	}
 }
+
+func TestLeftoverLockFileDoesNotBlockInstall(t *testing.T) {
+	// A process that died during an install left its lock file behind.
+	bundle := testBundle(t)
+	root := t.TempDir()
+	skills := filepath.Join(root, ".agents", "skills")
+	if err := os.MkdirAll(skills, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(skills, lockName)
+	if err := os.WriteFile(lock, []byte("12345\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, _, stderr := runAction(t, Options{InstallAgent: "agents", Scope: "project", ProjectDir: root}, bundle)
+	if status != 0 || !strings.Contains(stderr, "Installed fetch skill") {
+		t.Fatalf("install status=%d stderr=%q", status, stderr)
+	}
+	if _, err := os.Lstat(lock); !os.IsNotExist(err) {
+		t.Fatalf("lock file was not removed after the install: %v", err)
+	}
+}
