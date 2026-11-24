@@ -41,9 +41,13 @@ func (b Bash) Register() string {
   local cur prev_tokens
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev_tokens=("${COMP_WORDS[@]:0:COMP_CWORD}")
-  local IFS=$'\n'
-  COMPREPLY=($(fetch --complete=bash -- "${prev_tokens[@]}" "$cur"))
-  IFS=$' \t\n'
+  local line
+  COMPREPLY=()
+  # Read one candidate per line. An unquoted $(...) array would split and
+  # glob-expand the candidates.
+  while IFS= read -r line; do
+    COMPREPLY+=("$line")
+  done < <(fetch --complete=bash -- "${prev_tokens[@]}" "$cur")
 }
 complete -o nosort -o nospace -F _fetch_complete fetch`
 }
@@ -51,7 +55,11 @@ complete -o nosort -o nospace -F _fetch_complete fetch`
 func (b Bash) Complete(vals []core.KeyVal[string]) string {
 	var sb strings.Builder
 	for _, kv := range vals {
-		sb.WriteString(kv.Key)
+		word, ok := bashCandidate(kv.Key)
+		if !ok {
+			continue
+		}
+		sb.WriteString(word)
 		if !strings.HasSuffix(kv.Key, "/") && !strings.HasSuffix(kv.Key, "=") {
 			sb.WriteByte(' ')
 		}
@@ -119,4 +127,42 @@ func (z Zsh) Complete(vals []core.KeyVal[string]) string {
 		sb.WriteString(kv.Key)
 	}
 	return sb.String()
+}
+
+// bashCandidate returns key as bash must insert it into the command line.
+// Bash inserts a candidate as it is, so the file name part of key must be
+// escaped: a file named "$(cmd)" would otherwise run cmd. The text before
+// the last "/" comes from the word that the user typed, so it stays as it
+// is and "~" or "$HOME" in it still expands. A trailing "/" on a directory
+// candidate does not start the file name part. bashCandidate returns false
+// when key contains a newline or another control character, because bash
+// cannot read such a candidate from one line.
+func bashCandidate(key string) (string, bool) {
+	if strings.ContainsFunc(key, isControl) {
+		return "", false
+	}
+	trimmed, slash := strings.CutSuffix(key, "/")
+	start := strings.LastIndexByte(trimmed, '/') + 1
+	var sb strings.Builder
+	sb.WriteString(trimmed[:start])
+	name := trimmed[start:]
+	for i, r := range name {
+		switch {
+		case strings.ContainsRune(" \t\\'\"$`!&;|<>()[]{}*?^", r):
+			sb.WriteByte('\\')
+		case (r == '~' || r == '#') && i == 0 && start == 0 && name != "~":
+			// A word that starts with "~" or "#" is a tilde expansion or
+			// a comment. A bare "~" is the home directory candidate.
+			sb.WriteByte('\\')
+		}
+		sb.WriteRune(r)
+	}
+	if slash {
+		sb.WriteByte('/')
+	}
+	return sb.String(), true
+}
+
+func isControl(r rune) bool {
+	return r < 0x20 || r == 0x7f
 }

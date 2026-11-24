@@ -41,12 +41,42 @@ func (p PowerShell) Register() string {
 func (p PowerShell) Complete(vals []core.KeyVal[string]) string {
 	var sb strings.Builder
 	for _, kv := range vals {
-		sb.WriteString(kv.Key)
+		// PowerShell cannot read a candidate with a control character
+		// from one line, so skip it.
+		if strings.ContainsFunc(kv.Key, isControl) {
+			continue
+		}
+		// PowerShell inserts a candidate into the command line as it is.
+		sb.WriteString(powerShellQuote(kv.Key))
 		if kv.Val != "" {
 			sb.WriteByte('\t')
 			sb.WriteString(kv.Val)
 		}
 		sb.WriteByte('\n')
 	}
+	return sb.String()
+}
+
+// powerShellSingleQuotes holds the characters that PowerShell reads as a
+// single quote: the ASCII quote and four Unicode quotes.
+const powerShellSingleQuotes = "'\u2018\u2019\u201a\u201b"
+
+// powerShellQuote returns s as a single-quoted PowerShell string when it
+// contains a character that PowerShell would interpret, such as "$", "@",
+// a space, or a quote. Each single quote character in s is doubled, which
+// is how PowerShell escapes it inside a single-quoted string.
+func powerShellQuote(s string) string {
+	if !strings.ContainsAny(s, " \t\"$`;&|<>(){}@#,"+powerShellSingleQuotes) {
+		return s
+	}
+	var sb strings.Builder
+	sb.WriteByte('\'')
+	for _, r := range s {
+		if strings.ContainsRune(powerShellSingleQuotes, r) {
+			sb.WriteRune(r)
+		}
+		sb.WriteRune(r)
+	}
+	sb.WriteByte('\'')
 	return sb.String()
 }
