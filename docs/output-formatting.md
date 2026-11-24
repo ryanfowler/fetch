@@ -230,6 +230,8 @@ Features:
 
 - Automatic conversion to JSON format
 - Same formatting as JSON responses
+- NaN and infinite floats become the strings `"NaN"`, `"Infinity"` and
+  `"-Infinity"`, because JSON has no numbers for them
 
 ```sh
 fetch example.com/api/data.msgpack

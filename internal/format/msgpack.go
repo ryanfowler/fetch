@@ -111,13 +111,13 @@ func (p *msgPackParser) writeValue(out *bytes.Buffer, depth int) error {
 		if err != nil {
 			return err
 		}
-		writeString(out, strconv.FormatFloat(float64(math.Float32frombits(v)), 'g', -1, 32))
+		writeMsgPackFloat(out, float64(math.Float32frombits(v)), 32)
 	case marker == 0xcb:
 		v, err := p.readU64()
 		if err != nil {
 			return err
 		}
-		writeString(out, strconv.FormatFloat(math.Float64frombits(v), 'g', -1, 64))
+		writeMsgPackFloat(out, math.Float64frombits(v), 64)
 	case marker == 0xcc:
 		v, err := p.readByte()
 		if err != nil {
@@ -470,6 +470,23 @@ func (p *msgPackParser) readExact(length int) ([]byte, error) {
 }
 
 func writeString(out *bytes.Buffer, s string) { _, _ = out.WriteString(s) }
+
+// writeMsgPackFloat writes f as a JSON number. JSON has no number for NaN
+// or an infinity, so these are written as the strings "NaN", "Infinity" and
+// "-Infinity", as the Protocol Buffers JSON mapping does. The protobuf
+// formatter therefore gives the same output for these values.
+func writeMsgPackFloat(out *bytes.Buffer, f float64, bitSize int) {
+	switch {
+	case math.IsNaN(f):
+		writeString(out, `"NaN"`)
+	case math.IsInf(f, 1):
+		writeString(out, `"Infinity"`)
+	case math.IsInf(f, -1):
+		writeString(out, `"-Infinity"`)
+	default:
+		writeString(out, strconv.FormatFloat(f, 'g', -1, bitSize))
+	}
+}
 
 func writeJSONValue(out *bytes.Buffer, s string) {
 	b, _ := json.Marshal(s) // s was validated as UTF-8 by the caller.
