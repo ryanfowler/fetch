@@ -13,6 +13,8 @@ import (
 
 	"github.com/mattn/go-runewidth"
 	"github.com/yuin/goldmark/v2/ast"
+	"github.com/yuin/goldmark/v2/extension"
+	east "github.com/yuin/goldmark/v2/extension/ast"
 	"github.com/yuin/goldmark/v2/parser"
 )
 
@@ -1590,5 +1592,99 @@ func TestFormatMarkdownStopsAtOutputLimit(t *testing.T) {
 	}
 	if err := FormatMarkdown(source, core.TestPrinter(false).NewBoundedWriter(io.Discard, 4096, "test")); !errors.Is(err, core.ErrLimitExceeded) {
 		t.Fatalf("FormatMarkdown() error = %v, want the output limit", err)
+	}
+}
+
+// countMarkdownTableCells returns the number of table cells that goldmark
+// creates for src.
+func countMarkdownTableCells(src []byte) int {
+	doc := parser.New(parser.WithExtensions(extension.NewTableParser())).Parse(src)
+	cells := 0
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if _, ok := n.(*east.TableCell); ok && entering {
+			cells++
+		}
+		return ast.WalkContinue, nil
+	})
+	return cells
+}
+
+func TestMarkdownTableCellsIsAnUpperBound(t *testing.T) {
+	wide := strings.Repeat("|h", 8) + "|\n" + strings.Repeat("|-", 8) + "|\n"
+	for _, input := range []string{
+		"| a | b |\n|---|:-:|\n| 1 | 2 |\n| 3 | 4 |\n",
+		"a | b\n--- | ---\n1 | 2\n\nafter\n",
+		":--\nx\n",
+		"> " + strings.ReplaceAll(wide, "\n", "\n> ") + "x\n> y\n",
+		"- " + strings.ReplaceAll(wide, "\n", "\n  ") + "x\n",
+		"1. " + strings.ReplaceAll(wide, "\n", "\n   ") + "x\n",
+		// A delimiter row in a run that already had a small table.
+		"a|b\n-|-\n# H\n" + wide + "x\ny\n",
+		// A line of non-breaking spaces is not blank.
+		wide + "x\n\u00a0\nx\n\u00a0\n",
+		strings.ReplaceAll(wide+"x\ny\n", "\n", "\r\n"),
+		"   " + wide + "x\n",
+	} {
+		real := countMarkdownTableCells([]byte(input))
+		if estimate := markdownTableCells([]byte(input)); estimate < real {
+			t.Errorf("markdownTableCells(%q) = %d, below the %d cells that goldmark creates", input, estimate, real)
+		}
+	}
+}
+
+func FuzzMarkdownTableCellsIsAnUpperBound(f *testing.F) {
+	f.Add("| a | b |\n|---|---|\n| 1 | 2 |\n")
+	f.Add("> |a|b|\n> |-|-|\n> x\n")
+	f.Add("a|b\n-|-\n# H\n|a|b|c|\n|-|-|-|\nx\n")
+	f.Add("|a|\n|-|\nx\n\u00a0\nx\n")
+	f.Fuzz(func(t *testing.T, input string) {
+		if len(input) > 4096 {
+			return
+		}
+		real := countMarkdownTableCells([]byte(input))
+		if estimate := markdownTableCells([]byte(input)); estimate < real {
+			t.Fatalf("markdownTableCells(%q) = %d, below %d", input, estimate, real)
+		}
+	})
+}
+
+func TestFormatMarkdownTableBudget(t *testing.T) {
+	// Under the budget, a table keeps its layout.
+	p := core.TestPrinter(false)
+	if err := FormatMarkdown([]byte("| a | b |\n|---|---|\n| 1 | 2 |\n"), p); err != nil {
+		t.Fatal(err)
+	}
+	// The table layout pads the cells to the column width.
+	if got := string(p.Bytes()); !strings.Contains(got, "| a   | b   |") {
+		t.Fatalf("small table was not rendered as a table: %q", got)
+	}
+	// Over the budget, the document is parsed without tables.
+	var b strings.Builder
+	b.WriteString(strings.Repeat("|a", 2000) + "|\n")
+	b.WriteString(strings.Repeat("|-", 2000) + "|\n")
+	for b.Len() < 12*1024 {
+		b.WriteString("|x|\n")
+	}
+	if markdownTableCells([]byte(b.String())) <= maxMarkdownTableCells {
+		t.Fatal("wide table is within the budget")
+	}
+}
+
+func TestFormatMarkdownWideTableIsFast(t *testing.T) {
+	// Every short row is padded to the 2,000 header columns. A 12 KB body
+	// used to take more than a second to parse.
+	var b strings.Builder
+	b.WriteString(strings.Repeat("|a", 2000) + "|\n")
+	b.WriteString(strings.Repeat("|-", 2000) + "|\n")
+	for b.Len() < 12*1024 {
+		b.WriteString("|x|\n")
+	}
+	p := core.TestPrinter(false).NewBoundedWriter(io.Discard, 1<<20, "test")
+	start := time.Now()
+	if err := FormatMarkdown([]byte(b.String()), p); err != nil && !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatMarkdown() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("FormatMarkdown() took %v", elapsed)
 	}
 }
