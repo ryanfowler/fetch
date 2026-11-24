@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -691,5 +693,177 @@ func TestFormatCSSCustomProperties(t *testing.T) {
 	}
 	if !strings.Contains(output, "var(") {
 		t.Errorf("output should contain 'var(', got: %s", output)
+	}
+}
+
+func TestFormatCSSKeepsContent(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "declarations in at-rule",
+			input: "@font-face { font-family: Foo; src: url(a.woff); } body { color: red }",
+			want:  "@font-face {\n  font-family: Foo;\n  src: url(a.woff);\n}\n\nbody {\n  color: red;\n}\n",
+		},
+		{
+			name:  "calc operators",
+			input: ".a { width: calc(100% + 2px * 3); margin: -1px; }",
+			want:  ".a {\n  width: calc(100% + 2px * 3);\n  margin: -1px;\n}\n",
+		},
+		{
+			name:  "attribute operators",
+			input: `a[href^="http"], a[lang|=en], a[x$=y], a[c~=d], a[e*=f] { color: red }`,
+			want:  "a[href^=\"http\"], a[lang|=en], a[x$=y], a[c~=d], a[e*=f] {\n  color: red;\n}\n",
+		},
+		{
+			name:  "nested rule",
+			input: ".a { &:hover { color: red } color: blue; }",
+			want:  ".a {\n  &:hover {\n    color: red;\n  }\n  color: blue;\n}\n",
+		},
+		{
+			name:  "media prelude",
+			input: "@media screen and (min-width: 768px) { a:hover { color: red } }",
+			want:  "@media screen and (min-width: 768px) {\n  a:hover {\n    color: red;\n  }\n}\n",
+		},
+		{
+			name:  "nested parentheses in prelude",
+			input: "@supports (display: grid) and (not (display: inline-grid)) { a { b: c } }",
+			want:  "@supports (display: grid) and (not (display: inline-grid)) {\n  a {\n    b: c;\n  }\n}\n",
+		},
+		{
+			name:  "page selector",
+			input: "@page :first { margin: 1cm; @top-center { content: 'x' } }",
+			want:  "@page :first {\n  margin: 1cm;\n  @top-center {\n    content: 'x';\n  }\n}\n",
+		},
+		{
+			name:  "stray semicolons",
+			input: ".b { color: red;; ; }",
+			want:  ".b {\n  color: red;\n}\n",
+		},
+		{
+			name:  "important",
+			input: "a { color: red !important }",
+			want:  "a {\n  color: red !important;\n}\n",
+		}, {
+			name:  "braces in unquoted url",
+			input: "a { background: url(x{y}.png); color: red } p { q: r }",
+			want:  "a {\n  background: url(x{y}.png);\n  color: red;\n}\n\np {\n  q: r;\n}\n",
+		},
+		{
+			name:  "data url kept as written",
+			input: "a { background: url(data:image/svg+xml;utf8,<svg>{</svg>) }",
+			want:  "a {\n  background: url(data:image/svg+xml;utf8,<svg>{</svg>);\n}\n",
+		},
+		{
+			name:  "selector function arguments",
+			input: "li:nth-child(2n+1), :is(h1, h2 > b), a:not([x^=y]), b:not(.c > d) { e: f }",
+			want:  "li:nth-child(2n+1), :is(h1, h2 > b), a:not([x^=y]), b:not(.c > d) {\n  e: f;\n}\n",
+		},
+		{
+			name:  "attribute flag",
+			input: `a[x=y i], a[href$=".pdf" s] { e: f }`,
+			want:  "a[x=y i], a[href$=\".pdf\" s] {\n  e: f;\n}\n",
+		},
+		{
+			name:  "at-rule without block before closing brace",
+			input: "@media screen { a { @foo } b { c: d } }",
+			want:  "@media screen {\n  a {\n    @foo\n  }\n  b {\n    c: d;\n  }\n}\n",
+		},
+		{
+			name:  "custom property with braces",
+			input: "a { --x: {a:b; c:d}; color: red }",
+			want:  "a {\n  --x: {a:b; c:d};\n  color: red;\n}\n",
+		},
+		{
+			name:  "stray top-level tokens",
+			input: "a { b: c } } d { e: f } ;",
+			want:  "a {\n  b: c;\n}\n\nd {\n  e: f;\n}\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			p := core.TestPrinter(false)
+			if err := FormatCSS([]byte(test.input), p); err != nil {
+				t.Fatal(err)
+			}
+			if got := string(p.Bytes()); got != test.want {
+				t.Fatalf("FormatCSS() =\n%s\nwant\n%s", got, test.want)
+			}
+		})
+	}
+}
+
+func FuzzFormatCSS(f *testing.F) {
+	f.Add(".a { &:hover { color: red } color: blue; }")
+	f.Add("@media screen and (not (x: y)) { a:b { c: d } }")
+	f.Add("@font-face { a: b; } x[y^=z] { w: calc(1 + 2) }")
+	f.Add("a { ; } } { :")
+	f.Fuzz(func(t *testing.T, input string) {
+		if len(input) > 4096 {
+			return
+		}
+		p := core.TestPrinter(false)
+		if FormatCSS([]byte(input), p) != nil || !wellFormedCSS(input) {
+			return
+		}
+		// Formatting is idempotent: formatted CSS is formatted again into
+		// the same text. A formatter that drops or moves tokens usually
+		// breaks this.
+		once := string(p.Bytes())
+		again := core.TestPrinter(false)
+		if err := FormatCSS([]byte(once), again); err != nil {
+			t.Fatalf("formatting the output failed: %v\ninput: %q\noutput: %q", err, input, once)
+		}
+		if twice := string(again.Bytes()); twice != once {
+			t.Fatalf("formatting is not idempotent\ninput: %q\nonce:  %q\ntwice: %q", input, once, twice)
+		}
+	})
+}
+
+// wellFormedCSS reports whether input has terminated strings and comments,
+// properly nested braces, brackets, and parentheses, and no control or
+// escape characters. For such input, the formatter output must not depend
+// on error recovery or on terminal escaping.
+func wellFormedCSS(input string) bool {
+	for _, r := range input {
+		if r == '\\' || r == utf8.RuneError || (unicode.IsControl(r) && r != '\n' && r != '\t') {
+			return false
+		}
+	}
+	tok := newCSSTokenizer([]byte(input))
+	var open []string
+	closing := map[string]string{"}": "{", "]": "[", ")": "("}
+	for {
+		t := tok.next()
+		switch t.typ {
+		case cssTokenEOF:
+			return len(open) == 0
+		case cssTokenString:
+			if len(t.value) < 2 || t.value[len(t.value)-1] != t.value[0] {
+				return false
+			}
+		case cssTokenComment:
+			if len(t.value) < 4 || !strings.HasSuffix(t.value, "*/") {
+				return false
+			}
+		case cssTokenFunction:
+			open = append(open, "(")
+		case cssTokenURL:
+			if !strings.HasSuffix(t.value, ")") {
+				return false
+			}
+		case cssTokenDelim:
+			switch t.value {
+			case "{", "[", "(":
+				open = append(open, t.value)
+			case "}", "]", ")":
+				if len(open) == 0 || open[len(open)-1] != closing[t.value] {
+					return false
+				}
+				open = open[:len(open)-1]
+			}
+		}
 	}
 }

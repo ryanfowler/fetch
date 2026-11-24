@@ -3,6 +3,7 @@ package format
 import (
 	"errors"
 	"io"
+	"strings"
 
 	"github.com/ryanfowler/fetch/internal/core"
 )
@@ -22,6 +23,7 @@ const (
 	cssTokenComment                 // /* ... */
 	cssTokenDelim                   // single chars: { } : ; , . > + ~ * [ ] ( )
 	cssTokenWhitespace              // spaces, tabs, newlines
+	cssTokenURL                     // url(...) with an unquoted value, kept as written
 )
 
 // cssToken represents a single token from the CSS input.
@@ -258,10 +260,41 @@ func (t *cssTokenizer) scanIdentOrFunction() cssToken {
 	// Check if it's a function (followed by open paren)
 	if t.peek() == '(' {
 		t.advance()
+		if strings.EqualFold(value, "url") {
+			if url, ok := t.scanUnquotedURL(start); ok {
+				return url
+			}
+		}
 		return cssToken{typ: cssTokenFunction, value: value + "("}
 	}
 
 	return cssToken{typ: cssTokenIdent, value: value}
+}
+
+// scanUnquotedURL scans the rest of an unquoted url(...) after "url(", as
+// CSS Syntax defines it: the value is raw text up to ")", so it can contain
+// characters such as "{", ";", and ",". start is the position of "url". It
+// reports false, without consuming input, for a quoted value, which is an
+// ordinary function argument.
+func (t *cssTokenizer) scanUnquotedURL(start int) (cssToken, bool) {
+	pos := t.pos
+	for pos < len(t.input) && (t.input[pos] == ' ' || t.input[pos] == '\t' || t.input[pos] == '\n' || t.input[pos] == '\r' || t.input[pos] == '\f') {
+		pos++
+	}
+	if pos < len(t.input) && (t.input[pos] == '"' || t.input[pos] == '\'') {
+		return cssToken{}, false
+	}
+	for pos < len(t.input) && t.input[pos] != ')' {
+		if t.input[pos] == '\\' && pos+1 < len(t.input) {
+			pos++
+		}
+		pos++
+	}
+	if pos < len(t.input) {
+		pos++ // the closing ")"
+	}
+	t.pos = pos
+	return cssToken{typ: cssTokenURL, value: string(t.input[start:pos])}, true
 }
 
 func isDigit(c byte) bool {
@@ -377,6 +410,12 @@ func (f *cssFormatter) format() error {
 			continue
 		}
 
+		// Skip a stray ";" or "}" at the top level.
+		if f.current.typ == cssTokenDelim && (f.current.value == ";" || f.current.value == "}") {
+			f.advance()
+			continue
+		}
+
 		// Must be a qualified rule (selector + declaration block)
 		// Add blank line between top-level rules
 		if f.indent == 0 && f.wroteRule {
@@ -390,8 +429,14 @@ func (f *cssFormatter) format() error {
 
 func (f *cssFormatter) formatComment() {
 	f.writeIndent()
+	comment := f.current.value
+	if !strings.HasSuffix(comment, "*/") {
+		// An unterminated comment runs to the end of the input. Its
+		// trailing whitespace is not part of its text.
+		comment = strings.TrimRight(comment, " \t\r\n\f")
+	}
 	f.printer.Set(core.Dim)
-	f.printer.WriteStringUntrusted(f.current.value)
+	f.printer.WriteStringUntrusted(comment)
 	f.printer.Reset()
 	f.printer.WriteString("\n")
 	f.atNewline = true
@@ -455,18 +500,26 @@ func (f *cssFormatter) formatAtRule() {
 }
 
 func (f *cssFormatter) formatAtRulePrelude() {
+	// Whitespace separates the parts of a prelude, as in
+	// "screen and (min-width: 768px)", also inside parentheses, as in
+	// "(not (display: grid))". Removing it would join words, and a word
+	// followed by "(" would become a function, such as "and(".
 	needSpace := false
 	parenDepth := 0
 
 	for f.current.typ != cssTokenEOF {
 		if f.current.typ == cssTokenDelim {
-			if f.current.value == "{" || f.current.value == ";" {
+			if f.current.value == "{" || f.current.value == ";" || f.current.value == "}" {
 				break
 			}
 			if f.current.value == "(" {
+				if needSpace {
+					f.printer.WriteString(" ")
+				}
 				parenDepth++
 				f.printer.WriteString("(")
 				f.advance()
+				f.skipWhitespace()
 				needSpace = false
 				continue
 			}
@@ -474,7 +527,7 @@ func (f *cssFormatter) formatAtRulePrelude() {
 				parenDepth--
 				f.printer.WriteString(")")
 				f.advance()
-				needSpace = true
+				needSpace = false
 				continue
 			}
 			if f.current.value == "," {
@@ -484,18 +537,22 @@ func (f *cssFormatter) formatAtRulePrelude() {
 				continue
 			}
 			if f.current.value == ":" {
+				// A media feature, as in "(min-width: 768px)", or a page
+				// selector, as in "@page :first".
+				if needSpace && parenDepth == 0 {
+					f.printer.WriteString(" ")
+				}
 				f.printer.WriteString(":")
 				f.advance()
-				needSpace = false
+				f.skipWhitespace()
+				needSpace = parenDepth > 0
 				continue
 			}
 		}
 
 		if f.current.typ == cssTokenWhitespace {
 			f.advance()
-			if parenDepth == 0 {
-				needSpace = true
-			}
+			needSpace = true
 			continue
 		}
 
@@ -509,29 +566,132 @@ func (f *cssFormatter) formatAtRulePrelude() {
 }
 
 func (f *cssFormatter) formatAtRuleBody() {
+	f.formatBlockContents()
+}
+
+// cssBlockItem is the kind of item that starts at the current token inside a
+// block.
+type cssBlockItem int
+
+const (
+	cssBlockDeclaration cssBlockItem = iota // property: value;
+	cssBlockRule                            // selector { ... }
+	cssBlockJunk                            // anything else, up to ";" or "}"
+)
+
+// classifyBlockItem looks ahead on a copy of the tokenizer, so it does not
+// consume tokens. A block can hold declarations, as in a style rule or
+// @font-face, and nested rules, as in @media or CSS nesting. A nested rule's
+// selector ends with "{"; a declaration ends with ";" or "}". A selector can
+// also contain a colon, as in "a:hover {". Braces and semicolons inside
+// parentheses do not count. A custom property, such as "--x: {a:b};", can
+// hold braces in its value.
+func (f *cssFormatter) classifyBlockItem() cssBlockItem {
+	lookahead := *f.tok
+	tok := f.current
+	declaration, custom := false, false
+	if tok.typ == cssTokenIdent {
+		custom = strings.HasPrefix(tok.value, "--")
+		tok = lookahead.next()
+		for tok.typ == cssTokenWhitespace || tok.typ == cssTokenComment {
+			tok = lookahead.next()
+		}
+		declaration = tok.typ == cssTokenDelim && tok.value == ":"
+	}
+	parens, braces := 0, 0
+	for {
+		switch {
+		case tok.typ == cssTokenEOF, tok.typ == cssTokenAtKeyword && parens == 0 && braces == 0:
+			// Neither a selector nor a value can contain an at-keyword.
+			if declaration {
+				return cssBlockDeclaration
+			}
+			return cssBlockJunk
+		case tok.typ == cssTokenFunction || (tok.typ == cssTokenDelim && tok.value == "("):
+			parens++
+		case tok.typ == cssTokenDelim && tok.value == ")":
+			parens = max(parens-1, 0)
+		case parens > 0:
+		case tok.typ == cssTokenDelim && tok.value == "{":
+			if !(declaration && custom) {
+				return cssBlockRule
+			}
+			braces++
+		case tok.typ == cssTokenDelim && tok.value == "}" && braces > 0:
+			braces--
+		case tok.typ == cssTokenDelim && (tok.value == ";" || tok.value == "}") && braces == 0:
+			if declaration {
+				return cssBlockDeclaration
+			}
+			return cssBlockJunk
+		}
+		tok = lookahead.next()
+	}
+}
+
+// formatBlockContents formats the items of a block up to its closing brace,
+// which it does not consume.
+func (f *cssFormatter) formatBlockContents() {
 	for f.current.typ != cssTokenEOF && f.err == nil {
 		f.skipWhitespace()
 		if f.current.typ == cssTokenEOF {
 			break
 		}
-
 		if f.current.typ == cssTokenDelim && f.current.value == "}" {
 			break
 		}
-
-		if f.current.typ == cssTokenComment {
+		switch {
+		case f.current.typ == cssTokenComment:
 			f.formatComment()
-			continue
-		}
-
-		if f.current.typ == cssTokenAtKeyword {
+		case f.current.typ == cssTokenAtKeyword:
 			f.formatAtRule()
+		default:
+			switch f.classifyBlockItem() {
+			case cssBlockDeclaration:
+				f.formatDeclaration()
+			case cssBlockRule:
+				// In @keyframes, selectors can be percentages (0%, 100%) or
+				// keywords (from, to). CSS nesting allows "&" selectors.
+				f.formatQualifiedRule()
+			default:
+				f.formatJunk()
+			}
+		}
+	}
+}
+
+// formatJunk writes an item that is neither a declaration nor a rule, as in
+// malformed input, as written and ends it with ";". It stops at ";", which
+// it consumes, or before "}", an at-keyword, or the end of the input. An
+// empty item, such as a stray ";", writes nothing.
+func (f *cssFormatter) formatJunk() {
+	wrote, needSpace := false, false
+	for f.current.typ != cssTokenEOF && f.current.typ != cssTokenAtKeyword {
+		if f.current.typ == cssTokenDelim && f.current.value == "}" {
+			break
+		}
+		if f.current.typ == cssTokenDelim && f.current.value == ";" {
+			f.advance()
+			break
+		}
+		if f.current.typ == cssTokenWhitespace || f.current.typ == cssTokenComment {
+			needSpace = wrote
+			f.advance()
 			continue
 		}
-
-		// Either a nested rule or a declaration
-		// In @keyframes, selectors can be percentages (0%, 100%) or keywords (from, to)
-		f.formatQualifiedRule()
+		if !wrote {
+			f.writeIndent()
+		} else if needSpace {
+			f.printer.WriteString(" ")
+		}
+		needSpace = false
+		f.printer.WriteStringUntrusted(f.current.value)
+		f.advance()
+		wrote = true
+	}
+	if wrote {
+		f.printer.WriteString(";\n")
+		f.atNewline = true
 	}
 }
 
@@ -567,6 +727,11 @@ func (f *cssFormatter) formatQualifiedRule() {
 		if f.indent == 0 {
 			f.wroteRule = true
 		}
+	} else if !f.atNewline {
+		// A selector without a block, in malformed input. End it with ";",
+		// so formatting the output again does not join it to the next line.
+		f.printer.WriteString(";\n")
+		f.atNewline = true
 	}
 }
 
@@ -574,10 +739,25 @@ func (f *cssFormatter) formatSelector() {
 	needSpace := false
 	bracketDepth := 0
 
-	for f.current.typ != cssTokenEOF {
+	for f.current.typ != cssTokenEOF && f.current.typ != cssTokenAtKeyword {
 		if f.current.typ == cssTokenDelim {
-			if f.current.value == "{" {
+			// A selector ends at "{". It cannot contain ";", "}", or an
+			// at-keyword, so stop there too instead of printing malformed
+			// input as a selector.
+			if f.current.value == "{" || f.current.value == ";" || f.current.value == "}" {
 				break
+			}
+			if bracketDepth > 0 && f.current.value != "[" && f.current.value != "]" {
+				// An attribute operator, such as "^=", "|=", "$=", "~=", or
+				// "*=", or a namespace separator. Operators take no spaces.
+				f.printer.Set(core.Bold)
+				f.printer.Set(core.Blue)
+				f.printer.WriteStringUntrusted(f.current.value)
+				f.printer.Reset()
+				f.advance()
+				f.skipWhitespace()
+				needSpace = false
+				continue
 			}
 			if f.current.value == "[" {
 				bracketDepth++
@@ -620,7 +800,9 @@ func (f *cssFormatter) formatSelector() {
 			}
 			// Other selector parts: . * :
 			if f.current.value == "." || f.current.value == "*" || f.current.value == ":" {
-				if needSpace && f.current.value != ":" {
+				// Keep whitespace before ":" too: "a :hover" (a descendant
+				// combinator) and "a:hover" are different selectors.
+				if needSpace {
 					f.printer.WriteString(" ")
 				}
 				f.printer.Set(core.Bold)
@@ -644,10 +826,10 @@ func (f *cssFormatter) formatSelector() {
 		}
 
 		if f.current.typ == cssTokenWhitespace {
+			// Inside brackets, whitespace separates a value from a flag, as
+			// in [href$=".pdf" i].
 			f.advance()
-			if bracketDepth == 0 {
-				needSpace = true
-			}
+			needSpace = true
 			continue
 		}
 
@@ -672,7 +854,7 @@ func (f *cssFormatter) formatSelector() {
 			f.printer.Reset()
 			f.advance()
 			needSpace = false
-		case cssTokenString:
+		case cssTokenString, cssTokenURL:
 			f.printer.Set(core.Green)
 			f.printer.WriteStringUntrusted(f.current.value)
 			f.printer.Reset()
@@ -695,42 +877,33 @@ func (f *cssFormatter) formatSelector() {
 			f.printer.Reset()
 			f.advance()
 			needSpace = false
-		default:
+		case cssTokenDelim:
+			// Another selector part, such as the "&" nesting selector or a
+			// "|" namespace separator. Keep it as written.
+			f.printer.Set(core.Bold)
+			f.printer.Set(core.Blue)
+			f.printer.WriteStringUntrusted(f.current.value)
+			f.printer.Reset()
 			f.advance()
+			needSpace = false
+		default:
+			// Keep any other token, such as an at-keyword or a comment.
+			f.printer.WriteStringUntrusted(f.current.value)
+			f.advance()
+			needSpace = false
 		}
 	}
 }
 
 func (f *cssFormatter) formatDeclarationBlock() {
-	for f.current.typ != cssTokenEOF {
-		f.skipWhitespace()
-		if f.current.typ == cssTokenEOF {
-			break
-		}
-
-		if f.current.typ == cssTokenDelim && f.current.value == "}" {
-			break
-		}
-
-		if f.current.typ == cssTokenComment {
-			f.formatComment()
-			continue
-		}
-
-		// Property declaration
-		if f.current.typ == cssTokenIdent {
-			f.formatDeclaration()
-		} else {
-			// Skip unexpected tokens
-			f.advance()
-		}
-	}
+	f.formatBlockContents()
 }
 
 func (f *cssFormatter) formatDeclaration() {
 	f.writeIndent()
 
 	// Property name
+	custom := strings.HasPrefix(f.current.value, "--")
 	f.printer.Set(core.Cyan)
 	f.printer.WriteStringUntrusted(f.current.value)
 	f.printer.Reset()
@@ -738,14 +911,15 @@ func (f *cssFormatter) formatDeclaration() {
 
 	f.skipWhitespace()
 
-	// Colon
+	// Colon. The value starts after one space.
 	if f.current.typ == cssTokenDelim && f.current.value == ":" {
 		f.printer.WriteString(": ")
 		f.advance()
+		f.skipWhitespace()
 	}
 
 	// Property value
-	f.formatValue()
+	f.formatValue(custom)
 
 	f.skipWhitespace()
 
@@ -754,23 +928,31 @@ func (f *cssFormatter) formatDeclaration() {
 		f.printer.WriteString(";\n")
 		f.atNewline = true
 		f.advance()
-	} else if f.current.typ == cssTokenDelim && f.current.value == "}" {
-		// Missing semicolon before closing brace (lenient)
-		f.printer.WriteString(";\n")
-		f.atNewline = true
 	} else {
-		f.printer.WriteString("\n")
+		// A missing semicolon, before "}" or at the end of the input.
+		f.printer.WriteString(";\n")
 		f.atNewline = true
 	}
 }
 
-func (f *cssFormatter) formatValue() {
+// formatValue formats a declaration value up to its ";" or "}". The value of
+// a custom property can contain balanced braces, as in "--x: {a:b}".
+func (f *cssFormatter) formatValue(custom bool) {
 	needSpace := false
 	parenDepth := 0
+	braceDepth := 0
 
 	for f.current.typ != cssTokenEOF && f.err == nil {
+		if f.current.typ == cssTokenAtKeyword && parenDepth == 0 && braceDepth == 0 {
+			// A value cannot contain an at-keyword; it starts the next item.
+			break
+		}
 		if f.current.typ == cssTokenDelim {
-			if f.current.value == ";" || f.current.value == "}" {
+			if custom && f.current.value == "{" {
+				braceDepth++
+			} else if braceDepth > 0 && f.current.value == "}" {
+				braceDepth--
+			} else if braceDepth == 0 && (f.current.value == ";" || f.current.value == "}") {
 				break
 			}
 			if f.current.value == "(" {
@@ -835,7 +1017,7 @@ func (f *cssFormatter) formatValueToken() {
 		f.printer.WriteStringUntrusted(f.current.value)
 		f.printer.Reset()
 		f.advance()
-	case cssTokenString:
+	case cssTokenString, cssTokenURL:
 		f.printer.Set(core.Green)
 		f.printer.WriteStringUntrusted(f.current.value)
 		f.printer.Reset()
@@ -852,69 +1034,53 @@ func (f *cssFormatter) formatValueToken() {
 		f.advance()
 		f.formatFunctionArgsValue(0)
 	case cssTokenDelim:
-		if f.current.value == "!" {
-			f.printer.Set(core.Green)
-			f.printer.WriteString("!")
-			f.printer.Reset()
-			f.advance()
-		} else {
-			f.advance()
-		}
+		// "!" of !important, or another delimiter, such as an operator.
+		f.printer.Set(core.Green)
+		f.printer.WriteStringUntrusted(f.current.value)
+		f.printer.Reset()
+		f.advance()
 	default:
+		// Keep any other token, such as an at-keyword or a comment.
+		f.printer.WriteStringUntrusted(f.current.value)
 		f.advance()
 	}
 }
 
+// formatFunctionArgs formats the arguments of a selector function, such as
+// :not(), :is(), or :nth-child(), up to its closing parenthesis. It keeps
+// every token, and one space where the input has whitespace, because the
+// arguments are selectors or expressions such as "2n+1".
 func (f *cssFormatter) formatFunctionArgs() {
 	depth := 1
+	needSpace := false
 	for f.current.typ != cssTokenEOF && depth > 0 {
-		if f.current.typ == cssTokenDelim && f.current.value == "(" {
+		tok := f.current
+		switch {
+		case tok.typ == cssTokenWhitespace || tok.typ == cssTokenComment:
+			f.advance()
+			needSpace = true
+			continue
+		case tok.typ == cssTokenFunction || (tok.typ == cssTokenDelim && tok.value == "("):
 			depth++
-			f.printer.Set(core.Bold)
-			f.printer.Set(core.Blue)
-			f.printer.WriteString("(")
-			f.printer.Reset()
-			f.advance()
-			continue
-		}
-		if f.current.typ == cssTokenDelim && f.current.value == ")" {
+		case tok.typ == cssTokenDelim && tok.value == ")":
 			depth--
-			f.printer.Set(core.Bold)
-			f.printer.Set(core.Blue)
-			f.printer.WriteString(")")
-			f.printer.Reset()
-			f.advance()
-			continue
+			needSpace = false
 		}
-		if f.current.typ == cssTokenWhitespace {
-			f.advance()
-			continue
+		if needSpace {
+			f.printer.WriteString(" ")
+			needSpace = false
 		}
-
-		// Selector elements inside function
-		switch f.current.typ {
-		case cssTokenIdent:
+		if tok.typ == cssTokenString || tok.typ == cssTokenURL {
+			f.printer.Set(core.Green)
+		} else {
 			f.printer.Set(core.Bold)
 			f.printer.Set(core.Blue)
-			f.printer.WriteStringUntrusted(f.current.value)
-			f.printer.Reset()
-			f.advance()
-		case cssTokenHash:
-			f.printer.Set(core.Bold)
-			f.printer.Set(core.Blue)
-			f.printer.WriteStringUntrusted(f.current.value)
-			f.printer.Reset()
-			f.advance()
-		case cssTokenDelim:
-			if f.current.value == "." || f.current.value == ":" || f.current.value == "*" {
-				f.printer.Set(core.Bold)
-				f.printer.Set(core.Blue)
-				f.printer.WriteStringUntrusted(f.current.value)
-				f.printer.Reset()
-			}
-			f.advance()
-		default:
-			f.advance()
+		}
+		f.printer.WriteStringUntrusted(tok.value)
+		f.printer.Reset()
+		f.advance()
+		if tok.typ == cssTokenFunction || (tok.typ == cssTokenDelim && tok.value == "(") {
+			f.skipWhitespace()
 		}
 	}
 }
@@ -970,7 +1136,7 @@ func (f *cssFormatter) formatFunctionArgsValue(functionDepth int) {
 		case cssTokenIdent, cssTokenNumber, cssTokenDimension:
 			f.printer.WriteStringUntrusted(f.current.value)
 			f.advance()
-		case cssTokenString:
+		case cssTokenString, cssTokenURL:
 			f.printer.WriteStringUntrusted(f.current.value)
 			f.advance()
 		case cssTokenHash:
@@ -980,7 +1146,13 @@ func (f *cssFormatter) formatFunctionArgsValue(functionDepth int) {
 			f.printer.WriteStringUntrusted(f.current.value)
 			f.advance()
 			f.formatFunctionArgsValue(functionDepth + 1)
+		case cssTokenDelim:
+			// An operator, such as "+" or "*" in calc().
+			f.printer.WriteStringUntrusted(f.current.value)
+			f.advance()
 		default:
+			// Keep any other token, such as an at-keyword or a comment.
+			f.printer.WriteStringUntrusted(f.current.value)
 			f.advance()
 		}
 	}
