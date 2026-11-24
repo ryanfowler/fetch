@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -218,5 +220,60 @@ func TestResolverDialContextUsesConfiguredLookupAndHappyEyeballs(t *testing.T) {
 		peer.Close()
 	case <-time.After(time.Second):
 		t.Fatal("dial did not reach the configured address")
+	}
+}
+
+// writeFakeResolvectl puts a resolvectl script on PATH. The script writes
+// one argument per line to the file in $FAKE_RESOLVECTL_ARGS and then prints
+// output.
+func writeFakeResolvectl(t *testing.T, output string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake resolvectl is a shell script")
+	}
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	script := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > \"$FAKE_RESOLVECTL_ARGS\"\n" +
+		"printf '%s\\n' \"$FAKE_RESOLVECTL_OUTPUT\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "resolvectl"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("FAKE_RESOLVECTL_ARGS", argsFile)
+	t.Setenv("FAKE_RESOLVECTL_OUTPUT", output)
+	return argsFile
+}
+
+func TestQuerySystemdResolvedEndsOptions(t *testing.T) {
+	for _, host := range []string{"example.com", "--type=A", "-h"} {
+		argsFile := writeFakeResolvectl(t, host+" IN HTTPS 1 . alpn=h2")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		records, err := querySystemdResolved(ctx, host, dnsTypeHTTPS)
+		cancel()
+		if err != nil {
+			t.Fatalf("querySystemdResolved(%q): %v", host, err)
+		}
+		if len(records) != 1 || records[0].Priority != 1 {
+			t.Fatalf("records = %+v, want one record with priority 1", records)
+		}
+		args, err := os.ReadFile(argsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "--no-pager\n--legend=no\nquery\n--type=HTTPS\n--\n" + host + "\n"
+		if string(args) != want {
+			t.Fatalf("resolvectl args = %q, want %q", args, want)
+		}
+	}
+}
+
+func TestQuerySystemdResolvedRejectsInvalidName(t *testing.T) {
+	argsFile := writeFakeResolvectl(t, "")
+	if _, err := querySystemdResolved(context.Background(), "a..b", dnsTypeHTTPS); err == nil {
+		t.Fatal("querySystemdResolved accepted an invalid name")
+	}
+	if _, err := os.Stat(argsFile); !os.IsNotExist(err) {
+		t.Fatal("resolvectl ran for an invalid name")
 	}
 }

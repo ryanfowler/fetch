@@ -279,17 +279,19 @@ func querySystemdResolved(ctx context.Context, host string, typ uint16) ([]Recor
 	if typ == dnsTypeSVCB {
 		typeName = "SVCB"
 	}
-	cmd := exec.CommandContext(ctx, "resolvectl", "--no-pager", "--legend=no", "query", "--type="+typeName, host)
+	// Check the name before it goes to a subprocess. The "--" makes
+	// resolvectl read a name that starts with "-" as a name, not an option.
+	owner, err := ParseName(host)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "resolvectl", "--no-pager", "--legend=no", "query", "--type="+typeName, "--", host)
 	var output boundedSystemOutput
 	cmd.Stdout = &output
 	if err := cmd.Run(); err != nil {
 		return nil, err
 	}
 	data := output.Bytes()
-	owner, err := ParseName(host)
-	if err != nil {
-		return nil, err
-	}
 	var records []Record
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
