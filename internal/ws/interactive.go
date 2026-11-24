@@ -40,7 +40,11 @@ func runInteractive(ctx context.Context, cfg Config) error {
 	if err := t.enterRaw(); err != nil {
 		return err
 	}
-	defer t.restore()
+	// Restore the terminal before stdin is closed. When no read is in
+	// progress, Close releases the descriptor at once, and a restore after
+	// it would fail and leave the terminal in raw mode. Deferred calls run
+	// in reverse order, so the session is cancelled before this runs.
+	defer t.restoreAndClose(os.Stdin)
 
 	rows, cols := t.size()
 	if rows < minRows {
@@ -54,18 +58,6 @@ func runInteractive(ctx context.Context, cfg Config) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	// A raw terminal read is not context-aware. Close the descriptor when
-	// the session ends so the input goroutine cannot survive cancellation.
-	stopInputClose := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = os.Stdin.Close()
-		case <-stopInputClose:
-		}
-	}()
-	defer close(stopInputClose)
 
 	im := &interactiveMode{
 		cfg:    cfg,

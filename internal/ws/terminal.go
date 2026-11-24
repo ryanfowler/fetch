@@ -2,6 +2,7 @@ package ws
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"strconv"
 	"sync"
@@ -35,11 +36,25 @@ func (t *terminal) enterRaw() error {
 	return nil
 }
 
+// restore returns the terminal to the state before enterRaw. It is safe to
+// call more than once. It must run before stdin is closed, because it uses
+// the stdin descriptor.
 func (t *terminal) restore() {
 	if t.saved != nil {
 		term.Restore(t.fd, t.saved)
 		t.saved = nil
 	}
+}
+
+// restoreAndClose restores the terminal and then closes input, which must
+// be the file that t.fd refers to. The order matters: when no read is in
+// progress, Close releases the descriptor at once, and a restore after it
+// would fail and leave the terminal in raw mode. Close does not interrupt a
+// read that is in progress on a blocking terminal; that read ends at the
+// next key press.
+func (t *terminal) restoreAndClose(input io.Closer) {
+	t.restore()
+	_ = input.Close()
 }
 
 func (t *terminal) refreshSize() {
