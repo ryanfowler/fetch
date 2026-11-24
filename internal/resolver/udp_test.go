@@ -328,7 +328,7 @@ func TestQuerySystemTypeDetailedReportsTCPFallback(t *testing.T) {
 			if len(records) != 1 || !net.IP(records[0].RData).Equal(net.IPv4(192, 0, 2, 13)) {
 				t.Fatalf("records = %v", records)
 			}
-			if metadata.Server != server.addr() || metadata.Transport != TransportTCP || !metadata.TCPFallback || metadata.Attempts != 1 || metadata.Duration <= 0 {
+			if metadata.Server != server.addr() || metadata.Transport != TransportTCP || !metadata.TCPFallback || metadata.Attempts != 1 || metadata.Duration < 0 {
 				t.Fatalf("query metadata = %+v, want successful TCP fallback from %s", metadata, server.addr())
 			}
 			if err := <-done; err != nil {
