@@ -119,9 +119,28 @@ func postProcess(r *Result) error {
 		r.Method = "GET"
 	}
 
-	// Reject conflicting body sources.
+	// Reject conflicting body sources and outputs, as curl does. fetch would
+	// otherwise send a body that does not match its Content-Type, or drop
+	// one source without a warning.
 	if len(r.DataValues) > 0 && r.UploadFile != "" {
 		return fmt.Errorf("cannot use both data flags and --upload-file/-T")
+	}
+	if len(r.FormFields) > 0 {
+		switch {
+		case len(r.DataValues) > 0:
+			return fmt.Errorf("cannot use both data flags and -F/--form")
+		case r.UploadFile != "":
+			return fmt.Errorf("cannot use both -T/--upload-file and -F/--form")
+		case r.GetFlag:
+			return fmt.Errorf("cannot use both -G/--get and -F/--form")
+		}
+	}
+	if r.Output != "" && r.RemoteName {
+		return fmt.Errorf("cannot use both -o/--output and -O/--remote-name")
+	}
+	// curl ignores -J without -O.
+	if !r.RemoteName {
+		r.RemoteHeaderName = false
 	}
 
 	// Infer method.
