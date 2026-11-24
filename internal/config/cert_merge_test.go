@@ -8,7 +8,10 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -131,5 +134,101 @@ func TestCertHasOwnKey(t *testing.T) {
 		if got := certHasOwnKey(test.data); got != test.want {
 			t.Errorf("%s: certHasOwnKey() = %t, want %t", test.name, got, test.want)
 		}
+	}
+}
+
+func TestHostSectionFilesLoadOnlyForTheRequestHost(t *testing.T) {
+	dir := t.TempDir()
+	cert, key := testCertificatePEM(t, "api")
+	certPath := filepath.Join(dir, "api.pem")
+	if err := os.WriteFile(certPath, append(cert, key...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing.pem")
+	src := "[vpn.corp]\nca-cert = " + missing + "\n\n[api.example.com]\ncert = " + certPath + "\n"
+
+	// A missing file in an unrelated host section does not break parsing.
+	f, err := parseFile("config", src)
+	if err != nil {
+		t.Fatalf("parseFile() error = %v", err)
+	}
+
+	api := f.HostConfig("api.example.com")
+	if api.CertData != nil {
+		t.Fatal("host certificate was read before LoadFiles")
+	}
+	if err := api.LoadFiles(); err != nil {
+		t.Fatalf("LoadFiles() error = %v", err)
+	}
+	if _, err := api.ClientCert(); err != nil {
+		t.Fatalf("ClientCert() error = %v", err)
+	}
+
+	// The missing file is reported, with its line, for its own host.
+	err = f.HostConfig("vpn.corp").LoadFiles()
+	if err == nil || !strings.Contains(err.Error(), "line 2") || !strings.Contains(err.Error(), "missing.pem") {
+		t.Fatalf("LoadFiles() error = %v, want the missing file at line 2", err)
+	}
+}
+
+func TestGlobalSectionFilesLoadWhenParsed(t *testing.T) {
+	_, err := parseFile("config", "ca-cert = "+filepath.Join(t.TempDir(), "missing.pem")+"\n")
+	if err == nil {
+		t.Fatal("parseFile() accepted a missing global CA file")
+	}
+}
+
+func TestLoadFilesRemembersItsResult(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.pem")
+	f, err := parseFile("config", "[*.corp.example]\nkey = "+missing+"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := f.HostConfig("vpn.corp.example")
+	if host == nil {
+		t.Fatal("wildcard section did not match")
+	}
+	first := host.LoadFiles()
+	if first == nil {
+		t.Fatal("LoadFiles() accepted a missing key file")
+	}
+	// A retry does not report success for a partly loaded section.
+	if second := host.LoadFiles(); second == nil || second.Error() != first.Error() {
+		t.Fatalf("second LoadFiles() = %v, want %v", second, first)
+	}
+	var nilConfig *Config
+	if err := nilConfig.LoadFiles(); err != nil {
+		t.Fatalf("nil LoadFiles() = %v", err)
+	}
+}
+
+func TestHostSectionStillRejectsUnknownKeysWhenParsed(t *testing.T) {
+	if _, err := parseFile("config", "[api.example.com]\nno-such-key = 1\n"); err == nil {
+		t.Fatal("parseFile() accepted an unknown key in a host section")
+	}
+}
+
+func TestHostSectionCACertsKeepTheirOrder(t *testing.T) {
+	dir := t.TempDir()
+	var paths []string
+	for _, name := range []string{"first", "second"} {
+		cert, _ := testCertificatePEM(t, name)
+		path := filepath.Join(dir, name+".pem")
+		if err := os.WriteFile(path, cert, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+	}
+	f, err := parseFile("config", "[api.example.com]\nca-cert = "+paths[0]+"\nca-cert = "+paths[1]+"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := f.HostConfig("api.example.com")
+	if err := host.LoadFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if len(host.CACerts) != 2 || host.CACerts[0].Subject.CommonName != "first" || host.CACerts[1].Subject.CommonName != "second" {
+		t.Fatalf("CA certificates = %d, want first then second", len(host.CACerts))
 	}
 }
