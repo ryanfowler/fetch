@@ -63,6 +63,7 @@ type Request struct {
 	Compression      core.CompressionMode
 	Copy             bool
 	Data             io.Reader
+	DataFromStdin    bool
 	Digest           *core.KeyVal[string]
 	Discard          bool
 	ResolverEndpoint *resolver.Endpoint

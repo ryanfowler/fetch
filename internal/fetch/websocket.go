@@ -175,15 +175,9 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 	defer conn.CloseNow()
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	// Detect interactive mode: default to TUI only when all three FDs are terminals.
-	interactive := core.IsStdinTerm && core.IsStdoutTerm && core.IsStderrTerm
-	switch r.WSInteractive {
-	case core.WSInteractiveOn:
-		if !interactive {
-			return 1, errors.New("--ws-interactive on requires stdin, stdout, and stderr to be terminals")
-		}
-	case core.WSInteractiveOff:
-		interactive = false
+	interactive, err := websocketInteractive(r.WSInteractive, core.IsStdinTerm && core.IsStdoutTerm && core.IsStderrTerm, r.DataFromStdin)
+	if err != nil {
+		return 1, err
 	}
 
 	// Determine stdin: use it for the write loop only if it's a pipe or
@@ -306,4 +300,26 @@ func signWebSocketHandshake(r *Request, req *http.Request) error {
 	req.GetBody = getBody
 	req.ContentLength = contentLength
 	return err
+}
+
+// websocketInteractive reports whether the WebSocket session uses the
+// interactive terminal UI. By default it does only when stdin, stdout, and
+// stderr are all terminals. An initial message from stdin ("-d @-") and the
+// interactive input line would both read the terminal, so the default then
+// turns the UI off, and "--ws-interactive on" is an error.
+func websocketInteractive(mode core.WSInteractiveMode, terminals, bodyFromStdin bool) (bool, error) {
+	switch mode {
+	case core.WSInteractiveOn:
+		if !terminals {
+			return false, errors.New("--ws-interactive on requires stdin, stdout, and stderr to be terminals")
+		}
+		if bodyFromStdin {
+			return false, errors.New("--ws-interactive on cannot read the initial message from stdin")
+		}
+		return true, nil
+	case core.WSInteractiveOff:
+		return false, nil
+	default:
+		return terminals && !bodyFromStdin, nil
+	}
 }

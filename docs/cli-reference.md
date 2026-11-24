@@ -789,7 +789,9 @@ fetch ws://echo.websocket.events
 fetch wss://echo.websocket.events -d "hello"
 ```
 
-Use `--ws-interactive auto|on|off` to control the terminal prompt.
+Use `--ws-interactive auto|on|off` to control the terminal prompt. When the
+initial message comes from stdin (`-d @-` or `--json @-`), `auto` does not open
+the prompt, and `on` is an error.
 
 Use `--ws-message-mode auto|text|binary` to select message types. See
 [WebSocket documentation](websocket.md) for message limits, close handling,
