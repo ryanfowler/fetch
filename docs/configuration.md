@@ -694,6 +694,9 @@ header = X-API-Key: admin-key
 - Command-line flags override both global and host-specific settings
 - Multiple headers and query parameters are merged in global, host-specific,
   then CLI order.
+- The `ca-cert`, `cert`, and `key` files of a host section are read only for a
+  request to that host. A missing file in another host's section is not an
+  error.
 
 ## Configuration Examples
 
@@ -755,7 +758,7 @@ header = X-Company-ID: company-identifier
 
 ## Configuration File Validation
 
-`fetch` validates configuration files when loading them and will report errors:
+`fetch` validates configuration files when loading them and will report errors. The `ca-cert`, `cert`, and `key` files of a host section are checked only for a request to that host:
 
 ```
 config file '/home/user/.config/fetch/config': line 15: invalid option: 'invalid-option'

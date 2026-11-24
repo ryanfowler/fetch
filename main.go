@@ -622,6 +622,9 @@ func parseConfigFile(app *cli.App) (string, error) {
 	if app.URL != nil {
 		hostname := app.URL.Hostname()
 		if hostCfg := file.HostConfig(hostname); hostCfg != nil {
+			if err := hostCfg.LoadFiles(); err != nil {
+				return "", err
+			}
 			app.RecordConfigKeys(app.Cfg.Merge(hostCfg), cli.SourceHostConfig)
 		}
 	}

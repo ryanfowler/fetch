@@ -24,6 +24,10 @@ import (
 // Config represents the configuration options for fetch.
 type Config struct {
 	isFile bool
+	// deferredFiles are host-section settings that LoadFiles reads, and
+	// loadFilesErr is the result of reading them.
+	deferredFiles []deferredSetting
+	loadFilesErr  error
 
 	AutoUpdate     *time.Duration
 	CACerts        []*x509.Certificate
@@ -421,6 +425,16 @@ func (c *Config) validate(webTransport bool) error {
 		return err
 	}
 	return nil
+}
+
+// isFileSetting reports whether the value of key is a file that Set reads.
+// Keep it in step with the cases of Set.
+func isFileSetting(key string) bool {
+	switch key {
+	case "ca-cert", "cert", "key":
+		return true
+	}
+	return false
 }
 
 // Set sets the provided key and value pair, returning any error encountered.

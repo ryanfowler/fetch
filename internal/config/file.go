@@ -169,6 +169,13 @@ func parseFile(path, s string) (*File, error) {
 			val = strings.TrimSpace(val)
 		}
 
+		if config != f.Global && isFileSetting(key) {
+			// A host section reads its files only when a request uses it,
+			// so a missing file in another host's section does not break
+			// every request.
+			config.deferredFiles = append(config.deferredFiles, deferredSetting{key: key, value: val, path: path, line: num})
+			continue
+		}
 		err := config.Set(key, val)
 		if err != nil {
 			return nil, newFileError(path, num, err)
@@ -176,6 +183,34 @@ func parseFile(path, s string) (*File, error) {
 	}
 
 	return &f, nil
+}
+
+// deferredSetting is a host-section setting that LoadFiles parses.
+type deferredSetting struct {
+	key, value string
+	path       string
+	line       int
+}
+
+// LoadFiles reads the files that a host section refers to, such as its
+// client certificate. Call it for the section that a request uses, before
+// Merge. It reports errors with the file name and line. A later call does
+// not read the files again; it returns the result of the first call.
+func (c *Config) LoadFiles() error {
+	if c == nil {
+		return nil
+	}
+	if c.deferredFiles != nil {
+		settings := c.deferredFiles
+		c.deferredFiles = nil
+		for _, setting := range settings {
+			if err := c.Set(setting.key, setting.value); err != nil {
+				c.loadFilesErr = newFileError(setting.path, setting.line, err)
+				break
+			}
+		}
+	}
+	return c.loadFilesErr
 }
 
 // lines returns an iterator over lines and line numbers.
