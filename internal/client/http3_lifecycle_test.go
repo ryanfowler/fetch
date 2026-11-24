@@ -68,7 +68,9 @@ func TestRoundTripHTTP3CancelsResponseBodyOnContextDeadline(t *testing.T) {
 	transport := h3RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: body, Request: req}, nil
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	// The deadline must not pass before roundTripHTTP3 returns, also on a
+	// slow CI machine. The body read below then waits for it.
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.com/", nil)
 	if err != nil {
