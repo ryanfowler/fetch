@@ -784,6 +784,14 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 	var lastErr error
 	var tcpPending automaticPrepareResult
 	var haveTCP bool
+	// The race no longer owns a TCP result that this loop has taken from
+	// it and holds while discovery runs. Close it on every return, unless
+	// it is the selected result. Close runs at most once.
+	defer func() {
+		if haveTCP && race.winner.Load() != tcpPending.id {
+			tcpPending.cleanup.close()
+		}
+	}()
 	discoveryDone := hasResolve
 	var discoveredECH []resolver.ServiceCandidate
 	echEnabled := t.ech != core.ECHUnknown && t.ech != core.ECHOff
@@ -839,6 +847,12 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 					// Keep the speculative connection until HTTPS discovery
 					// completes. If a real config is found, redial with ECH;
 					// otherwise auto mode may use this connection.
+					if haveTCP {
+						// Only one TCP dial runs, so this does not happen.
+						// Do not overwrite, and so leak, the held result.
+						got.cleanup.close()
+						continue
+					}
 					tcpPending = got
 					haveTCP = true
 					continue
