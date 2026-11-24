@@ -541,7 +541,8 @@ fetch --retry 3 --retry-delay 0.5 example.com
 Use a custom DNS resolver. Supported endpoints are bare UDP addresses, or
 `udp://`, `tcp://`, `tls://`/`dot://`, `quic://`/`doq://`, and `https://`
 (DNS-over-HTTPS) endpoints. UDP and TCP default to port 53. DoT and DoQ
-default to 853. DoH uses the URL port and requires HTTPS.
+default to 853. DoQ cannot use port 53 (RFC 9250) and pads queries with
+EDNS(0). DoH uses the URL port and requires HTTPS.
 
 ```sh
 fetch --dns-server 8.8.8.8 example.com

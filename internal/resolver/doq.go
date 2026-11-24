@@ -199,8 +199,15 @@ func doqTLSConfig(cfg DoQConfig, ep *Endpoint) (*tls.Config, error) {
 	}), nil
 }
 
+// doqRequestCancelled is the DOQ_REQUEST_CANCELLED error code (RFC 9250,
+// section 4.3) for a stream whose query the client abandons.
+const doqRequestCancelled quic.StreamErrorCode = 0x3
+
 // Query sends one DNS query on its own bidirectional QUIC stream and validates
-// the response against the transaction ID and question.
+// the response against the question. RFC 9250, section 4.2.1, requires the
+// DNS Message ID to be 0: the stream pairs the query with its response, and a
+// server treats a non-zero ID as a protocol error. Section 5.4 requires EDNS(0)
+// padding, because the QUIC layer does not pad.
 func (c *DoQClient) Query(ctx context.Context, name string, typ uint16) (*Message, error) {
 	if c == nil || c.conn == nil {
 		return nil, errors.New("DNS-over-QUIC client is closed")
@@ -210,23 +217,26 @@ func (c *DoQClient) Query(ctx context.Context, name string, typ uint16) (*Messag
 		return nil, err
 	}
 	question := Question{Name: questionName, Type: typ, Class: 1}
-	query, id, err := EncodeQuery(name, typ)
+	query, id, err := EncodeQueryWithID(0, name, typ)
 	if err != nil {
 		return nil, err
 	}
+	query = padQuery(query)
 	stream, err := c.conn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, doqOperationError(ctx, err)
 	}
 	defer stream.Close()
-	defer stream.CancelRead(0)
+	// After a complete response, CancelRead does nothing. Otherwise the
+	// query is abandoned.
+	defer stream.CancelRead(doqRequestCancelled)
 
 	stopCancel := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			stream.CancelWrite(0)
-			stream.CancelRead(0)
+			stream.CancelWrite(doqRequestCancelled)
+			stream.CancelRead(doqRequestCancelled)
 		case <-stopCancel:
 		}
 	}()

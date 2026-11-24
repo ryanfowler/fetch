@@ -332,3 +332,30 @@ func recordLengthPacket(typ uint16, length uint16, data []byte) []byte {
 	binary.BigEndian.PutUint16(packet[12+1+8:12+1+10], length)
 	return packet
 }
+
+func TestPadQuery(t *testing.T) {
+	for _, name := range []string{"a.example", "example.com", strings.Repeat("a", 60) + ".example"} {
+		query, _, err := EncodeQueryWithID(0, name, dnsTypeA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		padded := padQuery(query)
+		if len(padded)%queryPaddingBlock != 0 {
+			t.Fatalf("%s: padded length %d is not a multiple of %d", name, len(padded), queryPaddingBlock)
+		}
+		message, err := DecodeMessage(padded)
+		if err != nil {
+			t.Fatalf("%s: padded query does not decode: %v", name, err)
+		}
+		var opt *Record
+		for i := range message.Additionals {
+			if message.Additionals[i].Type == dnsTypeOPT {
+				opt = &message.Additionals[i]
+			}
+		}
+		if opt == nil || len(opt.RData) < 4 || binary.BigEndian.Uint16(opt.RData) != ednsOptionPadding ||
+			int(binary.BigEndian.Uint16(opt.RData[2:]))+4 != len(opt.RData) {
+			t.Fatalf("%s: OPT record = %+v, want one Padding option", name, opt)
+		}
+	}
+}

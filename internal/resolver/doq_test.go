@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -293,6 +294,73 @@ func TestDoQRejectsMalformedResponseFrame(t *testing.T) {
 	}
 }
 
+func TestDoQRejectsResponseWithNonZeroID(t *testing.T) {
+	cert := makeTestCertificate(t, "resolver.test")
+	listener, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{doqALPN},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept(context.Background())
+		if err != nil {
+			return
+		}
+		stream, err := conn.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		var frame [2]byte
+		if _, err := io.ReadFull(stream, frame[:]); err != nil {
+			return
+		}
+		query := make([]byte, binary.BigEndian.Uint16(frame[:]))
+		if _, err := io.ReadFull(stream, query); err != nil {
+			return
+		}
+		message, err := DecodeMessage(query)
+		if err != nil || len(message.Questions) != 1 {
+			return
+		}
+		question := message.Questions[0]
+		answer := makeRecord(question.Name, question.Type, []byte{192, 0, 2, 1})
+		response := responsePacket(query, 0x1234, question, []Record{answer})
+		binary.BigEndian.PutUint16(frame[:], uint16(len(response)))
+		_, _ = stream.Write(frame[:])
+		_, _ = stream.Write(response)
+		_ = stream.Close()
+		<-conn.Context().Done()
+	}()
+
+	endpoint, err := ParseEndpoint("quic://resolver.test:" + endpointPort(listener.Addr().String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewDoQClient(context.Background(), DoQConfig{
+		Endpoint: endpoint,
+		Bootstrap: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+		},
+		CACerts: []*x509.Certificate{cert.Leaf},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, err = client.Query(ctx, "example.com", dnsTypeA)
+	cancel()
+	client.Close()
+	<-serverDone
+	if err == nil {
+		t.Fatal("response with a non-zero Message ID was accepted")
+	}
+}
+
 func TestDoQQueryHonorsTimeoutAndAbruptClose(t *testing.T) {
 	cert := makeTestCertificate(t, "resolver.test")
 	listener, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
@@ -496,6 +564,14 @@ func serveDoQQuery(stream *quic.Stream) error {
 	}
 	if len(message.Questions) != 1 {
 		return errors.New("test query has no question")
+	}
+	// RFC 9250, section 4.3.3: a non-zero Message ID is a protocol error.
+	if message.Header.ID != 0 {
+		return errors.New("DoQ query has a non-zero Message ID")
+	}
+	// RFC 9250, section 5.4: queries use EDNS(0) padding.
+	if len(query)%queryPaddingBlock != 0 {
+		return fmt.Errorf("DoQ query length %d is not padded to %d bytes", len(query), queryPaddingBlock)
 	}
 	answerData := []byte{192, 0, 2, 1}
 	if message.Questions[0].Type == dnsTypeAAAA {

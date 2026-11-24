@@ -70,6 +70,8 @@ func TestParseEndpointRejectsInvalidValues(t *testing.T) {
 		"2001:db8::1",
 		"resolver.example:",
 		"resolver.example/extra",
+		"quic://resolver.example:53",
+		"doq://resolver.example:53",
 	}
 	for _, value := range values {
 		t.Run(value, func(t *testing.T) {
