@@ -856,7 +856,7 @@ func transactTCP(ctx context.Context, serverAddr string, query []byte, id uint16
 
 func addressAnswers(message *Message, question Question, typ uint16) ([]net.IPAddr, error) {
 	if message.Header.RCode != 0 {
-		return nil, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+		return nil, &RCodeError{Prefix: "DNS response", Code: message.Header.RCode}
 	}
 	answers, err := AuthorizeAddressAnswers(message, question)
 	if err != nil {

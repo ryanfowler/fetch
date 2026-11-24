@@ -245,7 +245,7 @@ func QuerySystemTypeDetailed(ctx context.Context, policy SystemResolverPolicy, h
 			return nil, metadata, err
 		}
 		if message.Header.RCode != 0 {
-			return nil, metadata, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+			return nil, metadata, &RCodeError{Prefix: "DNS response", Code: message.Header.RCode}
 		}
 		authorized, err := AuthorizeAnswers(message, Question{Name: name, Type: typ, Class: 1})
 		if err != nil {

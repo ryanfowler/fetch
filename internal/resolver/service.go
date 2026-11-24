@@ -362,15 +362,32 @@ func classifyDiscoveryError(err error, authenticated bool) error {
 	if errors.As(err, &existing) {
 		return err
 	}
-	if errors.Is(err, errDNSNoData) || strings.Contains(strings.ToLower(err.Error()), "nodata") {
-		return &DiscoveryError{Kind: DiscoveryFailureNODATA, Err: err}
-	}
-	if strings.Contains(strings.ToLower(err.Error()), "nxdomain") || strings.Contains(strings.ToLower(err.Error()), "no such host") {
-		return &DiscoveryError{Kind: DiscoveryFailureNXDOMAIN, Err: err}
-	}
+	// Classify by error type only, never by message text. The text can
+	// contain attacker-influenced values, such as a queried name, or the
+	// result of an unrelated lookup.
 	kind := DiscoveryFailureUnauthenticated
 	if authenticated {
 		kind = DiscoveryFailureAuthenticated
+	}
+	var bootstrap *bootstrapError
+	if errors.As(err, &bootstrap) {
+		// The resolver's own address could not be resolved, usually over
+		// plaintext DNS. A forged NXDOMAIN there must not count as an
+		// answer from the configured resolver.
+		return &DiscoveryError{Kind: kind, Err: err}
+	}
+	if errors.Is(err, errDNSNoData) {
+		return &DiscoveryError{Kind: DiscoveryFailureNODATA, Err: err}
+	}
+	var rcode *RCodeError
+	if errors.As(err, &rcode) && rcode.Code == rcodeNXDomain {
+		return &DiscoveryError{Kind: DiscoveryFailureNXDOMAIN, Err: err}
+	}
+	var dnsErr *net.DNSError
+	if !authenticated && errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		// The system resolver reports NXDOMAIN this way. It is never an
+		// authenticated resolver.
+		return &DiscoveryError{Kind: DiscoveryFailureNXDOMAIN, Err: err}
 	}
 	return &DiscoveryError{Kind: kind, Err: err}
 }
@@ -505,10 +522,7 @@ func (r *Resolver) lookupServiceRecords(ctx context.Context, host string, typ ui
 		return nil, errors.New("DNS response is empty")
 	}
 	if message.Header.RCode != 0 {
-		if message.Header.RCode == 3 {
-			return nil, fmt.Errorf("DNS response: NXDomain")
-		}
-		return nil, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+		return nil, &RCodeError{Prefix: "DNS response", Code: message.Header.RCode}
 	}
 	authorized, err := AuthorizeAnswers(message, question)
 	if err != nil {
