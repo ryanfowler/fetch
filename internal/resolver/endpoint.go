@@ -132,6 +132,10 @@ func parseEndpoint(value string, allowInsecureHTTPS bool) (*Endpoint, error) {
 	if err != nil {
 		return nil, endpointError(value, err.Error())
 	}
+	if transport == TransportQUIC && port == 53 {
+		// RFC 9250, section 4.1.1.
+		return nil, endpointError(value, "DNS over QUIC must not use port 53")
+	}
 	verify := transport == TransportTLS || transport == TransportQUIC || (transport == TransportHTTPS && scheme != "http")
 	ep := newEndpoint(transport, host, port, u.Path, u.RawPath, u.RawQuery, verify)
 	if scheme == "http" {

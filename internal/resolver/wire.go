@@ -1037,6 +1037,28 @@ func EncodeQueryWithID(id uint16, name string, typ uint16) ([]byte, uint16, erro
 	return packet, id, nil
 }
 
+// ednsOptionPadding is the EDNS(0) Padding option code (RFC 7830).
+const ednsOptionPadding = 12
+
+// queryPaddingBlock is the block size for padded queries (RFC 8467).
+const queryPaddingBlock = 128
+
+// padQuery appends an EDNS(0) Padding option to a query from
+// EncodeQueryWithID, so that the query length is a multiple of
+// queryPaddingBlock. The OPT record must be the last record in the query,
+// with empty RDATA.
+func padQuery(query []byte) []byte {
+	const optionHeader = 4
+	padding := (queryPaddingBlock - (len(query)+optionHeader)%queryPaddingBlock) % queryPaddingBlock
+	padded := make([]byte, len(query), len(query)+optionHeader+padding)
+	copy(padded, query)
+	// The OPT RDLENGTH is the last field of the query.
+	binary.BigEndian.PutUint16(padded[len(padded)-2:], uint16(optionHeader+padding))
+	padded = binary.BigEndian.AppendUint16(padded, ednsOptionPadding)
+	padded = binary.BigEndian.AppendUint16(padded, uint16(padding))
+	return append(padded, make([]byte, padding)...)
+}
+
 // ValidateResponse checks the transaction, response flags, and exact question.
 func (m *Message) ValidateResponse(id uint16, question Question) error {
 	if m == nil {
