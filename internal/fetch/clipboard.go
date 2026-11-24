@@ -181,7 +181,16 @@ func copyToClipboardWithTimeout(ctx context.Context, clip *clipboardCmd, data []
 		return fmt.Errorf("attach clipboard command: %w", err)
 	}
 	err := cmd.Wait()
-	terminateClipboardProcessTree(cmd)
+	if err != nil {
+		// Stop descendants of a command that failed or timed out. On Unix,
+		// keep them after a successful exit: xclip and wl-copy fork a
+		// background process that holds the clipboard data until the next
+		// copy. Both read all of stdin before they fork, so that process
+		// does not hold the stdin pipe and WaitDelay does not end Wait with
+		// an error. On Windows, releaseClipboardProcess closes the job,
+		// which stops descendants; clip.exe does not fork a holder.
+		terminateClipboardProcessTree(cmd)
+	}
 	releaseClipboardProcess(cmd)
 	if err != nil {
 		if ctxErr := commandCtx.Err(); ctxErr != nil {
