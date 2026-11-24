@@ -62,7 +62,9 @@ func handleWebTransport(ctx context.Context, r *Request, c *client.Client, req *
 	}
 	if req.Body != nil && req.Body != http.NoBody {
 		if !r.DryRun {
-			initialReader = req.Body
+			// The body can read stdin (-d @-). The wrapper lets the session
+			// stop a read of an idle pipe when the peer ends the session.
+			initialReader = core.NewInterruptibleReader(req.Body)
 			initialOwned = true
 		}
 		req.Body = http.NoBody
@@ -164,7 +166,9 @@ func handleWebTransport(ctx context.Context, r *Request, c *client.Client, req *
 	stdin := io.Reader(nil)
 	if initialReader == nil || isReplayableInitial(req) {
 		if info, statErr := os.Stdin.Stat(); statErr == nil && (info.Size() > 0 || info.Mode()&os.ModeNamedPipe != 0) {
-			stdin = os.Stdin
+			// The session closes stdin when it ends; the wrapper makes that
+			// close stop a read of an idle pipe.
+			stdin = core.NewInterruptibleReader(os.Stdin)
 		}
 	}
 	initialOwned = false

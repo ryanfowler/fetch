@@ -188,12 +188,13 @@ func handleWebSocket(ctx context.Context, r *Request, c *client.Client, req *htt
 
 	// Determine stdin: use it for the write loop only if it's a pipe or
 	// file. When stdin is a terminal or /dev/null, pass nil so we run in
-	// read-only mode (unless interactive).
+	// read-only mode (unless interactive). The session closes stdin when
+	// it ends; the wrapper makes that close stop a read of an idle pipe.
 	var stdin io.Reader
 	if !interactive {
 		if info, err := os.Stdin.Stat(); err == nil {
 			if info.Size() > 0 || info.Mode()&os.ModeNamedPipe != 0 {
-				stdin = os.Stdin
+				stdin = core.NewInterruptibleReader(os.Stdin)
 			}
 		}
 	}
