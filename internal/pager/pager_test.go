@@ -303,7 +303,9 @@ func TestStreamContextLetsInteractivePagerHandleSIGTERM(t *testing.T) {
 
 func TestStreamContextKillsInteractivePagerThatIgnoresSIGTERM(t *testing.T) {
 	previous := pagerExitGrace
-	pagerExitGrace = 100 * time.Millisecond
+	// The shell runs the trap only after its current "sleep 0.05" ends.
+	// Allow enough time for that on a slow machine.
+	pagerExitGrace = time.Second
 	t.Cleanup(func() { pagerExitGrace = previous })
 
 	// The trap records SIGTERM and keeps running.
