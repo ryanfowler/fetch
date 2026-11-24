@@ -76,7 +76,7 @@ const (
 	ctxRequestObserverKey   ctxRedirectCallbackKeyType = 2
 	ctxRedirectCrossedKey   ctxRedirectCallbackKeyType = 3
 	ctxOriginCookiesKey     ctxRedirectCallbackKeyType = 4
-	ctxConnectBudgetKey     ctxRedirectCallbackKeyType = 5
+	ctxConnectAllowanceKey  ctxRedirectCallbackKeyType = 5
 	ctxRedirectValidatorKey ctxRedirectCallbackKeyType = 6
 	ctxCredentialHeadersKey ctxRedirectCallbackKeyType = 7
 	ctxRedirectSecurityKey  ctxRedirectCallbackKeyType = 8
@@ -158,16 +158,12 @@ func normalizeHeaderName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
-// WithConnectBudget associates one absolute connection-establishment budget
-// with a request. Dialers use it for DNS, proxy setup, TCP, TLS, and QUIC so
-// a retry cannot restart the connection timeout.
-func WithConnectBudget(ctx context.Context, budget core.Budget) context.Context {
-	return context.WithValue(ctx, ctxConnectBudgetKey, budget)
-}
-
+// connectContext returns the context for one connection attempt and a
+// function that ends the attempt. It uses the allowance from
+// WithConnectTimeout when ctx has one, and otherwise timeout.
 func connectContext(ctx context.Context, timeout time.Duration, phase string) (context.Context, context.CancelFunc) {
-	if budget, ok := ctx.Value(ctxConnectBudgetKey).(core.Budget); ok && budget.Limited() {
-		return budget.WithConnectionContext(ctx, phase)
+	if allowance, ok := ctx.Value(ctxConnectAllowanceKey).(*connectAllowance); ok {
+		return allowance.begin(ctx, phase)
 	}
 	if timeout <= 0 {
 		return context.WithCancel(ctx)
@@ -516,23 +512,59 @@ func NewClient(cfg ClientConfig) *Client {
 // handshake that net/http performs after DialContext returns. The deadline is
 // cleared when the first non-CONNECT request is written or when an encrypted
 // application record is written after CONNECT, so it does not limit the body.
+//
+// The connection attempt also stays open until then, so the time of those
+// handshakes counts against the allowance from WithConnectTimeout. The
+// attempt ends when the deadline is cleared, when the connection is closed,
+// or when the deadline passes, whichever comes first.
 type connectDeadlineConn struct {
 	net.Conn
 	mu           sync.Mutex
 	cleared      bool
 	proxyConnect bool
+	endAttempt   func()
+	timer        *time.Timer
 }
 
-func newConnectDeadlineConn(conn net.Conn, ctx context.Context) net.Conn {
+// newConnectDeadlineConn takes ownership of endAttempt, which ends the
+// connection attempt that ctx belongs to. It calls endAttempt exactly once.
+func newConnectDeadlineConn(conn net.Conn, ctx context.Context, endAttempt func()) net.Conn {
 	if conn == nil {
+		endAttempt()
 		return nil
 	}
 	deadline, ok := ctx.Deadline()
 	if !ok {
+		endAttempt()
 		return conn
 	}
 	_ = conn.SetDeadline(deadline)
-	return &connectDeadlineConn{Conn: conn}
+	c := &connectDeadlineConn{Conn: conn, endAttempt: endAttempt}
+	// After the deadline, the handshake has failed. End the attempt even if
+	// the connection is never written or closed.
+	c.timer = time.AfterFunc(time.Until(deadline), func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.endAttemptLocked()
+	})
+	return c
+}
+
+// Close closes the connection and ends the connection attempt.
+func (c *connectDeadlineConn) Close() error {
+	c.mu.Lock()
+	c.endAttemptLocked()
+	c.mu.Unlock()
+	return c.Conn.Close()
+}
+
+func (c *connectDeadlineConn) endAttemptLocked() {
+	if c.endAttempt == nil {
+		return
+	}
+	c.timer.Stop()
+	c.endAttempt()
+	c.endAttempt = nil
 }
 
 func (c *connectDeadlineConn) Write(p []byte) (int, error) {
@@ -568,13 +600,13 @@ func (c *connectDeadlineConn) clearDeadlineLocked() {
 	}
 	c.cleared = true
 	_ = c.Conn.SetDeadline(time.Time{})
+	c.endAttemptLocked()
 }
 
 // wrapDialWithConnectTimeout wraps a dial function with a connect timeout sub-context.
 func wrapDialWithConnectTimeout(baseDial func(context.Context, string, string) (net.Conn, error), timeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		ctx, cancel := connectContext(ctx, timeout, "DNS/TCP connect")
-		defer cancel()
+		ctx, endAttempt := connectContext(ctx, timeout, "DNS/TCP connect")
 		var conn net.Conn
 		var err error
 		if baseDial != nil {
@@ -584,9 +616,12 @@ func wrapDialWithConnectTimeout(baseDial func(context.Context, string, string) (
 			conn, err = d.DialContext(ctx, network, address)
 		}
 		if err != nil {
+			endAttempt()
 			return nil, err
 		}
-		return newConnectDeadlineConn(conn, ctx), nil
+		// The attempt continues through the TLS handshake that net/http
+		// performs next.
+		return newConnectDeadlineConn(conn, ctx, endAttempt), nil
 	}
 }
 

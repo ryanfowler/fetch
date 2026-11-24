@@ -41,20 +41,13 @@ func retryableRequestWithBudget(ctx context.Context, r *Request, c *client.Clien
 	if err != nil {
 		return 0, err
 	}
-	connectBudget, err := core.NewBudget(r.ConnectTimeout)
-	if err != nil {
-		return 0, err
-	}
-
 	// Keep request-construction context values, such as the response encoding
 	// policy and body source, while attaching one absolute request deadline.
 	parent, stopParent := combineContexts(ctx, req.Context())
 	defer stopParent()
 	requestCtx, cancelBudget := requestBudget.WithContext(parent, "")
 	defer cancelBudget()
-	if connectBudget.Limited() {
-		requestCtx = client.WithConnectBudget(requestCtx, connectBudget)
-	}
+	requestCtx = client.WithConnectTimeout(requestCtx, r.ConnectTimeout)
 
 	// A retry or Digest challenge needs an independent body stream. Reject a
 	// one-shot source before the first network operation instead of buffering it

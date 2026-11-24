@@ -526,7 +526,7 @@ fetch --connect-timeout 5 example.com
 fetch --connect-timeout 5 --timeout 30 example.com  # Both timeouts
 ```
 
-This is useful for fast-failing on unreachable hosts while allowing large responses to transfer slowly. The connect timeout is independent of `--timeout` — both can be set simultaneously, and `--timeout` still caps the entire request.
+This is useful for fast-failing on unreachable hosts while allowing large responses to transfer slowly. Redirects and retries share the limit, but only time spent establishing connections counts against it. The connect timeout is independent of `--timeout` — both can be set simultaneously, and `--timeout` still caps the entire request.
 
 ### Configuration File
 
