@@ -156,11 +156,21 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	}
 	defer unlock()
 
-	// Perform the update. Record an attempt only after the executable
-	// preflight has succeeded and a real release lookup starts. Dry runs,
-	// lock contention, and preflight failures never modify updater metadata.
+	// Perform the update. An update records an attempt only after the
+	// executable preflight has succeeded and a real release lookup starts.
+	// An automatic update also records a preflight failure that does not go
+	// away by itself, such as an executable in a directory that the user
+	// cannot write: the failure is silent, and without a record every later
+	// request would start another updater. A transient failure, such as a
+	// failed --version probe, is not recorded, so the next request retries.
+	// Dry runs and lock contention never modify updater metadata.
 	attemptStarted := false
-	err = updateInner(ctx, p, silent, dryRun, network, func() { attemptStarted = true })
+	markAttempt := func() { attemptStarted = true }
+	var markPermanentFailure func()
+	if background {
+		markPermanentFailure = markAttempt
+	}
+	err = updateInner(ctx, p, silent, dryRun, network, markAttempt, markPermanentFailure)
 	if !dryRun && attemptStarted {
 		if metadataErr := updateLastAttemptTime(cacheDir, time.Now()); metadataErr != nil {
 			msg := fmt.Sprintf("unable to record the 'last update attempt' timestamp: %s", metadataErr.Error())
@@ -170,7 +180,10 @@ func update(ctx context.Context, p *core.Printer, timeout time.Duration, silent 
 	return err
 }
 
-func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool, network NetworkConfig, markAttempt func()) error {
+// updateInner performs the update. It calls markAttempt when the release
+// lookup starts, and markPermanentFailure, if it is not nil, when the
+// executable preflight fails in a way that does not go away by itself.
+func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool, network NetworkConfig, markAttempt, markPermanentFailure func()) error {
 	c := client.NewClient(client.ClientConfig{
 		CACerts:          network.CACerts,
 		ConnectTimeout:   network.ConnectTimeout,
@@ -182,20 +195,26 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 
 	// Get the current executable path and verify that we have write
 	// permission in order to replace the file.
-	exePath, err := getExecutablePath()
+	permanent := func(err error) error {
+		if markPermanentFailure != nil {
+			markPermanentFailure()
+		}
+		return err
+	}
+	exePath, err := executablePath()
 	if err != nil {
-		return fmt.Errorf("preflight: resolve executable: %w", err)
+		return permanent(fmt.Errorf("preflight: resolve executable: %w", err))
 	}
 	if info, statErr := os.Lstat(exePath); statErr != nil {
-		return fmt.Errorf("preflight: inspect executable: %w", statErr)
+		return permanent(fmt.Errorf("preflight: inspect executable: %w", statErr))
 	} else if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("preflight: executable destination is not a regular file")
+		return permanent(fmt.Errorf("preflight: executable destination is not a regular file"))
 	}
 	if err := validateReplacementDirectory(exePath); err != nil {
-		return fmt.Errorf("preflight: %w", err)
+		return permanent(fmt.Errorf("preflight: %w", err))
 	}
 	if !canReplaceFile(exePath) {
-		return fmt.Errorf("preflight: %w", errNoWritePermission(exePath))
+		return permanent(fmt.Errorf("preflight: %w", errNoWritePermission(exePath)))
 	}
 
 	// Get the current version by calling `fetch --version` so that if the
@@ -786,6 +805,9 @@ func validateUpdateRedirect(hop client.RedirectHop) error {
 	}
 	return nil
 }
+
+// executablePath is getExecutablePath. Tests replace it.
+var executablePath = getExecutablePath
 
 // getExecutablePath returns the current executable path, following any symlinks.
 func getExecutablePath() (string, error) {

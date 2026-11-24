@@ -66,5 +66,9 @@ auto-update = 12h
 may start one detached, silent updater child when the interval is due. Help,
 version, build information, completion, skill management, dry-run, and updater
 children do not start automatic checks. Automatic failures do not change the
-requested fetch result. Metadata is advisory and stored in the platform user
+requested fetch result. A failed automatic attempt waits for the next
+interval. This includes an attempt that cannot replace the executable, for
+example because its directory is not writable. To see the error, run
+`fetch --update`. The interval is shared by all fetch executables of the
+user. Metadata is advisory and stored in the platform user
 cache with bounded, atomic, symlink-safe writes.
