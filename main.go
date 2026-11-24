@@ -217,6 +217,7 @@ func main() {
 		ContentType:      app.ContentType,
 		Copy:             getValue(app.Cfg.Copy),
 		Data:             app.Data,
+		DataFromStdin:    app.DataFromStdin,
 		Digest:           app.Digest,
 		Discard:          app.Discard,
 		ResolverEndpoint: app.Cfg.DNSEndpoint,

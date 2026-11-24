@@ -46,6 +46,8 @@ The initial payload and each text line are limited to 16 MiB. Binary stdin uses 
 
 When stdin/stdout/stderr are terminals, `fetch` opens an interactive prompt. Type a message and press Enter to send it. Empty entries are valid messages. Ctrl+D performs a normal close handshake; Ctrl+C cancels the connection. Interactive history is byte-bounded.
 
+With `-d @-` or `--json @-`, the initial message is read from stdin. The prompt would read the same terminal, so `auto` does not open the prompt when the message comes from stdin, and `on` returns an error before `fetch` connects. On a terminal, type the message, press Enter, and then press Ctrl+D to send it. `fetch` then prints the server messages.
+
 Control this behavior with `--ws-interactive`:
 
 ```sh

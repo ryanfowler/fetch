@@ -304,6 +304,10 @@ func Parse(args []string) (*App, error) {
 	if app.URL != nil && !app.WS && app.WSInteractive != core.WSInteractiveAuto {
 		return &app, fmt.Errorf("'--ws-interactive' requires a ws:// or wss:// URL")
 	}
+	if app.WS && app.WSInteractive == core.WSInteractiveOn && app.DataFromStdin {
+		// The prompt and the initial message would both read the terminal.
+		return &app, fmt.Errorf("'--ws-interactive on' cannot read the initial message from stdin")
+	}
 	if err := validateGRPCModes(&app, cli, long); err != nil {
 		return &app, err
 	}
@@ -783,8 +787,10 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 				return err
 			}
 			a.Data = reader
+			a.DataFromStdin = r.DataValues[0].Value == "@-"
 			a.dataSet = true
 		} else {
+			// The data is read now, so the request does not read stdin.
 			data, err := materializeCurlData(r.DataValues)
 			if err != nil {
 				return err
@@ -810,6 +816,7 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 			return err
 		}
 		a.Data = reader
+		a.DataFromStdin = r.UploadFile == "-"
 		a.dataSet = true
 	}
 

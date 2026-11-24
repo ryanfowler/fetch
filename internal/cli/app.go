@@ -77,6 +77,10 @@ type App struct {
 	// RedirectSchemes, when not nil, lists the URL schemes that redirects
 	// may use. It is set from curl's --proto option by --from-curl.
 	RedirectSchemes []string
+	// DataFromStdin reports that Data reads standard input, as with
+	// "-d @-". The reader can be wrapped, so this is not the same as
+	// Data == os.Stdin.
+	DataFromStdin bool
 
 	dataSet          bool
 	jsonSet          bool
@@ -707,6 +711,7 @@ func (a *App) parseDataFlag(value string) error {
 			return err
 		}
 	}
+	a.DataFromStdin = value == "@-"
 	a.dataSet = true
 	return nil
 }
@@ -723,6 +728,7 @@ func (a *App) parseJSONFlag(value string) error {
 		return err
 	}
 	a.Data = r
+	a.DataFromStdin = value == "@-"
 	a.ContentType = "application/json"
 	a.jsonSet = true
 	return nil
@@ -833,6 +839,7 @@ func (a *App) parseXMLFlag(value string) error {
 		return err
 	}
 	a.Data = r
+	a.DataFromStdin = value == "@-"
 	a.ContentType = "application/xml"
 	a.xmlSet = true
 	return nil
