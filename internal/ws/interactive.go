@@ -60,11 +60,12 @@ func runInteractive(ctx context.Context, cfg Config) error {
 	defer cancel()
 
 	im := &interactiveMode{
-		cfg:    cfg,
-		term:   t,
-		editor: &lineEditor{},
-		cancel: cancel,
-		status: "connected",
+		cfg:      cfg,
+		term:     t,
+		editor:   &lineEditor{},
+		cancel:   cancel,
+		status:   "connected",
+		sendDone: make(chan sendResult, 1),
 	}
 
 	// The input channel is intentionally small. The reader blocks instead of
@@ -115,23 +116,35 @@ func runInteractive(ctx context.Context, cfg Config) error {
 
 	go t.watchResize(ctx, resizeCh)
 
-	if err := sendInitialMessage(ctx, &cfg); err != nil {
+	// Join a write that is still running when the session ends. Deferred
+	// calls run in reverse order, so this runs before the deferred cancel.
+	defer func() {
+		if im.sending {
+			cancel()
+			<-im.sendDone
+		}
+	}()
+
+	initialType, initialData, hasInitial, err := initialMessage(&cfg)
+	if err != nil {
 		im.teardownScreen()
 		return err
 	}
-	if cfg.InitialMsgSet {
-		typ, _ := initialMessageType(cfg.MessageMode, cfg.InitialMsg)
-		if typ == websocket.MessageBinary {
-			im.renderSentBinaryIndicator(len(cfg.InitialMsg))
-		} else {
-			im.renderSentMessage(cfg.InitialMsg)
-		}
+	if hasInitial {
+		im.startSend(ctx, sendResult{typ: initialType, data: initialData, initial: true})
 	}
 
 	var inputSource <-chan []byte = inputCh
 	var inputError <-chan error = inputErr
 	var closeDone <-chan error
 	for {
+		// Do not show received messages while a write runs. A reply must
+		// not appear above the message that caused it. The queue applies
+		// backpressure meanwhile.
+		received := msgQueue.C()
+		if im.sending {
+			received = nil
+		}
 		select {
 		case err := <-inputError:
 			inputError = nil
@@ -151,10 +164,16 @@ func runInteractive(ctx context.Context, cfg Config) error {
 				pending = im.handleInput(ctx, pending)
 			}
 			if im.localEOF && closeDone == nil {
-				closeDone = startNormalClose(cfg.Conn)
+				if im.sending {
+					// Close after the write. Ctrl+C still ends the
+					// session if the peer never reads the message.
+					im.setStatus("closing after the message is sent")
+				} else {
+					closeDone = startNormalClose(cfg.Conn)
+				}
 			}
 
-		case <-msgQueue.C():
+		case <-received:
 			msg := msgQueue.pop()
 			if msg.err != nil {
 				im.teardownScreen()
@@ -166,6 +185,17 @@ func runInteractive(ctx context.Context, cfg Config) error {
 				im.renderReceivedMessage(msg.data)
 			case websocket.MessageBinary:
 				im.renderBinaryIndicator(len(msg.data))
+			}
+
+		case result := <-im.sendDone:
+			if err := im.finishSend(result); err != nil {
+				im.teardownScreen()
+				cancel()
+				_ = cfg.Conn.CloseNow()
+				return err
+			}
+			if im.localEOF && closeDone == nil {
+				closeDone = startNormalClose(cfg.Conn)
 			}
 
 		case <-resizeCh:
@@ -261,6 +291,25 @@ type interactiveMode struct {
 	// separate from cancel so the close handshake can finish first.
 	localEOF     bool
 	historyBytes int64
+
+	// sending is true while a write runs on its own goroutine. Only the
+	// session goroutine reads or writes it. sendDone receives the result
+	// of that write.
+	sending  bool
+	sendDone chan sendResult
+}
+
+// sendResult describes one interactive WebSocket write and its result.
+type sendResult struct {
+	typ  websocket.MessageType
+	data []byte
+	// text is the editor text to restore if the write fails. It is empty
+	// for the initial message.
+	text string
+	// initial is true for the initial message. Its failure ends the
+	// session, as in non-interactive mode.
+	initial bool
+	err     error
 }
 
 // setupScreen configures the scroll region and draws the separators and input line.
@@ -807,6 +856,20 @@ func (im *interactiveMode) handleEscape(buf []byte) int {
 // mode. Interactive input is always valid UTF-8 because it comes from runes.
 func (im *interactiveMode) sendMessage(ctx context.Context) {
 	im.mu.Lock()
+	if im.localEOF {
+		im.status = "closing; new messages are not sent"
+		im.drawStatusLocked()
+		im.mu.Unlock()
+		return
+	}
+	if im.sending {
+		// Keep the text in the editor. The user can press Enter again when
+		// the previous write has finished.
+		im.status = "previous message is still sending"
+		im.drawStatusLocked()
+		im.mu.Unlock()
+		return
+	}
 	if im.editor.limitReached {
 		im.status = "message exceeds 16 MiB limit"
 		im.drawStatusLocked()
@@ -830,24 +893,57 @@ func (im *interactiveMode) sendMessage(ctx context.Context) {
 		im.mu.Unlock()
 		return
 	}
-	err := im.cfg.Conn.Write(ctx, typ, data)
-	if err != nil {
-		// Restore the text so the user doesn't lose their input.
+	im.startSend(ctx, sendResult{typ: typ, data: data, text: text})
+}
+
+// startSend writes msg on another goroutine and delivers the result to
+// im.sendDone. A peer that does not read can block the write until the
+// context ends. The session goroutine must keep handling input meanwhile,
+// so Ctrl+C can cancel the session and stop the write.
+func (im *interactiveMode) startSend(ctx context.Context, msg sendResult) {
+	im.sending = true
+	go func() {
+		msg.err = im.cfg.Conn.Write(ctx, msg.typ, msg.data)
+		im.sendDone <- msg
+	}()
+}
+
+// finishSend shows the result of a write that startSend started. It returns
+// an error only when the initial message fails, which ends the session.
+func (im *interactiveMode) finishSend(result sendResult) error {
+	im.sending = false
+	if result.err != nil {
+		if result.initial {
+			return initialWriteError(result.err)
+		}
 		im.mu.Lock()
-		im.status = "send failed: " + err.Error()
-		im.editor.setText(text)
+		if len(im.editor.buf) == 0 {
+			// Restore the text so the user doesn't lose their input.
+			im.status = "send failed: " + result.err.Error()
+			im.editor.setText(result.text)
+		} else {
+			im.status = "send failed, message discarded: " + result.err.Error()
+		}
 		im.drawStatusLocked()
 		im.drawInputLineLocked()
 		im.mu.Unlock()
-		return
+		return nil
 	}
+	if !result.initial {
+		im.setStatus(fmt.Sprintf("sent %d bytes", len(result.data)))
+	}
+	if result.typ == websocket.MessageBinary {
+		im.renderSentBinaryIndicator(len(result.data))
+	} else {
+		im.renderSentMessage(result.data)
+	}
+	return nil
+}
+
+// setStatus replaces the status line.
+func (im *interactiveMode) setStatus(status string) {
 	im.mu.Lock()
-	im.status = fmt.Sprintf("sent %d bytes", len(data))
+	im.status = status
 	im.drawStatusLocked()
 	im.mu.Unlock()
-	if typ == websocket.MessageBinary {
-		im.renderSentBinaryIndicator(len(data))
-	} else {
-		im.renderSentMessage(data)
-	}
 }

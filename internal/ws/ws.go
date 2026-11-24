@@ -67,8 +67,18 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 func sendInitialMessage(ctx context.Context, cfg *Config) error {
+	typ, data, ok, err := initialMessage(cfg)
+	if err != nil || !ok {
+		return err
+	}
+	return initialWriteError(cfg.Conn.Write(ctx, typ, data))
+}
+
+// initialMessage reads the initial message and selects its type. ok is
+// false when no initial message is configured.
+func initialMessage(cfg *Config) (typ websocket.MessageType, data []byte, ok bool, err error) {
 	if !cfg.InitialMsgSet && len(cfg.InitialMsg) == 0 && cfg.InitialReader == nil {
-		return nil
+		return 0, nil, false, nil
 	}
 
 	if cfg.InitialReader != nil {
@@ -77,24 +87,27 @@ func sendInitialMessage(ctx context.Context, cfg *Config) error {
 			_ = closer.Close()
 		}
 		if err != nil {
-			return err
+			return 0, nil, false, err
 		}
 		cfg.InitialMsg = data
 		cfg.InitialReader = nil
 		cfg.InitialMsgSet = true
 	}
 
-	typ, err := initialMessageType(cfg.MessageMode, cfg.InitialMsg)
+	typ, err = initialMessageType(cfg.MessageMode, cfg.InitialMsg)
 	if err != nil {
-		return err
+		return 0, nil, false, err
 	}
-	if err := cfg.Conn.Write(ctx, typ, cfg.InitialMsg); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
-		return fmt.Errorf("write initial WebSocket message: %w", err)
+	return typ, cfg.InitialMsg, true, nil
+}
+
+// initialWriteError converts the result of writing the initial message. A
+// cancelled write is not an error: the session is ending.
+func initialWriteError(err error) error {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("write initial WebSocket message: %w", err)
 }
 
 func initialMessageType(mode core.WSMessageMode, data []byte) (websocket.MessageType, error) {
