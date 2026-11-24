@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -231,6 +232,11 @@ func TestBashCandidate(t *testing.T) {
 // TestBashCandidateRoundTrip checks that bash reads each escaped file name
 // back as the original name.
 func TestBashCandidateRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Git Bash (MSYS) rewrites arguments that look like paths, such as
+		// "dir/;", so it does not read the words back unchanged.
+		t.Skip("MSYS bash rewrites path-like arguments")
+	}
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skip("bash is not installed")
