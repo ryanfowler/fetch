@@ -911,6 +911,8 @@ fetch --from-curl 'https://example.com'
 
 - The command is split like a bash command: single, double, and ANSI-C (`$'...'`) quotes, backslash escapes, and line continuations are supported. A backslash before a Windows line ending (CRLF) also continues the line. Variables and command substitutions are not expanded, and a `$'...'` value with a NUL byte is an error.
 - `-b`/`--cookie` only supports inline cookie strings (e.g., `-b 'name=value'`). Cookie jar files are not supported and will return an error.
+- Repeated `-b`/`--cookie` options are joined with `; `, as curl does, so every cookie is sent.
+- As in curl, a `-H` header named `User-Agent`, `Referer` or `Cookie` replaces the value of `-A`, `-e` or `-b`.
 - `-d`/`--data` and `--data-ascii` strip CR, LF, and NUL from `@filename` or `@-` input; inline data is unchanged. `--data-binary` and `--json` preserve file/stdin bytes, while `--data-raw` treats `@` literally.
 - Body options are combined in order. A `--json` fragment is appended directly; other data fragments add `&` when the preceding body is nonempty. Repeated JSON fragments can therefore form one JSON document.
 - A single file/stdin data body streams through fetch's native request-body path. Transformed regular-file bodies remain replayable; stdin remains one-shot. Composite data bodies and `--data-urlencode @filename` are materialized for curl compatibility and capped at 16 MiB.

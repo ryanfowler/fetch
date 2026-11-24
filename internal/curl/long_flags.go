@@ -340,10 +340,9 @@ func parseLongFlag(r *Result, name, value string, hasValue bool, rest []string) 
 		if err != nil {
 			return 0, fmt.Errorf("--cookie requires an argument")
 		}
-		if err := validateCookieValue(v); err != nil {
+		if err := r.addCookie(v); err != nil {
 			return 0, err
 		}
-		r.Cookie = v
 		return n, nil
 
 	// Verbosity.

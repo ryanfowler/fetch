@@ -36,6 +36,20 @@ func validateCookieValue(v string) error {
 	return nil
 }
 
+// addCookie adds the inline cookies of one -b/--cookie value. Like curl, it
+// joins the values of repeated options with "; ", so each value is sent.
+func (r *Result) addCookie(v string) error {
+	if err := validateCookieValue(v); err != nil {
+		return err
+	}
+	if r.Cookie == "" {
+		r.Cookie = v
+	} else {
+		r.Cookie += "; " + v
+	}
+	return nil
+}
+
 // curlProtocols are the protocol names that curl's --proto accepts.
 var curlProtocols = map[string]struct{}{
 	"dict": {}, "file": {}, "ftp": {}, "ftps": {}, "gopher": {}, "gophers": {},

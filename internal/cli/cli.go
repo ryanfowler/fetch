@@ -643,6 +643,17 @@ func validateFromCurlExclusives(app *App, cli *CLI, long map[string]Flag) error 
 }
 
 // applyFromCurl maps a parsed curl Result onto the App fields.
+// curlHasHeader reports whether the curl command has a -H header named
+// name, in any letter case.
+func curlHasHeader(r *curl.Result, name string) bool {
+	for _, h := range r.Headers {
+		if strings.EqualFold(h.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) applyFromCurl(r *curl.Result) error {
 	// Parse the URL using the shared normalization logic.
 	if r.URL == "" {
@@ -710,19 +721,17 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 		}
 	}
 
-	// Convenience headers.
-	if r.UserAgent != "" {
-		if err := a.Cfg.ParseHeader("User-Agent: " + r.UserAgent); err != nil {
-			return err
+	// Convenience headers. As in curl, a -H header with the same name
+	// replaces the value of -A, -e or -b.
+	for _, h := range []struct{ name, value string }{
+		{"User-Agent", r.UserAgent},
+		{"Referer", r.Referer},
+		{"Cookie", r.Cookie},
+	} {
+		if h.value == "" || curlHasHeader(r, h.name) {
+			continue
 		}
-	}
-	if r.Referer != "" {
-		if err := a.Cfg.ParseHeader("Referer: " + r.Referer); err != nil {
-			return err
-		}
-	}
-	if r.Cookie != "" {
-		if err := a.Cfg.ParseHeader("Cookie: " + r.Cookie); err != nil {
+		if err := a.Cfg.ParseHeader(h.name + ": " + h.value); err != nil {
 			return err
 		}
 	}
