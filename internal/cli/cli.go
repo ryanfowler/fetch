@@ -273,6 +273,13 @@ func Parse(args []string) (*App, error) {
 		if err := app.applyFromCurl(result); err != nil {
 			return &app, err
 		}
+		// The registry checked the options given to fetch before the curl
+		// command set more. curl.Parse rejects curl-level conflicts with
+		// curl's option names; this check covers the rest, including
+		// conflicts between --from-curl and other fetch options.
+		if err := cli.Options().Validate(); err != nil {
+			return &app, err
+		}
 	}
 	if app.Method == "" && app.hasRequestBody() {
 		app.Method = "POST"
@@ -789,8 +796,11 @@ func (a *App) applyFromCurl(r *curl.Result) error {
 			a.Basic = &core.KeyVal[string]{Key: user, Val: pass}
 		}
 	}
-	if r.Bearer != "" {
+	// curl sends one Authorization header. --aws-sigv4 wins over
+	// --oauth2-bearer, which wins over -u.
+	if r.Bearer != "" && r.AWSSigv4 == "" {
 		a.Bearer = r.Bearer
+		a.Basic = nil
 	}
 	if r.AWSSigv4 != "" {
 		// curl's --aws-sigv4 uses format "aws:amz:REGION:SERVICE"

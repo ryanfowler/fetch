@@ -101,11 +101,12 @@ func (a *App) markCurlOptions(r *curl.Result) {
 	if r.BasicAuth != "" && r.AWSSigv4 == "" {
 		if r.DigestAuth {
 			a.markCurlOption("digest")
-		} else {
+		} else if r.Bearer == "" {
+			// --oauth2-bearer replaces Basic credentials, as in curl.
 			a.markCurlOption("basic")
 		}
 	}
-	if r.Bearer != "" {
+	if r.Bearer != "" && r.AWSSigv4 == "" {
 		a.markCurlOption("bearer")
 	}
 	if r.AWSSigv4 != "" {

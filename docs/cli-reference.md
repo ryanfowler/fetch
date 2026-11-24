@@ -916,6 +916,7 @@ fetch --from-curl 'https://example.com'
 - `--data-urlencode` supports `@filename` and `name@filename` forms for reading and URL-encoding file contents. File bytes are encoded before any text conversion.
 - With `--aws-sigv4`, `-u ACCESS_KEY:SECRET_KEY` gives the AWS keys, as in curl, instead of Basic credentials. These keys replace the `AWS_*` environment variables, and `AWS_SESSION_TOKEN` is then not sent; add `-H 'X-Amz-Security-Token: TOKEN'` for temporary keys. `--aws-sigv4` cannot be combined with `--digest`.
 - `-n`/`--netrc` is not supported. Use `--basic`, `--bearer`, or an explicit `Authorization` header instead.
+- Body and output options that curl does not accept together, such as `-d` with `-F`, `-G` with `-F`, or `-o` with `-O`, return an error. As in curl, `--oauth2-bearer` replaces `-u` credentials, `--aws-sigv4` replaces `--oauth2-bearer`, and `-J` without `-O` is ignored.
 - Semantic curl flags that fetch cannot faithfully translate, such as `-f`/`--fail`, `-N`/`--no-buffer`, `--proto-default`, and `--proto-redir`, return an error instead of being ignored.
 
 Unknown curl flags return an error.
