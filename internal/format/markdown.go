@@ -20,6 +20,15 @@ import (
 const (
 	maxMarkdownBlockquoteOpeners = 256
 	defaultMarkdownMaxWidth      = 100
+	// maxMarkdownListIndentDepth caps the indentation of nested lists.
+	// Deeper items are indented as deep as this level. Without the cap,
+	// a deeply nested list makes the output grow with the square of its
+	// depth.
+	maxMarkdownListIndentDepth = 32
+	// maxMarkdownStyleDepth caps the style stack. Deeper nesting, such as
+	// emphasis inside emphasis, adds no visible style, and every pop
+	// re-applies the whole stack.
+	maxMarkdownStyleDepth = 16
 )
 
 // MarkdownOptions controls terminal-only Markdown presentation.
@@ -202,16 +211,20 @@ type mdRenderer struct {
 	printer           *core.Printer
 	source            []byte
 	styles            []core.Sequence
+	extraStyles       int // pushes past maxMarkdownStyleDepth
 	bqDepth           int
 	links             []bool
 	linkTargets       []string
 	listContinuations []string
-	width             int
-	lineWidth         int
-	pendingSpace      string
-	tty               bool
-	imageRenderer     func(destination string) bool
-	renderedImages    map[*ast.Image]bool
+	// listItemNumbers holds, for each open list, the number of items
+	// entered so far.
+	listItemNumbers []int
+	width           int
+	lineWidth       int
+	pendingSpace    string
+	tty             bool
+	imageRenderer   func(destination string) bool
+	renderedImages  map[*ast.Image]bool
 }
 
 type mdTableCell struct {
@@ -219,14 +232,23 @@ type mdTableCell struct {
 	text string
 }
 
-// pushStyle appends a style to the stack and sets it on the printer.
+// pushStyle appends a style to the stack and sets it on the printer. Past
+// maxMarkdownStyleDepth, it only counts the push.
 func (r *mdRenderer) pushStyle(s core.Sequence) {
+	if len(r.styles) >= maxMarkdownStyleDepth {
+		r.extraStyles++
+		return
+	}
 	r.styles = append(r.styles, s)
 	r.printer.Set(s)
 }
 
 // popStyle removes the top style, resets all, and re-applies remaining styles.
 func (r *mdRenderer) popStyle() {
+	if r.extraStyles > 0 {
+		r.extraStyles--
+		return
+	}
 	if len(r.styles) == 0 {
 		return
 	}
@@ -527,6 +549,11 @@ func (r *mdRenderer) nodeText(n ast.Node) string {
 }
 
 func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
+	if err := r.printer.Err(); err != nil {
+		// The output limit is reached. Rendering the rest of the
+		// document would only produce output that the printer rejects.
+		return ast.WalkStop, err
+	}
 	switch v := n.(type) {
 	case *ast.Document:
 		// No output for document node.
@@ -643,6 +670,11 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		}
 
 	case *ast.List:
+		if entering {
+			r.listItemNumbers = append(r.listItemNumbers, 0)
+		} else {
+			r.listItemNumbers = r.listItemNumbers[:len(r.listItemNumbers)-1]
+		}
 		if !entering && n.NextSibling() != nil {
 			r.writeBqPrefix()
 			r.writeString("\n")
@@ -651,17 +683,15 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 	case *ast.ListItem:
 		if entering {
 			list := v.Parent().(*ast.List)
-			indent := r.listIndent(v)
+			// Every enclosing list item has pushed a continuation.
+			indent := strings.Repeat("  ", min(len(r.listContinuations), maxMarkdownListIndentDepth))
+			r.listItemNumbers[len(r.listItemNumbers)-1]++
 			r.writeBqPrefix()
 			r.writeString(indent)
 			r.printer.Set(core.Blue)
 			marker := ""
 			if list.IsOrdered() {
-				num := list.Start
-				// Count preceding siblings to determine item number.
-				for sib := v.Parent().FirstChild(); sib != nil && sib != n; sib = sib.NextSibling() {
-					num++
-				}
+				num := list.Start + r.listItemNumbers[len(r.listItemNumbers)-1] - 1
 				marker = fmt.Sprintf("%d.", num)
 			} else {
 				if r.tty {
@@ -918,17 +948,6 @@ func markdownLinkDestination(destination string) string {
 // autolinks display their address but need an explicit mailto: target.
 func markdownAutoLinkTarget(link *ast.AutoLink, source []byte) string {
 	return string(util.URLEscape([]byte(link.Destination.Value(source))))
-}
-
-// listIndent returns indentation string based on list nesting depth.
-func (r *mdRenderer) listIndent(item *ast.ListItem) string {
-	depth := 0
-	for p := item.Parent(); p != nil; p = p.Parent() {
-		if _, ok := p.(*ast.ListItem); ok {
-			depth++
-		}
-	}
-	return strings.Repeat("  ", depth)
 }
 
 // renderFencedCodeBlock renders a fenced code block, delegating to known formatters.

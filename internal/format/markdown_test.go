@@ -1,12 +1,19 @@
 package format
 
 import (
+	"errors"
+	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ryanfowler/fetch/internal/core"
 
 	"github.com/mattn/go-runewidth"
-	"github.com/ryanfowler/fetch/internal/core"
+	"github.com/yuin/goldmark/v2/ast"
+	"github.com/yuin/goldmark/v2/parser"
 )
 
 func TestFormatMarkdown(t *testing.T) {
@@ -1489,5 +1496,99 @@ func TestFormatMarkdownFrontMatterColor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFormatMarkdownDeeplyNestedInputIsFast(t *testing.T) {
+	// These inputs used to take time with the square of their depth.
+	for name, input := range map[string]string{
+		"bullets":  strings.Repeat("- ", 16000) + "x",
+		"ordered":  strings.Repeat("1. ", 20000) + "x",
+		"emphasis": strings.Repeat("*", 100000) + "x" + strings.Repeat("*", 100000),
+	} {
+		for _, color := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s color %t", name, color), func(t *testing.T) {
+				p := core.TestPrinter(color).NewBoundedWriter(io.Discard, 1<<20, "test")
+				start := time.Now()
+				if err := FormatMarkdown([]byte(input), p); err != nil && !errors.Is(err, core.ErrLimitExceeded) {
+					t.Fatalf("FormatMarkdown() error = %v", err)
+				}
+				if elapsed := time.Since(start); elapsed > 2*time.Second {
+					t.Fatalf("FormatMarkdown() took %v", elapsed)
+				}
+			})
+		}
+	}
+}
+
+func TestFormatMarkdownCapsListIndentation(t *testing.T) {
+	depth := maxMarkdownListIndentDepth + 10
+	var input strings.Builder
+	for i := range depth {
+		fmt.Fprintf(&input, "%s- item %d\n", strings.Repeat("  ", i), i)
+	}
+	p := core.TestPrinter(false)
+	if err := FormatMarkdown([]byte(input.String()), p); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(p.Bytes()), "\n"), "\n")
+	if len(lines) != depth {
+		t.Fatalf("got %d lines, want %d: %q", len(lines), depth, lines)
+	}
+	for i, line := range lines {
+		want := strings.Repeat("  ", min(i, maxMarkdownListIndentDepth)) + fmt.Sprintf("- item %d", i)
+		if line != want {
+			t.Fatalf("line %d = %q, want %q", i, line, want)
+		}
+	}
+}
+
+func TestFormatMarkdownNumbersOrderedListItems(t *testing.T) {
+	input := "3. a\n4. b\n   1. inner\n   2. inner\n5. c\n\n- x\n\n7. restart\n8. again\n"
+	p := core.TestPrinter(false)
+	if err := FormatMarkdown([]byte(input), p); err != nil {
+		t.Fatal(err)
+	}
+	var numbered []string
+	for line := range strings.SplitSeq(string(p.Bytes()), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" && trimmed[0] >= '0' && trimmed[0] <= '9' {
+			numbered = append(numbered, trimmed)
+		}
+	}
+	want := []string{"3. a", "4. b", "1. inner", "2. inner", "5. c", "7. restart", "8. again"}
+	if !slices.Equal(numbered, want) {
+		t.Fatalf("numbered lines = %q, want %q", numbered, want)
+	}
+}
+
+func TestFormatMarkdownStopsAtOutputLimit(t *testing.T) {
+	var input strings.Builder
+	for i := range 10000 {
+		fmt.Fprintf(&input, "paragraph %d\n\n", i)
+	}
+	source := []byte(input.String())
+	doc := parser.New().Parse(source)
+	total := 0
+	_ = ast.Walk(doc, func(ast.Node, bool) (ast.WalkStatus, error) {
+		total++
+		return ast.WalkContinue, nil
+	})
+
+	p := core.TestPrinter(false).NewBoundedWriter(io.Discard, 4096, "test")
+	r := &mdRenderer{printer: p, source: source, renderedImages: make(map[*ast.Image]bool)}
+	visited := 0
+	err := ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		visited++
+		return r.walk(n, entering)
+	})
+	if !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("walk error = %v, want the output limit", err)
+	}
+	// The walk stops soon after the limit instead of visiting every node.
+	if visited*10 > total {
+		t.Fatalf("visited %d of %d nodes after the output limit", visited, total)
+	}
+	if err := FormatMarkdown(source, core.TestPrinter(false).NewBoundedWriter(io.Discard, 4096, "test")); !errors.Is(err, core.ErrLimitExceeded) {
+		t.Fatalf("FormatMarkdown() error = %v, want the output limit", err)
 	}
 }

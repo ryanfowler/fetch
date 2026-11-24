@@ -173,6 +173,7 @@ Features:
 - Fenced code block delegation to JSON, YAML, XML, HTML, CSS formatters
 - Blockquote and list marker highlighting; TTY blockquotes use a muted rule
   and muted text
+- Lists nested deeper than 32 levels are indented as deep as level 32
 - Bold blue table headers with dimmed table borders and separators
 - TTY prose wraps to the detected terminal width, capped at 100 columns by
   default, using display-cell widths;
