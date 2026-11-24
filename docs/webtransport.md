@@ -8,6 +8,8 @@ Digest authentication.
 The default mode is one reliable bidirectional stream. `-d` and `-j` are sent
 after the session handshake, followed by piped standard input. The stream is
 closed for writing at EOF, but fetch continues to read until the peer closes.
+When the peer closes its side first, fetch continues to send piped input until
+EOF. Use Ctrl+C to stop earlier.
 Stream output is raw bytes when stdout is redirected and is escaped when it is
 a terminal.
 

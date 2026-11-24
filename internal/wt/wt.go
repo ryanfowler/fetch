@@ -109,6 +109,8 @@ func runStream(ctx context.Context, cfg Config) error {
 			}
 		}
 		if read == io.EOF {
+			// The peer closed its side of the stream. The writer continues
+			// until its input ends, as for a half-closed TCP connection.
 			break
 		}
 		if read != nil {

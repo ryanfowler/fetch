@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/rsa"
@@ -3351,6 +3352,50 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, wsURL, "--no-pager")
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stdout, "pong")
+	})
+
+	t.Run("websocket exits when the peer closes and stdin is an idle pipe", func(t *testing.T) {
+		t.Parallel()
+		server := startServer(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.CloseNow()
+			conn.Write(r.Context(), websocket.MessageText, []byte("pong"))
+			conn.Close(websocket.StatusNormalClosure, "done")
+		})
+		defer server.Close()
+
+		// Keep the write end open, so stdin never reaches EOF.
+		stdinReader, stdinWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stdinWriter.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+		cmd := exec.CommandContext(ctx, fetchPath, wsURL)
+		cmd.Stdin = stdinReader
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		stdinReader.Close()
+		err = cmd.Wait()
+		if ctx.Err() != nil {
+			t.Fatalf("fetch did not exit after the peer closed; stderr: %s", stderr.String())
+		}
+		if err != nil {
+			t.Fatalf("fetch failed: %v; stderr: %s", err, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "pong") {
+			t.Fatalf("stdout = %q, want pong", stdout.String())
+		}
 	})
 
 	t.Run("websocket verbose shows upgrade", func(t *testing.T) {
