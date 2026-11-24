@@ -27,7 +27,9 @@ func writeOutputToFile(filename string, body io.Reader, size int64, p *core.Prin
 	dir := filepath.Dir(name)
 	// Keep the temporary name independent of the server/user filename. This
 	// avoids exceeding filesystem component limits for a 255-byte destination.
-	f, err := os.CreateTemp(dir, ".fetch-download-*")
+	// fileutil.CreateTemp lets the umask set the mode, so a new download gets
+	// the same permissions as other new files, not mode 0600.
+	f, err := fileutil.CreateTemp(dir, ".fetch-download-")
 	if err != nil {
 		return err
 	}

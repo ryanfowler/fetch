@@ -90,6 +90,8 @@ func New(path string, clobber bool) (*Recorder, error) {
 		return nil, fmt.Errorf("unable to check HAR destination directory: %w", err)
 	}
 
+	// A HAR file can hold credentials, so keep the 0600 mode of
+	// os.CreateTemp. Downloads use fileutil.CreateTemp instead.
 	f, err := os.CreateTemp(filepath.Dir(abs), ".fetch-har-*")
 	if err != nil {
 		return nil, fmt.Errorf("unable to reserve HAR destination: %w", err)

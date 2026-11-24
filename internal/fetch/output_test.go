@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -229,6 +230,37 @@ func TestWriteOutputToFile_ClobberPreservesExistingPermissions(t *testing.T) {
 	}
 	if got, want := info.Mode().Perm(), before.Mode().Perm(); got != want {
 		t.Fatalf("output file permissions = %04o, want %04o", got, want)
+	}
+}
+
+func TestWriteOutputToFile_NewFileUsesUmaskMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no Unix permission bits")
+	}
+	for _, clobber := range []bool{false, true} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "download.txt")
+		err := writeOutputToFile(path, strings.NewReader("new"), 3, core.TestPrinter(false), core.VSilent, clobber)
+		if err != nil {
+			t.Fatalf("writeOutputToFile returned error: %v", err)
+		}
+
+		// A file created with mode 0666 gets the umask applied by the kernel.
+		ref := filepath.Join(dir, "reference")
+		if err := os.WriteFile(ref, nil, 0o666); err != nil {
+			t.Fatal(err)
+		}
+		want, err := os.Stat(ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Mode().Perm() != want.Mode().Perm() {
+			t.Fatalf("clobber=%t: mode = %04o, want %04o", clobber, got.Mode().Perm(), want.Mode().Perm())
+		}
 	}
 }
 

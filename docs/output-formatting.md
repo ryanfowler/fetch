@@ -337,6 +337,12 @@ fetch -o response.json example.com/api/data
 
 Formatting is disabled when writing to a file.
 
+fetch writes the body to a temporary file in the same directory and then
+moves it to `PATH`. A new file gets mode `0666` with the bits of the process
+umask removed, as with a shell redirect or curl. The temporary file has the
+same mode while the download runs, so other users that can read the result
+can also read the partial data.
+
 ### `-o -` (Stdout)
 
 Force output to stdout, bypassing binary detection:
