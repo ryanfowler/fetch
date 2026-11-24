@@ -354,13 +354,13 @@ func TestMain(t *testing.T) {
 
 	t.Run("digest auth", func(t *testing.T) {
 		t.Parallel()
-		var challenged bool
+		var challenged atomic.Bool
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
 			if auth == "" {
 				w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
 				w.WriteHeader(http.StatusUnauthorized)
-				challenged = true
+				challenged.Store(true)
 				return
 			}
 			if !strings.HasPrefix(auth, "Digest ") {
@@ -391,21 +391,21 @@ func TestMain(t *testing.T) {
 
 		res := runFetch(t, fetchPath, server.URL, "--digest", "user:pass")
 		assertExitCode(t, 0, res)
-		if !challenged {
+		if !challenged.Load() {
 			t.Fatal("server did not send digest challenge")
 		}
 	})
 
 	t.Run("digest auth with body", func(t *testing.T) {
 		t.Parallel()
-		var challenged bool
-		var body string
+		var challenged atomic.Bool
+		var body atomic.Pointer[string]
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
 			if auth == "" {
 				w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
 				w.WriteHeader(http.StatusUnauthorized)
-				challenged = true
+				challenged.Store(true)
 				return
 			}
 			if !strings.HasPrefix(auth, "Digest ") {
@@ -433,29 +433,31 @@ func TestMain(t *testing.T) {
 			}
 			var buf bytes.Buffer
 			buf.ReadFrom(r.Body)
-			body = buf.String()
+			s := buf.String()
+			body.Store(&s)
 		})
 		defer server.Close()
 
 		res := runFetch(t, fetchPath, server.URL, "--digest", "user:pass", "--data", "hello=world")
 		assertExitCode(t, 0, res)
-		if !challenged {
+		if !challenged.Load() {
 			t.Fatal("server did not send digest challenge")
 		}
-		if body != "hello=world" {
-			t.Fatalf("unexpected body: %q", body)
+		gotBody := body.Load()
+		if gotBody == nil || *gotBody != "hello=world" {
+			t.Fatalf("unexpected body: %v", gotBody)
 		}
 	})
 
 	t.Run("digest auth from curl", func(t *testing.T) {
 		t.Parallel()
-		var challenged bool
+		var challenged atomic.Bool
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
 			auth := r.Header.Get("Authorization")
 			if auth == "" {
 				w.Header().Set("WWW-Authenticate", `Digest realm="test", nonce="abc123", qop="auth", algorithm="MD5"`)
 				w.WriteHeader(http.StatusUnauthorized)
-				challenged = true
+				challenged.Store(true)
 				return
 			}
 			if !strings.HasPrefix(auth, "Digest ") {
@@ -484,7 +486,7 @@ func TestMain(t *testing.T) {
 
 		res := runFetch(t, fetchPath, "--from-curl", fmt.Sprintf("curl --digest -u user:pass %s", server.URL))
 		assertExitCode(t, 0, res)
-		if !challenged {
+		if !challenged.Load() {
 			t.Fatal("server did not send digest challenge")
 		}
 	})
@@ -1191,7 +1193,7 @@ func TestMain(t *testing.T) {
 			select {
 			case <-r.Context().Done():
 				return
-			case <-time.After(time.Second):
+			case <-time.After(10 * time.Second):
 			}
 		})
 		defer server.Close()
@@ -1213,24 +1215,29 @@ func TestMain(t *testing.T) {
 			}
 			gzipWriter := gzip.NewWriter(w)
 			if _, err := gzipWriter.Write([]byte("prefix")); err != nil {
-				t.Errorf("write compressed prefix: %v", err)
+				if r.Context().Err() == nil {
+					t.Errorf("write compressed prefix: %v", err)
+				}
 				return
 			}
 			if err := gzipWriter.Flush(); err != nil {
-				t.Errorf("flush compressed prefix: %v", err)
+				if r.Context().Err() == nil {
+					t.Errorf("flush compressed prefix: %v", err)
+				}
 				return
 			}
 			flusher.Flush()
 			select {
 			case <-r.Context().Done():
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(10 * time.Second):
 			}
 			_ = gzipWriter.Close()
 		})
 		defer server.Close()
 
-		res := runFetch(t, fetchPath, server.URL, "--compress", "gzip", "--timeout", "0.05", "--format", "off")
+		res := runFetch(t, fetchPath, server.URL, "--compress", "gzip", "--timeout", "0.25", "--format", "off")
 		assertExitCode(t, 1, res)
+		assertBufContains(t, res.stderr, "timed out")
 	})
 
 	t.Run("connect timeout", func(t *testing.T) {
@@ -1254,12 +1261,16 @@ func TestMain(t *testing.T) {
 		// The first response takes longer than the connect timeout. The
 		// redirect needs a new connection to another server.
 		slow := startServer(func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(700 * time.Millisecond)
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(1200 * time.Millisecond):
+			}
 			http.Redirect(w, r, target.URL, http.StatusFound)
 		})
 		defer slow.Close()
 
-		res := runFetch(t, fetchPath, slow.URL, "--connect-timeout", "0.5")
+		res := runFetch(t, fetchPath, slow.URL, "--connect-timeout", "1")
 		assertExitCode(t, 0, res)
 		assertBufEquals(t, res.stdout, "ok")
 	})
@@ -1286,7 +1297,13 @@ func TestMain(t *testing.T) {
 			t.Skip("unix sockets not supported")
 		}
 
-		sock := filepath.Join(t.TempDir(), "server.sock")
+		sockDir, err := os.MkdirTemp("/tmp", "fetch-sock-*")
+		if err != nil {
+			sockDir = t.TempDir()
+		} else {
+			t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+		}
+		sock := filepath.Join(sockDir, "s.sock")
 
 		server, err := startUnixServer(sock, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(200)
@@ -1456,7 +1473,7 @@ func TestMain(t *testing.T) {
 				}
 				select {
 				case <-r.Context().Done():
-				case <-time.After(2 * time.Second):
+				case <-time.After(10 * time.Second):
 					t.Error("compressed SSE response was not closed after the bounded drain")
 				}
 				close(firstClosed)
@@ -1478,7 +1495,7 @@ func TestMain(t *testing.T) {
 		}
 		select {
 		case <-firstClosed:
-		case <-time.After(time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("first compressed SSE response remained open")
 		}
 	})
@@ -2136,6 +2153,13 @@ func TestMain(t *testing.T) {
 		// Copy the binary to a test-specific directory so the update
 		// test doesn't modify the shared fetchPath.
 		updateDir := t.TempDir()
+		if runtime.GOOS == "windows" {
+			// Wait for Windows self-delete helper processes to finish before
+			// t.TempDir removes updateDir, even if an earlier assertion fails.
+			t.Cleanup(func() {
+				waitForUpdateDirCleanup(t, updateDir, 15*time.Second)
+			})
+		}
 		// Self-update intentionally rejects group/world-writable replacement
 		// directories, so make the test fixture match the production preflight.
 		if err := os.Chmod(updateDir, 0700); err != nil {
@@ -2241,8 +2265,30 @@ func TestMain(t *testing.T) {
 		defer server.Close()
 		urlStr.Store(&server.URL)
 
-		updateEnv := []string{"FETCH_INTERNAL_UPDATE_URL=" + server.URL}
+		updateHome := t.TempDir()
+		updateTmp := filepath.Join(updateHome, "tmp")
+		if err := os.MkdirAll(updateTmp, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		updateEnv := []string{
+			"FETCH_INTERNAL_UPDATE_URL=" + server.URL,
+			"HOME=" + updateHome,
+			"USERPROFILE=" + updateHome,
+			"XDG_CONFIG_HOME=" + filepath.Join(updateHome, "config"),
+			"XDG_CACHE_HOME=" + filepath.Join(updateHome, "cache"),
+			"APPDATA=" + filepath.Join(updateHome, "config"),
+			"LOCALAPPDATA=" + filepath.Join(updateHome, "cache"),
+			"TMPDIR=" + updateTmp,
+			"TMP=" + updateTmp,
+			"TEMP=" + updateTmp,
+		}
 
+		// Set an older modification time so replacement always produces a
+		// distinct timestamp even on filesystems with coarse granularity.
+		oldTime := time.Now().Add(-time.Minute).Truncate(time.Second)
+		if err := os.Chtimes(updateFetchPath, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
 		origModTime := getModTime(t, updateFetchPath)
 
 		// Test update using latest version.
@@ -2264,10 +2310,7 @@ func TestMain(t *testing.T) {
 		assertBufContains(t, res.stderr, "Updated fetch:")
 		assertBufContains(t, res.stderr, "Changelog:")
 		if runtime.GOOS == "windows" {
-			deadline := time.Now().Add(5 * time.Second)
-			for len(listFiles(t, filepath.Dir(updateFetchPath))) > 1 && time.Now().Before(deadline) {
-				time.Sleep(20 * time.Millisecond)
-			}
+			waitForUpdateDirCleanup(t, filepath.Dir(updateFetchPath), 15*time.Second)
 		}
 		if s := listFiles(t, filepath.Dir(updateFetchPath)); len(s) > 1 {
 			t.Fatalf("unexpected files after updating: %v", s)
@@ -2322,19 +2365,25 @@ func TestMain(t *testing.T) {
 		}
 
 		// Test the auto-update functionality.
+		if err := os.Chtimes(updateFetchPath, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+		beforeAutoUpdateModTime := getModTime(t, updateFetchPath)
 		res = runFetchOpts(t, updateFetchPath, fetchOpts{env: updateEnv}, server.URL, "--auto-update", "0s")
 		assertExitCode(t, 0, res)
-		var n int
+		autoUpdateDeadline := time.Now().Add(30 * time.Second)
 		for {
 			mt := getOptionalModTime(t, updateFetchPath)
-			if mt != nil && !mt.Equal(afterModTime) {
+			if mt != nil && !mt.Equal(beforeAutoUpdateModTime) {
 				break
 			}
-			if n > 100 {
-				t.Fatal("timed out waiting for self-update to complete")
+			if time.Now().After(autoUpdateDeadline) {
+				t.Fatalf("timed out waiting for self-update to complete (files=%v)", listFiles(t, filepath.Dir(updateFetchPath)))
 			}
 			time.Sleep(100 * time.Millisecond)
-			n++
+		}
+		if runtime.GOOS == "windows" {
+			waitForUpdateDirCleanup(t, filepath.Dir(updateFetchPath), 15*time.Second)
 		}
 
 		// Ensure the new fetch binary still works.
@@ -3374,10 +3423,12 @@ func TestMain(t *testing.T) {
 		}
 		defer stdinWriter.Close()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
 		cmd := exec.CommandContext(ctx, fetchPath, wsURL)
+		cmd.WaitDelay = time.Second
+		cmd.Env = isolatedEnv(t, t.TempDir())
 		cmd.Stdin = stdinReader
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -3468,9 +3519,10 @@ func TestMain(t *testing.T) {
 
 	t.Run("websocket auth header sent", func(t *testing.T) {
 		t.Parallel()
-		var gotAuth string
+		var gotAuth atomic.Pointer[string]
 		server := startServer(func(w http.ResponseWriter, r *http.Request) {
-			gotAuth = r.Header.Get("Authorization")
+			auth := r.Header.Get("Authorization")
+			gotAuth.Store(&auth)
 			conn, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -3485,8 +3537,9 @@ func TestMain(t *testing.T) {
 		res := runFetch(t, fetchPath, wsURL, "--bearer", "mytoken", "--no-pager")
 		assertExitCode(t, 0, res)
 		assertBufContains(t, res.stdout, "authed")
-		if gotAuth != "Bearer mytoken" {
-			t.Fatalf("expected auth header 'Bearer mytoken', got %q", gotAuth)
+		auth := gotAuth.Load()
+		if auth == nil || *auth != "Bearer mytoken" {
+			t.Fatalf("expected auth header 'Bearer mytoken', got %v", auth)
 		}
 	})
 
@@ -3619,16 +3672,18 @@ func TestMain(t *testing.T) {
 		defer server.Close()
 
 		wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
-		var stdout syncBuffer
+		var stdout, stderr syncBuffer
 		cmd := exec.Command(fetchPath, wsURL, "--no-pager")
+		cmd.WaitDelay = time.Second
+		cmd.Env = isolatedEnv(t, t.TempDir())
 		cmd.Stdout = &stdout
-		cmd.Stderr = io.Discard
+		cmd.Stderr = &stderr
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("failed to start: %v", err)
 		}
 
 		// Wait for the message to appear in stdout.
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
 			if strings.Contains(stdout.String(), "hello") {
 				break
@@ -3636,7 +3691,9 @@ func TestMain(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 		}
 		if !strings.Contains(stdout.String(), "hello") {
-			t.Fatal("timed out waiting for WebSocket message")
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatalf("timed out waiting for WebSocket message (stderr=%q)", stderr.String())
 		}
 
 		// Send SIGINT and verify process exits promptly.
@@ -3652,14 +3709,15 @@ func TestMain(t *testing.T) {
 			}
 			exitErr, ok := errors.AsType[*exec.ExitError](err)
 			if !ok {
-				t.Fatalf("Ctrl-C error = %v; want exit status 130", err)
+				t.Fatalf("Ctrl-C error = %v; want exit status 130 (stderr=%q)", err, stderr.String())
 			}
 			if exitErr.ExitCode() != 130 {
-				t.Fatalf("Ctrl-C exit code = %d; want 130", exitErr.ExitCode())
+				t.Fatalf("Ctrl-C exit code = %d; want 130 (stderr=%q)", exitErr.ExitCode(), stderr.String())
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			cmd.Process.Kill()
-			t.Fatal("process did not exit after SIGINT")
+			<-done
+			t.Fatalf("process did not exit after SIGINT (stderr=%q)", stderr.String())
 		}
 	})
 
@@ -4018,27 +4076,34 @@ func runFetchStdin(t *testing.T, input, path string, args ...string) runResult {
 func runFetchOpts(t *testing.T, path string, opts fetchOpts, args ...string) runResult {
 	t.Helper()
 
+	env := isolatedEnv(t, t.TempDir(), opts.env...)
 	deadline := time.Now().Add(2 * time.Second)
 	delay := 10 * time.Millisecond
 	for {
 		var stderr, stdout = new(bytes.Buffer), new(bytes.Buffer)
-		cmd := exec.Command(path, args...)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, path, args...)
+		cmd.WaitDelay = time.Second
 		if opts.stdin != "" {
 			cmd.Stdin = strings.NewReader(opts.stdin)
 		}
 		if opts.dir != "" {
 			cmd.Dir = opts.dir
 		}
-		if len(opts.env) > 0 {
-			cmd.Env = append(os.Environ(), opts.env...)
-		}
+		cmd.Env = env
 		cmd.Stderr = stderr
 		cmd.Stdout = stdout
-		if err := cmd.Run(); err != nil {
+		err := cmd.Run()
+		timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		cancel()
+		if err != nil {
 			if isTextFileBusy(err) && time.Now().Before(deadline) {
 				time.Sleep(delay)
 				delay = min(delay*2, 100*time.Millisecond)
 				continue
+			}
+			if timedOut {
+				t.Fatalf("fetch command timed out: %v\nSTDOUT: %s\nSTDERR: %s", err, stdout.String(), stderr.String())
 			}
 			if _, ok := errors.AsType[*exec.ExitError](err); !ok {
 				t.Fatalf("unexpected error running the fetch command: %s", err.Error())
@@ -4049,6 +4114,79 @@ func runFetchOpts(t *testing.T, path string, opts fetchOpts, args ...string) run
 			stderr: stderr,
 			stdout: stdout,
 		}
+	}
+}
+
+func isolatedEnv(t *testing.T, root string, overrides ...string) []string {
+	t.Helper()
+
+	tmpDir := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+		t.Fatalf("unable to create isolated temp dir: %v", err)
+	}
+	defaults := []string{
+		"HOME=" + root,
+		"USERPROFILE=" + root,
+		"XDG_CONFIG_HOME=" + filepath.Join(root, "config"),
+		"XDG_CACHE_HOME=" + filepath.Join(root, "cache"),
+		"APPDATA=" + filepath.Join(root, "config"),
+		"LOCALAPPDATA=" + filepath.Join(root, "cache"),
+		"TMPDIR=" + tmpDir,
+		"TMP=" + tmpDir,
+		"TEMP=" + tmpDir,
+		"HTTP_PROXY=",
+		"http_proxy=",
+		"HTTPS_PROXY=",
+		"https_proxy=",
+		"ALL_PROXY=",
+		"all_proxy=",
+		"NO_PROXY=*",
+		"no_proxy=*",
+	}
+	allOverrides := append(defaults, overrides...)
+	return mergeEnv(os.Environ(), allOverrides...)
+}
+
+func mergeEnv(base []string, overrides ...string) []string {
+	env := make([]string, 0, len(base)+len(overrides))
+	for _, kv := range base {
+		key, _, _ := strings.Cut(kv, "=")
+		replaced := false
+		for _, ov := range overrides {
+			ovKey, _, _ := strings.Cut(ov, "=")
+			if strings.EqualFold(key, ovKey) {
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			env = append(env, kv)
+		}
+	}
+	// Deduplicate overrides, keeping the last value for any key (case-insensitive).
+	for i, ov := range overrides {
+		ovKey, _, _ := strings.Cut(ov, "=")
+		later := false
+		for j := i + 1; j < len(overrides); j++ {
+			nextKey, _, _ := strings.Cut(overrides[j], "=")
+			if strings.EqualFold(ovKey, nextKey) {
+				later = true
+				break
+			}
+		}
+		if !later {
+			env = append(env, ov)
+		}
+	}
+	return env
+}
+
+func waitForUpdateDirCleanup(t *testing.T, dir string, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for len(listFiles(t, dir)) > 1 && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
@@ -4100,7 +4238,7 @@ func copyFile(t *testing.T, src, dst string) {
 func createTempFile(t *testing.T, data string) string {
 	t.Helper()
 
-	f, err := os.CreateTemp("", "")
+	f, err := os.CreateTemp(t.TempDir(), "")
 	if err != nil {
 		t.Fatalf("unable to create temp file: %s", err.Error())
 	}

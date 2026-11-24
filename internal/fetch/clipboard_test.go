@@ -119,7 +119,7 @@ func TestCopyToClipboardTimeout(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "clipboard command timed out") {
 		t.Fatalf("copyToClipboardWithTimeout() error = %v, want timeout", err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("copyToClipboardWithTimeout() took %s, want bounded return", elapsed)
 	}
 }

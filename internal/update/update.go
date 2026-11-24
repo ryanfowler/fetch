@@ -380,10 +380,9 @@ func validateStagedExecutable(parent context.Context, path string) error {
 	return err
 }
 
-const (
-	executableProbeTimeout     = 5 * time.Second
-	executableProbeOutputLimit = 4 << 10
-)
+var executableProbeTimeout = 5 * time.Second
+
+const executableProbeOutputLimit = 4 << 10
 
 // probeExecutableVersion runs an executable's --version command in a bounded,
 // contained process environment. It is used for both the current executable

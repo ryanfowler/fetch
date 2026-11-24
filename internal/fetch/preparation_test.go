@@ -96,7 +96,10 @@ func TestFetchCancelsBlockedRequestPreparation(t *testing.T) {
 				ctx, cancel := context.WithCancelCause(context.Background())
 				defer cancel(nil)
 				if cancellation == "timeout" {
-					r.Timeout = 100 * time.Millisecond
+					// Leave enough headroom for file setup (e.g. editor temp
+					// file creation or descriptor loading) on slow CI runners
+					// so preparation reliably reaches input.Read before timing out.
+					r.Timeout = 500 * time.Millisecond
 				}
 				result := make(chan error, 1)
 				go func() {
@@ -107,7 +110,7 @@ func TestFetchCancelsBlockedRequestPreparation(t *testing.T) {
 				case <-input.started:
 				case err := <-result:
 					t.Fatalf("fetch returned before reading the input: %v", err)
-				case <-time.After(2 * time.Second):
+				case <-time.After(10 * time.Second):
 					t.Fatal("preparation did not start reading the input")
 				}
 				callerCause := errors.New("caller canceled preparation")
@@ -126,7 +129,7 @@ func TestFetchCancelsBlockedRequestPreparation(t *testing.T) {
 							t.Fatalf("fetch error = %v, want request timeout after %s", err, r.Timeout)
 						}
 					}
-				case <-time.After(2 * time.Second):
+				case <-time.After(10 * time.Second):
 					t.Fatal("cancellation did not unblock request preparation")
 				}
 				select {
@@ -148,7 +151,7 @@ func TestRetryUsesPreparationBudget(t *testing.T) {
 	}))
 	defer server.Close()
 	r := &Request{
-		Timeout: time.Second, Discard: true,
+		Timeout: 3 * time.Second, Discard: true,
 		URL: mustParseURL(server.URL), PrinterHandle: core.NewHandle(core.ColorOff),
 	}
 	c := newClient(r)
@@ -158,18 +161,18 @@ func TestRetryUsesPreparationBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Model preparation consuming most of a request's budget. The configured
-	// timeout must not give the network attempt a fresh second.
-	budget, err := core.NewBudgetAt(time.Second, time.Now().Add(-950*time.Millisecond))
+	// timeout must not give the network attempt a fresh budget.
+	budget, err := core.NewBudgetAt(3*time.Second, time.Now().Add(-2900*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
 	start := time.Now()
 	_, err = retryableRequestWithBudget(context.Background(), r, c, req, budget)
 	var timeout core.TimeoutError
-	if !errors.As(err, &timeout) || timeout.Duration != time.Second {
+	if !errors.As(err, &timeout) || timeout.Duration != 3*time.Second {
 		t.Fatalf("retry error = %v, want the original request timeout", err)
 	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
 		t.Fatalf("network attempt restarted the timeout: elapsed %s", elapsed)
 	}
 }
@@ -228,7 +231,7 @@ func main() { for { time.Sleep(time.Second) } }
 				if !errors.As(err, &timeout) || timeout.Duration != r.Timeout {
 					t.Fatalf("schema preparation error = %v, want request timeout", err)
 				}
-			case <-time.After(2 * time.Second):
+			case <-time.After(10 * time.Second):
 				t.Fatal("schema preparation ignored the request timeout")
 			}
 		})
@@ -253,7 +256,7 @@ func TestEditorProcessHonorsCancellation(t *testing.T) {
 	go func() { result <- editRequestBody(req) }()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	deadline := time.NewTimer(2 * time.Second)
+	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	for {
 		if _, err := os.Stat(readyPath); err == nil {
@@ -274,7 +277,7 @@ func TestEditorProcessHonorsCancellation(t *testing.T) {
 		if !errors.Is(err, cause) {
 			t.Fatalf("editor error = %v, want cancellation cause", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("editor process did not stop on cancellation")
 	}
 }

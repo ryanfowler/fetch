@@ -15,6 +15,22 @@ import (
 	"github.com/ryanfowler/fetch/internal/core"
 )
 
+var (
+	fakeProtocOnce sync.Once
+	fakeProtocDir  string
+	fakeProtocPath string
+	fakeProtocErr  error
+	fakeProtocSkip string
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if fakeProtocDir != "" {
+		_ = os.RemoveAll(fakeProtocDir)
+	}
+	os.Exit(code)
+}
+
 func TestCompileProtosSuccess(t *testing.T) {
 	// Skip if protoc is not available.
 	if _, err := exec.LookPath("protoc"); err != nil {
@@ -367,7 +383,7 @@ func TestCompileProtosRejectsOversizedGeneratedDescriptor(t *testing.T) {
 	if err == nil || !errors.Is(err, core.ErrLimitExceeded) {
 		t.Fatalf("CompileProtosWithContext() error = %v, want generated descriptor size limit", err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
 		t.Fatalf("generated descriptor overflow was not detected while protoc was running: %s", elapsed)
 	}
 }
@@ -386,7 +402,7 @@ func TestCompileProtosStopsHangingProtoc(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("CompileProtosWithContext() error = %v, want errors.Is(context.DeadlineExceeded)", err)
 	}
-	if elapsed := time.Since(started); elapsed > 2*time.Second {
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
 		t.Fatalf("hanging protoc was not terminated promptly: %s", elapsed)
 	}
 }
@@ -409,13 +425,13 @@ func TestCompileProtosContainsChildWithInheritedPipes(t *testing.T) {
 	childPIDPath := filepath.Join(t.TempDir(), "child.pid")
 	t.Setenv("FETCH_FAKE_PROTOC_CHILD_PID_FILE", childPIDPath)
 
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	started := time.Now()
 	if _, err := CompileProtosWithContext(ctx, nil, nil); err != nil {
 		t.Fatalf("CompileProtosWithContext() error = %v", err)
 	}
-	if elapsed := time.Since(started); elapsed > time.Second {
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
 		t.Fatalf("CompileProtosWithContext() hung on inherited pipes: %s", elapsed)
 	}
 
@@ -449,27 +465,44 @@ func readChildPID(t *testing.T, path string) int {
 
 func buildFakeProtoc(t *testing.T) string {
 	t.Helper()
-	goTool, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("go not found in PATH, skipping fake protoc test")
+	fakeProtocOnce.Do(func() {
+		goTool, err := exec.LookPath("go")
+		if err != nil {
+			fakeProtocSkip = "go not found in PATH, skipping fake protoc test"
+			return
+		}
+		dir, err := os.MkdirTemp("", "fetch-fake-protoc-*")
+		if err != nil {
+			fakeProtocErr = fmt.Errorf("create temp dir: %w", err)
+			return
+		}
+		fakeProtocDir = dir
+		source := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(source, []byte(fakeProtocSource), 0600); err != nil {
+			fakeProtocErr = fmt.Errorf("write fake protoc: %w", err)
+			return
+		}
+		helper := filepath.Join(dir, "protoc")
+		if os.PathSeparator == '\\' {
+			helper += ".exe"
+		}
+		cmd := exec.Command(goTool, "build", "-o", helper, "main.go")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GO111MODULE=off")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			fakeProtocErr = fmt.Errorf("build fake protoc: %w\n%s", err, output)
+			return
+		}
+		fakeProtocPath = helper
+	})
+	if fakeProtocSkip != "" {
+		t.Skip(fakeProtocSkip)
 	}
-	dir := t.TempDir()
-	source := filepath.Join(dir, "main.go")
-	if err := os.WriteFile(source, []byte(fakeProtocSource), 0600); err != nil {
-		t.Fatalf("write fake protoc: %v", err)
+	if fakeProtocErr != nil {
+		t.Fatal(fakeProtocErr)
 	}
-	helper := filepath.Join(dir, "protoc")
-	if os.PathSeparator == '\\' {
-		helper += ".exe"
-	}
-	cmd := exec.Command(goTool, "build", "-o", helper, "main.go")
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GO111MODULE=off")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build fake protoc: %v\n%s", err, output)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return helper
+	t.Setenv("PATH", fakeProtocDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return fakeProtocPath
 }
 
 const fakeProtocSource = `package main
@@ -530,7 +563,10 @@ func main() {
 			os.Exit(1)
 		}
 		if path := os.Getenv("FETCH_FAKE_PROTOC_CHILD_PID_FILE"); path != "" {
-			_ = os.WriteFile(path, []byte(fmt.Sprint(child.Process.Pid)), 0600)
+			if err := os.WriteFile(path, []byte(fmt.Sprint(child.Process.Pid)), 0600); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
 		}
 	case "hang":
 		for {

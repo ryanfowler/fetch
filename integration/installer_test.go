@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json/v2"
@@ -18,6 +19,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReleaseInstallerInstallsVerifiedGoArtifactAtomically(t *testing.T) {
@@ -71,21 +73,21 @@ func TestReleaseInstallerInstallsVerifiedGoArtifactAtomically(t *testing.T) {
 	root := filepath.Dir(filepath.Dir(mustInstallerCallerFile(t)))
 	installDir := filepath.Join(t.TempDir(), "bin")
 	home := t.TempDir()
-	newInstaller := func() *exec.Cmd {
-		cmd := exec.Command("bash", filepath.Join(root, "install.sh"))
+	newInstaller := func(ctx context.Context) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, "bash", filepath.Join(root, "install.sh"))
+		cmd.WaitDelay = time.Second
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(),
+		cmd.Env = isolatedEnv(t, home,
 			"FETCH_INSTALL_API_URL="+server.URL+"/latest",
 			"FETCH_INSTALL_ALLOW_HTTP=1",
 			"FETCH_INSTALL_DIR="+installDir,
-			"HOME="+home,
 			"SHELL=/bin/sh",
 			"PATH=/usr/bin:/bin",
 		)
 		return cmd
 	}
 
-	output, err := runInstaller(t, newInstaller())
+	output, err := runInstaller(t, newInstaller)
 	if err != nil {
 		t.Fatalf("installer failed: %v\n%s", err, output)
 	}
@@ -107,7 +109,7 @@ func TestReleaseInstallerInstallsVerifiedGoArtifactAtomically(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(installDir, "fetch")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	output, err = runInstaller(t, newInstaller())
+	output, err = runInstaller(t, newInstaller)
 	if err == nil || !strings.Contains(string(output), "symlink target") {
 		t.Fatalf("symlink target result = %v, output=%s", err, output)
 	}
@@ -138,9 +140,11 @@ func installerTestArchive(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-func runInstaller(t *testing.T, cmd *exec.Cmd) ([]byte, error) {
+func runInstaller(t *testing.T, buildCmd func(context.Context) *exec.Cmd) ([]byte, error) {
 	t.Helper()
-	return cmd.CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return buildCmd(ctx).CombinedOutput()
 }
 
 func mustInstallerCallerFile(t *testing.T) string {
