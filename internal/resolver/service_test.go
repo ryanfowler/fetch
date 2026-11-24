@@ -3,7 +3,9 @@ package resolver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -124,18 +126,31 @@ func TestResolveHTTPSDelayedTargetSupplementsHints(t *testing.T) {
 
 func TestDiscoveryDowngradePolicy(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		err  error
-		kind DiscoveryFailureKind
-		want bool
+		name          string
+		err           error
+		authenticated bool
+		kind          DiscoveryFailureKind
+		want          bool
 	}{
-		{"nodata", errDNSNoData, DiscoveryFailureNODATA, true},
-		{"nxdomain", errors.New("DNS response: NXDomain"), DiscoveryFailureNXDOMAIN, true},
-		{"unauthenticated", errors.New("resolver timed out"), DiscoveryFailureUnauthenticated, true},
-		{"authenticated", &DiscoveryError{Kind: DiscoveryFailureAuthenticated, Err: errors.New("malformed HTTPS RRset")}, DiscoveryFailureAuthenticated, false},
+		{"nodata", errDNSNoData, false, DiscoveryFailureNODATA, true},
+		{"nxdomain", &RCodeError{Prefix: "DNS response", Code: rcodeNXDomain}, false, DiscoveryFailureNXDOMAIN, true},
+		{"authenticated nxdomain", fmt.Errorf("query: %w", &RCodeError{Prefix: "DoH response", Code: rcodeNXDomain}), true, DiscoveryFailureNXDOMAIN, true},
+		{"servfail", &RCodeError{Prefix: "DNS response", Code: 2}, false, DiscoveryFailureUnauthenticated, true},
+		{"no addresses", errNoAddresses, false, DiscoveryFailureNODATA, true},
+		{"system not found", &net.DNSError{Err: "no such host", Name: "x.example", IsNotFound: true}, false, DiscoveryFailureNXDOMAIN, true},
+		{"unauthenticated", errors.New("resolver timed out"), false, DiscoveryFailureUnauthenticated, true},
+		{"authenticated", &DiscoveryError{Kind: DiscoveryFailureAuthenticated, Err: errors.New("malformed HTTPS RRset")}, true, DiscoveryFailureAuthenticated, false},
+		// A message that only mentions NXDOMAIN or NODATA, for example
+		// through a queried name, is not a DNS answer.
+		{"text only", errors.New(`Post "https://dns.example/dns-query?name=nxdomain.nodata.example": EOF`), true, DiscoveryFailureAuthenticated, false},
+		// A forged NXDOMAIN for the resolver's own name must not allow a
+		// downgrade of an authenticated resolver.
+		{"bootstrap nxdomain", &url.Error{Op: "Post", URL: "https://dns.example/dns-query", Err: &bootstrapError{server: `DoH endpoint "dns.example"`, err: &net.DNSError{Err: "no such host", Name: "dns.example", IsNotFound: true}}}, true, DiscoveryFailureAuthenticated, false},
+		{"bootstrap rcode", &bootstrapError{server: `DoH endpoint "dns.example"`, err: &RCodeError{Prefix: "DNS response", Code: rcodeNXDomain}}, true, DiscoveryFailureAuthenticated, false},
+		{"authenticated system not found", &net.DNSError{Err: "no such host", Name: "x.example", IsNotFound: true}, true, DiscoveryFailureAuthenticated, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			wrapped := classifyDiscoveryError(test.err, test.kind == DiscoveryFailureAuthenticated)
+			wrapped := classifyDiscoveryError(test.err, test.authenticated)
 			if DiscoveryFailure(wrapped) != test.kind || MayDowngrade(wrapped) != test.want {
 				t.Fatalf("classified = %v/%v, want %v/%v", DiscoveryFailure(wrapped), MayDowngrade(wrapped), test.kind, test.want)
 			}

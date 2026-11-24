@@ -160,7 +160,7 @@ func bootstrapDoQEndpoint(ctx context.Context, cfg DoQConfig) ([]net.IPAddr, err
 			var err error
 			addresses, err = bootstrap(ctx, ep.ConnectHost)
 			if err != nil {
-				return nil, fmt.Errorf("resolve DNS-over-QUIC endpoint %q: %w", ep.ConnectHost, err)
+				return nil, &bootstrapError{server: fmt.Sprintf("DNS-over-QUIC endpoint %q", ep.ConnectHost), err: err}
 			}
 		}
 	}
@@ -377,7 +377,7 @@ func lookupDoQIPs(ctx context.Context, cfg DoQConfig, host string) ([]net.IPAddr
 			return nil, err
 		}
 		if message.Header.RCode != 0 {
-			return nil, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+			return nil, &RCodeError{Prefix: "DNS response", Code: message.Header.RCode}
 		}
 		authorized, err := AuthorizeAddressAnswers(message, Question{Name: name, Type: typ, Class: 1})
 		if err != nil {

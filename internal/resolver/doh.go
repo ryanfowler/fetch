@@ -201,7 +201,7 @@ func dohDialContext(dial DialContextFunc, bootstrap BootstrapFunc, endpoint *End
 		if len(addresses) == 0 && bootstrap != nil && net.ParseIP(host) == nil {
 			addresses, err = bootstrap(ctx, host)
 			if err != nil {
-				return nil, fmt.Errorf("resolve DoH endpoint %q: %w", host, err)
+				return nil, &bootstrapError{server: fmt.Sprintf("DoH endpoint %q", host), err: err}
 			}
 		}
 		if len(addresses) == 0 {
@@ -318,7 +318,7 @@ func (c *DOHClient) wireMessage(ctx context.Context, host string, answerType int
 		return nil, fmt.Errorf("invalid DoH wire response: %w", err)
 	}
 	if message.Header.RCode != 0 {
-		return nil, fmt.Errorf("DoH response: %s", RCodeName(message.Header.RCode))
+		return nil, &RCodeError{Prefix: "DoH response", Code: message.Header.RCode}
 	}
 	if _, err := AuthorizeAnswers(message, question); err != nil {
 		return nil, err
@@ -624,14 +624,12 @@ func (c *DOHClient) lookupJSONRecords(ctx context.Context, host, dnsType string,
 		// Preserve the actual DNS response code. Only NXDOMAIN is a
 		// negative name answer; SERVFAIL, REFUSED, and other server errors
 		// must not be mistaken for a safe downgrade.
-		name := rcodeName(int(status))
-		if name == "" {
-			name = RCodeName(uint16(status))
+		prefix := "DoH JSON response"
+		if status == rcodeNXDomain {
+			// Keep the message that users and scripts see for a missing name.
+			prefix = "no such host"
 		}
-		if status == 3 {
-			return nil, fmt.Errorf("no such host: %s", name)
-		}
-		return nil, fmt.Errorf("DoH JSON response: %s", name)
+		return nil, &RCodeError{Prefix: prefix, Code: uint16(status)}
 	}
 	answers, err := AuthorizeAnswers(message, question)
 	if err != nil {

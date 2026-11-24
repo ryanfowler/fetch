@@ -137,7 +137,7 @@ func dialStreamEndpoint(ctx context.Context, cfg StreamConfig) (net.Conn, error)
 			var err error
 			addresses, err = bootstrap(ctx, ep.ConnectHost)
 			if err != nil {
-				return nil, fmt.Errorf("resolve DNS endpoint %q: %w", ep.ConnectHost, err)
+				return nil, &bootstrapError{server: fmt.Sprintf("DNS endpoint %q", ep.ConnectHost), err: err}
 			}
 		}
 	}
@@ -483,7 +483,7 @@ func lookupStreamIPs(ctx context.Context, cfg StreamConfig, host string) ([]net.
 			return nil, err
 		}
 		if message.Header.RCode != 0 {
-			return nil, fmt.Errorf("DNS response: %s", RCodeName(message.Header.RCode))
+			return nil, &RCodeError{Prefix: "DNS response", Code: message.Header.RCode}
 		}
 		answers, err := AuthorizeAddressAnswers(message, Question{Name: name, Type: typ, Class: 1})
 		if err != nil {

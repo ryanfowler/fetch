@@ -106,7 +106,8 @@ func resolveAddressFamilies(ctx context.Context, lookup func(context.Context, ui
 	if firstErr != nil {
 		return nil, firstErr
 	}
-	return nil, errors.New("no such host")
+	// Both families answered without addresses and without an error.
+	return nil, errNoAddresses
 }
 
 func deduplicateAddresses(addrs []net.IPAddr) []net.IPAddr {
