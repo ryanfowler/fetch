@@ -3,10 +3,12 @@ package fetch
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +52,35 @@ func TestClipboardCommandHelper(t *testing.T) {
 			time.Sleep(time.Hour)
 		}
 	}
+	if os.Getenv("FETCH_TEST_CLIPBOARD_HOLDER") == "1" {
+		// A background clipboard holder, as xclip forks: it publishes the
+		// data after its parent has exited.
+		time.Sleep(200 * time.Millisecond)
+		out := os.Getenv("FETCH_TEST_CLIPBOARD_OUT")
+		if err := os.Rename(out+".pending", out); err != nil {
+			fmt.Fprintf(os.Stderr, "clipboard holder: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if os.Getenv("FETCH_TEST_CLIPBOARD_BACKGROUND") == "1" {
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			t.Fatalf("unable to read stdin: %v", err)
+		}
+		if err := os.WriteFile(os.Getenv("FETCH_TEST_CLIPBOARD_OUT")+".pending", data, 0o600); err != nil {
+			t.Fatalf("unable to write pending clipboard output: %v", err)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestClipboardCommandHelper$")
+		cmd.Env = append(os.Environ(), "FETCH_TEST_CLIPBOARD_HOLDER=1")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("unable to start clipboard holder: %v", err)
+		}
+		if os.Getenv("FETCH_TEST_CLIPBOARD_FAIL") == "1" {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv("FETCH_TEST_CLIPBOARD_FORK") == "1" {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestClipboardCommandHelper$")
 		cmd.Env = append(os.Environ(), "FETCH_TEST_CLIPBOARD_DESCENDANT=1")
@@ -90,6 +121,62 @@ func TestCopyToClipboardTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("copyToClipboardWithTimeout() took %s, want bounded return", elapsed)
+	}
+}
+
+func TestCopyToClipboardKeepsBackgroundHolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows clipboard commands do not fork a holder")
+	}
+	out := filepath.Join(t.TempDir(), "clipboard")
+	t.Setenv("FETCH_TEST_CLIPBOARD_HELPER", "1")
+	t.Setenv("FETCH_TEST_CLIPBOARD_BACKGROUND", "1")
+	t.Setenv("FETCH_TEST_CLIPBOARD_OUT", out)
+
+	err := copyToClipboardWithTimeout(context.Background(), &clipboardCmd{
+		path: os.Args[0],
+		args: []string{"-test.run=^TestClipboardCommandHelper$"},
+	}, []byte("copied"), 5*time.Second)
+	if err != nil {
+		t.Fatalf("copyToClipboardWithTimeout() error = %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(out)
+		if err == nil {
+			if string(data) != "copied" {
+				t.Fatalf("clipboard data = %q, want %q", data, "copied")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("clipboard data was not published within 5s; the background holder was stopped or failed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestCopyToClipboardStopsHolderOfFailedCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows clipboard commands do not fork a holder")
+	}
+	out := filepath.Join(t.TempDir(), "clipboard")
+	t.Setenv("FETCH_TEST_CLIPBOARD_HELPER", "1")
+	t.Setenv("FETCH_TEST_CLIPBOARD_BACKGROUND", "1")
+	t.Setenv("FETCH_TEST_CLIPBOARD_FAIL", "1")
+	t.Setenv("FETCH_TEST_CLIPBOARD_OUT", out)
+
+	err := copyToClipboardWithTimeout(context.Background(), &clipboardCmd{
+		path: os.Args[0],
+		args: []string{"-test.run=^TestClipboardCommandHelper$"},
+	}, []byte("copied"), 5*time.Second)
+	if err == nil {
+		t.Fatal("copyToClipboardWithTimeout() succeeded for a failed command")
+	}
+	// The holder publishes 200ms after it starts unless it was stopped.
+	time.Sleep(time.Second)
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("holder of a failed command was not stopped: %v", err)
 	}
 }
 
