@@ -966,9 +966,7 @@ func removeManaged(path string) error {
 	return os.RemoveAll(path)
 }
 
-type operationLock struct{ path string }
-
-func acquireLocks(ctx context.Context, destinations []string, includeMissing bool) ([]operationLock, error) {
+func acquireLocks(ctx context.Context, destinations []string, includeMissing bool) ([]*fileutil.FileLock, error) {
 	parents := make(map[string]struct{})
 	for _, destination := range destinations {
 		_, err := os.Lstat(destination)
@@ -985,7 +983,7 @@ func acquireLocks(ctx context.Context, destinations []string, includeMissing boo
 		parentList = append(parentList, parent)
 	}
 	sort.Strings(parentList)
-	locks := make([]operationLock, 0, len(parentList))
+	locks := make([]*fileutil.FileLock, 0, len(parentList))
 	for _, parent := range parentList {
 		if err := ensureDirectory(parent); err != nil {
 			releaseLocks(locks)
@@ -1002,32 +1000,20 @@ func acquireLocks(ctx context.Context, destinations []string, includeMissing boo
 	return locks, nil
 }
 
-func acquireLock(ctx context.Context, path string) (operationLock, error) {
-	deadline := time.NewTimer(5 * time.Second)
-	defer deadline.Stop()
-	for {
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err == nil {
-			_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
-			_ = file.Close()
-			return operationLock{path: path}, nil
-		}
-		if !os.IsExist(err) && !os.IsPermission(err) {
-			return operationLock{}, err
-		}
-		select {
-		case <-ctx.Done():
-			return operationLock{}, ctx.Err()
-		case <-deadline.C:
-			return operationLock{}, fmt.Errorf("timed out waiting for skill operation lock %q", path)
-		case <-time.After(25 * time.Millisecond):
-		}
+// acquireLock takes the skill operation lock at path. It is an operating
+// system lock, so a process that dies while it holds the lock does not
+// leave a stale lock.
+func acquireLock(ctx context.Context, path string) (*fileutil.FileLock, error) {
+	lock, err := fileutil.LockFile(ctx, path, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("skill operation lock: %w", err)
 	}
+	return lock, nil
 }
 
-func releaseLocks(locks []operationLock) {
+func releaseLocks(locks []*fileutil.FileLock) {
 	for i := len(locks) - 1; i >= 0; i-- {
-		_ = os.Remove(locks[i].path)
+		locks[i].Unlock()
 	}
 }
 

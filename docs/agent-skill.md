@@ -32,7 +32,10 @@ replacement or removal unless `--force` is supplied. An unrecognized directory
 is never recursively removed just because it is named `fetch`.
 
 Destination components are checked for symlinks, writes use private directories
-and atomic operations, and concurrent operations use a per-destination lock.
+and atomic operations, and concurrent operations use a per-destination lock. The
+lock is an operating-system file lock, so a process that dies does not leave a
+stale lock. On a file system without file locks, such as some network mounts,
+installation reports an error.
 The command does not edit agent settings, shell profiles, plugin registries, or
 other configuration.
 
