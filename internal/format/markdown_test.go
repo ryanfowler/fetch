@@ -1291,7 +1291,7 @@ func TestFormatMarkdownBlockSpacing(t *testing.T) {
 		{
 			name:  "table then paragraph",
 			input: "| A |\n|---|\n| 1 |\n\nparagraph\n",
-			want:  "| A   |\n|---|\n| 1   |\n\nparagraph\n",
+			want:  "| A   |\n|-----|\n| 1   |\n\nparagraph\n",
 		},
 		{
 			name:  "blockquote then paragraph",
@@ -1686,5 +1686,94 @@ func TestFormatMarkdownWideTableIsFast(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("FormatMarkdown() took %v", elapsed)
+	}
+}
+
+func TestFormatMarkdownTableKeepsBodyRows(t *testing.T) {
+	input := "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |\n"
+	p := core.TestPrinter(false)
+	if err := FormatMarkdown([]byte(input), p); err != nil {
+		t.Fatalf("FormatMarkdown() error = %v", err)
+	}
+	want := "| a   | b   |\n|-----|-----|\n| 1   | 2   |\n| 3   | 4   |\n| 5   | 6   |\n"
+	if got := string(p.Bytes()); !strings.Contains(got, want) {
+		t.Fatalf("output = %q, want it to contain %q", got, want)
+	}
+}
+
+func TestFormatMarkdownVerticalTableKeepsBodyRows(t *testing.T) {
+	p := core.TestTerminalPrinter(false)
+	input := "| Name | Description |\n| --- | --- |\n| Ada | A long description that does not fit |\n| Bob | Another long description here |\n"
+	if err := FormatMarkdownWithOptions([]byte(input), p, MarkdownOptions{MaxWidth: 30}); err != nil {
+		t.Fatalf("FormatMarkdownWithOptions() error = %v", err)
+	}
+	output := string(p.Bytes())
+	for _, want := range []string{"--- Row 1 ---", "Name: Ada", "--- Row 2 ---", "Name: Bob"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output does not contain %q: %q", want, output)
+		}
+	}
+	if strings.Contains(output, "--- Row 3 ---") {
+		t.Errorf("output has a third row: %q", output)
+	}
+}
+
+func TestFormatMarkdownTableStopsAtOutputLimit(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("| a | b |\n|---|---|\n")
+	for range 2000 {
+		b.WriteString("| xxxxxxxx | yyyyyyyy |\n")
+	}
+	for _, terminal := range []bool{false, true} {
+		base := core.TestPrinter(false)
+		options := MarkdownOptions{}
+		if terminal {
+			// A narrow width forces the vertical layout.
+			base = core.TestTerminalPrinter(false)
+			options.MaxWidth = 10
+		}
+		p := base.NewBoundedWriter(io.Discard, 4096, "test")
+		err := FormatMarkdownWithOptions([]byte(b.String()), p, options)
+		if !errors.Is(err, core.ErrLimitExceeded) {
+			t.Fatalf("terminal=%t: FormatMarkdown() error = %v, want ErrLimitExceeded", terminal, err)
+		}
+		if n := len(p.Bytes()); n > 8192 {
+			t.Fatalf("terminal=%t: rendering went on after the limit: %d bytes", terminal, n)
+		}
+	}
+}
+
+func TestFormatMarkdownTableRefusesLargeOutput(t *testing.T) {
+	// One long header label is repeated for every row in the vertical
+	// layout, and it pads every row in the grid layout.
+	var b strings.Builder
+	b.WriteString("| " + strings.Repeat("L", 20000) + " | b |\n|---|---|\n")
+	for range 1000 {
+		b.WriteString("| x | y |\n")
+	}
+	for _, terminal := range []bool{false, true} {
+		p := core.TestPrinter(false)
+		if terminal {
+			p = core.TestTerminalPrinter(false)
+		}
+		err := FormatMarkdownWithOptions([]byte(b.String()), p, MarkdownOptions{MaxWidth: 80})
+		if !errors.Is(err, core.ErrLimitExceeded) {
+			t.Fatalf("terminal=%t: error = %v, want ErrLimitExceeded", terminal, err)
+		}
+		if n := len(p.Bytes()); n > 1<<20 {
+			t.Fatalf("terminal=%t: output is %d bytes", terminal, n)
+		}
+	}
+}
+
+func TestFormatMarkdownTableCodeSpanCells(t *testing.T) {
+	input := "| Name | Use |\n|---|---|\n| `AWS_ACCESS_KEY_ID` | key |\n| `X` | other |\n| `-k`, `a \\| b` | pipe |\n"
+	p := core.TestPrinter(false)
+	if err := FormatMarkdown([]byte(input), p); err != nil {
+		t.Fatalf("FormatMarkdown() error = %v", err)
+	}
+	want := "| Name              | Use   |\n|-------------------|-------|\n| AWS_ACCESS_KEY_ID | key   |\n| X                 | other |\n| -k, a | b         | pipe  |\n"
+	if got := string(p.Bytes()); !strings.Contains(got, want) {
+		t.Fatalf("output = %q, want it to contain %q", got, want)
 	}
 }

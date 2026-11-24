@@ -897,7 +897,7 @@ fetch --from-curl 'https://example.com'
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | Request                    | `-X`, `-H`, `-d`/`--data`/`--data-ascii`, `--data-raw`, `--data-binary`, `--data-urlencode`, `--json`, `-F`, `-T`, `-I`, `-G` |
 | Auth                       | `-u`, `--digest`, `--aws-sigv4`, `--oauth2-bearer`                                                                                 |
-| TLS                        | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`, `--ech hard                                                    | true | auto | false` |
+| TLS                        | `-k`, `--cacert`, `-E`/`--cert`, `--key`, `--tlsv1.x`, `--tls-max`, `--ech hard \| true \| auto \| false` |
 | Output                     | `-o`, `-O`, `-J`                                                                                                                   |
 | Network                    | `-L`, `--max-redirs`, `-m`/`--max-time`, `--connect-timeout`, `-x`, `--unix-socket`, `--doh-url`, `--resolve`, `--retry`, `--retry-delay`, `--retry-unsafe`, `-r` |
 | HTTP version               | `-0`, `--http1.1`, `--http2`, `--http3`                                                                                            |

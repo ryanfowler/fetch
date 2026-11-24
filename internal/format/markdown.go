@@ -803,24 +803,7 @@ func (r *mdRenderer) walk(n ast.Node, entering bool) (ast.WalkStatus, error) {
 	case *ast.CodeSpan:
 		if entering {
 			r.printer.Set(core.Cyan)
-			indices := v.Value.Indices()
-			var raw strings.Builder
-			lastStop := -1
-			for _, index := range indices {
-				if index.Start == index.Stop {
-					continue
-				}
-				if lastStop >= 0 {
-					raw.Write(r.source[lastStop:index.Start])
-				}
-				raw.Write(r.source[index.Start:index.Stop])
-				lastStop = index.Stop
-			}
-			code := raw.String()
-			if len(code) >= 2 && markdownSpace(code[0]) && markdownSpace(code[len(code)-1]) && strings.Trim(code, " \t\r\n") != "" {
-				code = code[1 : len(code)-1]
-			}
-			r.writeUntrusted(code)
+			r.writeUntrusted(r.codeSpanText(v))
 			r.popAllAndRestore()
 			return ast.WalkSkipChildren, nil
 		}
@@ -1086,12 +1069,23 @@ func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 	var rows [][]mdTableCell
 	var alignments []east.Alignment
 
-	for row := table.FirstChild(); row != nil; row = row.NextSibling() {
+	// The table holds a TableHeader with the header cells, then a TableBody
+	// with one TableRow per body row.
+	addRow := func(row ast.Node) {
 		var cells []mdTableCell
 		for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
 			cells = append(cells, mdTableCell{node: cell, text: r.inlineText(cell)})
 		}
 		rows = append(rows, cells)
+	}
+	for child := table.FirstChild(); child != nil; child = child.NextSibling() {
+		if body, ok := child.(*east.TableBody); ok {
+			for row := body.FirstChild(); row != nil; row = row.NextSibling() {
+				addRow(row)
+			}
+		} else {
+			addRow(child)
+		}
 	}
 
 	if len(rows) == 0 {
@@ -1130,11 +1124,21 @@ func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 		}
 	}
 
+	// Every row is padded to the widest cell of each column, and the
+	// vertical layout repeats the header labels for each row. So one long
+	// cell can make the output much larger than the input. Refuse a table
+	// whose output would be larger than the formatted output limit. The
+	// estimate covers both layouts.
+	perRow := 2*tableDisplayWidth(widths) + (numCols+2)*(r.bqPrefixWidth()+1) + 32
+	if int64(len(rows))*int64(perRow) > core.MaxFormattedBodyBytes {
+		return ast.WalkStop, core.LimitError{Subsystem: "Markdown table output", Limit: core.MaxFormattedBodyBytes}
+	}
+
 	// A wide table is more readable as a sequence of labeled records than as
 	// a grid that forces the terminal to wrap every row independently. The
 	// vertical form also gives long cell values the normal prose wrapper.
 	if r.width > 0 && tableDisplayWidth(widths)+r.bqPrefixWidth() > r.width {
-		return r.renderVerticalTable(rows), nil
+		return r.renderVerticalTable(rows)
 	}
 
 	// Render header row.
@@ -1151,6 +1155,9 @@ func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 		if i < len(alignments) {
 			a = alignments[i]
 		}
+		// Each cell has a space on both sides, so the separator is two
+		// characters wider than the cell text.
+		w += 2
 		switch a {
 		case east.AlignLeft:
 			r.writeString(":")
@@ -1170,8 +1177,11 @@ func (r *mdRenderer) renderTable(table *east.Table) (ast.WalkStatus, error) {
 	r.popAllAndRestore()
 	r.writeString("\n")
 
-	// Render body rows.
+	// Render body rows. Stop when the output limit is reached.
 	for _, row := range rows[1:] {
+		if err := r.printer.Err(); err != nil {
+			return ast.WalkStop, err
+		}
 		r.writeBqPrefix()
 		r.renderTableRow(row, widths, false)
 		r.writeString("\n")
@@ -1195,9 +1205,9 @@ func (r *mdRenderer) bqPrefixWidth() int {
 // renderVerticalTable renders a wide Markdown table as labeled records. The
 // values are kept styled when they fit on one line; oversized values use the
 // same display-width-aware wrapper as prose.
-func (r *mdRenderer) renderVerticalTable(rows [][]mdTableCell) ast.WalkStatus {
+func (r *mdRenderer) renderVerticalTable(rows [][]mdTableCell) (ast.WalkStatus, error) {
 	if len(rows) == 0 {
-		return ast.WalkSkipChildren
+		return ast.WalkSkipChildren, nil
 	}
 
 	headers := rows[0]
@@ -1207,6 +1217,10 @@ func (r *mdRenderer) renderVerticalTable(rows [][]mdTableCell) ast.WalkStatus {
 	}
 
 	for rowIndex, row := range body {
+		// Stop when the output limit is reached.
+		if err := r.printer.Err(); err != nil {
+			return ast.WalkStop, err
+		}
 		if rowIndex > 0 {
 			r.writeString("\n")
 		}
@@ -1246,7 +1260,7 @@ func (r *mdRenderer) renderVerticalTable(rows [][]mdTableCell) ast.WalkStatus {
 		}
 	}
 
-	return ast.WalkSkipChildren
+	return ast.WalkSkipChildren, nil
 }
 
 // renderTableRow renders a single table row.
@@ -1328,12 +1342,45 @@ func (r *mdRenderer) inlineText(n ast.Node) string {
 	return sb.String()
 }
 
-func (r *mdRenderer) collectText(sb *strings.Builder, n ast.Node) {
-	if t, ok := n.(*ast.Text); ok {
-		sb.WriteString(t.Value.Value(r.source))
+// codeSpanText returns the text of a code span. goldmark keeps it in the
+// node's Value, not in child nodes. As in CommonMark, one space is removed
+// from each end when both ends have one and the text is not all spaces.
+func (r *mdRenderer) codeSpanText(v *ast.CodeSpan) string {
+	var code string
+	if v.Value.IsOwned() {
+		// The table parser replaces the value of a code span with "\|"
+		// in a cell by a string that holds "|" instead.
+		code = v.Value.Str(r.source)
+	} else {
+		var raw strings.Builder
+		lastStop := -1
+		for _, index := range v.Value.Indices() {
+			if index.Start == index.Stop {
+				continue
+			}
+			if lastStop >= 0 {
+				raw.Write(r.source[lastStop:index.Start])
+			}
+			raw.Write(r.source[index.Start:index.Stop])
+			lastStop = index.Stop
+		}
+		code = raw.String()
 	}
-	if a, ok := n.(*ast.AutoLink); ok {
-		sb.WriteString(a.Label.Value(r.source))
+	if len(code) >= 2 && markdownSpace(code[0]) && markdownSpace(code[len(code)-1]) && strings.Trim(code, " \t\r\n") != "" {
+		code = code[1 : len(code)-1]
+	}
+	return code
+}
+
+func (r *mdRenderer) collectText(sb *strings.Builder, n ast.Node) {
+	switch v := n.(type) {
+	case *ast.Text:
+		sb.WriteString(v.Value.Value(r.source))
+	case *ast.AutoLink:
+		sb.WriteString(v.Label.Value(r.source))
+	case *ast.CodeSpan:
+		sb.WriteString(r.codeSpanText(v))
+		return
 	}
 	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 		r.collectText(sb, c)
