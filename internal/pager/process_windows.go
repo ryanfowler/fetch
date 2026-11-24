@@ -77,4 +77,8 @@ func releaseProcess(cmd *exec.Cmd) {
 	}
 }
 
+// requestProcessExit reports false: Windows has no signal that asks a console
+// pager to exit, so the job object is terminated instead.
+func requestProcessExit(*exec.Cmd) bool { return false }
+
 func pagerExitWasSIGPIPE(error) bool { return false }

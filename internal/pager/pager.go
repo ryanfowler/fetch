@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -103,25 +104,10 @@ func StreamContext(ctx context.Context, src io.Reader, mode core.PagerMode, stdo
 	}
 	defer releaseProcess(cmd)
 
-	// A non-closable reader cannot be interrupted by this package. Keep its
-	// copy synchronous so cancellation cannot strand a producer goroutine.
-	// All response-body paths use closable readers, which take the concurrent
-	// path below and can be stopped when the pager exits.
-	if _, ok := src.(io.Closer); !ok {
-		_, copyErr := io.Copy(stdin, src)
-		_ = stdin.Close()
-		waitDone := make(chan error, 1)
-		go func() { waitDone <- cmd.Wait() }()
-		select {
-		case waitErr := <-waitDone:
-			return pagerResult(copyErr, waitErr, false)
-		case <-ctx.Done():
-			terminateProcessTree(cmd)
-			<-waitDone
-			return ctx.Err()
-		}
-	}
-
+	// Copy concurrently, so cancellation is seen even while a pager does not
+	// read its input. Closing stdin stops a blocked write. Closing src stops
+	// a blocked read of a closable reader, which every response body is. A
+	// non-closable reader, such as in-memory text, does not block on reads.
 	copyDone := make(chan copyResult, 1)
 	go func() {
 		_, copyErr := io.Copy(stdin, src)
@@ -146,8 +132,7 @@ func StreamContext(ctx context.Context, src io.Reader, mode core.PagerMode, stdo
 		case <-ctx.Done():
 			closeReader(src)
 			_ = stdin.Close()
-			terminateProcessTree(cmd)
-			<-waitDone
+			stopPager(cmd, waitDone)
 			return ctx.Err()
 		}
 	case waitErr = <-waitDone:
@@ -157,12 +142,36 @@ func StreamContext(ctx context.Context, src io.Reader, mode core.PagerMode, stdo
 	case <-ctx.Done():
 		closeReader(src)
 		_ = stdin.Close()
-		terminateProcessTree(cmd)
-		<-waitDone
+		stopPager(cmd, waitDone)
 		return ctx.Err()
 	}
 
 	return pagerResult(result.copyErr, waitErr, sourceClosed)
+}
+
+// pagerExitGrace is how long stopPager waits for a pager to handle SIGTERM.
+var pagerExitGrace = 2 * time.Second
+
+// stopPager stops the pager after cancellation and waits until it exits.
+// waitDone receives the result of cmd.Wait. The caller closes the pager's
+// input first. An interactive pager first gets a signal that it can handle,
+// so it can restore the terminal; SIGKILL is the last resort.
+//
+// The signal reaches only the pager process. When PAGER starts a wrapper,
+// such as "sh -c 'less'", a descendant that does not exit with the wrapper
+// keeps running and must restore the terminal itself.
+func stopPager(cmd *exec.Cmd, waitDone <-chan error) {
+	if requestProcessExit(cmd) {
+		timer := time.NewTimer(pagerExitGrace)
+		defer timer.Stop()
+		select {
+		case <-waitDone:
+			return
+		case <-timer.C:
+		}
+	}
+	terminateProcessTree(cmd)
+	<-waitDone
 }
 
 func pagerResult(copyErr, waitErr error, sourceClosed bool) error {
