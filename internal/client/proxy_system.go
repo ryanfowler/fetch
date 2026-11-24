@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,7 +31,40 @@ func systemProxyForURL(target *url.URL) *url.URL {
 	}
 }
 
+// systemCommandResults caches the output of each system settings command
+// for the life of the process. Proxy selection runs for every request and
+// redirect, and on some systems it needs several commands. A long session,
+// such as interactive WebSocket mode, therefore keeps the proxy settings
+// that it saw first.
+var systemCommandResults sync.Map // map[string]*systemCommandResult
+
+type systemCommandResult struct {
+	once   sync.Once
+	output string
+	ok     bool
+}
+
+// runSystemCommandFunc runs a command. Tests replace it.
+var runSystemCommandFunc = runSystemCommandUncached
+
+// runSystemCommand returns the output of a system settings command. It runs
+// each command, with its arguments, once per process after it succeeds. A
+// failure, such as a timeout on a cold settings daemon, is not kept, so a
+// later call runs the command again.
 func runSystemCommand(name string, args ...string) (string, bool) {
+	key := strings.Join(append([]string{name}, args...), "\x00")
+	value, _ := systemCommandResults.LoadOrStore(key, &systemCommandResult{})
+	result := value.(*systemCommandResult)
+	result.once.Do(func() {
+		result.output, result.ok = runSystemCommandFunc(name, args...)
+	})
+	if !result.ok {
+		systemCommandResults.CompareAndDelete(key, result)
+	}
+	return result.output, result.ok
+}
+
+func runSystemCommandUncached(name string, args ...string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
