@@ -364,29 +364,49 @@ func (c *StreamClient) readLoop() {
 		}
 		message, err := DecodeMessage(packet)
 		if err != nil {
-			c.failAll(fmt.Errorf("invalid DNS stream response: %w", err))
-			return
+			err = fmt.Errorf("invalid DNS stream response: %w", err)
+			if len(packet) < dnsHeaderSize {
+				// The frame is too short to be DNS. The peer does not speak
+				// DNS, so do not keep the connection.
+				c.failAll(err)
+				return
+			}
+			// The frame boundaries are still intact, so other queries on this
+			// connection are not affected. Report the error only to the query
+			// that the response's ID belongs to.
+			if pending := c.takePending(binary.BigEndian.Uint16(packet[:2])); pending != nil {
+				pending.result <- streamResult{err: err}
+			}
+			continue
 		}
 
-		c.mu.Lock()
-		pending := c.pending[message.Header.ID]
-		if pending != nil {
-			delete(c.pending, message.Header.ID)
-		}
-		c.mu.Unlock()
+		pending := c.takePending(message.Header.ID)
 		if pending == nil {
-			// A response for a timed-out query can already be in the stream. It
-			// cannot be assigned to another query because IDs are never reused
-			// while a response is pending.
+			// The response matches no pending query, for example a duplicate
+			// from a misbehaving server. Drop it. (A query that times out
+			// closes the connection, so its late response never arrives.)
 			continue
 		}
 		if err := message.ValidateResponse(message.Header.ID, pending.question); err != nil {
-			pending.result <- streamResult{err: err}
-			c.failAll(errors.New("DNS stream response question did not match the query"))
-			return
+			// As for a malformed response, the framing is intact, so only this
+			// query fails.
+			pending.result <- streamResult{err: fmt.Errorf("DNS stream response did not match the query: %w", err)}
+			continue
 		}
 		pending.result <- streamResult{message: message}
 	}
+}
+
+// takePending removes and returns the pending query with the given ID, or
+// nil if no query with that ID is pending.
+func (c *StreamClient) takePending(id uint16) *streamPending {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	pending := c.pending[id]
+	if pending != nil {
+		delete(c.pending, id)
+	}
+	return pending
 }
 
 // Close stops the reader and fails all pending queries. It is safe to call

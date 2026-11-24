@@ -261,9 +261,12 @@ type Message struct {
 	Additionals []Record
 }
 
+// dnsHeaderSize is the size of the fixed DNS message header.
+const dnsHeaderSize = 12
+
 // DecodeMessage strictly decodes one DNS message.
 func DecodeMessage(packet []byte) (*Message, error) {
-	if len(packet) < 12 {
+	if len(packet) < dnsHeaderSize {
 		return nil, errors.New("DNS packet is shorter than its header")
 	}
 	if len(packet) > 65535 {
