@@ -323,3 +323,52 @@ func (t *blockingAutomaticH3Transport) wasClosed() bool {
 		return false
 	}
 }
+
+func TestCachedH3GateHoldsCandidatesUntilECHDiscovery(t *testing.T) {
+	a := automaticH3Candidate{host: "a.example", port: 443}
+	b := automaticH3Candidate{host: "b.example", port: 443}
+
+	// Without ECH, cached candidates are dialed at once.
+	open := cachedH3Gate{}
+	if got := open.offer([]automaticH3Candidate{a}); len(got) != 1 {
+		t.Fatalf("offer without ECH = %v, want the candidate", got)
+	}
+
+	// With ECH, the gate holds them until discovery finishes.
+	noECH := cachedH3Gate{hold: true}
+	if got := noECH.offer([]automaticH3Candidate{a}); len(got) != 0 {
+		t.Fatalf("offer during discovery = %v, want none", got)
+	}
+	if got := noECH.release(false); len(got) != 1 || got[0].host != "a.example" {
+		t.Fatalf("release without ECH = %v, want the held candidate", got)
+	}
+	if got := noECH.offer([]automaticH3Candidate{b}); len(got) != 1 {
+		t.Fatalf("offer after discovery without ECH = %v, want the candidate", got)
+	}
+
+	// When the origin advertises ECH, cached candidates are never dialed,
+	// including candidates that the cache delivers after discovery.
+	withECH := cachedH3Gate{hold: true}
+	withECH.offer([]automaticH3Candidate{a})
+	if got := withECH.release(true); len(got) != 0 {
+		t.Fatalf("release with ECH = %v, want none", got)
+	}
+	if got := withECH.offer([]automaticH3Candidate{b}); len(got) != 0 {
+		t.Fatalf("offer after discovery with ECH = %v, want none", got)
+	}
+}
+
+func TestDiscoveryAdvertisesECHIncludesHTTP3OnlyServices(t *testing.T) {
+	// An HTTP/3-only service with ECH is not a TCP ECH candidate, but the
+	// origin still advertises ECH, so cached candidates must not be dialed.
+	h3Only := resolver.ServiceCandidate{ALPN: [][]byte{[]byte("h3")}, ECH: []byte{1}}
+	if serviceAdvertisesTCP(h3Only) {
+		t.Fatal("test service unexpectedly advertises TCP")
+	}
+	if !discoveryAdvertisesECH([]resolver.ServiceCandidate{{ALPN: [][]byte{[]byte("h2")}}, h3Only}) {
+		t.Fatal("discoveryAdvertisesECH ignored an HTTP/3-only ECH service")
+	}
+	if discoveryAdvertisesECH([]resolver.ServiceCandidate{{ALPN: [][]byte{[]byte("h3")}}}) {
+		t.Fatal("discoveryAdvertisesECH reported ECH for a service without it")
+	}
+}

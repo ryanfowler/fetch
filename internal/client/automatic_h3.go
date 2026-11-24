@@ -578,6 +578,9 @@ type automaticPrepareResult struct {
 	tcpAddrs      []net.IPAddr
 	tcpPort       string
 	echCandidates []resolver.ServiceCandidate
+	// echAdvertised reports whether discovery found an ECH configuration
+	// for any service of the origin, for TCP or HTTP/3.
+	echAdvertised bool
 	timing        DialTiming
 	err           error
 	cleanup       *automaticPrepareCleanup
@@ -769,6 +772,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 			t.cache.replaceDNS(key, values)
 			result.candidates = values
 			result.echCandidates = echCandidates
+			result.echAdvertised = discoveryAdvertisesECH(discovery.Candidates)
 			race.send(result)
 		}()
 	}
@@ -783,6 +787,24 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 	discoveryDone := hasResolve
 	var discoveredECH []resolver.ServiceCandidate
 	echEnabled := t.ech != core.ECHUnknown && t.ech != core.ECHOff
+	cachedGate := cachedH3Gate{hold: echEnabled && !discoveryDone}
+	dialCached := func(candidates []automaticH3Candidate) {
+		for _, candidate := range candidates {
+			candidate := candidate
+			pending++
+			go func() {
+				result := race.result("h3")
+				got, packet, timing, err := t.dialH3(innerCtx, origin, candidate)
+				result.h3 = got
+				result.packet = packet
+				result.candidate = candidate
+				result.timing = timing
+				result.err = err
+				result.cleanup = closeAutomaticH3Result(got, packet)
+				race.send(result)
+			}()
+		}
+	}
 	for pending > 0 {
 		select {
 		case got := <-race.results:
@@ -794,21 +816,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 				if t.ech == core.ECHOn {
 					continue
 				}
-				for _, candidate := range got.candidates {
-					candidate := candidate
-					pending++
-					go func() {
-						result := race.result("h3")
-						got, packet, timing, err := t.dialH3(innerCtx, origin, candidate)
-						result.h3 = got
-						result.packet = packet
-						result.candidate = candidate
-						result.timing = timing
-						result.err = err
-						result.cleanup = closeAutomaticH3Result(got, packet)
-						race.send(result)
-					}()
-				}
+				dialCached(cachedGate.offer(got.candidates))
 			case "tcp":
 				if got.err == nil && got.tcp != nil && echEnabled && discoveryDone {
 					if len(discoveredECH) > 0 {
@@ -858,6 +866,13 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 			case "discovery":
 				discoveryDone = true
 				discoveredECH = append([]resolver.ServiceCandidate(nil), got.echCandidates...)
+				// Release the held cached candidates on the paths below that
+				// keep racing. A path that returns the held TCP connection
+				// drops them: with --ech auto, cached HTTP/3 does not race a
+				// TCP connection that is already established.
+				releaseCached := func() {
+					dialCached(cachedGate.release(got.echAdvertised))
+				}
 				if got.err != nil {
 					if !resolver.MayDowngrade(got.err) {
 						if haveTCP {
@@ -875,6 +890,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 						race.selectResult(tcpPending)
 						return preparedAutomaticConnection{tcp: tcpPending.tcp}, nil
 					}
+					releaseCached()
 					continue
 				}
 				if echEnabled && haveTCP {
@@ -897,6 +913,7 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 				if t.ech == core.ECHOn {
 					continue
 				}
+				releaseCached()
 				for _, candidate := range got.candidates {
 					candidate := candidate
 					pending++
@@ -937,6 +954,54 @@ func (t *automaticHTTP3Transport) prepare(ctx context.Context, origin *url.URL, 
 		lastErr = errors.New("automatic HTTP/3 and TCP connection failed")
 	}
 	return preparedAutomaticConnection{}, lastErr
+}
+
+// discoveryAdvertisesECH reports whether any service has an ECH
+// configuration, whatever protocols it advertises.
+func discoveryAdvertisesECH(services []resolver.ServiceCandidate) bool {
+	for _, service := range services {
+		if len(service.ECH) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// cachedH3Gate decides when cached HTTP/3 candidates may be dialed. Cached
+// candidates have no ECH configuration. With ECH enabled, dialing one before
+// discovery has finished would send the real server name in cleartext,
+// although the origin may advertise ECH. The gate holds them until discovery
+// finishes, and then drops them if the origin advertises ECH.
+type cachedH3Gate struct {
+	hold bool // discovery is still running
+	drop bool // discovery found an ECH configuration
+	held []automaticH3Candidate
+}
+
+// offer returns the candidates that may be dialed now.
+func (g *cachedH3Gate) offer(candidates []automaticH3Candidate) []automaticH3Candidate {
+	switch {
+	case g.drop:
+		return nil
+	case g.hold:
+		g.held = append(g.held, candidates...)
+		return nil
+	default:
+		return candidates
+	}
+}
+
+// release ends the hold when discovery finishes and returns the held
+// candidates that may be dialed. echAvailable reports whether discovery
+// found a usable ECH configuration.
+func (g *cachedH3Gate) release(echAvailable bool) []automaticH3Candidate {
+	held := g.held
+	g.hold, g.held = false, nil
+	if echAvailable {
+		g.drop = true
+		return nil
+	}
+	return held
 }
 
 func (t *automaticHTTP3Transport) dialH3(ctx context.Context, origin *url.URL, candidate automaticH3Candidate) (*quic.Conn, net.PacketConn, DialTiming, error) {
