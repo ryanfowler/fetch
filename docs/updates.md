@@ -33,7 +33,9 @@ fetch --update --dry-run
 ```
 
 `--check-update` reports the latest release. `--update` downloads the matching
-archive and requires a SHA-256 sidecar. Metadata is limited to 1 MiB, checksum
+archive and requires a SHA-256 sidecar. Neither installs nor offers an older
+release: when the current version is newer than the latest release, as for a
+build from the main branch, they report this and do nothing. Metadata is limited to 1 MiB, checksum
 sidecars to 1 KiB, and archives to 128 MiB. Archive contents are bounded to
 128 entries and 512 MiB unpacked data. The archive is not opened until checksum
 verification succeeds.

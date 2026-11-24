@@ -108,6 +108,8 @@ func CheckWithConfig(ctx context.Context, p *core.Printer, timeout time.Duration
 			if err == nil {
 				if latest.TagName == version {
 					writeMsg(p, silent, "Already using the latest version ("+safeUpdateText(version)+").\n")
+				} else if isNewerThan(version, latest.TagName) {
+					writeMsg(p, silent, newerVersionMessage(version, latest.TagName))
 				} else if !silent {
 					p.WriteString("Update available: ")
 					p.WriteString(version)
@@ -225,7 +227,6 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 		}
 		return nil
 	}
-
 	// Look for the artifact and its mandatory checksum sidecar before doing
 	// any binary download. Asset names are exact and must be unambiguous.
 	artifact, checksum, err := getArtifactAssets(latest)
@@ -238,6 +239,14 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 	expectedDigest, err := downloadChecksum(ctx, c, checksum.URL)
 	if err != nil {
 		return fmt.Errorf("checksum download: %w", err)
+	}
+	if isNewerThan(version, latest.TagName) {
+		// Do not downgrade, for example a build from the main branch or a
+		// release that was later withdrawn as the latest one. This check
+		// comes after the release validation, so a dry run still checks
+		// the asset and its checksum.
+		writeMsg(p, silent, newerVersionMessage(version, latest.TagName))
+		return nil
 	}
 	if dryRun {
 		_ = expectedDigest
@@ -313,6 +322,18 @@ func updateInner(ctx context.Context, p *core.Printer, silent bool, dryRun bool,
 
 	writeUpdateSuccess(p, silent, version, latest.TagName)
 	return nil
+}
+
+// isNewerThan reports whether version is a later semantic version than
+// latest. A version that is not a semantic version, such as a development
+// build, is never newer.
+func isNewerThan(version, latest string) bool {
+	c, ok := compareVersions(version, latest)
+	return ok && c > 0
+}
+
+func newerVersionMessage(version, latest string) string {
+	return "The current version (" + safeUpdateText(version) + ") is newer than the latest release (" + safeUpdateText(latest) + "); not updating.\n"
 }
 
 func getExeVersion(ctx context.Context, path string) (string, error) {
