@@ -154,3 +154,107 @@ func testECHConfigList(config []byte) []byte {
 	list := appendUint16(nil, uint16(len(config)))
 	return append(list, config...)
 }
+
+// TestDialResolverWithECHReportsTLSState checks that an accepted ECH dial and
+// an auto-mode fallback both report the TLS state. inspect-tls needs it.
+func TestDialResolverWithECHReportsTLSState(t *testing.T) {
+	certificate, roots := echTestCertificate(t)
+	echPrivate, err := ecdh.X25519().GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	echConfig := testECHConfig(7, echPrivate.PublicKey().Bytes(), "public.example")
+	otherPrivate, err := ecdh.X25519().GenerateKey(cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A configuration with another key ID that the server cannot decrypt.
+	staleConfig := testECHConfig(9, otherPrivate.PublicKey().Bytes(), "public.example")
+
+	tests := []struct {
+		name         string
+		config       []byte
+		wantAccepted bool
+		wantFallback bool
+	}{
+		{"accepted", echConfig, true, false},
+		{"fallback", staleConfig, false, true},
+		{"no ECH config", nil, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serverConfig := &tls.Config{
+				Certificates: []tls.Certificate{certificate},
+				MinVersion:   tls.VersionTLS13,
+				EncryptedClientHelloKeys: []tls.EncryptedClientHelloKey{{
+					Config:     echConfig,
+					PrivateKey: echPrivate.Bytes(),
+				}},
+			}
+			listener, err := tls.Listen("tcp", "127.0.0.1:0", serverConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			go func() {
+				for {
+					conn, err := listener.Accept()
+					if err != nil {
+						return
+					}
+					go func() {
+						defer conn.Close()
+						_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+						_ = conn.(*tls.Conn).Handshake()
+					}()
+				}
+			}()
+
+			dialer := NewResolverDialer(nil, 5*time.Second)
+			address := listener.Addr().String()
+			dialer.BaseDial = func(ctx context.Context, network, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, network, address)
+			}
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clientConfig := &tls.Config{
+				MinVersion: tls.VersionTLS13,
+				ServerName: "secret.example",
+				RootCAs:    roots,
+			}
+			if tt.config != nil {
+				clientConfig.EncryptedClientHelloConfigList = testECHConfigList(tt.config)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			result, err := DialResolverWithECH(ctx, dialer, DialRequest{
+				Network: "tcp", Host: host, Port: port,
+				Candidates: []net.IPAddr{{IP: net.ParseIP(host)}},
+			}, clientConfig, core.ECHAuto)
+			if err != nil {
+				t.Fatalf("DialResolverWithECH: %v", err)
+			}
+			defer result.Conn.Close()
+			if result.TLSState == nil {
+				t.Fatal("TLSState is nil")
+			}
+			if result.TLSState.ECHAccepted != tt.wantAccepted {
+				t.Fatalf("ECHAccepted = %t, want %t", result.TLSState.ECHAccepted, tt.wantAccepted)
+			}
+			if len(result.TLSState.PeerCertificates) == 0 {
+				t.Fatal("TLSState has no peer certificates")
+			}
+			info, ok := result.ECHInfo.(ECHHandshakeInfo)
+			if !ok {
+				t.Fatalf("ECHInfo = %T, want ECHHandshakeInfo", result.ECHInfo)
+			}
+			if info.Offered != (tt.config != nil) || info.Accepted != tt.wantAccepted || info.Fallback != tt.wantFallback {
+				t.Fatalf("info = offered %t, accepted %t, fallback %t; want offered %t, accepted %t, fallback %t",
+					info.Offered, info.Accepted, info.Fallback, tt.config != nil, tt.wantAccepted, tt.wantFallback)
+			}
+		})
+	}
+}

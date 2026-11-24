@@ -22,8 +22,10 @@ type ECHHandshakeInfo struct {
 	Rejected        bool
 	Fallback        bool
 	OuterServerName string
-	// State is populated when inspection returns an unverified ECH rejection
-	// instead of downgrading. The caller must perform certificate verification.
+	// State is the final TLS state of the returned connection. When
+	// inspection gets an unverified ECH rejection instead of a downgrade,
+	// State holds the outer handshake, and the caller must verify its
+	// certificate.
 	State *tls.ConnectionState
 	// TCPDuration and TLSDuration cover all attempts, including ECH retry
 	// connections. They let inspection separate the raw connect from the
@@ -98,6 +100,7 @@ func dialTLSWithECHPolicyInfoAndFallback(ctx context.Context, rawDial func(conte
 				return nil, info, errECHNotAccepted
 			}
 			info.Accepted = state.ECHAccepted
+			info.State = &state
 			_ = tlsConn.SetDeadline(time.Time{})
 			return tlsConn, info, nil
 		}
@@ -211,7 +214,9 @@ func DialResolverWithECH(ctx context.Context, dialer *ResolverDialer, request Di
 	}
 	result, err := dialer.Dial(ctx, request)
 	if err == nil {
-		if info, ok := result.ECHInfo.(ECHHandshakeInfo); ok && info.State != nil {
+		// The attempt does the TLS handshake itself, so the dialer has no
+		// TLS state. The attempt reports it in info.
+		if info, ok := result.ECHInfo.(ECHHandshakeInfo); ok {
 			result.TLSState = info.State
 		}
 	}
